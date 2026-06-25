@@ -24,7 +24,7 @@ Michi Micro Server centralizes your local music library, reads advanced metadata
 | Metadata | Lofty |
 | Serialization | Serde |
 | Logging | Tracing |
-| Audio | FFmpeg (external) |
+| Audio | Built-in streaming (no FFmpeg) |
 | Container | Docker + Compose |
 
 ## Project Structure
@@ -48,6 +48,17 @@ michi-micro-server/
 ├── docker-compose.yml
 └── casaos/                  # CasaOS support
 ```
+
+## Web UI
+
+Open http://localhost:8096 in your browser for the built-in web interface:
+
+- Server status and library statistics
+- Scan your music library
+- Browse tracks (title, artist, album, format, duration)
+- Play tracks directly in the browser via `<audio>` element
+
+The Web UI is served directly by the server, no build step or frontend framework needed.
 
 ## Quick Start
 
@@ -75,7 +86,7 @@ cargo run -p michi-server
 ### Running Tests
 
 ```bash
-# Run all tests (68 tests across all crates)
+# Run all tests (73 tests across all crates)
 cargo test
 ```
 
@@ -216,7 +227,7 @@ curl -v -H "Range: bytes=0-1023" http://localhost:8096/api/stream/<UUID>
 ```
 
 The streaming endpoint:
-- Returns `200 OK` with full file for requests without `Range`
+- Returns `200 OK` with the full file streamed asynchronously (no full load in RAM)
 - Returns `206 Partial Content` with the requested byte range
 - Returns `416 Range Not Satisfiable` for invalid ranges
 - Returns `403 Forbidden` for files outside the configured music path

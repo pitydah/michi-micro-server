@@ -59,6 +59,10 @@ For each audio file, the following fields are extracted:
 
 ## Error Handling
 
+The library provides two functions:
+- `read_metadata()` — propagates `LoftyError` as `Err` for callers that need to distinguish error types.
+- `read_metadata_safe()` — swallows errors and returns `AudioMetadata::default()` (the scanner uses this variant).
+
 The scanner is resilient to individual file failures:
 - If metadata cannot be read for a file, a warning is logged and the scanner continues with the next file.
 - The file is still registered in the library with unknown metadata.

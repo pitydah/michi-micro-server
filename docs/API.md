@@ -10,7 +10,7 @@ http://<server>:8096
 
 ### GET /
 
-Returns a simple HTML page confirming the server is running.
+Returns the **Web UI**: an HTML page with server status, library statistics, scan button, track listing, and built-in audio player. No frontend build step required.
 
 ### GET /api/status
 

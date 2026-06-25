@@ -39,8 +39,17 @@
 - [ ] Cover art serving
 - [ ] HLS or adaptive streaming
 
+## Phase 4: Web UI
+- [x] Built-in HTML interface served at `GET /`
+- [x] Server status and library statistics display
+- [x] One-click library scan
+- [x] Track listing with metadata
+- [x] In-browser audio playback via `<audio>` element
+- [ ] Search
+- [ ] Playlist management
+- [ ] Now playing improvements
+
 ## Future
-- [ ] Web UI (library browser, now-playing, search, playlists)
 - [ ] Home Assistant MQTT
 - [ ] CasaOS/ZimaOS app store
 - [ ] Sync API for Michi Music Player / Michi Mobile

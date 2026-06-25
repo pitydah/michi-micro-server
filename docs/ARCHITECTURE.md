@@ -37,10 +37,14 @@ Contains all shared data types: `Track`, `AudioFormat`, `AudioMetadata`, `Librar
 Key utility functions:
 - `track_id_from_path()` — generates UUID v5 from a normalized full file path (legacy fallback)
 - `track_id_from_library_path()` — generates UUID v5 from the **relative** path within the music library. This makes IDs stable across different mount points (e.g., `/music` vs `/mnt/music`) as long as the relative path is the same.
-- `is_path_inside_library()` — canonicalizes both paths and validates that a file resides within the library root. Prevents path traversal attacks. Returns a `Result<bool, String>`.
+- `is_path_inside_library()` — canonicalizes both paths and validates that a file resides within the library root. Prevents path traversal attacks. Returns a `Result<bool, PathError>` with typed errors.
+- `PathError` — typed error enum for path resolution failures (`CannotCanonicalizeRoot`, `CannotCanonicalizeFile`).
+- `AudioFormat` — `#[non_exhaustive]` enum allowing new formats to be added without breaking changes. Implements `Display` and `FromStr`.
 
 ### michi-api
 Axum-based HTTP router. Defines all endpoints and handlers. Receives shared state (Config).
+
+Serves both JSON API endpoints (`/api/*`) and the Web UI at `GET /`. The Web UI is a self-contained HTML page with embedded CSS and vanilla JavaScript that consumes the API endpoints.
 
 ### michi-config
 Reads configuration from environment variables with defaults suitable for containerized deployment.
