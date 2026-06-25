@@ -19,16 +19,23 @@ pub enum DbError {
 }
 
 fn ensure_db_parent_dir(database_url: &str) -> Result<(), DbError> {
-    let path = database_url
+    // Strip sqlite:// or sqlite: prefix and any query params to get the file path.
+    // Works for: sqlite:///path/to/db.db, sqlite:/path, sqlite:./path, :memory:
+    let no_scheme = database_url
         .trim_start_matches("sqlite://")
         .trim_start_matches("sqlite:")
-        .split('?')
-        .next()
-        .unwrap_or(database_url);
+        .trim_start_matches("sqlite");
+
+    let path = no_scheme.split('?').next().unwrap_or(no_scheme);
+
+    // Skip in-memory databases and purely relative-looking paths that don't need parent dirs
+    if path.is_empty() || path == ":memory:" {
+        return Ok(());
+    }
 
     let db_path = Path::new(path);
     if let Some(parent) = db_path.parent() {
-        if !parent.exists() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| DbError::Migration(format!("failed to create db dir: {}", e)))?;
         }
@@ -100,50 +107,6 @@ async fn migration_001(pool: &SqlitePool) -> Result<(), DbError> {
             artwork_id TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS albums (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            artist TEXT,
-            year INTEGER,
-            artwork_id TEXT
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS artists (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS playlists (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS playlist_tracks (
-            playlist_id TEXT NOT NULL,
-            track_id TEXT NOT NULL,
-            position INTEGER NOT NULL,
-            PRIMARY KEY (playlist_id, track_id)
         )",
     )
     .execute(pool)

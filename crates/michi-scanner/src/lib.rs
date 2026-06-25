@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use michi_core::{track_id_from_path, AudioFormat, Track};
+use michi_core::{track_id_from_library_path, AudioFormat, Track};
 use michi_metadata::read_metadata_safe;
 use tracing::{info, warn};
 
@@ -15,7 +15,7 @@ fn is_audio_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn scan_directory_sync(path: &Path) -> Vec<Track> {
+fn scan_directory_sync(library_root: &Path, path: &Path) -> Vec<Track> {
     let mut tracks = Vec::new();
 
     if !path.exists() || !path.is_dir() {
@@ -33,14 +33,19 @@ fn scan_directory_sync(path: &Path) -> Vec<Track> {
     for entry in entries.flatten() {
         let entry_path = entry.path();
 
+        if entry_path.is_symlink() {
+            warn!("skipping symlink: {}", entry_path.display());
+            continue;
+        }
+
         if entry_path.is_dir() {
-            let sub_tracks = scan_directory_sync(&entry_path);
+            let sub_tracks = scan_directory_sync(library_root, &entry_path);
             tracks.extend(sub_tracks);
         } else if entry_path.is_file() && is_audio_file(&entry_path) {
             let metadata = read_metadata_safe(&entry_path);
 
             let file_path = entry_path.to_string_lossy().to_string();
-            let track_id = track_id_from_path(&file_path);
+            let track_id = track_id_from_library_path(library_root, &entry_path);
 
             let track = Track {
                 id: track_id,
@@ -85,7 +90,7 @@ pub async fn scan_directory(path: &Path) -> Vec<Track> {
 
     let tracks = tokio::task::spawn_blocking({
         let path_buf = path_buf.clone();
-        move || scan_directory_sync(&path_buf)
+        move || scan_directory_sync(&path_buf, &path_buf)
     })
     .await
     .unwrap_or_default();
@@ -101,6 +106,7 @@ pub async fn scan_directory(path: &Path) -> Vec<Track> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_is_audio_file() {
@@ -117,5 +123,65 @@ mod tests {
         assert!(is_audio_file(Path::new("song.m4a")));
         assert!(!is_audio_file(Path::new("song.txt")));
         assert!(!is_audio_file(Path::new("song")));
+    }
+
+    #[test]
+    fn test_scan_directory_skips_unsupported_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("song.flac"), b"not a real flac").unwrap();
+        fs::write(dir.path().join("readme.txt"), b"hello").unwrap();
+        fs::write(dir.path().join("song.mp3"), b"not a real mp3").unwrap();
+
+        let tracks = scan_directory_sync(dir.path(), dir.path());
+        assert_eq!(tracks.len(), 2, "should find flac and mp3, skip txt");
+    }
+
+    #[test]
+    fn test_scan_directory_handles_unreadable_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("corrupt.flac");
+        fs::write(&file, b"not a valid audio file").unwrap();
+
+        let tracks = scan_directory_sync(dir.path(), dir.path());
+        assert_eq!(tracks.len(), 1, "corrupt file should still be registered");
+        assert_eq!(tracks[0].format, AudioFormat::Flac);
+        assert!(
+            tracks[0].title.is_none(),
+            "metadata should be empty for corrupt file"
+        );
+    }
+
+    #[test]
+    fn test_scan_directory_uses_relative_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("artist");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("song.flac"), b"data").unwrap();
+
+        let tracks = scan_directory_sync(dir.path(), dir.path());
+        assert_eq!(tracks.len(), 1);
+
+        let relative_id =
+            michi_core::track_id_from_library_path(dir.path(), &sub.join("song.flac"));
+        assert_eq!(
+            tracks[0].id, relative_id,
+            "ID should be based on relative path"
+        );
+    }
+
+    #[test]
+    fn test_scan_directory_skips_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.flac"), b"data").unwrap();
+
+        let symlink_path = dir.path().join("link_to_outside");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.path().join("secret.flac"), &symlink_path).ok();
+        }
+
+        let tracks = scan_directory_sync(dir.path(), dir.path());
+        assert_eq!(tracks.len(), 0, "symlinks should be skipped");
     }
 }

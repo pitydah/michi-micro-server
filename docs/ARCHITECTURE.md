@@ -32,7 +32,12 @@ michi-micro-server/
 ## Crate Descriptions
 
 ### michi-core
-Contains all shared data types: `Track`, `Album`, `Artist`, `Playlist`, `PlaybackState`, `AudioFormat`, `AudioMetadata`. These models are designed to be compatible with Michi Music Player and Michi Mobile for future sync capabilities.
+Contains all shared data types: `Track`, `AudioFormat`, `AudioMetadata`, `LibraryStats`, `TrackUpdate`. These models are designed to be compatible with Michi Music Player and Michi Mobile for future sync capabilities.
+
+Key utility functions:
+- `track_id_from_path()` — generates UUID v5 from a normalized full file path (legacy fallback)
+- `track_id_from_library_path()` — generates UUID v5 from the **relative** path within the music library. This makes IDs stable across different mount points (e.g., `/music` vs `/mnt/music`) as long as the relative path is the same.
+- `is_path_inside_library()` — canonicalizes both paths and validates that a file resides within the library root. Prevents path traversal attacks. Returns a `Result<bool, String>`.
 
 ### michi-api
 Axum-based HTTP router. Defines all endpoints and handlers. Receives shared state (Config).
@@ -47,7 +52,14 @@ SQLite database layer using SQLx. Handles connection pooling and schema migratio
 Audio metadata extraction using the Lofty crate. Parses tags and audio properties from music files.
 
 ### michi-scanner
-Recursively scans directories for audio files, reads metadata, and builds a track database.
+Recursively scans directories for audio files, reads metadata, and builds a track database. 
+
+Key behaviors:
+- IDs are generated from the **relative path** within the library root via `track_id_from_library_path()`, ensuring stable IDs across mount points.
+- Symlinks are **skipped** to prevent accidental traversal outside the library.
+- Unreadable/corrupt files do not stop the scan; a warning is logged and the file is still registered with unknown metadata.
+- Only supported audio extensions are processed (mp3, flac, ogg, opus, aac, m4a, wav, aiff, aif, dsf, dff).
+- Blocking I/O runs inside `tokio::task::spawn_blocking` to avoid blocking the async runtime.
 
 ### michi-streaming
 Audio streaming with HTTP Range Request support. Provides:

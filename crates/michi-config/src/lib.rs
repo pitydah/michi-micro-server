@@ -29,8 +29,8 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/cache"));
 
-        let database_url = env::var("MICHI_DATABASE")
-            .unwrap_or_else(|_| "sqlite:///config/michi.db?mode=rwc".to_string());
+        let database_url =
+            env::var("MICHI_DATABASE").unwrap_or_else(|_| "sqlite:///config/michi.db".to_string());
 
         Self {
             port,
@@ -48,5 +48,49 @@ impl Config {
 
     pub fn version(&self) -> &str {
         self.version
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_database_url_default_no_mode_param() {
+        temp_env::with_var("MICHI_DATABASE", None::<&str>, || {
+            let config = Config::from_env();
+            assert_eq!(config.database_url, "sqlite:///config/michi.db");
+            assert!(
+                !config.database_url.contains("?mode=rwc"),
+                "default URL should not need ?mode=rwc"
+            );
+        });
+    }
+
+    #[test]
+    fn test_port_default() {
+        temp_env::with_var("MICHI_PORT", None::<&str>, || {
+            let config = Config::from_env();
+            assert_eq!(config.port, 8096);
+        });
+    }
+
+    #[test]
+    fn test_music_path_default() {
+        temp_env::with_var("MICHI_MUSIC_PATH", None::<&str>, || {
+            let config = Config::from_env();
+            assert_eq!(config.music_path, PathBuf::from("/music"));
+        });
+    }
+
+    #[test]
+    fn test_env_overrides() {
+        temp_env::with_var("MICHI_PORT", Some("9999"), || {
+            temp_env::with_var("MICHI_DATABASE", Some("sqlite://./local.db"), || {
+                let config = Config::from_env();
+                assert_eq!(config.port, 9999);
+                assert_eq!(config.database_url, "sqlite://./local.db");
+            });
+        });
     }
 }

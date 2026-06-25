@@ -1,18 +1,23 @@
+use std::fmt;
+use std::path::Path;
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum PlaybackState {
-    Idle,
-    Playing,
-    Paused,
-    Buffering,
-    Stopped,
-    Error,
+#[derive(Debug, Error)]
+pub enum PathError {
+    #[error("cannot canonicalize library root '{0}'")]
+    CannotCanonicalizeRoot(String),
+
+    #[error("cannot canonicalize file path '{0}'")]
+    CannotCanonicalizeFile(String),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
 pub enum AudioFormat {
     Mp3,
     Flac,
@@ -77,6 +82,19 @@ impl AudioFormat {
     }
 }
 
+impl fmt::Display for AudioFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for AudioFormat {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from_extension(s))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioMetadata {
     pub title: Option<String>,
@@ -135,31 +153,6 @@ pub struct Track {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Album {
-    pub id: Uuid,
-    pub title: String,
-    pub artist: Option<String>,
-    pub year: Option<i32>,
-    pub artwork_id: Option<Uuid>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Artist {
-    pub id: Uuid,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Playlist {
-    pub id: Uuid,
-    pub name: String,
-    pub description: Option<String>,
-    pub tracks: Vec<Uuid>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryStats {
     pub tracks: i64,
     pub albums: i64,
@@ -169,6 +162,27 @@ pub struct LibraryStats {
 pub fn track_id_from_path(path: &str) -> Uuid {
     let normalized = path.replace('\\', "/");
     Uuid::new_v5(&Uuid::NAMESPACE_URL, normalized.as_bytes())
+}
+
+pub fn track_id_from_library_path(library_root: &Path, file_path: &Path) -> Uuid {
+    if let Ok(relative) = file_path.strip_prefix(library_root) {
+        let rel_str = relative.to_string_lossy().replace('\\', "/");
+        if !rel_str.is_empty() {
+            return Uuid::new_v5(&Uuid::NAMESPACE_URL, rel_str.as_bytes());
+        }
+    }
+    let full = file_path.to_string_lossy().replace('\\', "/");
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, full.as_bytes())
+}
+
+pub fn is_path_inside_library(library_root: &Path, file_path: &Path) -> Result<bool, PathError> {
+    let canonical_root = library_root.canonicalize().map_err(|e| {
+        PathError::CannotCanonicalizeRoot(format!("{}: {}", library_root.display(), e))
+    })?;
+    let canonical_file = file_path.canonicalize().map_err(|e| {
+        PathError::CannotCanonicalizeFile(format!("{}: {}", file_path.display(), e))
+    })?;
+    Ok(canonical_file.starts_with(&canonical_root))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -263,6 +277,87 @@ mod tests {
         assert_eq!(AudioFormat::Dsf.mime_type(), "audio/dsf");
         assert_eq!(AudioFormat::Dff.mime_type(), "audio/dff");
         assert_eq!(AudioFormat::Unknown.mime_type(), "application/octet-stream");
+    }
+
+    #[test]
+    fn test_track_id_from_library_path_relative() {
+        let root = Path::new("/music");
+        let file = Path::new("/music/Pink Floyd/Time.flac");
+        let id1 = track_id_from_library_path(root, file);
+        let id2 = track_id_from_library_path(root, file);
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_track_id_from_library_path_same_relative_different_root() {
+        let id1 = track_id_from_library_path(
+            Path::new("/music"),
+            Path::new("/music/Pink Floyd/Time.flac"),
+        );
+        let id2 = track_id_from_library_path(
+            Path::new("/mnt/music"),
+            Path::new("/mnt/music/Pink Floyd/Time.flac"),
+        );
+        assert_eq!(
+            id1, id2,
+            "same relative path under different roots must produce same ID"
+        );
+    }
+
+    #[test]
+    fn test_track_id_from_library_path_different_files() {
+        let root = Path::new("/music");
+        let id1 = track_id_from_library_path(root, Path::new("/music/song1.flac"));
+        let id2 = track_id_from_library_path(root, Path::new("/music/song2.flac"));
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_track_id_from_library_path_file_outside_root() {
+        let root = Path::new("/music");
+        let outside = Path::new("/other/file.flac");
+        let id = track_id_from_library_path(root, outside);
+        assert_ne!(id, Uuid::nil());
+    }
+
+    #[test]
+    fn test_is_path_inside_library_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file_path = sub.join("test.flac");
+        std::fs::write(&file_path, b"data").unwrap();
+        let result = is_path_inside_library(dir.path(), &file_path);
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn test_is_path_inside_library_outside() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        let outside = dir2.path().join("secret.txt");
+        std::fs::write(&outside, b"data").unwrap();
+        let result = is_path_inside_library(dir1.path(), &outside);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn test_is_path_inside_library_nonexistent_root() {
+        let root = Path::new("/nonexistent_path_xyz");
+        let file = Path::new("/some/file.flac");
+        let result = is_path_inside_library(root, file);
+        assert!(matches!(result, Err(PathError::CannotCanonicalizeRoot(_))));
+    }
+
+    #[test]
+    fn test_is_path_inside_library_traversal_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let inside = dir.path().join("real_file.flac");
+        std::fs::write(&inside, b"data").unwrap();
+        let traversal = dir.path().join("../../etc/passwd");
+        let result = is_path_inside_library(dir.path(), &traversal);
+        assert!(result.is_err() || !result.unwrap());
     }
 
     #[test]

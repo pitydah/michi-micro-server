@@ -65,7 +65,7 @@ MICHI_PORT=8096 \
 MICHI_MUSIC_PATH=./music \
 MICHI_CONFIG_PATH=./data/config \
 MICHI_CACHE_PATH=./data/cache \
-MICHI_DATABASE=sqlite:///./data/config/michi.db?mode=rwc \
+MICHI_DATABASE=sqlite://./data/config/michi.db \
 cargo run -p michi-server
 
 # Or with default paths (requires /music, /config, /cache):
@@ -75,7 +75,7 @@ cargo run -p michi-server
 ### Running Tests
 
 ```bash
-# Run all tests (52 tests across all crates)
+# Run all tests (68 tests across all crates)
 cargo test
 ```
 
@@ -219,7 +219,7 @@ The streaming endpoint:
 - Returns `200 OK` with full file for requests without `Range`
 - Returns `206 Partial Content` with the requested byte range
 - Returns `416 Range Not Satisfiable` for invalid ranges
-- Validates that files are inside the configured music path
+- Returns `403 Forbidden` for files outside the configured music path
 - Detects MIME types based on file extension
 - Sets `Accept-Ranges: bytes` header
 
@@ -233,7 +233,7 @@ All configuration is done via environment variables:
 | `MICHI_MUSIC_PATH` | `/music` | Music library path |
 | `MICHI_CONFIG_PATH` | `/config` | Configuration path |
 | `MICHI_CACHE_PATH` | `/cache` | Cache path |
-| `MICHI_DATABASE` | `sqlite:///config/michi.db?mode=rwc` | SQLite database URL |
+| `MICHI_DATABASE` | `sqlite:///config/michi.db` | SQLite database URL (created automatically if missing, no `?mode=rwc` needed) |
 
 ## Compatibility
 

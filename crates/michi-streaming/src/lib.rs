@@ -181,6 +181,48 @@ pub async fn resolve_track(
     Ok((track, path, file))
 }
 
+pub async fn open_track_file_async(
+    music_path: &Path,
+    track: &Track,
+) -> Result<(PathBuf, tokio::fs::File), StreamError> {
+    let file_path = Path::new(&track.file_path);
+    let canonical = validate_track_path(music_path, file_path)?;
+
+    if !canonical.is_file() {
+        return Err(StreamError::FileNotFound(format!(
+            "file does not exist: {}",
+            canonical.display()
+        )));
+    }
+
+    let file = tokio::fs::File::open(&canonical).await?;
+    Ok((canonical, file))
+}
+
+pub async fn read_range_from_file_async(
+    file: &mut tokio::fs::File,
+    range: &ByteRange,
+) -> Result<Vec<u8>, StreamError> {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncSeekExt;
+
+    let mut buf = vec![0u8; range.content_length() as usize];
+
+    file.seek(std::io::SeekFrom::Start(range.start)).await?;
+
+    let mut total_read = 0usize;
+    while total_read < buf.len() {
+        let n = file.read(&mut buf[total_read..]).await?;
+        if n == 0 {
+            break;
+        }
+        total_read += n;
+    }
+
+    buf.truncate(total_read);
+    Ok(buf)
+}
+
 pub fn read_range_from_file(mut file: &File, range: &ByteRange) -> Result<Vec<u8>, StreamError> {
     let mut buf = vec![0u8; range.content_length() as usize];
 

@@ -38,16 +38,7 @@ pub fn read_metadata(path: &Path) -> Result<AudioMetadata, MetadataError> {
 
     let format = format_from_path(path);
 
-    let tagged_file = match read_from_path(path) {
-        Ok(f) => f,
-        Err(e) => {
-            error!("failed to read file {}: {}", path.display(), e);
-            return Ok(AudioMetadata {
-                format,
-                ..Default::default()
-            });
-        }
-    };
+    let tagged_file = read_from_path(path)?;
 
     let properties = tagged_file.properties();
 
@@ -133,5 +124,65 @@ pub fn read_metadata_safe(path: &Path) -> AudioMetadata {
                 ..Default::default()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_format_from_path() {
+        assert_eq!(format_from_path(Path::new("song.mp3")), AudioFormat::Mp3);
+        assert_eq!(format_from_path(Path::new("song.flac")), AudioFormat::Flac);
+        assert_eq!(format_from_path(Path::new("song.ogg")), AudioFormat::Ogg);
+        assert_eq!(format_from_path(Path::new("song.wav")), AudioFormat::Wav);
+        assert_eq!(format_from_path(Path::new("song.aac")), AudioFormat::Aac);
+        assert_eq!(format_from_path(Path::new("song.m4a")), AudioFormat::M4a);
+        assert_eq!(format_from_path(Path::new("song.opus")), AudioFormat::Opus);
+        assert_eq!(format_from_path(Path::new("song.aiff")), AudioFormat::Aiff);
+        assert_eq!(format_from_path(Path::new("song.aif")), AudioFormat::Aiff);
+        assert_eq!(format_from_path(Path::new("song.dsf")), AudioFormat::Dsf);
+        assert_eq!(format_from_path(Path::new("song.dff")), AudioFormat::Dff);
+        assert_eq!(
+            format_from_path(Path::new("song.txt")),
+            AudioFormat::Unknown
+        );
+        assert_eq!(format_from_path(Path::new("song")), AudioFormat::Unknown);
+    }
+
+    #[test]
+    fn test_read_metadata_nonexistent_file() {
+        let result = read_metadata(Path::new("/nonexistent_xyz.flac"));
+        assert!(result.is_err());
+        assert!(matches!(result, Err(MetadataError::Io(_))));
+    }
+
+    #[test]
+    fn test_read_metadata_corrupt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.flac");
+        fs::write(&path, b"not a valid audio file at all").unwrap();
+        let result = read_metadata(&path);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(MetadataError::Lofty(_))));
+    }
+
+    #[test]
+    fn test_read_metadata_safe_nonexistent() {
+        let result = read_metadata_safe(Path::new("/nonexistent_xyz.flac"));
+        assert_eq!(result.format, AudioFormat::Flac);
+        assert!(result.title.is_none());
+    }
+
+    #[test]
+    fn test_read_metadata_safe_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.flac");
+        fs::write(&path, b"garbage data").unwrap();
+        let result = read_metadata_safe(&path);
+        assert_eq!(result.format, AudioFormat::Flac);
+        assert!(result.title.is_none());
     }
 }

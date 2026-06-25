@@ -177,6 +177,7 @@ Body:
 
 **Error Responses**:
 - `400 Bad Request` — Invalid UUID or malformed `Range` header
+- `403 Forbidden` — File is outside the configured music library path
 - `404 Not Found` — Track not found or file missing from disk
 - `416 Range Not Satisfiable` — Range start beyond file size
 
