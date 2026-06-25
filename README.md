@@ -39,7 +39,7 @@ michi-micro-server/
 │   ├── michi-db/            # Database layer
 │   ├── michi-metadata/      # Audio tag reading
 │   ├── michi-scanner/       # Library scanner
-│   ├── michi-streaming/     # Streaming (future)
+│   ├── michi-streaming/     # Audio streaming with Range Requests
 │   ├── michi-homeassistant/ # HA integration (future)
 │   ├── michi-sync/          # Sync (future)
 │   └── michi-multiroom/     # Multiroom (future)
@@ -70,6 +70,13 @@ cargo run -p michi-server
 
 # Or with default paths (requires /music, /config, /cache):
 cargo run -p michi-server
+```
+
+### Running Tests
+
+```bash
+# Run all tests (52 tests across all crates)
+cargo test
 ```
 
 ### Testing the server
@@ -142,6 +149,7 @@ docker run -d \
 | PUT | `/api/tracks/:id` | Update track metadata (partial) |
 | DELETE | `/api/tracks/:id` | Delete a track by UUID |
 | GET | `/api/library/stats` | Library statistics |
+| GET | `/api/stream/:id` | Stream audio file with Range Request support |
 
 ### Health Check
 
@@ -194,6 +202,26 @@ Response:
   "artists": 42
 }
 ```
+
+### Streaming
+
+Stream audio files with HTTP Range Request support for seeking:
+
+```bash
+# Get the full file
+curl -v http://localhost:8096/api/stream/<UUID>
+
+# Request a specific byte range (used by clients for seeking)
+curl -v -H "Range: bytes=0-1023" http://localhost:8096/api/stream/<UUID>
+```
+
+The streaming endpoint:
+- Returns `200 OK` with full file for requests without `Range`
+- Returns `206 Partial Content` with the requested byte range
+- Returns `416 Range Not Satisfiable` for invalid ranges
+- Validates that files are inside the configured music path
+- Detects MIME types based on file extension
+- Sets `Accept-Ranges: bytes` header
 
 ## Configuration
 

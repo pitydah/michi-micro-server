@@ -10,6 +10,7 @@ use tower_http::trace::TraceLayer;
 mod library;
 mod root;
 mod status;
+mod stream;
 
 pub use status::StatusResponse;
 
@@ -42,6 +43,7 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(library::delete_track_handler)
                 .put(library::update_track_handler),
         )
+        .route("/api/stream/:id", get(stream::stream_handler))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)

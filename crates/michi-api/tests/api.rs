@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use axum::{
     body::Body,
@@ -280,4 +280,265 @@ async fn test_track_get_returns_400_for_bad_uuid() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Streaming endpoint tests
+// ---------------------------------------------------------------------------
+
+fn create_test_file(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, content).unwrap();
+    path
+}
+
+async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, Uuid) {
+    let tmp = tempfile::tempdir().unwrap();
+    let music_dir = tmp.path().join("music");
+    std::fs::create_dir_all(&music_dir).unwrap();
+
+    let file_path = create_test_file(&music_dir, "test.flac", &[0u8; 50000]);
+
+    let pool = test_db().await;
+    let config = Config {
+        port: 9999,
+        music_path: music_dir,
+        config_path: PathBuf::from("/tmp/michi-test/config"),
+        cache_path: PathBuf::from("/tmp/michi-test/cache"),
+        database_url: "sqlite::memory:".to_string(),
+        version: "test",
+    };
+    let id = track_id_from_path(file_path.to_str().unwrap());
+    let track = Track {
+        id,
+        title: Some("Test Stream".into()),
+        artist: Some("Test Artist".into()),
+        album: Some("Test Album".into()),
+        album_artist: None,
+        duration_ms: Some(5000),
+        file_path: file_path.to_str().unwrap().to_string(),
+        format: AudioFormat::Flac,
+        sample_rate: Some(44100),
+        bit_depth: Some(16),
+        channels: Some(2),
+        artwork_id: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    michi_db::upsert_track(&pool, &track).await.unwrap();
+
+    let state = michi_api::AppState::new(config, pool.clone());
+    (michi_api::create_router(state), pool, tmp, id)
+}
+
+#[tokio::test]
+async fn test_stream_full_file() {
+    let (app, _pool, _tmp, id) = make_streaming_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/stream/{}", id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "audio/flac"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("accept-ranges")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "bytes"
+    );
+    let body = axum::body::to_bytes(response.into_body(), 100000)
+        .await
+        .unwrap();
+    assert_eq!(body.len(), 50000);
+}
+
+#[tokio::test]
+async fn test_stream_range_request() {
+    let (app, _pool, _tmp, id) = make_streaming_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/stream/{}", id))
+                .header("Range", "bytes=0-1023")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "audio/flac"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("content-range")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "bytes 0-1023/50000"
+    );
+    let body = axum::body::to_bytes(response.into_body(), 100000)
+        .await
+        .unwrap();
+    assert_eq!(body.len(), 1024);
+}
+
+#[tokio::test]
+async fn test_stream_range_from_offset() {
+    let (app, _pool, _tmp, id) = make_streaming_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/stream/{}", id))
+                .header("Range", "bytes=100-")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-range")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "bytes 100-49999/50000"
+    );
+    let body = axum::body::to_bytes(response.into_body(), 100000)
+        .await
+        .unwrap();
+    assert_eq!(body.len(), 49900);
+}
+
+#[tokio::test]
+async fn test_stream_range_not_satisfiable() {
+    let (app, _pool, _tmp, id) = make_streaming_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/stream/{}", id))
+                .header("Range", "bytes=50000-60000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+}
+
+#[tokio::test]
+async fn test_stream_track_not_found() {
+    let (app, _pool, _tmp, _id) = make_streaming_app().await;
+    let fake_id = "00000000-0000-0000-0000-000000000000";
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/stream/{}", fake_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_stream_bad_uuid() {
+    let (app, _pool, _tmp, _id) = make_streaming_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/stream/not-a-uuid")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_stream_file_not_on_disk() {
+    let pool = test_db().await;
+    let config = Config {
+        port: 9999,
+        music_path: PathBuf::from("/tmp/michi-test/music"),
+        config_path: PathBuf::from("/tmp/michi-test/config"),
+        cache_path: PathBuf::from("/tmp/michi-test/cache"),
+        database_url: "sqlite::memory:".to_string(),
+        version: "test",
+    };
+
+    let id = track_id_from_path("/nonexistent/path/file.flac");
+    let track = Track {
+        id,
+        title: Some("Missing File".into()),
+        artist: None,
+        album: None,
+        album_artist: None,
+        duration_ms: None,
+        file_path: "/nonexistent/path/file.flac".to_string(),
+        format: AudioFormat::Flac,
+        sample_rate: None,
+        bit_depth: None,
+        channels: None,
+        artwork_id: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    michi_db::upsert_track(&pool, &track).await.unwrap();
+
+    let state = michi_api::AppState::new(config, pool.clone());
+    let app = michi_api::create_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/stream/{}", id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_stream_status_still_works() {
+    let (app, _pool, _tmp, _id) = make_streaming_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }

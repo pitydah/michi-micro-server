@@ -143,6 +143,73 @@ Updates metadata fields for a track. Only the fields sent in the request body ar
 - `200 OK` — Track updated successfully.
 - `404 Not Found` — Track not found.
 
+### GET /api/stream/:id
+
+Streams an audio file with optional HTTP Range Request support.
+
+**Parameters**:
+- `id` (path) — UUID of the track to stream.
+
+**Response (no Range header)**: `200 OK`
+
+Headers:
+- `Content-Type`: Audio MIME type based on file extension
+- `Content-Length`: Full file size
+- `Accept-Ranges: bytes`
+
+**Response (valid Range header)**: `206 Partial Content`
+
+Headers:
+- `Content-Type`: Audio MIME type
+- `Content-Range`: Range in `bytes start-end/total` format
+- `Content-Length`: Size of the range
+- `Accept-Ranges: bytes`
+
+**Response (invalid Range)**: `416 Range Not Satisfiable`
+
+Body:
+```json
+{
+  "status": "error",
+  "message": "range not satisfiable: ..."
+}
+```
+
+**Error Responses**:
+- `400 Bad Request` — Invalid UUID or malformed `Range` header
+- `404 Not Found` — Track not found or file missing from disk
+- `416 Range Not Satisfiable` — Range start beyond file size
+
+**Examples**:
+
+```bash
+# Full file
+curl -v http://localhost:8096/api/stream/TRACK_ID
+
+# Partial range
+curl -v -H "Range: bytes=0-1023" http://localhost:8096/api/stream/TRACK_ID
+
+# From offset to end
+curl -v -H "Range: bytes=100-" http://localhost:8096/api/stream/TRACK_ID
+
+# Suffix range (last N bytes)
+curl -v -H "Range: bytes=-500" http://localhost:8096/api/stream/TRACK_ID
+```
+
+**Supported MIME Types**:
+
+| Extension | MIME Type |
+|-----------|-----------|
+| mp3 | `audio/mpeg` |
+| flac | `audio/flac` |
+| ogg, opus | `audio/ogg` |
+| m4a | `audio/mp4` |
+| aac | `audio/aac` |
+| wav | `audio/wav` |
+| aiff, aif | `audio/aiff` |
+| dsf | `audio/dsf` |
+| dff | `audio/dff` |
+
 ### GET /api/library/stats
 
 Returns library statistics.
@@ -173,9 +240,6 @@ List all playlists.
 
 ### POST /api/playlists
 Create a new playlist.
-
-### GET /api/stream/:id
-Stream audio from a track.
 
 ### WebSocket /api/ws
 Real-time updates for playback state and library changes.

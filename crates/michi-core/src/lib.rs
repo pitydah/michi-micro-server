@@ -44,6 +44,22 @@ impl AudioFormat {
         }
     }
 
+    pub fn mime_type(&self) -> &'static str {
+        match self {
+            Self::Mp3 => "audio/mpeg",
+            Self::Flac => "audio/flac",
+            Self::Ogg => "audio/ogg",
+            Self::Opus => "audio/ogg",
+            Self::Aac => "audio/aac",
+            Self::M4a => "audio/mp4",
+            Self::Wav => "audio/wav",
+            Self::Aiff => "audio/aiff",
+            Self::Dsf => "audio/dsf",
+            Self::Dff => "audio/dff",
+            Self::Unknown => "application/octet-stream",
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Mp3 => "mp3",
@@ -232,6 +248,21 @@ mod tests {
         assert_eq!(m.format, AudioFormat::Unknown);
         assert!(m.title.is_none());
         assert!(!m.has_artwork);
+    }
+
+    #[test]
+    fn test_audio_format_mime_type() {
+        assert_eq!(AudioFormat::Mp3.mime_type(), "audio/mpeg");
+        assert_eq!(AudioFormat::Flac.mime_type(), "audio/flac");
+        assert_eq!(AudioFormat::Ogg.mime_type(), "audio/ogg");
+        assert_eq!(AudioFormat::Opus.mime_type(), "audio/ogg");
+        assert_eq!(AudioFormat::M4a.mime_type(), "audio/mp4");
+        assert_eq!(AudioFormat::Aac.mime_type(), "audio/aac");
+        assert_eq!(AudioFormat::Wav.mime_type(), "audio/wav");
+        assert_eq!(AudioFormat::Aiff.mime_type(), "audio/aiff");
+        assert_eq!(AudioFormat::Dsf.mime_type(), "audio/dsf");
+        assert_eq!(AudioFormat::Dff.mime_type(), "audio/dff");
+        assert_eq!(AudioFormat::Unknown.mime_type(), "application/octet-stream");
     }
 
     #[test]

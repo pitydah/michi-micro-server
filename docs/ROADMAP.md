@@ -19,11 +19,13 @@
 - [x] Integration tests for API handlers (11 tests)
 
 ## Phase 3: Streaming
-- [ ] Audio streaming endpoint
-- [ ] Range request support
+- [x] Audio streaming endpoint (`GET /api/stream/:id`)
+- [x] Range request support (206 Partial Content, 416 Range Not Satisfiable)
+- [x] Path traversal protection (canonical path validation)
+- [x] MIME type detection by file extension
 - [ ] Transcoding via FFmpeg
 - [ ] Cover art serving
-- [ ] HLS or direct streaming
+- [ ] HLS or adaptive streaming
 
 ## Phase 4: Web Interface
 - [ ] Basic web UI

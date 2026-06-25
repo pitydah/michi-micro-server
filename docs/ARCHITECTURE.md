@@ -15,7 +15,7 @@ michi-micro-server/
 │   ├── michi-db/           # SQLite database layer (SQLx)
 │   ├── michi-metadata/     # Audio metadata reading (Lofty)
 │   ├── michi-scanner/      # Music library scanner
-│   ├── michi-streaming/    # Audio streaming (future)
+│   ├── michi-streaming/    # Audio streaming with Range Requests
 │   ├── michi-homeassistant/# Home Assistant MQTT (future)
 │   ├── michi-sync/         # Sync with Michi players (future)
 │   └── michi-multiroom/    # Multiroom audio (future)
@@ -49,8 +49,17 @@ Audio metadata extraction using the Lofty crate. Parses tags and audio propertie
 ### michi-scanner
 Recursively scans directories for audio files, reads metadata, and builds a track database.
 
+### michi-streaming
+Audio streaming with HTTP Range Request support. Provides:
+- `parse_range()` — parses `Range` headers into start/end byte offsets
+- `validate_track_path()` — canonicalizes paths and prevents directory traversal
+- `open_track_file()` — resolves a track's file path and opens it for reading
+- `mime_type_for_ext()` — maps file extensions to audio MIME types
+
+The crate is consumed by `michi-api` handlers and calls `michi-db` to look up tracks. It intentionally contains no HTTP or database logic — only file I/O and range math.
+
 ### Placeholder Crates
-`michi-streaming`, `michi-homeassistant`, `michi-sync`, and `michi-multiroom` are prepared for future development and currently export placeholder functions.
+`michi-homeassistant`, `michi-sync`, and `michi-multiroom` are prepared for future development and currently export placeholder functions.
 
 ## Data Flow
 
@@ -65,4 +74,9 @@ Config (env) → main.rs → Router (michi-api)
 When scanning:
 ```
 Scanner → Metadata Reader → Database
+```
+
+When streaming:
+```
+Client → /api/stream/:id → michi-api handler → michi-db (lookup) → michi-streaming (file I/O) → Response
 ```
