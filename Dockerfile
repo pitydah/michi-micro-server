@@ -37,6 +37,6 @@ ENV MICHI_PORT=8096
 ENV MICHI_MUSIC_PATH=/music
 ENV MICHI_CONFIG_PATH=/config
 ENV MICHI_CACHE_PATH=/cache
-ENV MICHI_DATABASE=/config/michi.db
+ENV MICHI_DATABASE=sqlite:///config/michi.db?mode=rwc
 
 ENTRYPOINT ["michi-server"]

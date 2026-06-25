@@ -16,5 +16,5 @@ services:
       - MICHI_MUSIC_PATH=/music
       - MICHI_CONFIG_PATH=/config
       - MICHI_CACHE_PATH=/cache
-      - MICHI_DATABASE=/config/michi.db
+      - MICHI_DATABASE=sqlite:///config/michi.db?mode=rwc
     restart: unless-stopped

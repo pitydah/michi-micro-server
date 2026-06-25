@@ -1,6 +1,7 @@
 use axum::{extract::State, Json};
-use michi_config::Config;
 use serde::Serialize;
+
+use crate::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
@@ -10,11 +11,11 @@ pub struct StatusResponse {
     pub port: u16,
 }
 
-pub async fn status_handler(State(config): State<Config>) -> Json<StatusResponse> {
+pub async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
     Json(StatusResponse {
         status: "ok".to_string(),
         service: "michi-micro-server".to_string(),
-        version: config.version().to_string(),
-        port: config.port(),
+        version: state.config.version().to_string(),
+        port: state.config.port(),
     })
 }

@@ -58,36 +58,52 @@ pub fn read_metadata(path: &Path) -> Result<AudioMetadata, MetadataError> {
 
     let tag = tagged_file.first_tag();
 
-    let (title, artist, album, album_artist, genre, year, track_number, disc_number, has_artwork) =
-        match tag {
-            Some(tag) => {
-                let title = tag.title().map(|s| s.to_string());
-                let artist = tag.artist().map(|s| s.to_string());
-                let album = tag.album().map(|s| s.to_string());
-                let album_artist = tag.get_string(&ItemKey::AlbumArtist).map(|s| s.to_string());
-                let genre = tag.genre().map(|s| s.to_string());
-                let year = tag.year().map(|y| y as i32);
-                let track_number = tag.track();
-                let disc_number = tag.disk();
-                let has_artwork = tag.pictures().len() > 0;
+    let (
+        mut title,
+        artist,
+        album,
+        album_artist,
+        genre,
+        year,
+        track_number,
+        disc_number,
+        has_artwork,
+    ) = match tag {
+        Some(tag) => {
+            let title = tag.title().map(|s| s.to_string());
+            let artist = tag.artist().map(|s| s.to_string());
+            let album = tag.album().map(|s| s.to_string());
+            let album_artist = tag.get_string(&ItemKey::AlbumArtist).map(|s| s.to_string());
+            let genre = tag.genre().map(|s| s.to_string());
+            let year = tag.year().map(|y| y as i32);
+            let track_number = tag.track();
+            let disc_number = tag.disk();
+            let has_artwork = !tag.pictures().is_empty();
 
-                (
-                    title,
-                    artist,
-                    album,
-                    album_artist,
-                    genre,
-                    year,
-                    track_number,
-                    disc_number,
-                    has_artwork,
-                )
-            }
-            None => {
-                warn!("no tags found for {}", path.display());
-                (None, None, None, None, None, None, None, None, false)
-            }
-        };
+            (
+                title,
+                artist,
+                album,
+                album_artist,
+                genre,
+                year,
+                track_number,
+                disc_number,
+                has_artwork,
+            )
+        }
+        None => {
+            warn!("no tags found for {}", path.display());
+            (None, None, None, None, None, None, None, None, false)
+        }
+    };
+
+    if title.is_none() {
+        title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string());
+    }
 
     Ok(AudioMetadata {
         title,

@@ -10,3 +10,8 @@ michi-core = { path = "../michi-core" }
 sqlx.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

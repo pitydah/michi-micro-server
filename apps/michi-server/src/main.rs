@@ -18,12 +18,15 @@ async fn main() -> Result<()> {
         version = %config.version(),
         port = %config.port(),
         music_path = %config.music_path.display(),
+        database = %config.database_url,
         "starting Michi Micro Server",
     );
 
-    let _pool = michi_db::init_pool(&config.database_url).await;
+    let pool = michi_db::init_pool(&config.database_url).await?;
 
-    let app = michi_api::create_router(&config);
+    let state = michi_api::AppState::new(config.clone(), pool);
+
+    let app = michi_api::create_router(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!("listening on {}", addr);

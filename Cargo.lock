@@ -946,12 +946,19 @@ name = "michi-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "michi-config",
  "michi-core",
+ "michi-db",
+ "michi-scanner",
  "serde",
  "serde_json",
+ "sqlx",
+ "tokio",
+ "tower",
  "tower-http",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -974,10 +981,13 @@ dependencies = [
 name = "michi-db"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "michi-core",
  "sqlx",
  "thiserror",
+ "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1016,12 +1026,11 @@ dependencies = [
 name = "michi-scanner"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "chrono",
  "michi-core",
- "michi-db",
  "michi-metadata",
  "thiserror",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -1475,6 +1484,12 @@ dependencies = [
  "cpufeatures",
  "digest",
 ]
+
+[[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "sha2"
@@ -2071,6 +2086,7 @@ dependencies = [
  "getrandom 0.4.3",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

@@ -30,13 +30,137 @@ Returns the server status as JSON.
 **Status Codes**:
 - `200 OK` — Server is running normally.
 
-## Future Endpoints
+### POST /api/library/scan
+
+Scans the configured music directory for audio files, reads metadata, and saves tracks to the database.
+
+**Response**:
+
+```json
+{
+  "status": "ok",
+  "scanned": 120,
+  "saved": 120
+}
+```
+
+**Status Codes**:
+- `200 OK` — Scan completed successfully.
+- `404 Not Found` — Music path does not exist.
+- `400 Bad Request` — Music path is not a directory.
+
+### DELETE /api/library/tracks
+
+Deletes all tracks from the library.
+
+**Response**:
+
+```json
+{
+  "deleted": 120
+}
+```
+
+**Status Codes**:
+- `200 OK` — Tracks deleted successfully.
 
 ### GET /api/tracks
-List all tracks in the library.
+
+Returns all tracks stored in the library.
+
+**Response**: Array of track objects.
+
+```json
+[
+  {
+    "id": "uuid-v5-from-path",
+    "title": "Song Title",
+    "artist": "Artist Name",
+    "album": "Album Name",
+    "album_artist": "Album Artist",
+    "duration_ms": 240000,
+    "file_path": "/music/artist/album/song.flac",
+    "format": "flac",
+    "sample_rate": 44100,
+    "bit_depth": 16,
+    "channels": 2,
+    "artwork_id": null,
+    "created_at": "2026-01-01T00:00:00+00:00",
+    "updated_at": "2026-01-01T00:00:00+00:00"
+  }
+]
+```
+
+**Status Codes**:
+- `200 OK` — Tracks returned successfully.
 
 ### GET /api/tracks/:id
-Get a single track by ID.
+
+Returns a single track by UUID.
+
+**Status Codes**:
+- `200 OK` — Track returned successfully.
+- `404 Not Found` — Track not found.
+
+### DELETE /api/tracks/:id
+
+Deletes a single track by UUID.
+
+**Response**:
+
+```json
+{
+  "deleted": true
+}
+```
+
+**Status Codes**:
+- `200 OK` — Track deleted successfully.
+- `404 Not Found` — Track not found.
+
+### PUT /api/tracks/:id
+
+Updates metadata fields for a track. Only the fields sent in the request body are modified.
+
+**Request Body** (all fields optional):
+
+```json
+{
+  "title": "New Title",
+  "artist": "New Artist",
+  "album": "New Album",
+  "album_artist": "New Album Artist",
+  "duration_ms": 240000,
+  "sample_rate": 44100,
+  "bit_depth": 16,
+  "channels": 2
+}
+```
+
+**Response**: The updated track object.
+
+**Status Codes**:
+- `200 OK` — Track updated successfully.
+- `404 Not Found` — Track not found.
+
+### GET /api/library/stats
+
+Returns library statistics.
+
+**Response**:
+
+```json
+{
+  "tracks": 120,
+  "albums": 15,
+  "artists": 42
+}
+```
+
+**Status Codes**:
+- `200 OK` — Stats returned successfully.
+
+## Future Endpoints
 
 ### GET /api/albums
 List all albums.
@@ -53,9 +177,6 @@ Create a new playlist.
 ### GET /api/stream/:id
 Stream audio from a track.
 
-### POST /api/scan
-Trigger a library rescan.
-
 ### WebSocket /api/ws
 Real-time updates for playback state and library changes.
 
@@ -65,6 +186,7 @@ All API responses use JSON. Errors follow:
 
 ```json
 {
-  "error": "description of the error"
+  "status": "error",
+  "message": "description of the error"
 }
 ```

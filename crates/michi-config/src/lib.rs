@@ -29,8 +29,8 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/cache"));
 
-        let database_url =
-            env::var("MICHI_DATABASE").unwrap_or_else(|_| "/config/michi.db".to_string());
+        let database_url = env::var("MICHI_DATABASE")
+            .unwrap_or_else(|_| "sqlite:///config/michi.db?mode=rwc".to_string());
 
         Self {
             port,

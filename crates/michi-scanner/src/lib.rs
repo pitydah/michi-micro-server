@@ -1,18 +1,8 @@
 use std::path::Path;
 
-use michi_core::{AudioFormat, Track};
+use michi_core::{track_id_from_path, AudioFormat, Track};
 use michi_metadata::read_metadata_safe;
 use tracing::{info, warn};
-use uuid::Uuid;
-
-#[derive(Debug, thiserror::Error)]
-pub enum ScanError {
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("database error: {0}")]
-    Db(#[from] michi_db::DbError),
-}
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "mp3", "flac", "ogg", "opus", "aac", "m4a", "wav", "aiff", "aif", "dsf", "dff",
@@ -25,13 +15,10 @@ fn is_audio_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-pub fn scan_directory(path: &Path) -> Vec<Track> {
-    info!("scanning directory: {}", path.display());
-
+fn scan_directory_sync(path: &Path) -> Vec<Track> {
     let mut tracks = Vec::new();
 
     if !path.exists() || !path.is_dir() {
-        warn!("directory does not exist: {}", path.display());
         return tracks;
     }
 
@@ -47,19 +34,22 @@ pub fn scan_directory(path: &Path) -> Vec<Track> {
         let entry_path = entry.path();
 
         if entry_path.is_dir() {
-            let sub_tracks = scan_directory(&entry_path);
+            let sub_tracks = scan_directory_sync(&entry_path);
             tracks.extend(sub_tracks);
         } else if entry_path.is_file() && is_audio_file(&entry_path) {
             let metadata = read_metadata_safe(&entry_path);
 
+            let file_path = entry_path.to_string_lossy().to_string();
+            let track_id = track_id_from_path(&file_path);
+
             let track = Track {
-                id: Uuid::new_v4(),
+                id: track_id,
                 title: metadata.title.clone(),
                 artist: metadata.artist.clone(),
                 album: metadata.album.clone(),
                 album_artist: metadata.album_artist.clone(),
                 duration_ms: metadata.duration_ms,
-                file_path: entry_path.to_string_lossy().to_string(),
+                file_path,
                 format: metadata.format,
                 sample_rate: metadata.sample_rate,
                 bit_depth: metadata.bit_depth,
@@ -81,6 +71,51 @@ pub fn scan_directory(path: &Path) -> Vec<Track> {
         }
     }
 
-    info!("scanned {} tracks from {}", tracks.len(), path.display());
     tracks
+}
+
+pub async fn scan_directory(path: &Path) -> Vec<Track> {
+    let path_buf = path.to_path_buf();
+    info!("scanning directory: {}", path_buf.display());
+
+    if !path_buf.exists() || !path_buf.is_dir() {
+        warn!("directory does not exist: {}", path_buf.display());
+        return Vec::new();
+    }
+
+    let tracks = tokio::task::spawn_blocking({
+        let path_buf = path_buf.clone();
+        move || scan_directory_sync(&path_buf)
+    })
+    .await
+    .unwrap_or_default();
+
+    info!(
+        "scanned {} tracks from {}",
+        tracks.len(),
+        path_buf.display()
+    );
+    tracks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_audio_file() {
+        assert!(is_audio_file(Path::new("song.mp3")));
+        assert!(is_audio_file(Path::new("song.flac")));
+        assert!(is_audio_file(Path::new("song.wav")));
+        assert!(is_audio_file(Path::new("song.aiff")));
+        assert!(is_audio_file(Path::new("song.aif")));
+        assert!(is_audio_file(Path::new("song.dsf")));
+        assert!(is_audio_file(Path::new("song.dff")));
+        assert!(is_audio_file(Path::new("song.ogg")));
+        assert!(is_audio_file(Path::new("song.opus")));
+        assert!(is_audio_file(Path::new("song.aac")));
+        assert!(is_audio_file(Path::new("song.m4a")));
+        assert!(!is_audio_file(Path::new("song.txt")));
+        assert!(!is_audio_file(Path::new("song")));
+    }
 }
