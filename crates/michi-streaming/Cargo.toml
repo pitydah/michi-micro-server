@@ -1,0 +1,12 @@
+[package]
+name = "michi-streaming"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+michi-core = { path = "../michi-core" }
+
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true

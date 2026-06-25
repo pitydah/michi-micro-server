@@ -1,0 +1,16 @@
+[package]
+name = "michi-scanner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+michi-core = { path = "../michi-core" }
+michi-metadata = { path = "../michi-metadata" }
+michi-db = { path = "../michi-db" }
+
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
+chrono.workspace = true

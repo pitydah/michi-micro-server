@@ -1,0 +1,12 @@
+[package]
+name = "michi-metadata"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+michi-core = { path = "../michi-core" }
+
+lofty.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
