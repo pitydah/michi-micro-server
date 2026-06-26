@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use michi_core::{LibraryStats, Track};
+use michi_core::{AlbumSummary, ArtistSummary, LibraryStats, Track};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -276,10 +276,7 @@ impl MichiClient {
             "playlists" => self.state.as_ref().is_some_and(|s| s.features.playlists),
             "artwork" => self.state.as_ref().is_some_and(|s| s.features.artwork),
             "sync" => self.state.as_ref().is_some_and(|s| s.features.sync),
-            "transcoding" => self
-                .state
-                .as_ref()
-                .is_some_and(|s| s.features.transcoding),
+            "transcoding" => self.state.as_ref().is_some_and(|s| s.features.transcoding),
             "websocket" => self.state.as_ref().is_some_and(|s| s.features.websocket),
             _ => false,
         }
@@ -295,6 +292,75 @@ impl MichiClient {
 
     pub fn timeout_secs(&self) -> u64 {
         self.timeout.as_secs()
+    }
+
+    pub async fn get_status(&self) -> Result<serde_json::Value, ClientError> {
+        let url = self.url("/api/status");
+        let resp = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+        resp.json()
+            .await
+            .map_err(|e| ClientError::InvalidResponse(e.to_string()))
+    }
+
+    pub async fn get_albums(&self) -> Result<Vec<AlbumSummary>, ClientError> {
+        let url = self.url("/api/albums");
+        let resp = self
+            .inner
+            .get(&url)
+            .header("Authorization", self.auth_header().unwrap_or_default())
+            .send()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+        resp.json()
+            .await
+            .map_err(|e| ClientError::InvalidResponse(e.to_string()))
+    }
+
+    pub async fn get_artists(&self) -> Result<Vec<ArtistSummary>, ClientError> {
+        let url = self.url("/api/artists");
+        let resp = self
+            .inner
+            .get(&url)
+            .header("Authorization", self.auth_header().unwrap_or_default())
+            .send()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+        resp.json()
+            .await
+            .map_err(|e| ClientError::InvalidResponse(e.to_string()))
+    }
+
+    pub async fn get_album_tracks(&self, album: &str) -> Result<Vec<Track>, ClientError> {
+        let url = self.url(&format!("/api/albums/{}", url_encode(album)));
+        let resp = self
+            .inner
+            .get(&url)
+            .header("Authorization", self.auth_header().unwrap_or_default())
+            .send()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+        resp.json()
+            .await
+            .map_err(|e| ClientError::InvalidResponse(e.to_string()))
+    }
+
+    pub async fn get_artist_tracks(&self, artist: &str) -> Result<Vec<Track>, ClientError> {
+        let url = self.url(&format!("/api/artists/{}", url_encode(artist)));
+        let resp = self
+            .inner
+            .get(&url)
+            .header("Authorization", self.auth_header().unwrap_or_default())
+            .send()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+        resp.json()
+            .await
+            .map_err(|e| ClientError::InvalidResponse(e.to_string()))
     }
 }
 

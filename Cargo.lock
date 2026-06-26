@@ -1591,14 +1591,15 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "michi-client",
  "michi-core",
  "ratatui",
- "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
