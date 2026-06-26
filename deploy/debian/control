@@ -1,0 +1,12 @@
+Source: michi-micro-server
+Section: sound
+Priority: optional
+Maintainer: Your Name <you@example.com>
+Build-Depends: debhelper-compat (= 13), rustc, cargo
+Standards-Version: 4.6.0
+
+Package: michi-micro-server
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Michi Micro Server
+ A lightweight music streaming server

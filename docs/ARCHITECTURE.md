@@ -16,9 +16,9 @@ michi-micro-server/
 │   ├── michi-metadata/     # Audio metadata reading (Lofty)
 │   ├── michi-scanner/      # Music library scanner
 │   ├── michi-streaming/    # Audio streaming with Range Requests
-│   ├── michi-homeassistant/# Home Assistant MQTT (future)
-│   ├── michi-sync/         # Sync with Michi players (future)
-│   └── michi-multiroom/    # Multiroom audio (future)
+│   ├── michi-homeassistant/# Home Assistant MQTT (inactive)
+│   ├── michi-sync/         # Sync with Michi players (inactive)
+│   └── michi-multiroom/    # Multiroom audio (inactive)
 ```
 
 ## Design Principles
@@ -69,13 +69,24 @@ Key behaviors:
 Audio streaming with HTTP Range Request support. Provides:
 - `parse_range()` — parses `Range` headers into start/end byte offsets
 - `validate_track_path()` — canonicalizes paths and prevents directory traversal
-- `open_track_file()` — resolves a track's file path and opens it for reading
+- `open_track_file_async()` — resolves a track's file path and opens it for async reading
 - `mime_type_for_ext()` — maps file extensions to audio MIME types
 
 The crate is consumed by `michi-api` handlers and calls `michi-db` to look up tracks. It intentionally contains no HTTP or database logic — only file I/O and range math.
 
-### Placeholder Crates
-`michi-homeassistant`, `michi-sync`, and `michi-multiroom` are prepared for future development and currently export placeholder functions.
+### Placeholder Crates (Inactive)
+`michi-homeassistant`, `michi-sync`, and `michi-multiroom` are present in the filesystem but commented out of `Cargo.toml` workspace `members` until actively developed.
+
+## Web UI
+
+The Web UI is a self-contained HTML page with embedded CSS and vanilla JavaScript served at `GET /`. It consumes the JSON API endpoints directly:
+- `/api/status` — Server health and version
+- `/api/library/stats` — Track/album/artist counts
+- `/api/tracks` — Full track listing (supports `?limit=&offset=` for pagination)
+- `/api/search?q=` — Case-insensitive search across title, artist, album, album_artist, format
+- `/api/stream/:id` — Audio playback with `<audio>` element
+- `/api/library/scan` — Trigger library rescan
+- `/api/library/tracks` — Clear library (with DELETE + confirm dialog)
 
 ## Data Flow
 

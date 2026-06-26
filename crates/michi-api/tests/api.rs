@@ -19,11 +19,18 @@ async fn test_db() -> SqlitePool {
 fn test_config() -> Config {
     Config {
         port: 9999,
-        music_path: PathBuf::from("/tmp/michi-test/music"),
+        music_paths: vec![PathBuf::from("/tmp/michi-test/music")],
         config_path: PathBuf::from("/tmp/michi-test/config"),
         cache_path: PathBuf::from("/tmp/michi-test/cache"),
         database_url: "sqlite::memory:".to_string(),
         version: "test",
+        sync_peers: Vec::new(),
+        sync_name: "test".to_string(),
+        listenbrainz_token: None,
+        scrobble_enabled: false,
+        auth_username: None,
+        auth_password: None,
+        auth_enabled: false,
     }
 }
 
@@ -302,11 +309,18 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
     let pool = test_db().await;
     let config = Config {
         port: 9999,
-        music_path: music_dir,
+        music_paths: vec![music_dir],
         config_path: PathBuf::from("/tmp/michi-test/config"),
         cache_path: PathBuf::from("/tmp/michi-test/cache"),
         database_url: "sqlite::memory:".to_string(),
         version: "test",
+        sync_peers: Vec::new(),
+        sync_name: "test".to_string(),
+        listenbrainz_token: None,
+        scrobble_enabled: false,
+        auth_username: None,
+        auth_password: None,
+        auth_enabled: false,
     };
     let id = track_id_from_path(file_path.to_str().unwrap());
     let track = Track {
@@ -487,11 +501,18 @@ async fn test_stream_file_not_on_disk() {
     let pool = test_db().await;
     let config = Config {
         port: 9999,
-        music_path: PathBuf::from("/tmp/michi-test/music"),
+        music_paths: vec![PathBuf::from("/tmp/michi-test/music")],
         config_path: PathBuf::from("/tmp/michi-test/config"),
         cache_path: PathBuf::from("/tmp/michi-test/cache"),
         database_url: "sqlite::memory:".to_string(),
         version: "test",
+        sync_peers: Vec::new(),
+        sync_name: "test".to_string(),
+        listenbrainz_token: None,
+        scrobble_enabled: false,
+        auth_username: None,
+        auth_password: None,
+        auth_enabled: false,
     };
 
     let id = track_id_from_path("/nonexistent/path/file.flac");
@@ -541,4 +562,734 @@ async fn test_stream_status_still_works() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// Search endpoint tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_search_by_title() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/song1.flac", "Yellow Submarine").await;
+    seed_track(&pool, "/music/song2.flac", "Yesterday").await;
+    seed_track(&pool, "/music/song3.flac", "Something").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/search?q=yellow")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(tracks.len(), 1, "should find 1 track matching 'yellow'");
+    assert_eq!(tracks[0]["title"], "Yellow Submarine");
+}
+
+#[tokio::test]
+async fn test_search_case_insensitive() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/beatles.flac", "Let It Be").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/search?q=let+it")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(tracks.len(), 1);
+}
+
+#[tokio::test]
+async fn test_search_no_results() {
+    let (app, _pool) = make_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/search?q=zzz_nonexistent_zzz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(tracks.len(), 0);
+}
+
+#[tokio::test]
+async fn test_search_empty_query() {
+    let (app, _pool) = make_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/search?q=")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(tracks.len(), 0, "empty query should return empty array");
+}
+
+// ---------------------------------------------------------------------------
+// Pagination tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_tracks_pagination_limit_offset() {
+    let (app, pool) = make_app().await;
+    for i in 0..10 {
+        let path = format!("/music/song_{}.flac", i);
+        let title = format!("Track {}", i);
+        seed_track(&pool, &path, &title).await;
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tracks?limit=3&offset=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(tracks.len(), 3);
+}
+
+#[tokio::test]
+async fn test_tracks_limit_max() {
+    let (app, pool) = make_app().await;
+    for i in 0..20 {
+        let path = format!("/music/song_{}.flac", i);
+        let title = format!("Track {}", i);
+        seed_track(&pool, &path, &title).await;
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tracks?limit=9999")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert!(tracks.len() <= 500);
+}
+
+// ---------------------------------------------------------------------------
+// Albums / Artists endpoint tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_albums_endpoint() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/a1.flac", "Song A1").await;
+    seed_track(&pool, "/music/a2.flac", "Song A2").await;
+    seed_track(&pool, "/music/b1.flac", "Song B1").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/albums")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let albums: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(albums.len(), 1);
+    assert_eq!(albums[0]["album"], "Test Album");
+    assert_eq!(albums[0]["track_count"], 3);
+}
+
+#[tokio::test]
+async fn test_albums_endpoint_empty() {
+    let (app, _pool) = make_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/albums")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    assert_eq!(text, "[]");
+}
+
+#[tokio::test]
+async fn test_artists_endpoint() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/a1.flac", "Song A1").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/artists")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let artists: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(artists.len(), 1);
+    assert_eq!(artists[0]["artist"], "Test Artist");
+    assert_eq!(artists[0]["track_count"], 1);
+    assert_eq!(artists[0]["track_count"], 1);
+}
+
+#[tokio::test]
+async fn test_album_tracks_endpoint() {
+    let (app, pool) = make_app().await;
+    let _id = seed_track(&pool, "/music/test.flac", "Test Song").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/albums/Test%20Album")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0]["title"], "Test Song");
+}
+
+#[tokio::test]
+async fn test_artist_tracks_endpoint() {
+    let (app, pool) = make_app().await;
+    let _id = seed_track(&pool, "/music/test.flac", "Test Song").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/artists/Test%20Artist")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0]["title"], "Test Song");
+}
+
+#[tokio::test]
+async fn test_artwork_not_found() {
+    let (app, _pool) = make_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/artwork/00000000-0000-0000-0000-000000000000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Playlist endpoint tests
+// ---------------------------------------------------------------------------
+
+async fn seed_playlist(pool: &SqlitePool) -> michi_core::Playlist {
+    michi_db::create_playlist(
+        pool,
+        &michi_core::PlaylistCreate {
+            name: "Test Playlist".into(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_playlists_empty() {
+    let (app, _pool) = make_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/playlists")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    assert_eq!(text, "[]");
+}
+
+#[tokio::test]
+async fn test_create_playlist() {
+    let (app, _pool) = make_app().await;
+    let body = r#"{"name":"My Playlist"}"#;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/playlists")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let pl: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(pl["name"], "My Playlist");
+    assert_eq!(pl["track_count"], 0);
+}
+
+#[tokio::test]
+async fn test_create_playlist_empty_name() {
+    let (app, _pool) = make_app().await;
+    let body = r#"{"name":""}"#;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/playlists")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_delete_playlist() {
+    let (app, pool) = make_app().await;
+    let pl = seed_playlist(&pool).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/playlists/{}", pl.id))
+                .method("DELETE")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["deleted"], true);
+}
+
+#[tokio::test]
+async fn test_add_track_to_playlist() {
+    let (app, pool) = make_app().await;
+    let pl = seed_playlist(&pool).await;
+    let track_id = seed_track(&pool, "/music/test.flac", "Test Song").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/playlists/{}/tracks/{}", pl.id, track_id))
+                .method("POST")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let pt: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(pt["playlist_id"], pl.id.to_string());
+    assert_eq!(pt["track_id"], track_id.to_string());
+}
+
+#[tokio::test]
+async fn test_get_playlist_tracks() {
+    let (app, pool) = make_app().await;
+    let pl = seed_playlist(&pool).await;
+    let track_id = seed_track(&pool, "/music/test.flac", "Test Song").await;
+    michi_db::add_track_to_playlist(&pool, &pl.id, &track_id)
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/playlists/{}/tracks", pl.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0]["title"], "Test Song");
+}
+
+// ---------------------------------------------------------------------------
+// Pagination tests
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// WebSocket endpoint tests
+// ---------------------------------------------------------------------------
+
+async fn run_test_server() -> (u16, SqlitePool) {
+    let pool = test_db().await;
+    let config = test_config();
+    let state = michi_api::AppState::new(config, pool.clone());
+    let app = create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let port = addr.port();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    // Give server a moment to start
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    (port, pool)
+}
+
+#[tokio::test]
+async fn test_websocket_connect() {
+    let (port, _pool) = run_test_server().await;
+    use futures_util::StreamExt;
+
+    let url = format!("ws://127.0.0.1:{}/api/ws", port);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WebSocket connection should succeed");
+    let (mut _write, mut read) = ws_stream.split();
+
+    // Should receive something within timeout
+    let timeout = tokio::time::timeout(std::time::Duration::from_secs(2), read.next()).await;
+    match timeout {
+        Ok(Some(Ok(msg))) => {
+            let text = msg.to_text().unwrap();
+            // Should be valid JSON
+            let _v: serde_json::Value = serde_json::from_str(text).unwrap();
+        }
+        Ok(Some(Err(e))) => panic!("WebSocket error: {}", e),
+        Ok(None) => panic!("WebSocket closed unexpectedly"),
+        Err(_) => { /* timeout is OK - server might not send initial message */ }
+    }
+}
+
+#[tokio::test]
+async fn test_websocket_receives_events() {
+    let (port, _pool) = run_test_server().await;
+    use futures_util::StreamExt;
+
+    // Connect WebSocket
+    let url = format!("ws://127.0.0.1:{}/api/ws", port);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WebSocket should connect");
+    let (mut _write, mut read) = ws_stream.split();
+
+    // Trigger a library clear (which sends library_updated event)
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(format!("http://127.0.0.1:{}/api/library/tracks", port))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Read the next WS message
+    let timeout = tokio::time::timeout(std::time::Duration::from_secs(3), read.next()).await;
+    match timeout {
+        Ok(Some(Ok(msg))) => {
+            let text = msg.to_text().unwrap();
+            let v: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(v["type"], "library_updated");
+        }
+        Ok(Some(Err(e))) => panic!("WS error: {}", e),
+        Ok(None) => panic!("WS closed"),
+        Err(_) => panic!("Timeout - no library_updated event received"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M3U import/export tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_m3u_export_empty_playlist() {
+    let (app, pool) = make_app().await;
+    let pl = seed_playlist(&pool).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/playlists/{}/export", pl.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "audio/x-mpegurl"
+    );
+
+    let text = body_text(response).await;
+    assert!(
+        text.starts_with("#EXTM3U\n"),
+        "M3U should start with #EXTM3U: {}",
+        text
+    );
+}
+
+#[tokio::test]
+async fn test_m3u_export_with_tracks() {
+    let (app, pool) = make_app().await;
+    let pl = seed_playlist(&pool).await;
+    let tid = seed_track(&pool, "/music/test.flac", "Test Song").await;
+    michi_db::add_track_to_playlist(&pool, &pl.id, &tid)
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/playlists/{}/export", pl.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    assert!(text.contains("/music/test.flac"));
+    assert!(text.contains("Test Song"));
+}
+
+#[tokio::test]
+async fn test_m3u_import() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/test.flac", "Test Song").await;
+
+    let m3u_content = "#EXTM3U\n\
+                       #EXTINF:240,Test Song\n\
+                       /music/test.flac\n\
+                       #EXTINF:300,NonExistent\n\
+                       /nonexistent/path.flac\n";
+
+    let body = serde_json::json!({
+        "name": "Imported Playlist",
+        "content": m3u_content
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/playlists/import")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["matched"], 1, "should match 1 track");
+    assert_eq!(v["total"], 2, "should have 2 entries total");
+    assert_eq!(v["playlist"]["name"], "Imported Playlist");
+}
+
+#[tokio::test]
+async fn test_m3u_import_empty_name() {
+    let (app, _pool) = make_app().await;
+    let body = serde_json::json!({
+        "name": "",
+        "content": "#EXTM3U\n"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/playlists/import")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Full pipeline test: scan real file and stream it
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_full_pipeline_scan_and_stream() {
+    // Create a real audio file
+    let tmp = tempfile::tempdir().unwrap();
+    let music_dir = tmp.path().join("music");
+    std::fs::create_dir_all(&music_dir).unwrap();
+    let file_path = music_dir.join("test.flac");
+    std::fs::write(&file_path, &[0u8; 50000]).unwrap();
+
+    // We seed the track directly then test streaming via tower
+    let id = michi_core::track_id_from_path(file_path.to_str().unwrap());
+    let track = michi_core::Track {
+        id,
+        title: Some("Pipeline Test".into()),
+        artist: Some("Test Artist".into()),
+        album: Some("Test Album".into()),
+        album_artist: None,
+        duration_ms: Some(5000),
+        file_path: file_path.to_str().unwrap().to_string(),
+        format: michi_core::AudioFormat::Flac,
+        sample_rate: Some(44100),
+        bit_depth: Some(16),
+        channels: Some(2),
+        artwork_id: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    // The streaming handler uses the real path, so we need the correct config
+    let pool = test_db().await;
+    michi_db::upsert_track(&pool, &track).await.unwrap();
+    let config = michi_config::Config {
+        port: 9999,
+        music_paths: vec![music_dir],
+        config_path: tmp.path().join("config"),
+        cache_path: tmp.path().join("cache"),
+        database_url: "sqlite::memory:".to_string(),
+        version: "test",
+        sync_peers: Vec::new(),
+        sync_name: "test".to_string(),
+        listenbrainz_token: None,
+        scrobble_enabled: false,
+        auth_username: None,
+        auth_password: None,
+        auth_enabled: false,
+    };
+    let state = michi_api::AppState::new(config, pool.clone());
+    let test_app = create_router(state);
+    let test_app2 = test_app.clone();
+
+    // Stream the track via tower
+    let response = test_app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/stream/{}", id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 100000)
+        .await
+        .unwrap();
+    assert_eq!(bytes.len(), 50000);
+
+    // Also verify stats show the track
+    let response = test_app2
+        .oneshot(
+            Request::builder()
+                .uri("/api/library/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let text = body_text(response).await;
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["tracks"], 1);
+}
+
+#[tokio::test]
+async fn test_tracks_still_works_without_params() {
+    let (app, pool) = make_app().await;
+    for i in 0..3 {
+        let path = format!("/music/song_{}.flac", i);
+        let title = format!("Track {}", i);
+        seed_track(&pool, &path, &title).await;
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tracks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(tracks.len(), 3, "no params should return all tracks");
 }

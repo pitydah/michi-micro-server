@@ -21,12 +21,8 @@ COPY crates/michi-db/Cargo.toml ./crates/michi-db/Cargo.toml
 COPY crates/michi-metadata/Cargo.toml ./crates/michi-metadata/Cargo.toml
 COPY crates/michi-scanner/Cargo.toml ./crates/michi-scanner/Cargo.toml
 COPY crates/michi-streaming/Cargo.toml ./crates/michi-streaming/Cargo.toml
-COPY crates/michi-homeassistant/Cargo.toml ./crates/michi-homeassistant/Cargo.toml
-COPY crates/michi-sync/Cargo.toml ./crates/michi-sync/Cargo.toml
-COPY crates/michi-multiroom/Cargo.toml ./crates/michi-multiroom/Cargo.toml
-
 # Dummy sources so dependency resolution can proceed
-RUN for dir in michi-core michi-api michi-config michi-db michi-metadata michi-scanner michi-streaming michi-homeassistant michi-sync michi-multiroom; do \
+RUN for dir in michi-core michi-api michi-config michi-db michi-metadata michi-scanner michi-streaming; do \
       mkdir -p crates/$dir/src && echo "pub fn placeholder() {}" > crates/$dir/src/lib.rs; \
     done && \
     mkdir -p apps/michi-server/src && echo "fn main() {}" > apps/michi-server/src/main.rs && \

@@ -1,0 +1,19 @@
+[Unit]
+Description=Michi Micro Server
+After=network.target
+
+[Service]
+Type=simple
+User=michi
+Group=michi
+Environment=MICHI_PORT=8096
+Environment=MICHI_MUSIC_PATH=/music
+Environment=MICHI_CONFIG_PATH=/etc/michi
+Environment=MICHI_CACHE_PATH=/var/cache/michi
+Environment=MICHI_DATABASE=sqlite:///etc/michi/michi.db
+ExecStart=/usr/bin/michi-server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

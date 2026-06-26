@@ -9,7 +9,8 @@ michi-core = { path = "../michi-core" }
 michi-db = { path = "../michi-db" }
 
 tokio.workspace = true
-tracing.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 sqlx.workspace = true

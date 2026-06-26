@@ -1,22 +1,14 @@
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use futures_util::Stream;
 use michi_core::{AudioFormat, Track};
 use michi_db::DbError;
-use sqlx::SqlitePool;
 use thiserror::Error;
-use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum StreamError {
-    #[error("invalid track id: {0}")]
-    InvalidId(String),
-
-    #[error("track not found: {0}")]
-    TrackNotFound(String),
-
     #[error("file not found on disk: {0}")]
     FileNotFound(String),
 
@@ -123,70 +115,40 @@ pub fn parse_range(header: &str, file_size: u64) -> Result<ByteRange, StreamErro
     })
 }
 
-pub fn mime_type_for_format(format: &AudioFormat) -> &'static str {
-    format.mime_type()
-}
-
 pub fn mime_type_for_ext(ext: &str) -> &'static str {
     AudioFormat::from_extension(ext).mime_type()
 }
 
-pub fn validate_track_path(music_path: &Path, file_path: &Path) -> Result<PathBuf, StreamError> {
-    let canonical_base = music_path
-        .canonicalize()
-        .map_err(|e| StreamError::UnsafePath(format!("cannot canonicalize music path: {}", e)))?;
-
+pub fn validate_track_path(
+    music_paths: &[PathBuf],
+    file_path: &Path,
+) -> Result<PathBuf, StreamError> {
     let canonical_file = file_path.canonicalize().map_err(|_| {
         StreamError::FileNotFound(format!("file not found: {}", file_path.display()))
     })?;
 
-    if !canonical_file.starts_with(&canonical_base) {
-        return Err(StreamError::UnsafePath(format!(
-            "file {} is outside music library {}",
-            canonical_file.display(),
-            canonical_base.display()
-        )));
+    for music_path in music_paths {
+        let canonical_base = match music_path.canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if canonical_file.starts_with(&canonical_base) {
+            return Ok(canonical_file.clone());
+        }
     }
 
-    Ok(canonical_file)
-}
-
-pub fn open_track_file(music_path: &Path, track: &Track) -> Result<(PathBuf, File), StreamError> {
-    let file_path = Path::new(&track.file_path);
-    let canonical = validate_track_path(music_path, file_path)?;
-
-    if !canonical.is_file() {
-        return Err(StreamError::FileNotFound(format!(
-            "file does not exist: {}",
-            canonical.display()
-        )));
-    }
-
-    let file = File::open(&canonical)?;
-    Ok((canonical, file))
-}
-
-pub async fn resolve_track(
-    pool: &SqlitePool,
-    id_str: &str,
-    music_path: &Path,
-) -> Result<(Track, PathBuf, File), StreamError> {
-    let id = Uuid::from_str(id_str).map_err(|_| StreamError::InvalidId(id_str.to_string()))?;
-
-    let track = michi_db::get_track(pool, &id)
-        .await?
-        .ok_or_else(|| StreamError::TrackNotFound(id_str.to_string()))?;
-
-    let (path, file) = open_track_file(music_path, &track)?;
-    Ok((track, path, file))
+    Err(StreamError::UnsafePath(format!(
+        "file {} is outside all configured music libraries",
+        canonical_file.display()
+    )))
 }
 
 pub async fn open_track_file_async(
-    music_path: &Path,
+    music_paths: &[PathBuf],
     track: &Track,
 ) -> Result<(PathBuf, tokio::fs::File), StreamError> {
     let file_path = Path::new(&track.file_path);
-    let canonical = validate_track_path(music_path, file_path)?;
+    let canonical = validate_track_path(music_paths, file_path)?;
 
     if !canonical.is_file() {
         return Err(StreamError::FileNotFound(format!(
@@ -223,26 +185,83 @@ pub async fn read_range_from_file_async(
     Ok(buf)
 }
 
-pub fn read_range_from_file(mut file: &File, range: &ByteRange) -> Result<Vec<u8>, StreamError> {
-    let mut buf = vec![0u8; range.content_length() as usize];
-
-    file.seek(SeekFrom::Start(range.start))?;
-
-    let mut total_read = 0usize;
-    while total_read < buf.len() {
-        let n = file.read(&mut buf[total_read..])?;
-        if n == 0 {
-            break;
-        }
-        total_read += n;
-    }
-
-    buf.truncate(total_read);
-    Ok(buf)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TranscodeFormat {
+    Mp3,
+    Ogg,
 }
 
-pub fn is_valid_range_request(header: &str) -> bool {
-    header.trim().starts_with("bytes=")
+impl TranscodeFormat {
+    pub fn mime_type(&self) -> &'static str {
+        match self {
+            Self::Mp3 => "audio/mpeg",
+            Self::Ogg => "audio/ogg",
+        }
+    }
+
+    pub fn ffmpeg_format(&self) -> &'static str {
+        match self {
+            Self::Mp3 => "mp3",
+            Self::Ogg => "ogg",
+        }
+    }
+
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Self::Mp3 => "mp3",
+            Self::Ogg => "ogg",
+        }
+    }
+}
+
+impl FromStr for TranscodeFormat {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "mp3" => Ok(Self::Mp3),
+            "ogg" => Ok(Self::Ogg),
+            _ => Err(()),
+        }
+    }
+}
+
+pub fn check_ffmpeg() -> bool {
+    std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub async fn transcode_stream(
+    file_path: &Path,
+    format: &TranscodeFormat,
+) -> Result<impl Stream<Item = Result<Vec<u8>, io::Error>>, StreamError> {
+    use futures_util::StreamExt;
+    use tokio::process::Command;
+    use tokio_util::io::ReaderStream;
+
+    let fmt = format.ffmpeg_format().to_string();
+
+    let mut child = Command::new("ffmpeg")
+        .arg("-i")
+        .arg(file_path)
+        .arg("-f")
+        .arg(&fmt)
+        .arg("-")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(StreamError::Io)?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| StreamError::Io(io::Error::other("failed to capture ffmpeg stdout")))?;
+
+    Ok(ReaderStream::new(stdout).map(|r| r.map(|b| b.to_vec())))
 }
 
 #[cfg(test)]
@@ -344,14 +363,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_valid_range_request() {
-        assert!(is_valid_range_request("bytes=0-1023"));
-        assert!(is_valid_range_request("bytes=100-"));
-        assert!(!is_valid_range_request("0-1023"));
-        assert!(!is_valid_range_request(""));
-    }
-
-    #[test]
     fn test_validate_track_path_valid() {
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("sub");
@@ -359,7 +370,24 @@ mod tests {
         let file_path = sub.join("test.flac");
         std::fs::write(&file_path, b"data").unwrap();
 
-        let result = validate_track_path(dir.path(), &file_path);
+        let result = validate_track_path(&[dir.path().to_path_buf()], &file_path);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_track_path_second_path() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        let sub = dir2.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file_path = sub.join("test.flac");
+        std::fs::write(&file_path, b"data").unwrap();
+
+        // File is in dir2, should be valid when dir2 is in the list
+        let result = validate_track_path(
+            &[dir1.path().to_path_buf(), dir2.path().to_path_buf()],
+            &file_path,
+        );
         assert!(result.is_ok());
     }
 
@@ -370,7 +398,7 @@ mod tests {
         let outside_file = dir2.path().join("secret.txt");
         std::fs::write(&outside_file, b"secret").unwrap();
 
-        let result = validate_track_path(dir1.path(), &outside_file);
+        let result = validate_track_path(&[dir1.path().to_path_buf()], &outside_file);
         assert!(result.is_err());
         match result {
             Err(StreamError::UnsafePath(_)) => {}
@@ -382,11 +410,50 @@ mod tests {
     fn test_validate_track_path_nonexistent() {
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("nonexistent.flac");
-        let result = validate_track_path(dir.path(), &fake);
+        let result = validate_track_path(&[dir.path().to_path_buf()], &fake);
         assert!(result.is_err());
         match result {
             Err(StreamError::FileNotFound(_)) => {}
             _ => panic!("expected FileNotFound error"),
         }
+    }
+
+    #[test]
+    fn test_check_ffmpeg_runs_without_panicking() {
+        // Just verify calling check_ffmpeg doesn't panic
+        let _ = check_ffmpeg();
+    }
+
+    #[test]
+    fn test_transcode_format_from_str() {
+        assert_eq!(
+            "mp3".parse::<TranscodeFormat>().unwrap(),
+            TranscodeFormat::Mp3
+        );
+        assert_eq!(
+            "MP3".parse::<TranscodeFormat>().unwrap(),
+            TranscodeFormat::Mp3
+        );
+        assert_eq!(
+            "ogg".parse::<TranscodeFormat>().unwrap(),
+            TranscodeFormat::Ogg
+        );
+        assert_eq!(
+            "OGG".parse::<TranscodeFormat>().unwrap(),
+            TranscodeFormat::Ogg
+        );
+        assert!("flac".parse::<TranscodeFormat>().is_err());
+    }
+
+    #[test]
+    fn test_transcode_format_mime_type() {
+        assert_eq!(TranscodeFormat::Mp3.mime_type(), "audio/mpeg");
+        assert_eq!(TranscodeFormat::Ogg.mime_type(), "audio/ogg");
+    }
+
+    #[test]
+    fn test_transcode_format_extension() {
+        assert_eq!(TranscodeFormat::Mp3.extension(), "mp3");
+        assert_eq!(TranscodeFormat::Ogg.extension(), "ogg");
     }
 }

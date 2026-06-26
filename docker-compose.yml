@@ -1,20 +1,18 @@
+version: "3.8"
 services:
-  michi-micro-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: michi-micro-server
+  michi:
+    image: ghcr.io/YOURNAME/michi-micro-server:latest
+    container_name: michi
     ports:
       - "8096:8096"
     volumes:
-      - ./data/config:/config
-      - ./data/cache:/cache
-      - ./music:/music
+      - ./music:/music:ro
+      - ./config:/config
+      - ./cache:/cache
     environment:
-      - TZ=America/Santiago
       - MICHI_PORT=8096
       - MICHI_MUSIC_PATH=/music
-      - MICHI_CONFIG_PATH=/config
-      - MICHI_CACHE_PATH=/cache
       - MICHI_DATABASE=sqlite:///config/michi.db
+      - MICHI_CACHE_PATH=/cache
+      - MICHI_SYNC_NAME=michiserver
     restart: unless-stopped

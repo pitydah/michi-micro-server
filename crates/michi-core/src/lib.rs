@@ -159,6 +159,44 @@ pub struct LibraryStats {
     pub artists: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlbumSummary {
+    pub album: String,
+    pub album_artist: Option<String>,
+    pub track_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtistSummary {
+    pub artist: Option<String>,
+    pub track_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Playlist {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub track_count: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaylistCreate {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaylistTrack {
+    pub id: Uuid,
+    pub playlist_id: Uuid,
+    pub track_id: Uuid,
+    pub position: i64,
+    pub added_at: DateTime<Utc>,
+}
+
 pub fn track_id_from_path(path: &str) -> Uuid {
     let normalized = path.replace('\\', "/");
     Uuid::new_v5(&Uuid::NAMESPACE_URL, normalized.as_bytes())
@@ -183,6 +221,15 @@ pub fn is_path_inside_library(library_root: &Path, file_path: &Path) -> Result<b
         PathError::CannotCanonicalizeFile(format!("{}: {}", file_path.display(), e))
     })?;
     Ok(canonical_file.starts_with(&canonical_root))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayHistory {
+    pub id: Uuid,
+    pub track_id: Uuid,
+    pub played_at: DateTime<Utc>,
+    pub duration_ms: Option<u64>,
+    pub scrobbled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

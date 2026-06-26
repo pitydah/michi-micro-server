@@ -9,6 +9,7 @@ pub struct StatusResponse {
     pub service: String,
     pub version: String,
     pub port: u16,
+    pub music_paths: usize,
 }
 
 pub async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
@@ -17,5 +18,6 @@ pub async fn status_handler(State(state): State<AppState>) -> Json<StatusRespons
         service: "michi-micro-server".to_string(),
         version: state.config.version().to_string(),
         port: state.config.port(),
+        music_paths: state.config.music_paths.len(),
     })
 }

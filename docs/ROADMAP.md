@@ -25,7 +25,7 @@
 - [x] Integration tests for API handlers (19 tests)
 - [x] Configuration tests (4 tests)
 - [x] Scanner tests (5 tests)
-- [x] Streaming module tests (16 tests)
+- [x] Streaming module tests (15 tests)
 
 ## Phase 3: Streaming
 - [x] Audio streaming endpoint (`GET /api/stream/:id`)
@@ -45,12 +45,33 @@
 - [x] One-click library scan
 - [x] Track listing with metadata
 - [x] In-browser audio playback via `<audio>` element
-- [ ] Search
+- [x] Search by title, artist, album, album_artist, format
+- [x] Pagination support (`?limit=&offset=`)
+- [x] Clear library with confirmation
+- [x] Stop playback button
+- [x] Now playing info with format and duration
+- [x] Track counter
+- [x] Responsive layout for mobile
 - [ ] Playlist management
-- [ ] Now playing improvements
 
-## Future
-- [ ] Home Assistant MQTT
-- [ ] CasaOS/ZimaOS app store
+## Phase 5: CasaOS/ZimaOS
+- [x] CasaOS metadata (x-casaos, data.yml)
+- [x] Docker multi-architecture support (amd64, arm64)
+- [ ] Docker image published to ghcr.io
+- [ ] CasaOS app store submission
+
+## Phase 6: Home Assistant / MQTT
+- [ ] MQTT discovery
+- [ ] Play/pause/next controls via HA
+- [ ] Now playing sensor
+
+## Phase 7: Sync
 - [ ] Sync API for Michi Music Player / Michi Mobile
+- [ ] Shared data models
+
+## Phase 8: Multiroom
 - [ ] Multiroom Snapcast
+
+## Phase 9: Transcoding
+- [ ] FFmpeg-based transcoding for mobile
+- [ ] Adaptive bitrate streaming

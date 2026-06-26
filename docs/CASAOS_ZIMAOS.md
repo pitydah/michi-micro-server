@@ -2,20 +2,31 @@
 
 Michi Micro Server is designed to run as a Docker container, making it compatible with CasaOS and ZimaOS app stores.
 
-## CasaOS Installation (Future)
+## CasaOS Metadata
 
-CasaOS apps are defined using `docker-compose.yml` files. Michi Micro Server provides a CasaOS-compatible compose file at `casaos/docker-compose.casaos.yml`.
+CasaOS metadata lives in `casaos/`:
+
+| File | Purpose |
+|------|---------|
+| `docker-compose.casaos.yml` | CasaOS-compatible compose file with `${}` variables |
+| `data.yml` | App store listing metadata |
 
 ### Requirements for CasaOS App Store submission:
 
-1. A `docker-compose.yml` with the required CasaOS variables:
-   - `${CONFIG_PATH}`
-   - `${CACHE_PATH}`
-   - `${MUSIC_PATH}`
-   - `${TZ}`
+1. Application icon (512x512 PNG) — TODO: create icon
+2. Application screenshots — TODO: capture UI screenshots
+3. Published Docker image on ghcr.io — TODO: set up CI/CD
 
-2. Application icon (512x512 PNG)
-3. Application description and screenshots
+### CasaOS Variables
+
+The compose file uses CasaOS template variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `${CONFIG_PATH}` | Persistent config storage |
+| `${CACHE_PATH}` | Cache directory |
+| `${MUSIC_PATH}` | Music library mount |
+| `${TZ}` | Timezone |
 
 ### Manual Installation on CasaOS
 
@@ -36,9 +47,15 @@ docker run -d \
   pitydah/michi-micro-server:latest
 ```
 
+### Access
+
+- **Local network**: `http://<CASAOS_IP>:8096`
+- **Tailscale** (recommended): `http://<TAILSCALE_HOST>:8096`
+- **Do not** expose port 8096 directly to the internet.
+
 ## ZimaOS Compatibility
 
-ZimaOS is based on CasaOS, so the same Docker deployment method works. ZimaOS features a user-friendly app store and file manager for managing Docker containers.
+ZimaOS is based on CasaOS, so the same Docker deployment method works.
 
 ## Multi-Architecture Support
 
@@ -46,5 +63,10 @@ Michi Micro Server is compiled for:
 - `linux/amd64` — Intel/AMD 64-bit
 - `linux/arm64` — ARM 64-bit (Raspberry Pi 3/4/5, Rockchip, Apple Silicon)
 
-Future:
-- `linux/arm/v7` — ARM 32-bit (Raspberry Pi 2/3)
+## TODO (Pre-Submission)
+
+- [ ] Create 512x512 PNG application icon
+- [ ] Capture Web UI screenshots
+- [ ] Publish Docker image to ghcr.io/pitydah/michi-micro-server
+- [ ] Add CI/CD workflow for multi-arch builds
+- [ ] Test on actual CasaOS/ZimaOS device

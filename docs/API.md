@@ -66,7 +66,13 @@ Deletes all tracks from the library.
 
 ### GET /api/tracks
 
-Returns all tracks stored in the library.
+Returns tracks from the library. Supports optional pagination.
+
+**Query Parameters** (optional):
+- `limit` — Maximum number of tracks to return (max 500).
+- `offset` — Number of tracks to skip (default 0).
+
+Without parameters, returns all tracks.
 
 **Response**: Array of track objects.
 
@@ -80,7 +86,7 @@ Returns all tracks stored in the library.
     "album_artist": "Album Artist",
     "duration_ms": 240000,
     "file_path": "/music/artist/album/song.flac",
-    "format": "flac",
+    "format": "Flac",
     "sample_rate": 44100,
     "bit_depth": 16,
     "channels": 2,
@@ -210,6 +216,45 @@ curl -v -H "Range: bytes=-500" http://localhost:8096/api/stream/TRACK_ID
 | aiff, aif | `audio/aiff` |
 | dsf | `audio/dsf` |
 | dff | `audio/dff` |
+
+### GET /api/search?q=
+
+Searches tracks by title, artist, album, album_artist, or format. The search is case-insensitive and uses SQL LIKE.
+
+**Query Parameters**:
+- `q` (required) — Search query string. If empty, returns an empty array.
+
+**Response**: Array of matching track objects (same format as GET /api/tracks).
+
+```json
+[
+  {
+    "id": "uuid-v5-from-path",
+    "title": "Song Title",
+    "artist": "Artist Name",
+    "album": "Album Name",
+    "album_artist": "Album Artist",
+    "duration_ms": 240000,
+    "file_path": "/music/artist/album/song.flac",
+    "format": "Flac",
+    "sample_rate": 44100,
+    "bit_depth": 16,
+    "channels": 2,
+    "artwork_id": null,
+    "created_at": "2026-01-01T00:00:00+00:00",
+    "updated_at": "2026-01-01T00:00:00+00:00"
+  }
+]
+```
+
+**Status Codes**:
+- `200 OK` — Search completed successfully (may return empty array if no matches or empty query).
+
+**Example**:
+
+```bash
+curl "http://localhost:8096/api/search?q=pink+floyd"
+```
 
 ### GET /api/library/stats
 

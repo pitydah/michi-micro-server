@@ -1,17 +1,24 @@
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
+use serde::Deserialize;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::{library::ErrorResponse, AppState};
 use michi_streaming::{
-    open_track_file_async, parse_range, read_range_from_file_async, StreamError,
+    check_ffmpeg, open_track_file_async, parse_range, read_range_from_file_async, transcode_stream,
+    StreamError, TranscodeFormat,
 };
+
+#[derive(Debug, Deserialize)]
+pub struct StreamQuery {
+    pub format: Option<String>,
+}
 
 fn err_response(status: StatusCode, msg: &str) -> (StatusCode, Json<ErrorResponse>) {
     (
@@ -49,12 +56,62 @@ async fn track_from_db(
 pub async fn stream_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
     let track = track_from_db(&state, &id).await?;
-    let music_path = &state.config.music_path;
+    let music_paths = &state.config.music_paths;
 
-    let (_canonical, mut file) = open_track_file_async(music_path, &track)
+    // If format query param is specified, transcode via ffmpeg
+    if let Some(ref format_str) = query.format {
+        if !check_ffmpeg() {
+            return Err(err_response(
+                StatusCode::BAD_REQUEST,
+                "ffmpeg is not available on this system",
+            ));
+        }
+
+        let tf = format_str.parse::<TranscodeFormat>().map_err(|_| {
+            err_response(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid format: '{format_str}'. Supported: mp3, ogg"),
+            )
+        })?;
+
+        let file_path = std::path::Path::new(&track.file_path);
+        let canonical =
+            michi_streaming::validate_track_path(music_paths, file_path).map_err(|e| match e {
+                StreamError::FileNotFound(msg) => err_response(StatusCode::NOT_FOUND, &msg),
+                StreamError::UnsafePath(msg) => {
+                    tracing::warn!("unsafe path access attempt: {}", msg);
+                    err_response(StatusCode::FORBIDDEN, "access denied")
+                }
+                _ => {
+                    tracing::error!("error validating track path: {e}");
+                    err_response(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+                }
+            })?;
+
+        let stream = transcode_stream(&canonical, &tf).await.map_err(|e| {
+            tracing::error!("transcoding failed: {e}");
+            err_response(StatusCode::INTERNAL_SERVER_ERROR, "transcoding failed")
+        })?;
+
+        let body = Body::from_stream(stream);
+        let mime = tf.mime_type();
+
+        let resp = Response::builder()
+            .header(header::CONTENT_TYPE, mime)
+            .body(body)
+            .map_err(|e| {
+                tracing::error!("failed to build response: {e}");
+                err_response(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+            })?;
+
+        return Ok(resp);
+    }
+
+    let (_canonical, mut file) = open_track_file_async(music_paths, &track)
         .await
         .map_err(|e| match e {
             StreamError::FileNotFound(msg) => err_response(StatusCode::NOT_FOUND, &msg),

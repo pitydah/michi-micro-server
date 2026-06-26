@@ -114,6 +114,23 @@ pub fn read_metadata(path: &Path) -> Result<AudioMetadata, MetadataError> {
     })
 }
 
+pub fn extract_artwork(path: &Path) -> Result<Vec<u8>, MetadataError> {
+    let tagged_file = read_from_path(path)?;
+    let tag = tagged_file.first_tag().ok_or_else(|| {
+        MetadataError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no tags found",
+        ))
+    })?;
+    let picture = tag.pictures().first().ok_or_else(|| {
+        MetadataError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no artwork found",
+        ))
+    })?;
+    Ok(picture.data().to_vec())
+}
+
 pub fn read_metadata_safe(path: &Path) -> AudioMetadata {
     match read_metadata(path) {
         Ok(meta) => meta,

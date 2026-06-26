@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use michi_core::{track_id_from_library_path, AudioFormat, Track};
 use michi_metadata::read_metadata_safe;
@@ -47,6 +47,12 @@ fn scan_directory_sync(library_root: &Path, path: &Path) -> Vec<Track> {
             let file_path = entry_path.to_string_lossy().to_string();
             let track_id = track_id_from_library_path(library_root, &entry_path);
 
+            let artwork_id = if metadata.has_artwork {
+                Some(track_id)
+            } else {
+                None
+            };
+
             let track = Track {
                 id: track_id,
                 title: metadata.title.clone(),
@@ -59,7 +65,7 @@ fn scan_directory_sync(library_root: &Path, path: &Path) -> Vec<Track> {
                 sample_rate: metadata.sample_rate,
                 bit_depth: metadata.bit_depth,
                 channels: metadata.channels,
-                artwork_id: None,
+                artwork_id,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
@@ -79,28 +85,38 @@ fn scan_directory_sync(library_root: &Path, path: &Path) -> Vec<Track> {
     tracks
 }
 
-pub async fn scan_directory(path: &Path) -> Vec<Track> {
-    let path_buf = path.to_path_buf();
-    info!("scanning directory: {}", path_buf.display());
+pub async fn scan_directories(paths: &[PathBuf]) -> Vec<Track> {
+    let mut all_tracks: Vec<Track> = Vec::new();
 
-    if !path_buf.exists() || !path_buf.is_dir() {
-        warn!("directory does not exist: {}", path_buf.display());
-        return Vec::new();
+    for path in paths {
+        info!("scanning directory: {}", path.display());
+
+        if !path.exists() || !path.is_dir() {
+            warn!("directory does not exist: {}", path.display());
+            continue;
+        }
+
+        let path_buf = path.clone();
+        let path_for_closure = path_buf.clone();
+        let tracks = tokio::task::spawn_blocking(move || {
+            scan_directory_sync(&path_for_closure, &path_for_closure)
+        })
+        .await
+        .unwrap_or_default();
+
+        info!(
+            "scanned {} tracks from {}",
+            tracks.len(),
+            path_buf.display()
+        );
+        all_tracks.extend(tracks);
     }
 
-    let tracks = tokio::task::spawn_blocking({
-        let path_buf = path_buf.clone();
-        move || scan_directory_sync(&path_buf, &path_buf)
-    })
-    .await
-    .unwrap_or_default();
+    // Deduplicate by track ID (UUID v5 of relative path is unique per path)
+    let mut seen = std::collections::HashSet::new();
+    all_tracks.retain(|t| seen.insert(t.id));
 
-    info!(
-        "scanned {} tracks from {}",
-        tracks.len(),
-        path_buf.display()
-    );
-    tracks
+    all_tracks
 }
 
 #[cfg(test)]

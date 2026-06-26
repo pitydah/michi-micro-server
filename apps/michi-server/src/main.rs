@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
     info!(
         version = %config.version(),
         port = %config.port(),
-        music_path = %config.music_path.display(),
+        music_path = %config.music_path().display(),
         database = %config.database_url,
         "starting Michi Micro Server",
     );
@@ -25,8 +25,22 @@ async fn main() -> Result<()> {
     let pool = michi_db::init_pool(&config.database_url).await?;
 
     let state = michi_api::AppState::new(config.clone(), pool);
+    let app = michi_api::create_router(state.clone());
 
-    let app = michi_api::create_router(state);
+    // Start sync peer connections in background
+    michi_api::start_sync_peers(&state);
+
+    // Start Home Assistant MQTT integration if env vars are set
+    if std::env::var("MICHI_MQTT_HOST").is_ok() {
+        let ha_config = config.clone();
+        let ha_playback = state.playback_state.clone();
+        let ha_db = state.db.clone();
+        tokio::spawn(async move {
+            michi_homeassistant::run(ha_config, ha_playback, ha_db).await;
+        });
+    } else {
+        info!("MICHI_MQTT_HOST not set, Home Assistant integration disabled");
+    }
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!("listening on {}", addr);
