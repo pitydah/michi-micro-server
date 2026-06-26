@@ -3,6 +3,9 @@
 The stable API contract between Michi Micro Server and native clients
 (Michi Music Player, Michi Mobile, third-party apps).
 
+**Michi Music Player must use `/api/v1` endpoints exclusively for native integration.
+Legacy `/api/...` endpoints exist but are not part of the v1 contract.**
+
 ## Stable (v1 contract)
 
 These endpoints are the official Michi Link contract. They will not break

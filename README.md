@@ -71,9 +71,9 @@ Open http://localhost:8096 in your browser for the built-in web interface.
 - Dark/light theme toggle
 - Keyboard shortcuts (space, arrows, N/P, +/-)
 - Experimental FFmpeg transcoding toggle (requires ffmpeg)
-- Offline mode: download tracks to IndexedDB
-- PWA support (install as app, offline caching)
-- Authentication (session-based with admin + optional registration)
+- Offline mode: download tracks to IndexedDB (experimental)
+- PWA support: install as app, offline caching (experimental)
+- Authentication: session-based with admin + optional registration (experimental)
 - Responsive layout — no build step or frontend framework required
 
 ## Quick Start
