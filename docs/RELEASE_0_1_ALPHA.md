@@ -110,11 +110,13 @@ docker compose -f docker-compose.dev.yml up -d
 ## Known Limitations
 
 - No HTTPS/TLS — run behind a reverse proxy for production
+- CORS is restrictive by default in production — set `MICHI_CORS_ORIGIN` or use `MICHI_DEV_MODE=true`
 - HLS/DASH adaptive streaming not implemented
 - Docker image not published to ghcr.io yet (builds locally)
 - Auth is experimental — not recommended for public exposure
-- Max range size for streaming: 50MB
+- Max range size for streaming: 16MB
 - Transcoding depends on external ffmpeg binary
+- Michi Music Player must validate `api_version == "v1"` before connecting
 
 ## Test Commands
 

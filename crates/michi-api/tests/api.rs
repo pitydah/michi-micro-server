@@ -12,6 +12,7 @@ use sqlx::SqlitePool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+
 async fn test_db() -> SqlitePool {
     michi_db::init_pool("sqlite::memory:").await.unwrap()
 }
@@ -1616,4 +1617,70 @@ async fn test_v1_stream_invalid_id_error_format() {
         .await
         .unwrap();
     assert!(response.status().is_client_error());
+}
+
+#[tokio::test]
+async fn test_v1_stream_range_not_satisfiable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let music = tmp.path().join("music");
+    std::fs::create_dir_all(&music).unwrap();
+    let file = music.join("song.flac");
+    std::fs::write(&file, b"fake audio file with some bytes").unwrap();
+
+    let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+    let id = michi_core::track_id_from_path(file.to_str().unwrap());
+    let track = michi_core::Track {
+        id,
+        title: Some("Test".into()),
+        artist: None,
+        album: None,
+        album_artist: None,
+        duration_ms: Some(10000),
+        file_path: file.to_str().unwrap().to_string(),
+        format: michi_core::AudioFormat::Flac,
+        sample_rate: None,
+        bit_depth: None,
+        channels: None,
+        artwork_id: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    michi_db::upsert_track(&pool, &track).await.unwrap();
+
+    let config = michi_config::Config {
+        port: 9999,
+        music_paths: vec![music.clone()],
+        config_path: tmp.path().join("config"),
+        cache_path: tmp.path().join("cache"),
+        database_url: "sqlite::memory:".to_string(),
+        version: "test",
+        sync_peers: vec![],
+        sync_name: "test".into(),
+        listenbrainz_token: None,
+        scrobble_enabled: false,
+        auth_username: None,
+        auth_password: None,
+        auth_enabled: false,
+        allow_registration: false,
+        server_id: uuid::Uuid::new_v4(),
+        cors_origin: None,
+        dev_mode: true,
+    };
+    let state = michi_api::AppState::new(config, pool, None);
+    let app = michi_api::create_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/stream/{id}"))
+                .header("Range", "bytes=999999999-")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    let text = body_text(response).await;
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["error"]["code"], "RANGE_NOT_SATISFIABLE");
 }

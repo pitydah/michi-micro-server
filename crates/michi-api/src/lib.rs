@@ -328,8 +328,5 @@ fn cors_layer(state: &AppState) -> CorsLayer {
             .allow_headers(tower_http::cors::Any)
     } else {
         CorsLayer::new()
-            .allow_origin(tower_http::cors::AllowOrigin::any())
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any)
     }
 }

@@ -177,20 +177,10 @@ pub async fn stream_handler(
                     .into_response();
                 Ok(resp)
             }
-            Err(StreamError::InvalidRange(msg)) => {
-                let cr = format!("bytes */{}", file_size);
-                let body = Json(ErrorResponse {
-                    status: "error".to_string(),
-                    message: format!("range not satisfiable: {}", msg),
-                });
-                let resp = (
-                    StatusCode::RANGE_NOT_SATISFIABLE,
-                    [(header::CONTENT_RANGE, cr.as_str())],
-                    body,
-                )
-                    .into_response();
-                Ok(resp)
-            }
+            Err(StreamError::InvalidRange(msg)) => Err(err_response(
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                &format!("range not satisfiable: {}", msg),
+            )),
             Err(_) => Err(err_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal server error",

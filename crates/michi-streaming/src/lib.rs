@@ -174,7 +174,7 @@ pub async fn read_range_from_file_async(
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncSeekExt;
 
-    const MAX_RANGE_BYTES: u64 = 50 * 1024 * 1024;
+    const MAX_RANGE_BYTES: u64 = 16 * 1024 * 1024;
 
     if range.content_length() > MAX_RANGE_BYTES {
         return Err(StreamError::InvalidRange(format!(
