@@ -20,7 +20,8 @@ const HTML: &str = r#"<!DOCTYPE html>
         body { font-family: system-ui, -apple-system, sans-serif;
                background: var(--bg); color: var(--fg); padding: 20px;
                transition: background .3s, color .3s; }
-        .login-container { max-width: 360px; margin: 80px auto; background: var(--bg2); border-radius: 12px; padding: 32px; text-align: center; }
+        .login-container { max-width: 360px; margin: 80px auto;
+            background: var(--bg2); border-radius: 12px; padding: 32px; text-align: center; }
         .login-container h1 { color: var(--accent); margin-bottom: 24px; }
         .login-container input { width: 100%; padding: 12px 16px; margin-bottom: 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: .95rem; }
         .login-container input:focus { outline: none; border-color: var(--green); }

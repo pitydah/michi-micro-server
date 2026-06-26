@@ -83,10 +83,17 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                 let tid = track_id
                                     .map(|id| format!("\"{}\"", id))
                                     .unwrap_or_else(|| "null".into());
-                                let payload = format!(
-                                    r#"{{"type":"sync_state","track_id":{tid},"position_ms":{position_ms},"playing":{playing},"volume":{volume}}}"#,
+                                let msg = format!(
+                                    "{{\"type\":\"sync_state\",\
+                                     \"track_id\":{tid},\
+                                     \"position_ms\":{pos},\
+                                     \"playing\":{play},\
+                                     \"volume\":{vol}}}",
+                                    pos = position_ms,
+                                    play = playing,
+                                    vol = volume,
                                 );
-                                let _ = state_clone.tx.send(payload);
+                                let _ = state_clone.tx.send(msg);
                             }
                             michi_sync::SyncMessage::Identify { name, .. } => {
                                 info!("sync: peer identified as '{}'", name);

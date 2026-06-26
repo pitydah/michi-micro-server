@@ -512,7 +512,9 @@ pub async fn list_albums(pool: &SqlitePool) -> Result<Vec<AlbumSummary>, DbError
 
 pub async fn list_artists(pool: &SqlitePool) -> Result<Vec<ArtistSummary>, DbError> {
     let rows = sqlx::query(
-        "SELECT artist, COUNT(*) as track_count FROM tracks WHERE artist IS NOT NULL GROUP BY artist ORDER BY artist COLLATE NOCASE ASC",
+        "SELECT artist, COUNT(*) as track_count \
+         FROM tracks WHERE artist IS NOT NULL \
+         GROUP BY artist ORDER BY artist COLLATE NOCASE ASC",
     )
     .fetch_all(pool)
     .await?;
