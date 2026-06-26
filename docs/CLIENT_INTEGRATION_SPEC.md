@@ -1,28 +1,113 @@
-# Client Integration Specification
+# Michi Music Player — Native Client Specification
 
-For developers building a client for Michi Micro Server (e.g., Michi Music Player).
+How Michi Music Player must consume Michi Link v1 to connect natively
+to Michi Micro Server.
 
-## Quick Start
+## Objective
 
-```bash
-# 1. Discover the server
-curl http://<host>:8096/api/v1/server/info
+Michi Music Player connects to a Michi Micro Server instance via the
+stable `/api/v1` contract (Michi Link). This document defines the exact
+behavior, data model, error handling, and constraints the client must follow.
 
-# 2. Browse library
-curl http://<host>:8096/api/v1/tracks
-curl "http://<host>:8096/api/v1/search?q=artist+name"
+## Persistent Data
 
-# 3. Stream audio
-curl http://<host>:8096/api/v1/stream/<track_id> --output song.mp3
+The client must store per-server:
+
+| Key | Type | Source |
+|-----|------|--------|
+| `server_url` | String | User input (e.g. `http://192.168.1.50:8096`) |
+| `server_id` | UUID | `GET /api/v1/server/info` |
+| `server_name` | String | `GET /api/v1/server/info` |
+| `api_version` | String | `GET /api/v1/server/info` — must be `v1` |
+| `features` | Object | `GET /api/v1/server/info` |
+| `last_seen` | ISO 8601 | Local timestamp on successful response |
+| `token` | String (future) | `POST /api/auth/login` |
+| `connection_status` | Enum | `online`, `offline`, `timeout`, `error` |
+
+## Suggested Class: MichiServerClient
+
+```rust
+struct MichiServerClient {
+    server_url: String,
+    server_id: Option<Uuid>,
+    server_name: String,
+    api_version: String,
+    features: ServerFeatures,
+    token: Option<String>,
+    last_seen: Option<DateTime<Utc>>,
+    status: ConnectionStatus,
+    timeout: Duration,
+}
+
+enum ConnectionStatus {
+    Online,
+    Offline,
+    Timeout,
+    Error(String),
+}
 ```
 
-## 1. Server Discovery
+### Required Methods
 
-### GET /api/v1/server/info
+| Method | Endpoint | Return |
+|--------|----------|--------|
+| `get_server_info()` | `GET /api/v1/server/info` | `ServerInfo` |
+| `get_status()` | `GET /api/v1/status` | `Status` |
+| `get_library_stats()` | `GET /api/v1/library/stats` | `LibraryStats` |
+| `list_tracks()` | `GET /api/v1/tracks` | `Vec<Track>` |
+| `search_tracks(query)` | `GET /api/v1/search?q=` | `Vec<Track>` |
+| `get_track(id)` | `GET /api/v1/tracks/{id}` | `Track` |
+| `stream_url(id)` | Internal | `String` (url to stream) |
 
-No authentication required. This is the first endpoint every client must call.
+### Required Behaviors
 
-Response:
+- `set_timeout(secs)` — default 10 seconds, configurable
+- `handle_v1_error(response)` — parse `{ "error": { "code", "message" } }`
+- Retry: max 3 attempts on timeout or 5xx, exponential backoff 1s/2s/4s
+- `online/offline` state: if request fails, mark `Offline`; poll with retry
+- Never block the UI thread
+- `guardar server_id`: on first connect, persist `server_id`. If it changes
+  on same URL, alert user: "This appears to be a different server"
+
+## Connection Flow
+
+```
+1. User enters IP or URL
+2. POST /api/auth/login (if server requires auth — check /api/auth/check)
+3. GET /api/v1/server/info
+4. Validate api_version == "v1"
+5. Store server_id, name, features
+6. GET /api/v1/status
+7. If features.library && features.search && features.streaming:
+   enable remote library browsing
+8. User searches: GET /api/v1/search?q=...
+9. User plays: stream_url(track_id) -> GET /api/v1/stream/{id}
+10. On disconnect: mark server offline, do NOT freeze UI
+11. On reconnect: re-validate server_id before trusting cached data
+```
+
+## Mandatory Rules
+
+- Must use `/api/v1` endpoints only for native integration.
+- Must NOT depend on legacy `/api/...` endpoints.
+- Must NOT assume transcoding is available (feature flag is `false`).
+- Must NOT assume playlists are available (feature flag is `false`).
+- Must NOT assume artwork is available (feature flag is `false`).
+- Must NOT assume sync is available (feature flag is `false`).
+- Must NOT assume websocket is available (feature flag is `false`).
+- Must NOT block UI during network calls — all async.
+- Must use timeout on every request.
+- Must handle v1 error format.
+- Must allow reconnection.
+- Must persist `server_id`, not just IP.
+- Must warn user if `server_id` changes on same URL.
+
+## /api/v1/server/info
+
+```
+GET /api/v1/server/info
+```
+
 ```json
 {
   "name": "Michi Micro Server",
@@ -43,138 +128,10 @@ Response:
 }
 ```
 
-### Client MUST store these values
+Only `library`, `search`, `streaming`, `web_ui` are guaranteed stable in v1.
+All other flags are `false` — do not build features that depend on them.
 
-| Field | Type | Purpose |
-|-------|------|---------|
-| `server_id` | UUID | Detect server identity changes |
-| `server_url` | String | User-provided host:port |
-| `api_version` | String | Must be `v1` |
-| `features` | Object | Enable/disable UI features |
-
-### Detecting Server Changes
-
-```
-IF stored_server_id != response.server_id:
-    WARN user: "This appears to be a different server"
-    ASK: "Continue? [yes/no]"
-```
-
-## 2. Authentication
-
-If the server has auth enabled (`MICHI_AUTH_USERNAME` set), all endpoints
-except `/api/v1/server/info` require an `Authorization` header.
-
-### Login
-
-```http
-POST /api/auth/login
-Content-Type: application/json
-
-{"username": "user", "password": "pass"}
-```
-
-Response:
-```json
-{
-  "token": "abcdef12-3456-...",
-  "id": "user-uuid",
-  "username": "user",
-  "is_admin": false
-}
-```
-
-### Using the token
-
-```http
-GET /api/v1/tracks
-Authorization: Bearer abcdef12-3456-...
-```
-
-### Check auth status
-
-```http
-GET /api/auth/check
-Authorization: Bearer abcdef12-3456-...
-```
-
-Response:
-```json
-{
-  "enabled": true,
-  "authenticated": true,
-  "id": "user-uuid",
-  "username": "user",
-  "is_admin": false
-}
-```
-
-## 3. Browse Library
-
-### GET /api/v1/tracks
-
-Returns all tracks. Response is an array of:
-
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "title": "Bohemian Rhapsody",
-  "artist": "Queen",
-  "album": "A Night at the Opera",
-  "album_artist": "Queen",
-  "duration_ms": 355000,
-  "file_path": "/music/queen/bohemian.flac",
-  "format": "flac",
-  "sample_rate": 44100,
-  "bit_depth": 16,
-  "channels": 2,
-  "artwork_id": null,
-  "created_at": "2025-01-01T00:00:00Z",
-  "updated_at": "2025-01-01T00:00:00Z"
-}
-```
-
-### GET /api/v1/tracks/{id}
-
-Single track metadata. Uses the same Track schema.
-
-### GET /api/v1/search?q=query
-
-Case-insensitive search across title, artist, album. Returns array of Track.
-
-### GET /api/v1/library/stats
-
-```json
-{
-  "tracks": 1200,
-  "albums": 85,
-  "artists": 42
-}
-```
-
-## 4. Streaming
-
-### GET /api/v1/stream/{id}
-
-Returns raw audio bytes with appropriate Content-Type header.
-
-The client should:
-1. Send a HEAD request first to get Content-Type and Content-Length
-2. Support byte Range requests for seeking (206 Partial Content)
-3. Handle stream errors in v1 format
-
-### Example (simple)
-
-```rust
-// Rust pseudo-code for streaming
-let url = format!("{}/api/v1/stream/{}", server_url, track_id);
-let response = client.get(&url)
-    .header("Authorization", format!("Bearer {}", token))
-    .send().await?;
-let content_type = response.headers().get("content-type");
-```
-
-## 5. Error Handling
+## Error Handling
 
 All `/api/v1` errors follow this format:
 
@@ -187,72 +144,51 @@ All `/api/v1` errors follow this format:
 }
 ```
 
-### How to handle
+### Mapping
+
+| Code | HTTP | Client Action |
+|------|------|---------------|
+| `TRACK_NOT_FOUND` | 404 | Remove track from local cache, show toast |
+| `INVALID_ID` | 400 | Log warning, check URL construction |
+| `FILE_NOT_FOUND` | 404 | Show "file missing" to user |
+| `FORBIDDEN` | 403 | Log security warning, do not retry |
+| `BAD_REQUEST` | 400 | Log error, check request parameters |
+| `INTERNAL_ERROR` | 500 | Retry with backoff (max 3) |
+| `RANGE_NOT_SATISFIABLE` | 416 | Client seeking error, reset stream position |
+
+### Client Error Handler (pseudo-code)
 
 ```rust
-// Rust pseudo-code
-match error.code.as_str() {
-    "TRACK_NOT_FOUND" => // Show: "This track is no longer available"
-    "INVALID_ID" => // Malformed request, check your URL
-    "FORBIDDEN" => // Path security violation
-    "INTERNAL_ERROR" => // Server error, retry later
-    _ => // Show error.message to user
+fn handle_v1_error(response: Response) -> Result<T, ClientError> {
+    let status = response.status();
+    let body: V1Error = response.json()?;
+    match body.error.code.as_str() {
+        "TRACK_NOT_FOUND" => Err(ClientError::TrackNotFound(body.error.message)),
+        "FORBIDDEN" => Err(ClientError::Forbidden),
+        "INTERNAL_ERROR" => Err(ClientError::ServerError(body.error.message)),
+        _ => Err(ClientError::Unknown(body.error.message)),
+    }
 }
 ```
 
-HTTP status codes:
-- 200 = Success
-- 400 = Bad request or invalid UUID
-- 401 = Auth required (token missing or expired)
-- 403 = Forbidden (path outside library)
-- 404 = Not found
-- 500 = Internal error
+## Streaming
 
-## 6. Client Data Model
-
-Minimum fields to store per server connection:
-
-```rust
-struct ServerConnection {
-    server_url: String,       // "http://192.168.1.50:8096"
-    server_id: Uuid,          // From /api/v1/server/info
-    server_name: String,      // "Michi Micro Server"
-    api_version: String,      // "v1"
-    features: ServerFeatures, // Feature flags
-    token: Option<String>,    // Auth token if authenticated
-    last_connected: DateTime, // ISO 8601 timestamp
-}
-
-struct ServerFeatures {
-    library: bool,
-    search: bool,
-    streaming: bool,
-    web_ui: bool,
-    playlists: bool,
-    artwork: bool,
-    sync: bool,
-    transcoding: bool,
-    websocket: bool,
-}
+```
+GET /api/v1/stream/{id}
 ```
 
-## 7. What NOT to implement yet
+Returns raw audio bytes. Client should:
+- Send HEAD first for Content-Type / Content-Length
+- Support byte Range requests for seeking (206 Partial Content)
+- `?format=mp3|ogg` is experimental — do NOT use in production client
 
-These features exist in the server but are experimental or not part of
-the stable v1 contract. Do not depend on them for production clients:
+## Future Phases (not in v1 contract)
 
-- `sync` (multi-room) — feature flag is `false`
-- `transcoding` — requires ffmpeg, flag is `false`
-- Playlist sharing via `/api/shared/:code`
-- `/api/playback/state` (playback state push)
-- `/api/ws` (WebSocket events)
-- `/api/auth/register` (user registration)
-- M3U import/export
-- PWA / offline mode
-
-## 8. Full API Reference
-
-Interactive documentation: `http://<host>:8096/api/docs`
-(Swagger UI with all endpoints, request/response schemas)
-
-Stable contract reference: [MICHI_LINK.md](MICHI_LINK.md)
+| Feature | Status |
+|---------|--------|
+| Pairing/token | Not implemented |
+| Remote playlists | Feature flag is `false` |
+| Remote artwork | Feature flag is `false` |
+| WebSocket events | Feature flag is `false` |
+| Sync offline | Not implemented |
+| Mobile transcoding | Experimental, depends on external ffmpeg |

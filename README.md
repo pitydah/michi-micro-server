@@ -27,7 +27,7 @@ Michi Mobile, Home Assistant, and CasaOS/ZimaOS.
 | Metadata | Lofty |
 | Serialization | Serde |
 | Logging | Tracing |
-| Audio | Native streaming + optional FFmpeg transcoding |
+| Audio | Native streaming (+ experimental FFmpeg transcoding) |
 | Container | Docker + Compose |
 
 ## Project Structure
@@ -42,7 +42,7 @@ michi-micro-server/
 │   ├── michi-db/            # Database layer + migrations
 │   ├── michi-metadata/      # Audio tag reading (Lofty)
 │   ├── michi-scanner/       # Library scanner
-│   ├── michi-streaming/     # Audio streaming + FFmpeg transcoding
+│   ├── michi-streaming/     # Audio streaming (+ experimental transcoding)
 │   ├── michi-homeassistant/ # Home Assistant MQTT integration
 │   ├── michi-sync/          # Multi-room playback sync
 │   ├── michi-m3u/           # M3U playlist import/export
@@ -70,7 +70,7 @@ Open http://localhost:8096 in your browser for the built-in web interface.
 - Play history with ListenBrainz scrobbling
 - Dark/light theme toggle
 - Keyboard shortcuts (space, arrows, N/P, +/-)
-- Optional FFmpeg transcoding toggle
+- Experimental FFmpeg transcoding toggle (requires ffmpeg)
 - Offline mode: download tracks to IndexedDB
 - PWA support (install as app, offline caching)
 - Authentication (session-based with admin + optional registration)
@@ -147,7 +147,7 @@ docker run -d \
 | PUT | `/api/tracks/:id` | Update track metadata |
 | DELETE | `/api/tracks/:id` | Delete track |
 | GET | `/api/search?q=` | Search library |
-| GET | `/api/stream/:id` | Stream audio (`?format=mp3` for transcoding) |
+| GET | `/api/stream/:id` | Stream audio (`?format=mp3\|ogg` experimental) |
 | GET | `/api/albums` | List albums |
 | GET | `/api/albums/:album` | Album tracks |
 | GET | `/api/artists` | List artists |

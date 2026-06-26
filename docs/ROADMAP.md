@@ -22,7 +22,7 @@
 - [x] Audio streaming endpoint with Range Requests
 - [x] MIME type detection by file extension
 - [x] Async file I/O (tokio::fs)
-- [x] FFmpeg transcoding (optional, ?format=mp3|ogg)
+- [x] FFmpeg transcoding (experimental, requires ffmpeg on server)
 - [x] Cover art serving
 - [ ] HLS or adaptive streaming
 
@@ -63,8 +63,9 @@
 - [x] End-to-end tests (WebSocket, M3U, streaming)
 - [x] Debian packaging + systemd unit + install script
 - [x] Docker multi-arch build
-- [x] Michi Link (/api/v1) for native client integration
+- [x] Michi Link v1 contract stabilized (+ docs/CLIENT_INTEGRATION_SPEC.md)
 - [x] Persistent server_id
+- [x] conservative feature flags for stable v1 integration
 - [ ] Docker image published to ghcr.io
 
 ## Phase 9: Future

@@ -71,7 +71,7 @@ http://<server>:8096
 ### Streaming
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/stream/:id` | Stream audio (`?format=mp3\|ogg` for transcoding) |
+| GET | `/api/stream/:id` | Stream audio (`?format=mp3\|ogg` experimental) |
 | GET | `/api/artwork/:id` | Cover art image |
 
 ### Playlists

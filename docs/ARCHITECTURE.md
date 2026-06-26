@@ -15,7 +15,7 @@ michi-micro-server/
 │   ├── michi-db/           # SQLite database layer + 8 migrations
 │   ├── michi-metadata/     # Audio metadata reading (Lofty)
 │   ├── michi-scanner/      # Music library scanner
-│   ├── michi-streaming/    # Audio streaming + FFmpeg transcoding
+│   ├── michi-streaming/    # Audio streaming (+ experimental transcoding)
 │   ├── michi-homeassistant/# Home Assistant MQTT integration
 │   ├── michi-sync/         # Multi-room playback sync
 │   ├── michi-m3u/          # M3U playlist import/export
