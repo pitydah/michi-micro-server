@@ -6,30 +6,22 @@ Michi Link is the stable API contract between Michi Micro Server and native clie
 (Michi Music Player, Michi Mobile, third-party apps). It defines a versioned REST API
 (`/api/v1`) with predictable endpoints, error formats, and server identity.
 
-## Goal
-
-Enable native clients to:
-
-- Discover the server and its capabilities
-- Identify the server persistently across restarts
-- Browse and search the music library
-- Stream audio with optional transcoding
-- (Future) Pair securely with token-based auth
-- (Future) Sync playlists, history, and playback state
-
 ## Connection Flow
 
 1. Client connects to `http://<server>:8096/api/v1/server/info`
 2. Client stores: `server_url`, `server_id`, `version`, `features`
 3. Client uses stored `server_id` to detect server changes
-4. Client fetches library via `/api/v1/tracks` and `/api/v1/search`
+4. Client browses library via `/api/v1/tracks` and `/api/v1/search`
 5. Client streams via `/api/v1/stream/:id`
 
-## Endpoints (v1)
+## Stable Endpoints (v1)
+
+These endpoints are the official Michi Link contract and will not break
+without a major version bump.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/api/v1/server/info` | No | Server identity and capabilities |
+| GET | `/api/v1/server/info` | No | Server identity + capabilities |
 | GET | `/api/v1/status` | Yes* | Server health check |
 | GET | `/api/v1/library/stats` | Yes* | Library statistics |
 | GET | `/api/v1/tracks` | Yes* | List all tracks |
@@ -60,22 +52,36 @@ Response:
     "web_ui": true,
     "playlists": true,
     "artwork": true,
-    "sync": true,
-    "transcoding": true,
+    "sync": false,
+    "transcoding": false,
     "websocket": true
   }
 }
 ```
 
+### Feature Flags
+
+| Feature | Stable | Notes |
+|---------|--------|-------|
+| `library` | ✅ | Scanner, SQLite, CRUD endpoints |
+| `search` | ✅ | SQL LIKE case-insensitive |
+| `streaming` | ✅ | Range requests (206), MIME detection |
+| `web_ui` | ✅ | Vanilla HTML/CSS/JS, no build step |
+| `playlists` | ✅ | CRUD, reorder, import/export, share |
+| `artwork` | ✅ | Cover art serving from disk cache |
+| `sync` | ❌ | Experimental multi-room sync |
+| `transcoding` | ❌ | Optional, requires ffmpeg on server |
+| `websocket` | ✅ | Real-time events (scan, library, sync) |
+
 ### server_id
 
 The `server_id` is a UUID v4 persisted in `{MICHI_CONFIG_PATH}/server_id`.
-It is generated once on first startup and remains stable across restarts.
-Clients should store it to detect server identity changes.
+Generated once on first startup and stable across restarts.
+Clients must store it to detect server identity changes.
 
 ## Standard Error Format
 
-All `/api/v1` endpoints return errors in this format:
+All `/api/v1` endpoints return errors as:
 
 ```json
 {
@@ -107,7 +113,8 @@ GET /api/v1/stream/:id?format=ogg
 ```
 
 Supports Range requests (206 Partial Content) for seeking.
-Optional `?format=mp3|ogg` triggers FFmpeg transcoding (requires ffmpeg on server).
+Optional `?format=mp3|ogg` triggers FFmpeg transcoding (experimental —
+requires ffmpeg on server, feature flag is `false`).
 
 ## What Michi Music Player Should Store
 
@@ -121,11 +128,26 @@ Optional `?format=mp3|ogg` triggers FFmpeg transcoding (requires ffmpeg on serve
 | `token` | (future) | `/api/auth/login` |
 | `last_connected_at` | ISO 8601 | Local timestamp |
 
-## Future Extensions (not yet implemented)
+## Experimental Features (not in Michi Link contract)
+
+These features exist in the server but are not part of the stable v1
+contract. They may change or be removed.
+
+| Feature | Status |
+|---------|--------|
+| Auth (login/register) | Functional, future v1 auth endpoint |
+| Playlist sharing | Functional via `/api/shared/:code` |
+| Scrobbling (ListenBrainz) | Functional, `features` flag pending |
+| Multi-room sync | Functional via WebSocket, flag is `false` |
+| Transcoding | Functional if ffmpeg installed, flag is `false` |
+| PWA / offline | Functional, not exposed via v1 |
+| M3U import/export | Functional, not exposed via v1 |
+
+## Future (planned, not implemented)
 
 - **Pairing/Token**: Automatic device pairing with secure token exchange
-- **WebSocket Events**: Real-time library changes, playback state via `/api/v1/ws`
+- **WebSocket Events**: `/api/v1/ws` for real-time changes
 - **Playlist Sync**: Bidirectional playlist synchronization
 - **Artwork Bulk**: Batch artwork endpoints for initial sync
 - **Offline Sync**: Partial library download for offline playback
-- **Playback Control**: Remote playback control via `/api/v1/playback/*`
+- **Playback Control**: Remote playback via `/api/v1/playback/*`

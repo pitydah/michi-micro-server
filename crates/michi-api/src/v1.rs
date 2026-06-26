@@ -69,8 +69,8 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<ServerIn
             web_ui: true,
             playlists: true,
             artwork: true,
-            sync: true,
-            transcoding: true,
+            sync: false,
+            transcoding: false,
             websocket: true,
         },
     })
