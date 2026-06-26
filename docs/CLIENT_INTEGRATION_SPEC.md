@@ -178,8 +178,8 @@ GET /api/v1/stream/{id}
 ```
 
 Returns raw audio bytes. Client should:
-- Send HEAD first for Content-Type / Content-Length
 - Support byte Range requests for seeking (206 Partial Content)
+- Use Content-Type from the `/api/v1/tracks/{id}` metadata response
 - `?format=mp3|ogg` is experimental — do NOT use in production client
 
 ## Future Phases (not in v1 contract)

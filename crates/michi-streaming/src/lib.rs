@@ -62,6 +62,12 @@ pub fn parse_range(header: &str, file_size: u64) -> Result<ByteRange, StreamErro
         return Err(StreamError::InvalidRange("empty range".into()));
     }
 
+    if file_size == 0 {
+        return Err(StreamError::InvalidRange(
+            "range not satisfiable for empty file".into(),
+        ));
+    }
+
     if start_str.is_empty() {
         let suffix: u64 = end_str
             .parse()
@@ -464,5 +470,57 @@ mod tests {
     fn test_transcode_format_extension() {
         assert_eq!(TranscodeFormat::Mp3.extension(), "mp3");
         assert_eq!(TranscodeFormat::Ogg.extension(), "ogg");
+    }
+
+    #[test]
+    fn test_parse_range_empty_file() {
+        assert!(parse_range("bytes=0-", 0).is_err());
+        assert!(parse_range("bytes=0-1023", 0).is_err());
+        assert!(parse_range("bytes=-500", 0).is_err());
+    }
+
+    #[test]
+    fn test_parse_range_huge() {
+        let range = parse_range("bytes=0-999999", 1000000).unwrap();
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, 999999);
+    }
+
+    #[test]
+    fn test_parse_range_not_satisfiable() {
+        assert!(parse_range("bytes=10000-", 5000).is_err());
+        assert!(parse_range("bytes=0-", 0).is_err());
+    }
+
+    #[test]
+    fn test_parse_range_start_past_end() {
+        assert!(parse_range("bytes=100-50", 1000).is_err());
+    }
+
+    #[test]
+    fn test_validate_track_path_multi() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        let sub = dir2.path().join("subdir");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file_path = sub.join("track.flac");
+        std::fs::write(&file_path, b"data").unwrap();
+
+        let result = validate_track_path(
+            &[dir1.path().to_path_buf(), dir2.path().to_path_buf()],
+            &file_path,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_track_path_outside_all() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let file_path = outside.path().join("secret.flac");
+        std::fs::write(&file_path, b"data").unwrap();
+
+        let result = validate_track_path(&[dir1.path().to_path_buf()], &file_path);
+        assert!(result.is_err());
     }
 }

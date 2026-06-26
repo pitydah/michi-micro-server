@@ -1602,3 +1602,18 @@ async fn test_v1_endpoints_old_still_work() {
         .unwrap();
     assert_eq!(stat_response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_v1_stream_invalid_id_error_format() {
+    let (app, _) = make_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/stream/not-a-uuid")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status().is_client_error());
+}

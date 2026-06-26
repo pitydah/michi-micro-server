@@ -124,8 +124,10 @@ pub async fn v1_stream_handler(
         .await
         .map_err(|(status, err)| {
             let code = match status {
-                StatusCode::NOT_FOUND => "TRACK_NOT_FOUND",
+                StatusCode::NOT_FOUND => "FILE_NOT_FOUND",
                 StatusCode::FORBIDDEN => "FORBIDDEN",
+                StatusCode::RANGE_NOT_SATISFIABLE => "RANGE_NOT_SATISFIABLE",
+                StatusCode::BAD_REQUEST => "BAD_REQUEST",
                 _ => "STREAM_ERROR",
             };
             v1_map_err(status, &err.0.message, code)
