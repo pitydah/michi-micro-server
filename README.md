@@ -61,22 +61,24 @@ michi-micro-server/
 
 Open http://localhost:8096 in your browser for the built-in web interface.
 
-**Features:**
+**Stable features:**
 - Server status, version, port, and library statistics
 - One-click library scan with real-time WebSocket progress
-- Tracks, Albums, Artists, Playlists, Queue, History, Offline tabs
+- Tracks, Albums, Artists tabs
 - Search by title, artist, album, album_artist, or format
 - In-browser audio playback with `<audio>` element
-- Playlist create/delete/reorder/export/import (M3U) + sharing
-- Drag-and-drop playlist reordering
-- Play history with ListenBrainz scrobbling
-- Dark/light theme toggle
 - Keyboard shortcuts (space, arrows, N/P, +/-)
-- Experimental FFmpeg transcoding toggle (requires ffmpeg)
-- Offline mode: download tracks to IndexedDB (experimental)
-- PWA support: install as app, offline caching (experimental)
-- Authentication: session-based with admin + optional registration (experimental)
+- Dark/light theme toggle
 - Responsive layout — no build step or frontend framework required
+
+**Experimental features (functional, not in v1 contract):**
+- Playlists: create/delete/reorder/export/import (M3U) + sharing
+- Play history with ListenBrainz scrobbling
+- Queue management
+- Offline mode: download tracks to IndexedDB
+- PWA support: install as app, offline caching
+- Authentication: session-based with admin + optional registration
+- FFmpeg transcoding toggle (requires ffmpeg on server)
 
 ## Quick Start
 
@@ -103,7 +105,7 @@ cargo run -p michi-server
 ### Running Tests
 
 ```bash
-# Run all tests (119 tests across all crates)
+# Run all tests (144 tests across all crates)
 cargo test
 
 # Code quality
