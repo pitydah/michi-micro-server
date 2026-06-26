@@ -538,7 +538,9 @@ pub async fn count_album_tracks(pool: &SqlitePool, album: &str) -> Result<i64, D
 
 pub async fn get_album_tracks(pool: &SqlitePool, album: &str) -> Result<Vec<Track>, DbError> {
     let rows = sqlx::query(
-        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, created_at, updated_at FROM tracks WHERE album = ? ORDER BY title ASC",
+        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, \
+         format, sample_rate, bit_depth, channels, artwork_id, created_at, updated_at \
+         FROM tracks WHERE album = ? ORDER BY title ASC",
     )
     .bind(album)
     .fetch_all(pool)
@@ -549,7 +551,9 @@ pub async fn get_album_tracks(pool: &SqlitePool, album: &str) -> Result<Vec<Trac
 
 pub async fn get_artist_tracks(pool: &SqlitePool, artist: &str) -> Result<Vec<Track>, DbError> {
     let rows = sqlx::query(
-        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, created_at, updated_at FROM tracks WHERE artist = ? ORDER BY album ASC, title ASC",
+        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, \
+         format, sample_rate, bit_depth, channels, artwork_id, created_at, updated_at \
+         FROM tracks WHERE artist = ? ORDER BY album ASC, title ASC",
     )
     .bind(artist)
     .fetch_all(pool)
@@ -597,7 +601,9 @@ pub async fn list_playlists(
     let rows = if let Some(uid) = user_id {
         let uid_str = uid.to_string();
         sqlx::query(
-            "SELECT id, name, description, track_count, share_code, is_public, created_at, updated_at FROM playlists WHERE user_id = ? ORDER BY name COLLATE NOCASE ASC",
+            "SELECT id, name, description, track_count, share_code, is_public, \
+             created_at, updated_at FROM playlists \
+             WHERE user_id = ? ORDER BY name COLLATE NOCASE ASC",
         )
         .bind(&uid_str)
         .fetch_all(pool)

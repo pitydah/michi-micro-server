@@ -45,8 +45,12 @@ with Michi Music Player for integration via Michi Link.
 
 Key utility functions:
 - `track_id_from_path()` — generates UUID v5 from a normalized full file path (legacy fallback)
-- `track_id_from_library_path()` — generates UUID v5 from the **relative** path within the music library. This makes IDs stable across different mount points (e.g., `/music` vs `/mnt/music`) as long as the relative path is the same.
-- `is_path_inside_library()` — canonicalizes both paths and validates that a file resides within the library root. Prevents path traversal attacks. Returns a `Result<bool, PathError>` with typed errors.
+- `track_id_from_library_path()` — generates UUID v5 from the **relative** path
+  within the music library. This makes IDs stable across different mount points
+  (e.g., `/music` vs `/mnt/music`) as long as the relative path is the same.
+- `is_path_inside_library()` — canonicalizes both paths and validates that a file
+  resides within the library root. Prevents path traversal attacks.
+  Returns a `Result<bool, PathError>` with typed errors.
 - `PathError` — typed error enum for path resolution failures (`CannotCanonicalizeRoot`, `CannotCanonicalizeFile`).
 - `AudioFormat` — `#[non_exhaustive]` enum allowing new formats to be added without breaking changes. Implements `Display` and `FromStr`.
 
