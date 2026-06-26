@@ -1,0 +1,19 @@
+version: "3.8"
+services:
+  michi:
+    build: .
+    container_name: michi-dev
+    ports:
+      - "8096:8096"
+    volumes:
+      - ./music:/music:ro
+      - ./data/config:/config
+      - ./data/cache:/cache
+    environment:
+      - MICHI_PORT=8096
+      - MICHI_MUSIC_PATH=/music
+      - MICHI_DATABASE=sqlite:///config/michi.db
+      - MICHI_CACHE_PATH=/cache
+      - MICHI_DEV_MODE=true
+      - RUST_LOG=michi=debug,tower_http=debug
+    restart: unless-stopped

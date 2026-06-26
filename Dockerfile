@@ -40,6 +40,7 @@ FROM debian:${DEBIAN_VERSION}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libsqlite3-0 \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /config /cache /music
@@ -55,5 +56,8 @@ ENV MICHI_MUSIC_PATH=/music
 ENV MICHI_CONFIG_PATH=/config
 ENV MICHI_CACHE_PATH=/cache
 ENV MICHI_DATABASE=sqlite:///config/michi.db
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD wget -qO- http://localhost:8096/api/status || exit 1
 
 ENTRYPOINT ["michi-server"]
