@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     http::HeaderMap,
@@ -44,6 +45,7 @@ pub struct AppState {
     pub auth_sessions: auth::AuthState,
     pub auth_enabled: bool,
     pub admin_user_id: Option<Uuid>,
+    pub started_at: Instant,
 }
 
 impl AppState {
@@ -64,6 +66,7 @@ impl AppState {
             auth_sessions,
             auth_enabled,
             admin_user_id,
+            started_at: Instant::now(),
         }
     }
 
@@ -316,16 +319,16 @@ fn cors_layer(state: &AppState) -> CorsLayer {
         return CorsLayer::permissive();
     }
     if let Some(ref origin) = state.config.cors_origin {
-        CorsLayer::new()
-            .allow_origin(
-                origin
-                    .parse::<axum::http::HeaderValue>()
-                    .ok()
-                    .map(tower_http::cors::AllowOrigin::exact)
-                    .unwrap_or(tower_http::cors::AllowOrigin::any()),
-            )
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any)
+        match origin.parse::<axum::http::HeaderValue>() {
+            Ok(header_origin) => CorsLayer::new()
+                .allow_origin(tower_http::cors::AllowOrigin::exact(header_origin))
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any),
+            Err(_) => {
+                tracing::warn!("invalid MICHI_CORS_ORIGIN value, using restrictive CORS");
+                CorsLayer::new()
+            }
+        }
     } else {
         CorsLayer::new()
     }

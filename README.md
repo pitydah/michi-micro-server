@@ -265,6 +265,15 @@ Michi Micro Server is CasaOS/ZimaOS-ready with metadata in `casaos/`. See [docs/
 - Mobile app clients not yet released (Michi Music Player planned)
 - CI must be green before considering releases valid (see badge above)
 
+## Security Notes for Alpha
+
+- Recommended: run behind Tailscale or a reverse proxy with HTTPS
+- Do not expose port 8096 directly to the internet
+- Auth is experimental — not a final security layer
+- Registration is disabled by default
+- CORS is restrictive by default in production (set `MICHI_CORS_ORIGIN` or `MICHI_DEV_MODE=true` for dev)
+- Passwords and tokens are never logged
+
 ## License
 
 GPL-3.0-only — see [LICENSE](LICENSE).

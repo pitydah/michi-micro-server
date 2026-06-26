@@ -90,7 +90,7 @@ async fn test_status_endpoint() {
     let text = body_text(response).await;
     let v: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["status"], "ok");
-    assert_eq!(v["service"], "michi-micro-server");
+    assert_eq!(v["name"], "Michi Micro Server");
     assert_eq!(v["version"], "test");
 }
 
