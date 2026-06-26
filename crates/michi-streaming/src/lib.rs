@@ -168,6 +168,15 @@ pub async fn read_range_from_file_async(
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncSeekExt;
 
+    const MAX_RANGE_BYTES: u64 = 50 * 1024 * 1024;
+
+    if range.content_length() > MAX_RANGE_BYTES {
+        return Err(StreamError::InvalidRange(format!(
+            "range too large: {} bytes (max {MAX_RANGE_BYTES})",
+            range.content_length()
+        )));
+    }
+
     let mut buf = vec![0u8; range.content_length() as usize];
 
     file.seek(std::io::SeekFrom::Start(range.start)).await?;

@@ -33,6 +33,8 @@ fn test_config() -> Config {
         auth_enabled: false,
         allow_registration: false,
         server_id: uuid::Uuid::new_v4(),
+        cors_origin: None,
+        dev_mode: true,
     }
 }
 
@@ -325,6 +327,8 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         auth_enabled: false,
         allow_registration: false,
         server_id: uuid::Uuid::new_v4(),
+        cors_origin: None,
+        dev_mode: true,
     };
     let id = track_id_from_path(file_path.to_str().unwrap());
     let track = Track {
@@ -519,6 +523,8 @@ async fn test_stream_file_not_on_disk() {
         auth_enabled: false,
         allow_registration: false,
         server_id: uuid::Uuid::new_v4(),
+        cors_origin: None,
+        dev_mode: true,
     };
 
     let id = track_id_from_path("/nonexistent/path/file.flac");
@@ -1242,6 +1248,8 @@ async fn test_full_pipeline_scan_and_stream() {
         auth_enabled: false,
         allow_registration: false,
         server_id: uuid::Uuid::new_v4(),
+        cors_origin: None,
+        dev_mode: true,
     };
     let state = michi_api::AppState::new(config, pool.clone(), None);
     let test_app = create_router(state);

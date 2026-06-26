@@ -20,6 +20,8 @@ pub struct Config {
     pub auth_enabled: bool,
     pub allow_registration: bool,
     pub server_id: Uuid,
+    pub cors_origin: Option<String>,
+    pub dev_mode: bool,
 }
 
 impl Config {
@@ -79,6 +81,12 @@ impl Config {
 
         let server_id = load_or_create_server_id(&config_path);
 
+        let cors_origin = env::var("MICHI_CORS_ORIGIN").ok();
+        let dev_mode = env::var("MICHI_DEV_MODE")
+            .ok()
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
+
         Self {
             port,
             music_paths,
@@ -95,6 +103,8 @@ impl Config {
             auth_enabled,
             allow_registration,
             server_id,
+            cors_origin,
+            dev_mode,
         }
     }
 

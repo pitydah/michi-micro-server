@@ -92,10 +92,10 @@ MICHI_MUSIC_PATH=./music \
 MICHI_CONFIG_PATH=./data/config \
 MICHI_CACHE_PATH=./data/cache \
 MICHI_DATABASE=sqlite://./data/config/michi.db \
-cargo run
+cargo run -p michi-server
 
 # Or with default paths (requires /music, /config, /cache):
-cargo run
+cargo run -p michi-server
 ```
 
 ### Running Tests

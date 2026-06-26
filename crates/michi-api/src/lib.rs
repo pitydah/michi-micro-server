@@ -307,6 +307,29 @@ pub fn create_router(state: AppState) -> Router {
         )
         .merge(protected)
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(cors_layer(&state))
         .with_state(state)
+}
+
+fn cors_layer(state: &AppState) -> CorsLayer {
+    if state.config.dev_mode {
+        return CorsLayer::permissive();
+    }
+    if let Some(ref origin) = state.config.cors_origin {
+        CorsLayer::new()
+            .allow_origin(
+                origin
+                    .parse::<axum::http::HeaderValue>()
+                    .ok()
+                    .map(tower_http::cors::AllowOrigin::exact)
+                    .unwrap_or(tower_http::cors::AllowOrigin::any()),
+            )
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any)
+    } else {
+        CorsLayer::new()
+            .allow_origin(tower_http::cors::AllowOrigin::any())
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any)
+    }
 }
