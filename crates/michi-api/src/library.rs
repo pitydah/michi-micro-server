@@ -1,9 +1,9 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 use uuid::Uuid;
 
@@ -95,6 +95,34 @@ pub async fn tracks_handler(
             }),
         )
     })?;
+
+    Ok(Json(tracks))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchParams {
+    pub q: String,
+}
+
+pub async fn search_handler(
+    State(state): State<AppState>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<Vec<michi_core::Track>>, (StatusCode, Json<ErrorResponse>)> {
+    if params.q.trim().is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let tracks = michi_db::search_tracks(&state.db, params.q.trim())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    status: "error".to_string(),
+                    message: format!("database error: {}", e),
+                }),
+            )
+        })?;
 
     Ok(Json(tracks))
 }

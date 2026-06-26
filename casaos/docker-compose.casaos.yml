@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   michi-micro-server:
     image: pitydah/michi-micro-server:latest
@@ -18,3 +16,24 @@ services:
       - MICHI_CACHE_PATH=/cache
       - MICHI_DATABASE=sqlite:///config/michi.db
     restart: unless-stopped
+
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main_app: michi-micro-server
+  author: pitydah
+  category: music
+  description:
+    en_us: Lightweight, robust home music server. Stream your local music library over your home network or Tailscale.
+  developer: pitydah
+  icon: https://raw.githubusercontent.com/pitydah/michi-micro-server/main/docs/icon.png
+  screenshot_link:
+    - https://raw.githubusercontent.com/pitydah/michi-micro-server/main/docs/screenshot.png
+  tagline:
+    en_us: Your music, streamed simply.
+  thumbnail: ""
+  title:
+    en_us: Michi Micro Server
+  index: /
+  port_map: "8096"

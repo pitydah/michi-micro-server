@@ -180,6 +180,22 @@ pub async fn list_tracks(pool: &SqlitePool) -> Result<Vec<Track>, DbError> {
     Ok(tracks)
 }
 
+pub async fn search_tracks(pool: &SqlitePool, q: &str) -> Result<Vec<Track>, DbError> {
+    let pattern = format!("%{}%", q);
+    let rows = sqlx::query(
+        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, created_at, updated_at FROM tracks WHERE title LIKE ? OR artist LIKE ? OR album LIKE ? ORDER BY title ASC",
+    )
+    .bind(&pattern)
+    .bind(&pattern)
+    .bind(&pattern)
+    .fetch_all(pool)
+    .await?;
+
+    let tracks = rows.iter().map(row_to_track).collect();
+
+    Ok(tracks)
+}
+
 pub async fn library_stats(pool: &SqlitePool) -> Result<LibraryStats, DbError> {
     let row = sqlx::query(
         "SELECT COUNT(*) as tracks, COUNT(DISTINCT album) as albums, COUNT(DISTINCT artist) as artists FROM tracks",

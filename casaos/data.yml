@@ -1,0 +1,33 @@
+name: Michi Micro Server
+version: 0.1.0
+slug: michi-micro-server
+description: Lightweight, robust home music server. Stream your local music library over your home network or Tailscale.
+developer: pitydah
+license: GPL-3.0
+port_map: 8096
+categories:
+  - music
+  - media
+tags:
+  - music
+  - audio
+  - streaming
+  - server
+  - rust
+maintainer: pitydah
+more_info: |
+  Michi Micro Server centralizes your local music library, reads advanced metadata with Lofty,
+  stores everything in SQLite, and streams audio over your local network.
+
+  ## Features
+  - Web UI for browsing and playing tracks
+  - HTTP Range Request streaming
+  - Metadata extraction (title, artist, album, duration, sample rate, bit depth, channels)
+  - Library scanning with resilient error handling
+  - UUID v5 stable IDs based on relative paths
+
+  ## Quick Start
+  1. Set your music path volume
+  2. Open http://<your-server-ip>:8096
+  3. Click "Scan" to import your library
+  4. Browse and play your music

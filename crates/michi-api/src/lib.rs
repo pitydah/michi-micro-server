@@ -37,6 +37,7 @@ pub fn create_router(state: AppState) -> Router {
             delete(library::delete_all_tracks_handler),
         )
         .route("/api/tracks", get(library::tracks_handler))
+        .route("/api/search", get(library::search_handler))
         .route(
             "/api/tracks/:id",
             get(library::track_handler)
