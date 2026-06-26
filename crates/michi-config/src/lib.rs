@@ -15,6 +15,7 @@ pub struct Config {
     pub auth_username: Option<String>,
     pub auth_password: Option<String>,
     pub auth_enabled: bool,
+    pub allow_registration: bool,
 }
 
 impl Config {
@@ -60,6 +61,10 @@ impl Config {
         let auth_username = env::var("MICHI_AUTH_USERNAME").ok();
         let auth_password = env::var("MICHI_AUTH_PASSWORD").ok();
         let auth_enabled = auth_username.is_some() && auth_password.is_some();
+        let allow_registration = env::var("MICHI_ALLOW_REGISTRATION")
+            .ok()
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
 
         Self {
             port,
@@ -75,6 +80,7 @@ impl Config {
             auth_username,
             auth_password,
             auth_enabled,
+            allow_registration,
         }
     }
 

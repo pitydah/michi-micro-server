@@ -31,13 +31,14 @@ fn test_config() -> Config {
         auth_username: None,
         auth_password: None,
         auth_enabled: false,
+        allow_registration: false,
     }
 }
 
 async fn make_app() -> (axum::Router, SqlitePool) {
     let pool = test_db().await;
     let config = test_config();
-    let state = michi_api::AppState::new(config, pool.clone());
+    let state = michi_api::AppState::new(config, pool.clone(), None);
     (create_router(state), pool)
 }
 
@@ -321,6 +322,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         auth_username: None,
         auth_password: None,
         auth_enabled: false,
+        allow_registration: false,
     };
     let id = track_id_from_path(file_path.to_str().unwrap());
     let track = Track {
@@ -341,7 +343,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
     };
     michi_db::upsert_track(&pool, &track).await.unwrap();
 
-    let state = michi_api::AppState::new(config, pool.clone());
+    let state = michi_api::AppState::new(config, pool.clone(), None);
     (michi_api::create_router(state), pool, tmp, id)
 }
 
@@ -513,6 +515,7 @@ async fn test_stream_file_not_on_disk() {
         auth_username: None,
         auth_password: None,
         auth_enabled: false,
+        allow_registration: false,
     };
 
     let id = track_id_from_path("/nonexistent/path/file.flac");
@@ -534,7 +537,7 @@ async fn test_stream_file_not_on_disk() {
     };
     michi_db::upsert_track(&pool, &track).await.unwrap();
 
-    let state = michi_api::AppState::new(config, pool.clone());
+    let state = michi_api::AppState::new(config, pool.clone(), None);
     let app = michi_api::create_router(state);
 
     let response = app
@@ -845,6 +848,7 @@ async fn seed_playlist(pool: &SqlitePool) -> michi_core::Playlist {
             name: "Test Playlist".into(),
             description: None,
         },
+        None,
     )
     .await
     .unwrap()
@@ -991,7 +995,7 @@ async fn test_get_playlist_tracks() {
 async fn run_test_server() -> (u16, SqlitePool) {
     let pool = test_db().await;
     let config = test_config();
-    let state = michi_api::AppState::new(config, pool.clone());
+    let state = michi_api::AppState::new(config, pool.clone(), None);
     let app = create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1233,8 +1237,9 @@ async fn test_full_pipeline_scan_and_stream() {
         auth_username: None,
         auth_password: None,
         auth_enabled: false,
+        allow_registration: false,
     };
-    let state = michi_api::AppState::new(config, pool.clone());
+    let state = michi_api::AppState::new(config, pool.clone(), None);
     let test_app = create_router(state);
     let test_app2 = test_app.clone();
 

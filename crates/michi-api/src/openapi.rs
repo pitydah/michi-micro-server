@@ -1,0 +1,86 @@
+use utoipa::OpenApi;
+
+use crate::library;
+use crate::scrobble;
+use crate::status;
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        crate::status::status_handler,
+        crate::library::scan_handler,
+        crate::library::stats_handler,
+        crate::library::delete_all_tracks_handler,
+        crate::library::tracks_handler,
+        crate::library::search_handler,
+        crate::library::track_handler,
+        crate::library::delete_track_handler,
+        crate::library::update_track_handler,
+        crate::library::albums_handler,
+        crate::library::artists_handler,
+        crate::library::album_tracks_handler,
+        crate::library::artist_tracks_handler,
+        crate::library::artwork_handler,
+        crate::library::playlists_handler,
+        crate::library::create_playlist_handler,
+        crate::library::get_playlist_handler,
+        crate::library::delete_playlist_handler,
+        crate::library::add_playlist_track_handler,
+        crate::library::remove_playlist_track_handler,
+        crate::library::get_playlist_tracks_handler,
+        crate::library::reorder_playlist_handler,
+        crate::library::export_playlist_handler,
+        crate::library::import_playlist_handler,
+        crate::library::get_playback_state_handler,
+        crate::library::set_playback_state_handler,
+        crate::stream::stream_handler,
+        crate::scrobble::record_play_handler,
+        crate::scrobble::history_handler,
+        crate::auth::login_handler,
+        crate::auth::logout_handler,
+        crate::auth::check_handler,
+    ),
+    components(
+        schemas(
+            status::StatusResponse,
+            library::ScanResponse,
+            library::ErrorResponse,
+            library::DeleteResponse,
+            library::PurgeResponse,
+            library::ImportPlaylistInput,
+            library::ImportPlaylistResponse,
+            library::ReorderPlaylistInput,
+            library::SetPlaybackState,
+            scrobble::RecordPlayRequest,
+            scrobble::RecordPlayResponse,
+            scrobble::PlayHistoryEntry,
+            crate::auth::LoginRequest,
+            crate::auth::LoginResponse,
+            crate::auth::AuthStatusResponse,
+            michi_core::Track,
+            michi_core::LibraryStats,
+            michi_core::AlbumSummary,
+            michi_core::ArtistSummary,
+            michi_core::Playlist,
+            michi_core::PlaylistCreate,
+            michi_core::PlaylistTrack,
+            michi_core::TrackUpdate,
+            michi_core::AudioMetadata,
+            michi_sync::PlaybackState,
+        )
+    ),
+    tags(
+        (name = "Status", description = "Server status endpoints"),
+        (name = "Library", description = "Library management endpoints"),
+        (name = "Tracks", description = "Track listing and management endpoints"),
+        (name = "Albums", description = "Album listing endpoints"),
+        (name = "Artists", description = "Artist listing endpoints"),
+        (name = "Artwork", description = "Artwork retrieval endpoint"),
+        (name = "Playlists", description = "Playlist management endpoints"),
+        (name = "Playback", description = "Playback state endpoints"),
+        (name = "Streaming", description = "Audio streaming endpoint"),
+        (name = "Scrobbling", description = "Play recording and history endpoints"),
+        (name = "Auth", description = "Authentication endpoints"),
+    )
+)]
+pub struct ApiDoc;

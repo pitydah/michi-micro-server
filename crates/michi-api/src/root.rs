@@ -95,11 +95,13 @@ const HTML: &str = r#"<!DOCTYPE html>
         <input type="text" id="login-username" placeholder="Username" autocomplete="username">
         <input type="password" id="login-password" placeholder="Password" autocomplete="current-password">
         <button class="btn" onclick="doLogin()">Sign In</button>
+        <button class="btn btn-secondary" id="register-btn" style="display:none;margin-top:8px" onclick="doRegister()">Register</button>
         <div class="login-error" id="login-error"></div>
     </div>
     <div class="container" id="app-container" style="display:none">
         <div class="header">
             <h1>Michi Micro Server</h1>
+            <span id="user-info" style="color:var(--fg2);font-size:.85rem"></span>
             <button class="theme-btn" id="theme-btn" onclick="toggleTheme()">🌙</button>
             <span id="online-indicator" style="font-size:1.2rem;cursor:default" title="Online status"></span>
             <button class="btn btn-sm btn-secondary" id="logout-btn" style="display:none" onclick="doLogout()">Logout</button>
@@ -190,6 +192,7 @@ const HTML: &str = r#"<!DOCTYPE html>
         let queueContext = null;
 
         let authToken = localStorage.getItem('michi-token');
+        let currentUser = null;
 
         function authHeaders(headers) {
             const h = headers || {};
@@ -931,6 +934,19 @@ const HTML: &str = r#"<!DOCTYPE html>
             };
         }
 
+        function updateUserDisplay() {
+            const infoEl = document.getElementById('user-info');
+            const registerBtn = document.getElementById('register-btn');
+            if (currentUser) {
+                infoEl.textContent = currentUser.username + (currentUser.is_admin ? ' (admin)' : '');
+            } else {
+                infoEl.textContent = '';
+            }
+            if (registerBtn) {
+                registerBtn.style.display = currentUser ? 'none' : '';
+            }
+        }
+
         // Auth
         async function checkAuth() {
             try {
@@ -942,10 +958,19 @@ const HTML: &str = r#"<!DOCTYPE html>
                 if (status.enabled && !status.authenticated) {
                     loginEl.style.display = 'block';
                     appEl.style.display = 'none';
+                    currentUser = null;
+                    document.getElementById('register-btn').style.display = '';
+                    updateUserDisplay();
                 } else {
                     loginEl.style.display = 'none';
                     appEl.style.display = 'block';
-                    if (status.enabled) logoutBtn.style.display = 'inline-block';
+                    if (status.enabled) {
+                        logoutBtn.style.display = 'inline-block';
+                        if (status.username) {
+                            currentUser = { username: status.username, is_admin: status.is_admin };
+                        }
+                    }
+                    updateUserDisplay();
                     initVolume();
                     initTheme();
                     connectWs();
@@ -956,6 +981,8 @@ const HTML: &str = r#"<!DOCTYPE html>
             } catch (e) {
                 document.getElementById('login-container').style.display = 'block';
                 document.getElementById('app-container').style.display = 'none';
+                currentUser = null;
+                updateUserDisplay();
             }
         }
 
@@ -978,6 +1005,32 @@ const HTML: &str = r#"<!DOCTYPE html>
                 const data = await res.json();
                 authToken = data.token;
                 localStorage.setItem('michi-token', data.token);
+                currentUser = { username: data.username, is_admin: data.is_admin };
+                await checkAuth();
+            } catch (e) {
+                errorEl.textContent = e.message;
+            }
+        }
+
+        async function doRegister() {
+            const username = document.getElementById('login-username').value.trim();
+            const password = document.getElementById('login-password').value;
+            const errorEl = document.getElementById('login-error');
+            if (!username || !password) { errorEl.textContent = 'Fill in both fields'; return; }
+            try {
+                const res = await fetch('/api/auth/register', {
+                    method: 'POST',
+                    body: JSON.stringify({ username, password }),
+                    headers: { 'Content-Type': 'application/json' },
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({ message: 'Registration failed' }));
+                    throw new Error(err.message || 'Registration failed');
+                }
+                const data = await res.json();
+                authToken = data.token;
+                localStorage.setItem('michi-token', data.token);
+                currentUser = { username: data.username, is_admin: data.is_admin };
                 await checkAuth();
             } catch (e) {
                 errorEl.textContent = e.message;
@@ -989,6 +1042,7 @@ const HTML: &str = r#"<!DOCTYPE html>
                 await fetch('/api/auth/logout', { method: 'POST', headers: authHeaders() });
             } catch (e) { /* ignore */ }
             authToken = null;
+            currentUser = null;
             localStorage.removeItem('michi-token');
             await checkAuth();
         }

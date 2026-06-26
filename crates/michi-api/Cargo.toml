@@ -28,6 +28,9 @@ tokio-tungstenite = "0.24"
 chrono.workspace = true
 serde_json.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+utoipa.workspace = true
+utoipa-swagger-ui.workspace = true
+argon2.workspace = true
 
 [dev-dependencies]
 tower = "0.5"

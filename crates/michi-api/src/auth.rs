@@ -1,41 +1,36 @@
 use std::sync::Arc;
 
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
 use axum::{
     extract::{Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Json, Response},
-    routing::post,
+    routing::{get, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
+use utoipa::ToSchema;
+use uuid::Uuid;
 
 use crate::AppState;
 
 const SESSION_DURATION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
-#[derive(Debug, Deserialize)]
-struct LoginRequest {
-    username: String,
-    password: String,
-}
-
-#[derive(Debug, Serialize)]
-struct LoginResponse {
-    token: String,
-}
-
-#[derive(Debug, Serialize)]
-struct AuthStatusResponse {
-    enabled: bool,
-    authenticated: bool,
+#[derive(Debug, Clone)]
+pub struct SessionData {
+    pub expiry: std::time::Instant,
+    pub user_id: Uuid,
 }
 
 #[derive(Debug, Clone)]
 pub struct AuthState {
-    pub sessions: Arc<RwLock<std::collections::HashMap<String, std::time::Instant>>>,
+    pub sessions: Arc<RwLock<std::collections::HashMap<String, SessionData>>>,
 }
 
 impl AuthState {
@@ -45,16 +40,33 @@ impl AuthState {
         }
     }
 
-    pub async fn create_session(&self) -> String {
+    pub async fn create_session(&self, user_id: Uuid) -> String {
         let token = uuid::Uuid::new_v4().to_string();
         let mut sessions = self.sessions.write().await;
-        sessions.insert(token.clone(), std::time::Instant::now() + SESSION_DURATION);
+        sessions.insert(
+            token.clone(),
+            SessionData {
+                expiry: std::time::Instant::now() + SESSION_DURATION,
+                user_id,
+            },
+        );
         token
     }
 
     pub async fn validate(&self, token: &str) -> bool {
         let sessions = self.sessions.read().await;
-        matches!(sessions.get(token), Some(expiry) if *expiry > std::time::Instant::now())
+        matches!(sessions.get(token), Some(data) if data.expiry > std::time::Instant::now())
+    }
+
+    pub async fn extract_user_id(&self, token: &str) -> Option<Uuid> {
+        let sessions = self.sessions.read().await;
+        sessions.get(token).and_then(|data| {
+            if data.expiry > std::time::Instant::now() {
+                Some(data.user_id)
+            } else {
+                None
+            }
+        })
     }
 
     pub async fn invalidate(&self, token: &str) {
@@ -64,7 +76,7 @@ impl AuthState {
 
     pub async fn cleanup(&self) {
         let mut sessions = self.sessions.write().await;
-        sessions.retain(|_, expiry| *expiry > std::time::Instant::now());
+        sessions.retain(|_, data| data.expiry > std::time::Instant::now());
     }
 }
 
@@ -110,7 +122,61 @@ pub async fn auth_middleware(
     }
 }
 
-async fn login_handler(
+#[derive(Debug, Deserialize, ToSchema)]
+pub(crate) struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct LoginResponse {
+    token: String,
+    id: Uuid,
+    username: String,
+    is_admin: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct AuthStatusResponse {
+    enabled: bool,
+    authenticated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_admin: Option<bool>,
+}
+
+pub(crate) fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
+    let salt = SaltString::generate(&mut OsRng);
+    Ok(Argon2::default()
+        .hash_password(password.as_bytes(), &salt)?
+        .to_string())
+}
+
+pub(crate) fn verify_password(
+    password: &str,
+    hash: &str,
+) -> Result<bool, argon2::password_hash::Error> {
+    let parsed = PasswordHash::new(hash)?;
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok())
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/login",
+    tag = "Auth",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Login successful", body = LoginResponse),
+        (status = 400, description = "Auth not configured"),
+        (status = 401, description = "Invalid credentials")
+    )
+)]
+pub(crate) async fn login_handler(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<serde_json::Value>)> {
@@ -121,9 +187,24 @@ async fn login_handler(
         ));
     }
 
-    let valid = state.config.auth_username.as_deref() == Some(&body.username)
-        && state.config.auth_password.as_deref() == Some(&body.password);
+    let user = michi_db::get_user_by_username(&state.db, &body.username)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"status": "error", "message": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"status": "error", "message": "invalid credentials"})),
+            )
+        })?;
 
+    let (id, username, password_hash, is_admin) = user;
+
+    let valid = verify_password(&body.password, &password_hash).unwrap_or(false);
     if !valid {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -131,18 +212,114 @@ async fn login_handler(
         ));
     }
 
-    let token = state.auth_sessions.create_session().await;
-    Ok(Json(LoginResponse { token }))
+    let token = state.auth_sessions.create_session(id).await;
+    Ok(Json(LoginResponse {
+        token,
+        id,
+        username,
+        is_admin,
+    }))
 }
 
-async fn logout_handler(State(state): State<AppState>, request: Request) -> impl IntoResponse {
+#[utoipa::path(
+    post,
+    path = "/api/auth/register",
+    tag = "Auth",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Registration successful", body = LoginResponse),
+        (status = 400, description = "Auth not configured"),
+        (status = 403, description = "Registration not allowed"),
+        (status = 409, description = "Username already exists")
+    )
+)]
+pub(crate) async fn register_handler(
+    State(state): State<AppState>,
+    Json(body): Json<LoginRequest>,
+) -> Result<Json<LoginResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if !state.auth_enabled {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"status": "error", "message": "auth not configured"})),
+        ));
+    }
+
+    if !state.config.allow_registration {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"status": "error", "message": "registration not allowed"})),
+        ));
+    }
+
+    if michi_db::get_user_by_username(&state.db, &body.username)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"status": "error", "message": e.to_string()})),
+            )
+        })?
+        .is_some()
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"status": "error", "message": "username already exists"})),
+        ));
+    }
+
+    let user_id = Uuid::new_v4();
+    let password_hash = hash_password(&body.password).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"status": "error", "message": e.to_string()})),
+        )
+    })?;
+
+    michi_db::create_user(&state.db, &user_id, &body.username, &password_hash, false)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"status": "error", "message": e.to_string()})),
+            )
+        })?;
+
+    let token = state.auth_sessions.create_session(user_id).await;
+    Ok(Json(LoginResponse {
+        token,
+        id: user_id,
+        username: body.username,
+        is_admin: false,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    tag = "Auth",
+    responses(
+        (status = 200, description = "Logged out successfully")
+    )
+)]
+pub(crate) async fn logout_handler(
+    State(state): State<AppState>,
+    request: Request,
+) -> impl IntoResponse {
     if let Some(token) = extract_token(&request) {
         state.auth_sessions.invalidate(&token).await;
     }
     StatusCode::OK
 }
 
-async fn check_handler(
+#[utoipa::path(
+    get,
+    path = "/api/auth/check",
+    tag = "Auth",
+    responses(
+        (status = 200, description = "Auth status", body = AuthStatusResponse)
+    )
+)]
+pub(crate) async fn check_handler(
     State(state): State<AppState>,
     request: Request,
 ) -> Json<AuthStatusResponse> {
@@ -150,28 +327,46 @@ async fn check_handler(
         return Json(AuthStatusResponse {
             enabled: false,
             authenticated: true,
+            id: None,
+            username: None,
+            is_admin: None,
         });
     }
 
-    let authenticated = match extract_token(&request) {
-        Some(t) => state.auth_sessions.validate(&t).await,
-        None => false,
+    let (authenticated, id, username, is_admin) = match extract_token(&request) {
+        Some(t) => {
+            if let Some(uid) = state.auth_sessions.extract_user_id(&t).await {
+                if let Ok(Some((id, uname, _, admin))) =
+                    michi_db::get_user_by_id(&state.db, &uid).await
+                {
+                    (true, Some(id), Some(uname), Some(admin))
+                } else {
+                    (true, None, None, None)
+                }
+            } else {
+                (false, None, None, None)
+            }
+        }
+        None => (false, None, None, None),
     };
 
     Json(AuthStatusResponse {
         enabled: true,
         authenticated,
+        id,
+        username,
+        is_admin,
     })
 }
 
 pub fn auth_router() -> Router<AppState> {
     Router::new()
         .route("/api/auth/login", post(login_handler))
+        .route("/api/auth/register", post(register_handler))
         .route("/api/auth/logout", post(logout_handler))
-        .route("/api/auth/check", axum::routing::get(check_handler))
+        .route("/api/auth/check", get(check_handler))
 }
 
-// Background task to cleanup expired sessions periodically
 pub fn spawn_session_cleanup(state: AuthState) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));

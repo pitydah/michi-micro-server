@@ -119,9 +119,39 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 4 applied");
     }
 
+    if current < 5 {
+        info!("applying migration 5: users");
+        migration_005(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (5, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 5 applied");
+    }
+
+    if current < 6 {
+        info!("applying migration 6: user_id on playlists");
+        migration_006(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (6, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 6 applied");
+    }
+
+    if current < 7 {
+        info!("applying migration 7: user_id on play_history");
+        migration_007(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (7, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 7 applied");
+    }
+
     info!(
         "database schema at version {}",
-        current.max(1).max(2).max(3).max(4)
+        current.max(1).max(2).max(3).max(4).max(5).max(6).max(7)
     );
     Ok(())
 }
@@ -232,24 +262,121 @@ async fn migration_004(pool: &SqlitePool) -> Result<(), DbError> {
     Ok(())
 }
 
+async fn migration_005(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS users (
+            id BLOB PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+async fn migration_006(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query("ALTER TABLE playlists ADD COLUMN user_id BLOB REFERENCES users(id)")
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+async fn migration_007(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query("ALTER TABLE play_history ADD COLUMN user_id BLOB REFERENCES users(id)")
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+pub async fn create_user(
+    pool: &SqlitePool,
+    id: &Uuid,
+    username: &str,
+    password_hash: &str,
+    is_admin: bool,
+) -> Result<(), DbError> {
+    let id_str = id.to_string();
+    sqlx::query("INSERT INTO users (id, username, password_hash, is_admin) VALUES (?, ?, ?, ?)")
+        .bind(&id_str)
+        .bind(username)
+        .bind(password_hash)
+        .bind(is_admin as i64)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_user_by_username(
+    pool: &SqlitePool,
+    username: &str,
+) -> Result<Option<(Uuid, String, String, bool)>, DbError> {
+    let rows =
+        sqlx::query("SELECT id, username, password_hash, is_admin FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_all(pool)
+            .await?;
+
+    Ok(rows.first().map(|r| {
+        let id = Uuid::parse_str(r.get::<&str, _>("id")).unwrap_or(Uuid::nil());
+        let is_admin: bool = r.get::<i64, _>("is_admin") != 0;
+        (
+            id,
+            r.get::<&str, _>("username").to_string(),
+            r.get::<&str, _>("password_hash").to_string(),
+            is_admin,
+        )
+    }))
+}
+
+pub async fn get_user_by_id(
+    pool: &SqlitePool,
+    id: &Uuid,
+) -> Result<Option<(Uuid, String, String, bool)>, DbError> {
+    let id_str = id.to_string();
+    let rows = sqlx::query("SELECT id, username, password_hash, is_admin FROM users WHERE id = ?")
+        .bind(&id_str)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows.first().map(|r| {
+        let id = Uuid::parse_str(r.get::<&str, _>("id")).unwrap_or(Uuid::nil());
+        let is_admin: bool = r.get::<i64, _>("is_admin") != 0;
+        (
+            id,
+            r.get::<&str, _>("username").to_string(),
+            r.get::<&str, _>("password_hash").to_string(),
+            is_admin,
+        )
+    }))
+}
+
 pub async fn record_play(
     pool: &SqlitePool,
     track_id: &Uuid,
     duration_ms: Option<u64>,
     played_at: &DateTime<Utc>,
+    user_id: Option<&Uuid>,
 ) -> Result<PlayHistory, DbError> {
     let id = Uuid::new_v4();
     let id_str = id.to_string();
     let tid_str = track_id.to_string();
     let played_str = played_at.to_rfc3339();
+    let uid_str = user_id.map(|u| u.to_string());
 
     sqlx::query(
-        "INSERT INTO play_history (id, track_id, played_at, duration_ms, scrobbled) VALUES (?, ?, ?, ?, 0)",
+        "INSERT INTO play_history (id, track_id, played_at, duration_ms, scrobbled, user_id) VALUES (?, ?, ?, ?, 0, ?)",
     )
     .bind(&id_str)
     .bind(&tid_str)
     .bind(&played_str)
     .bind(duration_ms.map(|v| v as i64))
+    .bind(&uid_str)
     .execute(pool)
     .await?;
 
@@ -266,22 +393,44 @@ pub async fn get_play_history(
     pool: &SqlitePool,
     limit: i64,
     offset: i64,
+    user_id: Option<&Uuid>,
 ) -> Result<Vec<(PlayHistory, Track)>, DbError> {
-    let rows = sqlx::query(
-        "SELECT ph.id, ph.track_id, ph.played_at, ph.duration_ms, ph.scrobbled,
-                t.id as t_id, t.title, t.artist, t.album, t.album_artist,
-                t.duration_ms as t_duration_ms, t.file_path, t.format,
-                t.sample_rate, t.bit_depth, t.channels, t.artwork_id,
-                t.created_at, t.updated_at
-         FROM play_history ph
-         JOIN tracks t ON t.id = ph.track_id
-         ORDER BY ph.played_at DESC
-         LIMIT ? OFFSET ?",
-    )
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
+    let rows = if let Some(uid) = user_id {
+        let uid_str = uid.to_string();
+        sqlx::query(
+            "SELECT ph.id, ph.track_id, ph.played_at, ph.duration_ms, ph.scrobbled,
+                    t.id as t_id, t.title, t.artist, t.album, t.album_artist,
+                    t.duration_ms as t_duration_ms, t.file_path, t.format,
+                    t.sample_rate, t.bit_depth, t.channels, t.artwork_id,
+                    t.created_at, t.updated_at
+             FROM play_history ph
+             JOIN tracks t ON t.id = ph.track_id
+             WHERE ph.user_id = ?
+             ORDER BY ph.played_at DESC
+             LIMIT ? OFFSET ?",
+        )
+        .bind(&uid_str)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT ph.id, ph.track_id, ph.played_at, ph.duration_ms, ph.scrobbled,
+                    t.id as t_id, t.title, t.artist, t.album, t.album_artist,
+                    t.duration_ms as t_duration_ms, t.file_path, t.format,
+                    t.sample_rate, t.bit_depth, t.channels, t.artwork_id,
+                    t.created_at, t.updated_at
+             FROM play_history ph
+             JOIN tracks t ON t.id = ph.track_id
+             ORDER BY ph.played_at DESC
+             LIMIT ? OFFSET ?",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?
+    };
 
     Ok(rows.iter().map(row_to_play_history_with_track).collect())
 }
@@ -378,17 +527,20 @@ pub async fn get_artist_tracks(pool: &SqlitePool, artist: &str) -> Result<Vec<Tr
 pub async fn create_playlist(
     pool: &SqlitePool,
     input: &PlaylistCreate,
+    user_id: Option<&Uuid>,
 ) -> Result<Playlist, DbError> {
     let id = Uuid::new_v4();
     let now = Utc::now().to_rfc3339();
+    let uid_str = user_id.map(|u| u.to_string());
     sqlx::query(
-        "INSERT INTO playlists (id, name, description, track_count, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)",
+        "INSERT INTO playlists (id, name, description, track_count, created_at, updated_at, user_id) VALUES (?, ?, ?, 0, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(&input.name)
     .bind(&input.description)
     .bind(&now)
     .bind(&now)
+    .bind(&uid_str)
     .execute(pool)
     .await?;
 
@@ -402,12 +554,25 @@ pub async fn create_playlist(
     })
 }
 
-pub async fn list_playlists(pool: &SqlitePool) -> Result<Vec<Playlist>, DbError> {
-    let rows = sqlx::query(
-        "SELECT id, name, description, track_count, created_at, updated_at FROM playlists ORDER BY name COLLATE NOCASE ASC",
-    )
-    .fetch_all(pool)
-    .await?;
+pub async fn list_playlists(
+    pool: &SqlitePool,
+    user_id: Option<&Uuid>,
+) -> Result<Vec<Playlist>, DbError> {
+    let rows = if let Some(uid) = user_id {
+        let uid_str = uid.to_string();
+        sqlx::query(
+            "SELECT id, name, description, track_count, created_at, updated_at FROM playlists WHERE user_id = ? ORDER BY name COLLATE NOCASE ASC",
+        )
+        .bind(&uid_str)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT id, name, description, track_count, created_at, updated_at FROM playlists ORDER BY name COLLATE NOCASE ASC",
+        )
+        .fetch_all(pool)
+        .await?
+    };
 
     Ok(rows.iter().map(row_to_playlist).collect())
 }

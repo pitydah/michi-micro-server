@@ -5,6 +5,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -16,7 +17,7 @@ pub enum PathError {
     CannotCanonicalizeFile(String),
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, ToSchema)]
 #[non_exhaustive]
 pub enum AudioFormat {
     Mp3,
@@ -95,7 +96,7 @@ impl FromStr for AudioFormat {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AudioMetadata {
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -134,7 +135,7 @@ impl Default for AudioMetadata {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Track {
     pub id: Uuid,
     pub title: Option<String>,
@@ -152,27 +153,27 @@ pub struct Track {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct LibraryStats {
     pub tracks: i64,
     pub albums: i64,
     pub artists: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AlbumSummary {
     pub album: String,
     pub album_artist: Option<String>,
     pub track_count: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ArtistSummary {
     pub artist: Option<String>,
     pub track_count: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Playlist {
     pub id: Uuid,
     pub name: String,
@@ -182,13 +183,13 @@ pub struct Playlist {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PlaylistCreate {
     pub name: String,
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PlaylistTrack {
     pub id: Uuid,
     pub playlist_id: Uuid,
@@ -223,7 +224,7 @@ pub fn is_path_inside_library(library_root: &Path, file_path: &Path) -> Result<b
     Ok(canonical_file.starts_with(&canonical_root))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PlayHistory {
     pub id: Uuid,
     pub track_id: Uuid,
@@ -232,7 +233,7 @@ pub struct PlayHistory {
     pub scrobbled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
 pub struct TrackUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,

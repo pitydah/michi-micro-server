@@ -37,3 +37,6 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio-util = { version = "0.7", features = ["io"] }
 infer = "0.16"
 futures-util = "0.3"
+utoipa = { version = "5", features = ["uuid", "chrono"] }
+utoipa-swagger-ui = { version = "8", features = ["axum"] }
+argon2 = "0.5"

@@ -24,7 +24,8 @@ async fn main() -> Result<()> {
 
     let pool = michi_db::init_pool(&config.database_url).await?;
 
-    let state = michi_api::AppState::new(config.clone(), pool);
+    let admin_user_id = michi_api::init_admin_user(&config, &pool).await;
+    let state = michi_api::AppState::new(config.clone(), pool, admin_user_id);
     let app = michi_api::create_router(state.clone());
 
     // Start sync peer connections in background

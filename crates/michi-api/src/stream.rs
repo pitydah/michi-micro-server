@@ -53,6 +53,22 @@ async fn track_from_db(
         .ok_or_else(|| err_response(StatusCode::NOT_FOUND, &format!("track not found: {}", id)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/stream/{id}",
+    tag = "Streaming",
+    params(
+        ("id" = Uuid, Path, description = "Track UUID"),
+        ("format" = Option<String>, Query, description = "Transcode format (mp3, ogg)"),
+    ),
+    responses(
+        (status = 200, description = "Audio stream"),
+        (status = 206, description = "Partial content (range request)"),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 404, description = "Track not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 pub async fn stream_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,

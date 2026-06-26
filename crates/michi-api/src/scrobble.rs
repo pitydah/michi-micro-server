@@ -1,27 +1,28 @@
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RecordPlayRequest {
     pub track_id: Uuid,
     pub duration_ms: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RecordPlayResponse {
     pub status: String,
     pub id: Uuid,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PlayHistoryEntry {
     pub id: Uuid,
     pub track_id: Uuid,
@@ -36,23 +37,41 @@ pub struct PlayHistoryEntry {
     pub artwork_id: Option<Uuid>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/playback/record",
+    tag = "Scrobbling",
+    request_body = RecordPlayRequest,
+    responses(
+        (status = 200, description = "Play recorded", body = RecordPlayResponse),
+        (status = 500, description = "Internal server error", body = crate::library::ErrorResponse)
+    )
+)]
 pub async fn record_play_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(input): Json<RecordPlayRequest>,
 ) -> Result<Json<RecordPlayResponse>, (StatusCode, Json<crate::library::ErrorResponse>)> {
     let now = Utc::now();
+    let user_id = state.get_user_id(&headers).await;
 
-    let play = michi_db::record_play(&state.db, &input.track_id, input.duration_ms, &now)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::library::ErrorResponse {
-                    status: "error".to_string(),
-                    message: format!("database error: {}", e),
-                }),
-            )
-        })?;
+    let play = michi_db::record_play(
+        &state.db,
+        &input.track_id,
+        input.duration_ms,
+        &now,
+        user_id.as_ref(),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::library::ErrorResponse {
+                status: "error".to_string(),
+                message: format!("database error: {}", e),
+            }),
+        )
+    })?;
 
     // If ListenBrainz is configured, submit scrobble asynchronously
     if state.config.scrobble_enabled {
@@ -81,14 +100,29 @@ pub struct HistoryQuery {
     pub offset: Option<i64>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/history",
+    tag = "Scrobbling",
+    params(
+        ("limit" = Option<i64>, Query, description = "Maximum number of entries"),
+        ("offset" = Option<i64>, Query, description = "Number of entries to skip"),
+    ),
+    responses(
+        (status = 200, description = "Play history", body = Vec<PlayHistoryEntry>),
+        (status = 500, description = "Internal server error", body = crate::library::ErrorResponse)
+    )
+)]
 pub async fn history_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Vec<PlayHistoryEntry>>, (StatusCode, Json<crate::library::ErrorResponse>)> {
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let offset = query.offset.unwrap_or(0).max(0);
+    let user_id = state.get_user_id(&headers).await;
 
-    let entries = michi_db::get_play_history(&state.db, limit, offset)
+    let entries = michi_db::get_play_history(&state.db, limit, offset, user_id.as_ref())
         .await
         .map_err(|e| {
             (

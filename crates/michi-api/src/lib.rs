@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
+    http::HeaderMap,
     middleware,
     routing::{delete, get, post, put},
     Router,
@@ -14,9 +15,12 @@ use tokio_tungstenite::tungstenite::Message;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
+use utoipa::OpenApi;
+use uuid::Uuid;
 
 mod auth;
 mod library;
+mod openapi;
 mod pwa;
 mod root;
 mod scrobble;
@@ -24,6 +28,8 @@ mod status;
 mod stream;
 mod sync_ws;
 mod ws;
+
+use openapi::ApiDoc;
 
 pub use status::StatusResponse;
 
@@ -36,10 +42,11 @@ pub struct AppState {
     pub sync_tx: broadcast::Sender<michi_sync::SyncMessage>,
     pub auth_sessions: auth::AuthState,
     pub auth_enabled: bool,
+    pub admin_user_id: Option<Uuid>,
 }
 
 impl AppState {
-    pub fn new(config: Config, db: SqlitePool) -> Self {
+    pub fn new(config: Config, db: SqlitePool, admin_user_id: Option<Uuid>) -> Self {
         let (tx, _) = broadcast::channel(64);
         let (sync_tx, _) = broadcast::channel(64);
         let auth_sessions = auth::AuthState::new();
@@ -55,6 +62,53 @@ impl AppState {
             sync_tx,
             auth_sessions,
             auth_enabled,
+            admin_user_id,
+        }
+    }
+
+    pub async fn get_user_id(&self, headers: &HeaderMap) -> Option<Uuid> {
+        if !self.auth_enabled {
+            return None;
+        }
+        let auth_header = headers.get("Authorization")?.to_str().ok()?;
+        let token = auth_header.strip_prefix("Bearer ")?;
+        self.auth_sessions.extract_user_id(token).await
+    }
+}
+
+pub async fn init_admin_user(config: &Config, db: &SqlitePool) -> Option<Uuid> {
+    if !config.auth_enabled {
+        return None;
+    }
+    let username = config.auth_username.as_deref()?;
+    let password = config.auth_password.as_deref()?;
+
+    match michi_db::get_user_by_username(db, username)
+        .await
+        .ok()
+        .flatten()
+    {
+        Some((id, _, _, _)) => Some(id),
+        None => {
+            let id = Uuid::new_v4();
+            match auth::hash_password(password) {
+                Ok(hash) => {
+                    if michi_db::create_user(db, &id, username, &hash, true)
+                        .await
+                        .is_ok()
+                    {
+                        info!("created admin user: {}", username);
+                        Some(id)
+                    } else {
+                        warn!("failed to create admin user");
+                        None
+                    }
+                }
+                Err(e) => {
+                    warn!("failed to hash admin password: {}", e);
+                    None
+                }
+            }
         }
     }
 }
@@ -221,6 +275,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/manifest.json", get(pwa::manifest_json))
         .route("/sw.js", get(pwa::sw_js))
         .merge(auth::auth_router())
+        .merge(
+            utoipa_swagger_ui::SwaggerUi::new("/api/docs")
+                .url("/api-docs/openapi.json", ApiDoc::openapi()),
+        )
         .merge(protected)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())

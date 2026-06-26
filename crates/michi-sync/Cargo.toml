@@ -12,3 +12,4 @@ tokio = { workspace = true, features = ["sync"] }
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+utoipa = { version = "5", features = ["uuid", "chrono"] }
