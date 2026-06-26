@@ -32,6 +32,7 @@ fn test_config() -> Config {
         auth_password: None,
         auth_enabled: false,
         allow_registration: false,
+        server_id: uuid::Uuid::new_v4(),
     }
 }
 
@@ -323,6 +324,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         auth_password: None,
         auth_enabled: false,
         allow_registration: false,
+        server_id: uuid::Uuid::new_v4(),
     };
     let id = track_id_from_path(file_path.to_str().unwrap());
     let track = Track {
@@ -516,6 +518,7 @@ async fn test_stream_file_not_on_disk() {
         auth_password: None,
         auth_enabled: false,
         allow_registration: false,
+        server_id: uuid::Uuid::new_v4(),
     };
 
     let id = track_id_from_path("/nonexistent/path/file.flac");
@@ -1238,6 +1241,7 @@ async fn test_full_pipeline_scan_and_stream() {
         auth_password: None,
         auth_enabled: false,
         allow_registration: false,
+        server_id: uuid::Uuid::new_v4(),
     };
     let state = michi_api::AppState::new(config, pool.clone(), None);
     let test_app = create_router(state);
@@ -1297,4 +1301,155 @@ async fn test_tracks_still_works_without_params() {
     let text = body_text(response).await;
     let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
     assert_eq!(tracks.len(), 3, "no params should return all tracks");
+}
+
+#[tokio::test]
+async fn test_v1_server_info() {
+    let (app, _) = make_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/server/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["name"], "Michi Micro Server");
+    assert_eq!(json["api_version"], "v1");
+    assert!(json["server_id"].is_string());
+    let sid = json["server_id"].as_str().unwrap();
+    assert!(Uuid::parse_str(sid).is_ok(), "server_id must be valid UUID");
+    assert!(json["features"]["library"].as_bool().unwrap_or(false));
+    assert!(json["features"]["streaming"].as_bool().unwrap_or(false));
+}
+
+#[tokio::test]
+async fn test_v1_server_id_persists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sid1 = michi_config::load_or_create_server_id(tmp.path());
+    let sid2 = michi_config::load_or_create_server_id(tmp.path());
+    assert_eq!(sid1, sid2, "server_id must be stable across calls");
+}
+
+#[tokio::test]
+async fn test_v1_server_id_valid_uuid() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sid = michi_config::load_or_create_server_id(tmp.path());
+    assert!(!sid.is_nil(), "server_id must not be nil");
+}
+
+#[tokio::test]
+async fn test_v1_status() {
+    let (app, _) = make_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["status"], "ok");
+}
+
+#[tokio::test]
+async fn test_v1_tracks() {
+    let (app, _) = make_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tracks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_v1_search() {
+    let (app, _) = make_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/search?q=test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_v1_track_not_found_error() {
+    let (app, _) = make_app().await;
+    let fake_id = Uuid::new_v4();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/tracks/{fake_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let text = body_text(response).await;
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        json.get("error").is_some(),
+        "v1 error must have 'error' key"
+    );
+    assert_eq!(json["error"]["code"], "TRACK_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn test_v1_invalid_id_returns_error() {
+    let (app, _) = make_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tracks/not-a-uuid")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_client_error(),
+        "invalid UUID should return client error, got {}",
+        response.status()
+    );
+}
+
+#[tokio::test]
+async fn test_v1_stream_track_not_found() {
+    let (app, _) = make_app().await;
+    let fake_id = Uuid::new_v4();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/stream/{fake_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let text = body_text(response).await;
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        json.get("error").is_some(),
+        "v1 stream error must have 'error' key"
+    );
 }

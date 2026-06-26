@@ -27,6 +27,7 @@ mod scrobble;
 mod status;
 mod stream;
 mod sync_ws;
+mod v1;
 mod ws;
 
 use openapi::ApiDoc;
@@ -64,6 +65,10 @@ impl AppState {
             auth_enabled,
             admin_user_id,
         }
+    }
+
+    pub fn server_id(&self) -> Uuid {
+        self.config.server_id
     }
 
     pub async fn get_user_id(&self, headers: &HeaderMap) -> Option<Uuid> {
@@ -270,6 +275,12 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/stream/:id", get(stream::stream_handler))
         .route("/api/playback/record", post(scrobble::record_play_handler))
         .route("/api/history", get(scrobble::history_handler))
+        .route("/api/v1/status", get(v1::v1_status_handler))
+        .route("/api/v1/tracks", get(v1::v1_tracks_handler))
+        .route("/api/v1/tracks/:id", get(v1::v1_track_handler))
+        .route("/api/v1/search", get(v1::v1_search_handler))
+        .route("/api/v1/stream/:id", get(v1::v1_stream_handler))
+        .route("/api/v1/library/stats", get(v1::v1_stats_handler))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,
@@ -281,6 +292,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/manifest.json", get(pwa::manifest_json))
         .route("/sw.js", get(pwa::sw_js))
         .route("/api/shared/:code", get(library::shared_playlist_handler))
+        .route("/api/v1/server/info", get(v1::server_info_handler))
         .merge(auth::auth_router())
         .merge(
             utoipa_swagger_ui::SwaggerUi::new("/api/docs")

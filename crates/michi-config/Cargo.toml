@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+uuid.workspace = true
 
 [dev-dependencies]
 temp-env = "0.3"

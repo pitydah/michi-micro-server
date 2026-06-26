@@ -1,4 +1,7 @@
+use std::io::Write;
 use std::{env, path::Path, path::PathBuf};
+
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -16,6 +19,7 @@ pub struct Config {
     pub auth_password: Option<String>,
     pub auth_enabled: bool,
     pub allow_registration: bool,
+    pub server_id: Uuid,
 }
 
 impl Config {
@@ -66,6 +70,8 @@ impl Config {
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false);
 
+        let server_id = load_or_create_server_id(&config_path);
+
         Self {
             port,
             music_paths,
@@ -81,6 +87,7 @@ impl Config {
             auth_password,
             auth_enabled,
             allow_registration,
+            server_id,
         }
     }
 
@@ -97,6 +104,25 @@ impl Config {
     pub fn music_path(&self) -> &Path {
         &self.music_paths[0]
     }
+}
+
+pub fn load_or_create_server_id(config_path: &Path) -> Uuid {
+    let file_path = config_path.join("server_id");
+
+    if let Ok(existing) = std::fs::read_to_string(&file_path) {
+        if let Ok(id) = Uuid::parse_str(existing.trim()) {
+            return id;
+        }
+    }
+
+    let id = Uuid::new_v4();
+    if let Some(parent) = file_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::File::create(&file_path) {
+        let _ = f.write_all(id.to_string().as_bytes());
+    }
+    id
 }
 
 #[cfg(test)]

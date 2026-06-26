@@ -173,6 +173,20 @@ docker run -d \
 | GET | `/api/auth/check` | Auth status |
 | GET | `/api/docs` | Swagger UI
 
+## Versioned API (v1)
+
+A stable API contract (`/api/v1`) for native clients. See [docs/MICHI_LINK.md](docs/MICHI_LINK.md).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/server/info` | Server identity (no auth) |
+| GET | `/api/v1/status` | Health check |
+| GET | `/api/v1/library/stats` | Library statistics |
+| GET | `/api/v1/tracks` | List tracks |
+| GET | `/api/v1/tracks/:id` | Get track |
+| GET | `/api/v1/search?q=` | Search |
+| GET | `/api/v1/stream/:id` | Stream audio |
+
 ### Status
 
 ```bash

@@ -1448,6 +1448,7 @@ name = "michi-config"
 version = "0.1.0"
 dependencies = [
  "temp-env",
+ "uuid",
 ]
 
 [[package]]

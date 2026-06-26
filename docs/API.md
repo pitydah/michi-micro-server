@@ -4,6 +4,30 @@
 
 Open `http://<server>:8096/api/docs` for the full Swagger UI with all endpoints.
 
+## Versioned API (v1)
+
+A stable API at `/api/v1` for native clients. See [MICHI_LINK.md](MICHI_LINK.md).
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/v1/server/info` | No | Server identity + features |
+| GET | `/api/v1/status` | Yes* | Health check |
+| GET | `/api/v1/library/stats` | Yes* | Library statistics |
+| GET | `/api/v1/tracks` | Yes* | List tracks |
+| GET | `/api/v1/tracks/:id` | Yes* | Get track |
+| GET | `/api/v1/search?q=` | Yes* | Search |
+| GET | `/api/v1/stream/:id` | Yes* | Stream audio |
+
+V1 error format:
+```json
+{
+  "error": {
+    "code": "TRACK_NOT_FOUND",
+    "message": "Track not found"
+  }
+}
+```
+
 ## Base URL
 
 ```

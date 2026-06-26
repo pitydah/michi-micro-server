@@ -63,6 +63,8 @@
 - [x] End-to-end tests (WebSocket, M3U, streaming)
 - [x] Debian packaging + systemd unit + install script
 - [x] Docker multi-arch build
+- [x] Michi Link (/api/v1) for native client integration
+- [x] Persistent server_id
 - [ ] Docker image published to ghcr.io
 
 ## Phase 9: Future

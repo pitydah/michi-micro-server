@@ -10,15 +10,22 @@ michi-micro-server/
 │   └── michi-server/       # Main binary
 ├── crates/
 │   ├── michi-core/         # Shared models and types
-│   ├── michi-api/          # HTTP routes (Axum)
-│   ├── michi-config/       # Configuration from env vars
-│   ├── michi-db/           # SQLite database layer (SQLx)
+│   ├── michi-api/          # HTTP routes (Axum), auth, v1 API, WebSocket
+│   ├── michi-config/       # Configuration from env vars, server_id
+│   ├── michi-db/           # SQLite database layer + 8 migrations
 │   ├── michi-metadata/     # Audio metadata reading (Lofty)
 │   ├── michi-scanner/      # Music library scanner
-│   ├── michi-streaming/    # Audio streaming with Range Requests
-│   ├── michi-homeassistant/# Home Assistant MQTT (inactive)
-│   ├── michi-sync/         # Sync with Michi players (inactive)
-│   └── michi-multiroom/    # Multiroom audio (inactive)
+│   ├── michi-streaming/    # Audio streaming + FFmpeg transcoding
+│   ├── michi-homeassistant/# Home Assistant MQTT integration
+│   ├── michi-sync/         # Multi-room playback sync
+│   ├── michi-m3u/          # M3U playlist import/export
+│   └── michi-tui/          # Terminal UI client (ratatui)
+├── docs/                   # Documentation + MICHI_LINK.md
+├── deploy/                 # Systemd + Debian packaging
+├── Dockerfile
+├── docker-compose.yml
+├── Makefile
+└── casaos/                 # CasaOS metadata
 ```
 
 ## Design Principles
