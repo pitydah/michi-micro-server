@@ -255,6 +255,12 @@ pub fn create_router(state: AppState) -> Router {
             "/api/playlists/import",
             post(library::import_playlist_handler),
         )
+        .route(
+            "/api/playlists/:id/share",
+            get(library::get_share_handler)
+                .post(library::enable_share_handler)
+                .delete(library::disable_share_handler),
+        )
         .route("/api/ws", get(ws::ws_handler))
         .route("/api/sync", get(sync_ws::sync_handler))
         .route(
@@ -274,6 +280,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/", get(root::root_handler))
         .route("/manifest.json", get(pwa::manifest_json))
         .route("/sw.js", get(pwa::sw_js))
+        .route("/api/shared/:code", get(library::shared_playlist_handler))
         .merge(auth::auth_router())
         .merge(
             utoipa_swagger_ui::SwaggerUi::new("/api/docs")

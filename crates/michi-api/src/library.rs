@@ -1102,3 +1102,223 @@ pub async fn get_playlist_tracks_handler(
         })?;
     Ok(Json(tracks.into_iter().map(|(_, t)| t).collect()))
 }
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ShareInfo {
+    pub share_code: Option<String>,
+    pub is_public: bool,
+    pub share_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SharedPlaylist {
+    pub name: String,
+    pub description: Option<String>,
+    pub tracks: Vec<michi_core::Track>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MessageResponse {
+    pub status: String,
+    pub message: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/playlists/{id}/share",
+    tag = "Playlists",
+    params(
+        ("id" = String, Path, description = "Playlist ID"),
+    ),
+    responses(
+        (status = 200, description = "Share info", body = ShareInfo),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn get_share_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    _headers: HeaderMap,
+) -> Result<Json<ShareInfo>, (StatusCode, Json<ErrorResponse>)> {
+    let playlist = michi_db::get_playlist(&state.db, &id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    status: "error".to_string(),
+                    message: format!("database error: {}", e),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    status: "error".to_string(),
+                    message: "playlist not found".to_string(),
+                }),
+            )
+        })?;
+
+    let share_url = playlist
+        .share_code
+        .as_ref()
+        .map(|c| format!("/api/shared/{c}"));
+
+    Ok(Json(ShareInfo {
+        share_code: playlist.share_code,
+        is_public: playlist.is_public,
+        share_url,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/playlists/{id}/share",
+    tag = "Playlists",
+    params(
+        ("id" = String, Path, description = "Playlist ID"),
+    ),
+    responses(
+        (status = 200, description = "Share enabled", body = ShareInfo),
+        (status = 404, description = "Playlist not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn enable_share_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    _headers: HeaderMap,
+) -> Result<Json<ShareInfo>, (StatusCode, Json<ErrorResponse>)> {
+    let playlist = michi_db::get_playlist(&state.db, &id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    status: "error".to_string(),
+                    message: format!("database error: {}", e),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    status: "error".to_string(),
+                    message: "playlist not found".to_string(),
+                }),
+            )
+        })?;
+
+    let code = uuid::Uuid::new_v4().to_string()[..8].to_string();
+    michi_db::set_share_code(&state.db, &playlist.id, Some(&code))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    status: "error".to_string(),
+                    message: format!("database error: {}", e),
+                }),
+            )
+        })?;
+
+    let share_url = format!("/api/shared/{code}");
+
+    Ok(Json(ShareInfo {
+        share_code: Some(code),
+        is_public: true,
+        share_url: Some(share_url),
+    }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/playlists/{id}/share",
+    tag = "Playlists",
+    params(
+        ("id" = String, Path, description = "Playlist ID"),
+    ),
+    responses(
+        (status = 200, description = "Share disabled", body = MessageResponse),
+        (status = 404, description = "Playlist not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn disable_share_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    _headers: HeaderMap,
+) -> Result<Json<MessageResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let playlist = michi_db::get_playlist(&state.db, &id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    status: "error".to_string(),
+                    message: format!("database error: {}", e),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    status: "error".to_string(),
+                    message: "playlist not found".to_string(),
+                }),
+            )
+        })?;
+
+    michi_db::set_share_code(&state.db, &playlist.id, None)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    status: "error".to_string(),
+                    message: format!("database error: {}", e),
+                }),
+            )
+        })?;
+
+    Ok(Json(MessageResponse {
+        status: "ok".to_string(),
+        message: "sharing disabled".to_string(),
+    }))
+}
+
+pub async fn shared_playlist_handler(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+) -> Result<Json<SharedPlaylist>, (StatusCode, Json<ErrorResponse>)> {
+    let result = michi_db::find_playlist_by_share_code(&state.db, &code)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    status: "error".to_string(),
+                    message: format!("database error: {}", e),
+                }),
+            )
+        })?;
+
+    match result {
+        Some((playlist, tracks)) => Ok(Json(SharedPlaylist {
+            name: playlist.name,
+            description: playlist.description,
+            tracks: tracks.into_iter().map(|(_, t)| t).collect(),
+        })),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                status: "error".to_string(),
+                message: "shared playlist not found or no longer public".to_string(),
+            }),
+        )),
+    }
+}

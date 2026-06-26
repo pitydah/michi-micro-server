@@ -149,9 +149,27 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 7 applied");
     }
 
+    if current < 8 {
+        info!("applying migration 8: playlist sharing");
+        migration_008(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (8, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 8 applied");
+    }
+
     info!(
         "database schema at version {}",
-        current.max(1).max(2).max(3).max(4).max(5).max(6).max(7)
+        current
+            .max(1)
+            .max(2)
+            .max(3)
+            .max(4)
+            .max(5)
+            .max(6)
+            .max(7)
+            .max(8)
     );
     Ok(())
 }
@@ -288,6 +306,18 @@ async fn migration_006(pool: &SqlitePool) -> Result<(), DbError> {
 
 async fn migration_007(pool: &SqlitePool) -> Result<(), DbError> {
     sqlx::query("ALTER TABLE play_history ADD COLUMN user_id BLOB REFERENCES users(id)")
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+async fn migration_008(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query("ALTER TABLE playlists ADD COLUMN share_code TEXT")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("ALTER TABLE playlists ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0")
         .execute(pool)
         .await?;
 
@@ -533,7 +563,7 @@ pub async fn create_playlist(
     let now = Utc::now().to_rfc3339();
     let uid_str = user_id.map(|u| u.to_string());
     sqlx::query(
-        "INSERT INTO playlists (id, name, description, track_count, created_at, updated_at, user_id) VALUES (?, ?, ?, 0, ?, ?, ?)",
+        "INSERT INTO playlists (id, name, description, track_count, created_at, updated_at, user_id, share_code, is_public) VALUES (?, ?, ?, 0, ?, ?, ?, NULL, 0)",
     )
     .bind(id.to_string())
     .bind(&input.name)
@@ -549,6 +579,8 @@ pub async fn create_playlist(
         name: input.name.clone(),
         description: input.description.clone(),
         track_count: 0,
+        share_code: None,
+        is_public: false,
         created_at: now.parse().unwrap_or_else(|_| Utc::now()),
         updated_at: Utc::now(),
     })
@@ -561,14 +593,14 @@ pub async fn list_playlists(
     let rows = if let Some(uid) = user_id {
         let uid_str = uid.to_string();
         sqlx::query(
-            "SELECT id, name, description, track_count, created_at, updated_at FROM playlists WHERE user_id = ? ORDER BY name COLLATE NOCASE ASC",
+            "SELECT id, name, description, track_count, share_code, is_public, created_at, updated_at FROM playlists WHERE user_id = ? ORDER BY name COLLATE NOCASE ASC",
         )
         .bind(&uid_str)
         .fetch_all(pool)
         .await?
     } else {
         sqlx::query(
-            "SELECT id, name, description, track_count, created_at, updated_at FROM playlists ORDER BY name COLLATE NOCASE ASC",
+            "SELECT id, name, description, track_count, share_code, is_public, created_at, updated_at FROM playlists ORDER BY name COLLATE NOCASE ASC",
         )
         .fetch_all(pool)
         .await?
@@ -580,7 +612,7 @@ pub async fn list_playlists(
 pub async fn get_playlist(pool: &SqlitePool, id: &Uuid) -> Result<Option<Playlist>, DbError> {
     let id_str = id.to_string();
     let rows = sqlx::query(
-        "SELECT id, name, description, track_count, created_at, updated_at FROM playlists WHERE id = ?",
+        "SELECT id, name, description, track_count, share_code, is_public, created_at, updated_at FROM playlists WHERE id = ?",
     )
     .bind(&id_str)
     .fetch_all(pool)
@@ -596,6 +628,42 @@ pub async fn delete_playlist(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbErr
         .execute(pool)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+pub async fn set_share_code(
+    pool: &SqlitePool,
+    playlist_id: &Uuid,
+    share_code: Option<&str>,
+) -> Result<(), DbError> {
+    let id_str = playlist_id.to_string();
+    sqlx::query("UPDATE playlists SET share_code = ?, is_public = ? WHERE id = ?")
+        .bind(share_code)
+        .bind(if share_code.is_some() { 1 } else { 0 })
+        .bind(&id_str)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn find_playlist_by_share_code(
+    pool: &SqlitePool,
+    code: &str,
+) -> Result<Option<(Playlist, Vec<(PlaylistTrack, Track)>)>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, name, description, track_count, share_code, is_public, created_at, updated_at FROM playlists WHERE share_code = ? AND is_public = 1",
+    )
+    .bind(code)
+    .fetch_all(pool)
+    .await?;
+
+    match rows.first() {
+        Some(r) => {
+            let playlist = row_to_playlist(r);
+            let tracks = get_playlist_tracks(pool, &playlist.id).await?;
+            Ok(Some((playlist, tracks)))
+        }
+        None => Ok(None),
+    }
 }
 
 pub async fn add_track_to_playlist(
@@ -1031,6 +1099,10 @@ fn row_to_playlist(row: &sqlx::sqlite::SqliteRow) -> Playlist {
         name: row.get("name"),
         description: row.get("description"),
         track_count: row.get("track_count"),
+        share_code: row
+            .get::<Option<&str>, _>("share_code")
+            .map(|s| s.to_string()),
+        is_public: row.get::<i64, _>("is_public") != 0,
         created_at: row
             .get::<&str, _>("created_at")
             .parse()

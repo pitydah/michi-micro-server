@@ -182,6 +182,17 @@ const HTML: &str = r#"<!DOCTYPE html>
         </div>
     </div>
     <div class="toast" id="toast"></div>
+    <div id="share-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:200;align-items:center;justify-content:center">
+        <div style="background:var(--bg2);border-radius:12px;padding:24px;max-width:420px;width:90%">
+            <h3 style="color:var(--green);margin-bottom:12px">Share Playlist</h3>
+            <input id="share-link-input" type="text" readonly style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg);margin-bottom:8px;font-size:.85rem">
+            <div style="display:flex;gap:8px;margin-bottom:8px">
+                <button class="btn btn-sm" onclick="copyShareLink()">Copy Link</button>
+                <button class="btn btn-sm btn-danger" id="disable-share-btn" onclick="disableShare()">Disable</button>
+                <button class="btn btn-sm btn-secondary" onclick="closeShareModal()">Close</button>
+            </div>
+        </div>
+    </div>
     <script>
         let allTracks = [];
         let currentTracks = [];
@@ -661,7 +672,7 @@ const HTML: &str = r#"<!DOCTYPE html>
                 if (currentPlaylists.length === 0) { container.innerHTML = '<div class="empty">No playlists yet.</div>'; return; }
                 let html = '<table><thead><tr><th>Name</th><th>Tr.</th><th></th><th></th><th></th></tr></thead><tbody>';
                 for (const p of currentPlaylists) {
-                    html += '<tr><td class="clickable" onclick="showPlaylistTracks(\'' + p.id + '\', \'' + esc(p.name) + '\')">' + esc(p.name) + '</td><td>' + p.track_count + '</td><td><button class="play-btn" onclick="playPlaylist(\'' + p.id + '\')">Play</button></td><td><button class="btn btn-sm btn-secondary" onclick="exportPlaylist(\'' + p.id + '\', \'' + esc(p.name) + '\')">Export</button></td><td><button class="btn btn-sm btn-danger" onclick="deletePlaylist(\'' + p.id + '\')">Del</button></td></tr>';
+                    html += '<tr><td class="clickable" onclick="showPlaylistTracks(\'' + p.id + '\', \'' + esc(p.name) + '\')">' + esc(p.name) + '</td><td>' + p.track_count + '</td><td><button class="play-btn" onclick="playPlaylist(\'' + p.id + '\')">Play</button></td><td><button class="btn btn-sm btn-secondary" onclick="exportPlaylist(\'' + p.id + '\', \'' + esc(p.name) + '\')">Export</button></td><td><button class="btn btn-sm btn-secondary" style="background:var(--green);color:var(--bg)" onclick="showShareModal(\'' + p.id + '\')">Share</button></td><td><button class="btn btn-sm btn-danger" onclick="deletePlaylist(\'' + p.id + '\')">Del</button></td></tr>';
                 }
                 container.innerHTML = html + '</tbody></table>';
             } catch (e) { document.getElementById('playlists-container').innerHTML = '<div class="error">Failed: ' + esc(e.message) + '</div>'; }
@@ -1227,6 +1238,88 @@ const HTML: &str = r#"<!DOCTYPE html>
             var el = document.getElementById('online-indicator');
             if (el) el.textContent = navigator.onLine ? '\uD83D\uDCF6' : '\uD83D\uDCF4';
         }
+
+        let currentSharePlaylistId = null;
+
+        function showShareModal(playlistId) {
+            currentSharePlaylistId = playlistId;
+            api('/api/playlists/' + playlistId + '/share').then(function(info) {
+                if (info.share_code) {
+                    var url = window.location.origin + info.share_url;
+                    document.getElementById('share-link-input').value = url;
+                    document.getElementById('disable-share-btn').style.display = 'inline-block';
+                } else {
+                    document.getElementById('share-link-input').value = 'Not shared yet. Click Share to generate a link.';
+                    document.getElementById('disable-share-btn').style.display = 'none';
+                }
+                document.getElementById('share-modal').style.display = 'flex';
+            }).catch(function(e) {
+                showToast(e.message, true);
+            });
+        }
+
+        function closeShareModal() {
+            document.getElementById('share-modal').style.display = 'none';
+            currentSharePlaylistId = null;
+        }
+
+        function copyShareLink() {
+            var inp = document.getElementById('share-link-input');
+            inp.select();
+            document.execCommand('copy');
+            showToast('Link copied!');
+        }
+
+        async function disableShare() {
+            if (!currentSharePlaylistId) return;
+            try {
+                await api('/api/playlists/' + currentSharePlaylistId + '/share', { method: 'DELETE' });
+                document.getElementById('share-link-input').value = 'Sharing disabled.';
+                document.getElementById('disable-share-btn').style.display = 'none';
+                await loadPlaylists();
+                showToast('Sharing disabled');
+            } catch (e) {
+                showToast(e.message, true);
+            }
+        }
+
+        // Enable sharing when modal opens and no share exists
+        document.getElementById('share-modal').addEventListener('click', function(e) {
+            if (e.target === this) closeShareModal();
+        });
+
+        async function enableShare() {
+            if (!currentSharePlaylistId) return;
+            try {
+                var info = await api('/api/playlists/' + currentSharePlaylistId + '/share', { method: 'POST' });
+                var url = window.location.origin + info.share_url;
+                document.getElementById('share-link-input').value = url;
+                document.getElementById('disable-share-btn').style.display = 'inline-block';
+                await loadPlaylists();
+                showToast('Sharing enabled!');
+            } catch (e) {
+                showToast(e.message, true);
+            }
+        }
+
+        // Auto-enable share if not shared yet
+        var origShowShareModal = showShareModal;
+        showShareModal = function(id) {
+            api('/api/playlists/' + id + '/share').then(function(info) {
+                if (!info.share_code) {
+                    api('/api/playlists/' + id + '/share', { method: 'POST' }).then(function(newInfo) {
+                        currentSharePlaylistId = id;
+                        var url = window.location.origin + newInfo.share_url;
+                        document.getElementById('share-link-input').value = url;
+                        document.getElementById('disable-share-btn').style.display = 'inline-block';
+                        document.getElementById('share-modal').style.display = 'flex';
+                        loadPlaylists();
+                    }).catch(function(e) { showToast(e.message, true); });
+                } else {
+                    origShowShareModal(id);
+                }
+            }).catch(function(e) { showToast(e.message, true); });
+        };
 
         // Hook audio events to push sync state
         const audioEl = document.getElementById('audio-player');

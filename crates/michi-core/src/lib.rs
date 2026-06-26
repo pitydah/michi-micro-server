@@ -179,6 +179,10 @@ pub struct Playlist {
     pub name: String,
     pub description: Option<String>,
     pub track_count: i64,
+    #[serde(default)]
+    pub share_code: Option<String>,
+    #[serde(default)]
+    pub is_public: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
