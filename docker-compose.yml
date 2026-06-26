@@ -1,7 +1,8 @@
 version: "3.8"
 services:
   michi:
-    image: ghcr.io/YOURNAME/michi-micro-server:latest
+    build: .
+    image: ghcr.io/pitydah/michi-micro-server:latest
     container_name: michi
     ports:
       - "8096:8096"

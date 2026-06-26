@@ -1199,7 +1199,7 @@ async fn test_full_pipeline_scan_and_stream() {
     let music_dir = tmp.path().join("music");
     std::fs::create_dir_all(&music_dir).unwrap();
     let file_path = music_dir.join("test.flac");
-    std::fs::write(&file_path, &[0u8; 50000]).unwrap();
+    std::fs::write(&file_path, [0u8; 50000]).unwrap();
 
     // We seed the track directly then test streaming via tower
     let id = michi_core::track_id_from_path(file_path.to_str().unwrap());

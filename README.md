@@ -24,7 +24,7 @@ Michi Micro Server centralizes your local music library, reads advanced metadata
 | Metadata | Lofty |
 | Serialization | Serde |
 | Logging | Tracing |
-| Audio | Built-in streaming (no FFmpeg) |
+| Audio | Native streaming + optional FFmpeg transcoding |
 | Container | Docker + Compose |
 
 ## Project Structure
@@ -34,19 +34,22 @@ michi-micro-server/
 ├── apps/michi-server/       # Main binary
 ├── crates/
 │   ├── michi-core/          # Shared models
-│   ├── michi-api/           # HTTP routes
-│   ├── michi-config/        # Configuration
-│   ├── michi-db/            # Database layer
-│   ├── michi-metadata/      # Audio tag reading
+│   ├── michi-api/           # HTTP routes, WebSocket, auth
+│   ├── michi-config/        # Configuration from env
+│   ├── michi-db/            # Database layer + migrations
+│   ├── michi-metadata/      # Audio tag reading (Lofty)
 │   ├── michi-scanner/       # Library scanner
-│   ├── michi-streaming/     # Audio streaming with Range Requests
-│   ├── michi-homeassistant/ # HA integration (inactive)
-│   ├── michi-sync/          # Sync (inactive)
-│   └── michi-multiroom/     # Multiroom (inactive)
+│   ├── michi-streaming/     # Audio streaming + FFmpeg transcoding
+│   ├── michi-homeassistant/ # Home Assistant MQTT integration
+│   ├── michi-sync/          # Multi-room playback sync
+│   ├── michi-m3u/           # M3U playlist import/export
+│   └── michi-tui/           # Terminal UI client (ratatui)
 ├── docs/                    # Documentation
+├── deploy/                  # Systemd + Debian packaging
 ├── Dockerfile
 ├── docker-compose.yml
-└── casaos/                  # CasaOS support
+├── Makefile
+└── casaos/                  # CasaOS metadata
 ```
 
 ## Web UI
@@ -55,17 +58,20 @@ Open http://localhost:8096 in your browser for the built-in web interface.
 
 **Features:**
 - Server status, version, port, and library statistics
-- One-click library scan
-- Clear library with confirmation dialog
-- Track listing with title, artist, album, format, duration
-- Search by title, artist, album, album_artist, or format (case-insensitive)
+- One-click library scan with real-time WebSocket progress
+- Tracks, Albums, Artists, Playlists, Queue, History, Offline tabs
+- Search by title, artist, album, album_artist, or format
 - In-browser audio playback with `<audio>` element
-- Now playing info (title, artist, album, format, duration)
-- Auto-advance to next track on completion
-- Stop playback
-- Track counter
-- Responsive layout for mobile
-- No build step or frontend framework required
+- Playlist create/delete/reorder/export/import (M3U) + sharing
+- Drag-and-drop playlist reordering
+- Play history with ListenBrainz scrobbling
+- Dark/light theme toggle
+- Keyboard shortcuts (space, arrows, N/P, +/-)
+- Optional FFmpeg transcoding toggle
+- Offline mode: download tracks to IndexedDB
+- PWA support (install as app, offline caching)
+- Authentication (session-based with admin + optional registration)
+- Responsive layout — no build step or frontend framework required
 
 ## Quick Start
 
@@ -83,17 +89,21 @@ MICHI_MUSIC_PATH=./music \
 MICHI_CONFIG_PATH=./data/config \
 MICHI_CACHE_PATH=./data/cache \
 MICHI_DATABASE=sqlite://./data/config/michi.db \
-cargo run -p michi-server
+cargo run
 
 # Or with default paths (requires /music, /config, /cache):
-cargo run -p michi-server
+cargo run
 ```
 
 ### Running Tests
 
 ```bash
-# Run all tests (79 tests across all crates)
+# Run all tests (119 tests across all crates)
 cargo test
+
+# Code quality
+cargo fmt
+cargo clippy --all-targets
 ```
 
 ### Docker Compose (Recommended)
@@ -123,16 +133,45 @@ docker run -d \
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Web UI (HTML) |
+| GET | `/manifest.json` | PWA manifest |
+| GET | `/sw.js` | Service worker |
 | GET | `/api/status` | Server health check |
 | POST | `/api/library/scan` | Scan music library |
 | GET | `/api/library/stats` | Library statistics |
 | DELETE | `/api/library/tracks` | Delete all tracks |
-| GET | `/api/tracks` | List tracks (supports `?limit=&offset=`) |
-| GET | `/api/tracks/:id` | Get track by UUID |
+| GET | `/api/tracks` | List all tracks |
+| GET | `/api/tracks/:id` | Get track metadata |
 | PUT | `/api/tracks/:id` | Update track metadata |
-| DELETE | `/api/tracks/:id` | Delete track by UUID |
-| GET | `/api/search?q=` | Search tracks |
-| GET | `/api/stream/:id` | Stream audio file |
+| DELETE | `/api/tracks/:id` | Delete track |
+| GET | `/api/search?q=` | Search library |
+| GET | `/api/stream/:id` | Stream audio (`?format=mp3` for transcoding) |
+| GET | `/api/albums` | List albums |
+| GET | `/api/albums/:album` | Album tracks |
+| GET | `/api/artists` | List artists |
+| GET | `/api/artists/:artist` | Artist tracks |
+| GET | `/api/artwork/:id` | Cover art image |
+| GET | `/api/playlists` | List playlists |
+| POST | `/api/playlists` | Create playlist |
+| GET | `/api/playlists/:id` | Get playlist |
+| DELETE | `/api/playlists/:id` | Delete playlist |
+| GET | `/api/playlists/:id/tracks` | Playlist tracks |
+| POST | `/api/playlists/:id/tracks/:tid` | Add track to playlist |
+| DELETE | `/api/playlists/:id/tracks/:tid` | Remove track from playlist |
+| PUT | `/api/playlists/:id/reorder` | Reorder playlist |
+| GET | `/api/playlists/:id/export` | Export M3U |
+| POST | `/api/playlists/import` | Import M3U |
+| GET/POST/DELETE | `/api/playlists/:id/share` | Share/unshare playlist |
+| GET | `/api/shared/:code` | View shared playlist (no auth) |
+| GET/POST | `/api/playback/state` | Get/set playback state |
+| POST | `/api/playback/record` | Record play (scrobble) |
+| GET | `/api/history` | Play history |
+| GET | `/api/ws` | WebSocket (real-time events) |
+| GET | `/api/sync` | WebSocket (multi-room sync) |
+| POST | `/api/auth/login` | Authenticate |
+| POST | `/api/auth/register` | Register (if enabled) |
+| POST | `/api/auth/logout` | Logout |
+| GET | `/api/auth/check` | Auth status |
+| GET | `/api/docs` | Swagger UI
 
 ### Status
 
@@ -181,10 +220,18 @@ curl -v -H "Range: bytes=0-1023" http://localhost:8096/api/stream/<UUID>
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MICHI_PORT` | `8096` | HTTP server port |
-| `MICHI_MUSIC_PATH` | `/music` | Music library path |
+| `MICHI_MUSIC_PATH` | `/music` | Music library path(s), comma-separated |
 | `MICHI_CONFIG_PATH` | `/config` | Configuration path |
 | `MICHI_CACHE_PATH` | `/cache` | Cache path |
 | `MICHI_DATABASE` | `sqlite:///config/michi.db` | SQLite database URL |
+| `MICHI_SYNC_PEERS` | (none) | Comma-separated peer addresses for multi-room sync |
+| `MICHI_SYNC_NAME` | `default` | Room name for multi-room sync |
+| `MICHI_LISTENBRAINZ_TOKEN` | (none) | ListenBrainz API token for scrobbling |
+| `MICHI_SCROBBLE_ENABLED` | `false` | Enable/disable ListenBrainz scrobbling |
+| `MICHI_AUTH_USERNAME` | (none) | Admin username (auth enabled if set) |
+| `MICHI_AUTH_PASSWORD` | (none) | Admin password (auth enabled if set) |
+| `MICHI_ALLOW_REGISTRATION` | `false` | Allow new user registration |
+| `MICHI_MQTT_HOST` | (none) | MQTT broker host (Home Assistant) |
 
 ## CasaOS / ZimaOS
 
@@ -192,11 +239,10 @@ Michi Micro Server is CasaOS/ZimaOS-ready with metadata in `casaos/`. See [docs/
 
 ## Current Limitations
 
-- No authentication (run on trusted local networks or behind Tailscale)
-- No FFmpeg transcoding yet (native format only; browser compatibility varies)
-- No Home Assistant integration (planned for Phase 6)
-- No multiroom/Snapcast support (planned for Phase 8)
-- No mobile sync (planned for Phase 7)
+- No TLS/HTTPS (run behind a reverse proxy for production)
+- HLS/DASH adaptive streaming not implemented
+- Docker image not yet published to ghcr.io
+- Mobile app clients not yet released (Michi Music Player planned)
 
 ## License
 
