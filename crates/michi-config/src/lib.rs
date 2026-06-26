@@ -106,8 +106,16 @@ impl Config {
         self.version
     }
 
+    /// Returns the first music path, if configured.
+    /// This is the safe alternative to `music_path()`.
+    pub fn primary_music_path(&self) -> Option<&Path> {
+        self.music_paths.first().map(|p| p.as_path())
+    }
+
     /// Convenience method returning the first music path.
+    /// Deprecated: use `primary_music_path()` for new code.
     /// Guaranteed to return at least `/music` if none configured.
+    #[deprecated(since = "0.1.0", note = "use primary_music_path() instead")]
     pub fn music_path(&self) -> &Path {
         &self.music_paths[0]
     }
@@ -161,7 +169,7 @@ mod tests {
         temp_env::with_var("MICHI_MUSIC_PATH", None::<&str>, || {
             let config = Config::from_env();
             assert_eq!(config.music_paths, vec![PathBuf::from("/music")]);
-            assert_eq!(config.music_path(), Path::new("/music"));
+            assert_eq!(config.primary_music_path(), Some(Path::new("/music")));
         });
     }
 
@@ -189,6 +197,32 @@ mod tests {
         temp_env::with_var("MICHI_MUSIC_PATH", Some("/music,"), || {
             let config = Config::from_env();
             assert_eq!(config.music_paths, vec![PathBuf::from("/music")]);
+        });
+    }
+
+    #[test]
+    fn test_primary_music_path_default() {
+        temp_env::with_var("MICHI_MUSIC_PATH", None::<&str>, || {
+            let config = Config::from_env();
+            assert_eq!(config.primary_music_path(), Some(Path::new("/music")));
+        });
+    }
+
+    #[test]
+    fn test_primary_music_path_multiple() {
+        temp_env::with_var("MICHI_MUSIC_PATH", Some("/a,/b,/c"), || {
+            let config = Config::from_env();
+            assert_eq!(config.primary_music_path(), Some(Path::new("/a")));
+            assert_eq!(config.music_paths.len(), 3);
+        });
+    }
+
+    #[test]
+    fn test_primary_music_path_empty_env_uses_default() {
+        temp_env::with_var("MICHI_MUSIC_PATH", Some(""), || {
+            let config = Config::from_env();
+            assert_eq!(config.primary_music_path(), Some(Path::new("/music")));
+            assert_eq!(config.music_paths.len(), 1);
         });
     }
 

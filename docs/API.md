@@ -7,6 +7,7 @@ Open `http://<server>:8096/api/docs` for the full Swagger UI with all endpoints.
 ## Versioned API (v1)
 
 A stable API at `/api/v1` for native clients.
+**Michi Music Player must use `/api/v1`, not the legacy `/api` endpoints.**
 See [MICHI_LINK.md](MICHI_LINK.md) for the contract and
 [CLIENT_INTEGRATION_SPEC.md](CLIENT_INTEGRATION_SPEC.md) for client developers.
 

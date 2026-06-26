@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
     info!(
         version = %config.version(),
         port = %config.port(),
-        music_path = %config.music_path().display(),
+        music_path = %config.primary_music_path().map(|p| p.display().to_string()).unwrap_or_else(|| "none".to_string()),
         database = %config.database_url,
         "starting Michi Micro Server",
     );

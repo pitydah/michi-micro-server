@@ -1324,7 +1324,17 @@ async fn test_v1_server_info() {
     let sid = json["server_id"].as_str().unwrap();
     assert!(Uuid::parse_str(sid).is_ok(), "server_id must be valid UUID");
     assert!(json["features"]["library"].as_bool().unwrap_or(false));
+    assert!(json["features"]["search"].as_bool().unwrap_or(false));
     assert!(json["features"]["streaming"].as_bool().unwrap_or(false));
+    assert!(json["features"]["web_ui"].as_bool().unwrap_or(false));
+    assert!(
+        !json["features"]["playlists"].as_bool().unwrap_or(true),
+        "playlists should be false"
+    );
+    assert!(
+        !json["features"]["artwork"].as_bool().unwrap_or(true),
+        "artwork should be false"
+    );
     assert!(
         !json["features"]["sync"].as_bool().unwrap_or(true),
         "sync should be false"
@@ -1332,6 +1342,10 @@ async fn test_v1_server_info() {
     assert!(
         !json["features"]["transcoding"].as_bool().unwrap_or(true),
         "transcoding should be false"
+    );
+    assert!(
+        !json["features"]["websocket"].as_bool().unwrap_or(true),
+        "websocket should be false"
     );
 }
 
