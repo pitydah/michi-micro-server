@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,6 +14,7 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -22,10 +24,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
 
-      - run: cargo fmt --check
-      - run: cargo check --workspace
-      - run: cargo test --workspace
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: docker build .
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo check
+        run: cargo check --workspace
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: docker build
+        run: docker build .

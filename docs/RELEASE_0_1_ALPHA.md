@@ -128,35 +128,36 @@ cargo clippy --workspace --all-targets -- -D warnings
 docker build .
 ```
 
-## Alpha Validation Checklist
+## v0.1.1-alpha Validation Checklist
 
-- [x] CI green on GitHub Actions (`cargo fmt --check`, `cargo check`, `cargo test`, `cargo clippy -D warnings`, `docker build`)
 - [x] `cargo fmt --check` — no diffs
 - [x] `cargo check --workspace` — compiles clean
 - [x] `cargo test --workspace` — 144 tests, 0 failures
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` — 0 warnings
 - [x] `docker build .` — builds successfully
+- [ ] GitHub Actions green (fmt, check, test, clippy, docker build)
+- [ ] Docker HEALTHCHECK present in Dockerfile
 - [ ] `docker compose up -d` — smoke test
 - [ ] `GET /api/status` — returns 200
 - [ ] `GET /api/v1/server/info` — returns features + server_id
-- [ ] `GET /api/v1/stream/:id` — streams with Range support
+- [ ] `GET /api/v1/library/stats` — returns stats
+- [ ] `GET /api/v1/tracks` — returns tracks
+- [ ] `GET /api/v1/search?q=test` — search works
+- [ ] `GET /api/v1/stream/:id` — streams correctly
+- [ ] Range 206 on `/api/v1/stream/:id` — seeking works
+- [ ] Invalid Range → 416 + `RANGE_NOT_SATISFIABLE`
+- [ ] CORS not permissive in production by default
+- [ ] GHCR pending (no published package yet)
 
-## Next Steps
+## Tag Guidance
 
-- Publish Docker image to ghcr.io
-- Start Michi Music Player integration via Michi Link v1
-- Stabilize auth for production use
-- Add playlist/artwork to v1 contract
-
-## Tag v0.1.0-alpha
-
-The existing tag was created before CI verification. Once GitHub Actions
-shows all-green, recreate or replace:
+- `v0.1.0-alpha` exists but was created before CI verification.
+- `v0.1.1-alpha` must be created only after GitHub Actions is green and checklist above is confirmed.
 
 ```bash
-git tag -d v0.1.0-alpha && git push origin :v0.1.0-alpha
-git tag -a v0.1.0-alpha -m "Mich Micro Server v0.1.0-alpha — CI green, 144 tests"
-git push origin v0.1.0-alpha
+git tag -a v0.1.1-alpha -m "Michi Micro Server v0.1.1-alpha — CI green, 144 tests"
+git push origin v0.1.1-alpha
 ```
 
-Alternatively, tag `v0.1.1-alpha` after the first CI-green build.
+- Do not publish GHCR until CI is stable.
+- Docker must be built locally until GHCR package exists.

@@ -1,5 +1,7 @@
 # Michi Micro Server
 
+[![CI](https://github.com/pitydah/michi-micro-server/actions/workflows/ci.yml/badge.svg)](https://github.com/pitydah/michi-micro-server/actions/workflows/ci.yml)
+
 > Lightweight, robust, and efficient home music server written in Rust.
 
 Michi Micro Server centralizes your local music library, reads advanced metadata,
@@ -258,8 +260,10 @@ Michi Micro Server is CasaOS/ZimaOS-ready with metadata in `casaos/`. See [docs/
 
 - No TLS/HTTPS (run behind a reverse proxy for production)
 - HLS/DASH adaptive streaming not implemented
-- Docker image not yet published to ghcr.io
+- Docker image not yet published to ghcr.io (build locally with `docker build .`)
+- Streaming range requests limited to 16MB per chunk
 - Mobile app clients not yet released (Michi Music Player planned)
+- CI must be green before considering releases valid (see badge above)
 
 ## License
 
