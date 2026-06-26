@@ -13,6 +13,7 @@ members = [
     "crates/michi-sync",
     "crates/michi-homeassistant",
     "crates/michi-tui",
+    "crates/michi-client",
 ]
 
 [workspace.package]

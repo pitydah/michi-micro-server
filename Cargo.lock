@@ -1444,6 +1444,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "michi-client"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "michi-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "michi-config"
 version = "0.1.0"
 dependencies = [
