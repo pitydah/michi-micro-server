@@ -29,12 +29,19 @@ impl Config {
             .and_then(|v| v.parse::<u16>().ok())
             .unwrap_or(8096);
 
-        let music_paths = env::var("MICHI_MUSIC_PATH")
-            .unwrap_or_else(|_| "/music".to_string())
-            .split(',')
-            .map(|s| PathBuf::from(s.trim()))
-            .filter(|p| !p.as_os_str().is_empty())
-            .collect();
+        let music_paths = {
+            let paths: Vec<PathBuf> = env::var("MICHI_MUSIC_PATH")
+                .unwrap_or_else(|_| "/music".to_string())
+                .split(',')
+                .map(|s| PathBuf::from(s.trim()))
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect();
+            if paths.is_empty() {
+                vec![PathBuf::from("/music")]
+            } else {
+                paths
+            }
+        };
 
         let config_path = env::var("MICHI_CONFIG_PATH")
             .map(PathBuf::from)
@@ -100,7 +107,7 @@ impl Config {
     }
 
     /// Convenience method returning the first music path.
-    /// Panics if no music paths are configured.
+    /// Guaranteed to return at least `/music` if none configured.
     pub fn music_path(&self) -> &Path {
         &self.music_paths[0]
     }

@@ -39,7 +39,9 @@ michi-micro-server/
 ## Crate Descriptions
 
 ### michi-core
-Contains all shared data types: `Track`, `AudioFormat`, `AudioMetadata`, `LibraryStats`, `TrackUpdate`. These models are designed to be compatible with Michi Music Player and Michi Mobile for future sync capabilities.
+Contains all shared data types: `Track`, `AudioFormat`, `AudioMetadata`,
+`LibraryStats`, `TrackUpdate`. These models are designed to be compatible
+with Michi Music Player for integration via Michi Link.
 
 Key utility functions:
 - `track_id_from_path()` — generates UUID v5 from a normalized full file path (legacy fallback)

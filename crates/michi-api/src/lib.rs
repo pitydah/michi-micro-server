@@ -181,13 +181,13 @@ pub fn start_sync_peers(state: &AppState) {
                                             let mut current = recv_playback.write().await;
                                             *current = new_state;
                                         }
-                                        let _ = recv_tx.send(format!(
-                                            r#"{{"type":"sync_state","track_id":{},"position_ms":{},"playing":{},"volume":{}}}"#,
-                                            track_id.map(|id| format!("\"{}\"", id)).unwrap_or_else(|| "null".into()),
-                                            position_ms,
-                                            playing,
-                                            volume,
-                                        ));
+                                        let tid = track_id
+                                            .map(|id| format!("\"{}\"", id))
+                                            .unwrap_or_else(|| "null".into());
+                                        let payload = format!(
+                                            r#"{{"type":"sync_state","track_id":{tid},"position_ms":{position_ms},"playing":{playing},"volume":{volume}}}"#,
+                                        );
+                                        let _ = recv_tx.send(payload);
                                     }
                                 }
                                 Message::Close(_) => break,

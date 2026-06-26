@@ -6,7 +6,9 @@ Open `http://<server>:8096/api/docs` for the full Swagger UI with all endpoints.
 
 ## Versioned API (v1)
 
-A stable API at `/api/v1` for native clients. See [MICHI_LINK.md](MICHI_LINK.md).
+A stable API at `/api/v1` for native clients.
+See [MICHI_LINK.md](MICHI_LINK.md) for the contract and
+[CLIENT_INTEGRATION_SPEC.md](CLIENT_INTEGRATION_SPEC.md) for client developers.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|

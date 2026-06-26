@@ -2,7 +2,10 @@
 
 > Lightweight, robust, and efficient home music server written in Rust.
 
-Michi Micro Server centralizes your local music library, reads advanced metadata, manages playlists, and serves music over your local network or Tailscale. It is designed to integrate with [Michi Music Player](https://github.com/pitydah/michi-music-player), Michi Mobile, Home Assistant, and CasaOS/ZimaOS.
+Michi Micro Server centralizes your local music library, reads advanced metadata,
+manages playlists, and serves music over your local network or Tailscale.
+It is designed to integrate with [Michi Music Player](https://github.com/pitydah/michi-music-player),
+Michi Mobile, Home Assistant, and CasaOS/ZimaOS.
 
 ## Objectives
 

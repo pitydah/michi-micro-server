@@ -493,7 +493,9 @@ pub async fn mark_scrobbled(pool: &SqlitePool, id: &Uuid) -> Result<(), DbError>
 
 pub async fn list_albums(pool: &SqlitePool) -> Result<Vec<AlbumSummary>, DbError> {
     let rows = sqlx::query(
-        "SELECT album, album_artist, COUNT(*) as track_count FROM tracks WHERE album IS NOT NULL GROUP BY album ORDER BY album COLLATE NOCASE ASC",
+        "SELECT album, album_artist, COUNT(*) as track_count \
+         FROM tracks WHERE album IS NOT NULL \
+         GROUP BY album ORDER BY album COLLATE NOCASE ASC",
     )
     .fetch_all(pool)
     .await?;

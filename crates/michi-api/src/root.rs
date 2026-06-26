@@ -13,9 +13,13 @@ const HTML: &str = r#"<!DOCTYPE html>
     <title>Michi Micro Server</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        :root { --bg: #1a1a2e; --bg2: #16213e; --bg3: #0f3460; --fg: #e0e0e0; --fg2: #888; --accent: #e94560; --green: #4ecca3; --border: #0f3460; --hover: #1a2744; }
-        .light { --bg: #f5f5f5; --bg2: #ffffff; --bg3: #e0e0e0; --fg: #222; --fg2: #777; --accent: #c0392b; --green: #27ae60; --border: #ddd; --hover: #f0f0f0; }
-        body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--fg); padding: 20px; transition: background .3s, color .3s; }
+        :root { --bg: #1a1a2e; --bg2: #16213e; --bg3: #0f3460; --fg: #e0e0e0; --fg2: #888;
+                --accent: #e94560; --green: #4ecca3; --border: #0f3460; --hover: #1a2744; }
+        .light { --bg: #f5f5f5; --bg2: #ffffff; --bg3: #e0e0e0; --fg: #222; --fg2: #777;
+                 --accent: #c0392b; --green: #27ae60; --border: #ddd; --hover: #f0f0f0; }
+        body { font-family: system-ui, -apple-system, sans-serif;
+               background: var(--bg); color: var(--fg); padding: 20px;
+               transition: background .3s, color .3s; }
         .login-container { max-width: 360px; margin: 80px auto; background: var(--bg2); border-radius: 12px; padding: 32px; text-align: center; }
         .login-container h1 { color: var(--accent); margin-bottom: 24px; }
         .login-container input { width: 100%; padding: 12px 16px; margin-bottom: 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: .95rem; }

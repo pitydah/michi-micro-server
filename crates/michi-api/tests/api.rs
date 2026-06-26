@@ -1325,8 +1325,14 @@ async fn test_v1_server_info() {
     assert!(Uuid::parse_str(sid).is_ok(), "server_id must be valid UUID");
     assert!(json["features"]["library"].as_bool().unwrap_or(false));
     assert!(json["features"]["streaming"].as_bool().unwrap_or(false));
-    assert!(!json["features"]["sync"].as_bool().unwrap_or(true), "sync should be false");
-    assert!(!json["features"]["transcoding"].as_bool().unwrap_or(true), "transcoding should be false");
+    assert!(
+        !json["features"]["sync"].as_bool().unwrap_or(true),
+        "sync should be false"
+    );
+    assert!(
+        !json["features"]["transcoding"].as_bool().unwrap_or(true),
+        "transcoding should be false"
+    );
 }
 
 #[tokio::test]
@@ -1454,4 +1460,123 @@ async fn test_v1_stream_track_not_found() {
         json.get("error").is_some(),
         "v1 stream error must have 'error' key"
     );
+}
+
+#[tokio::test]
+async fn test_v1_tracks_with_seeded_data() {
+    let (app, pool) = make_app().await;
+    let id1 = seed_track(&pool, "/music/a.flac", "Alpha Song").await;
+    let id2 = seed_track(&pool, "/music/b.flac", "Beta Song").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tracks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(tracks.len(), 2);
+    let ids: Vec<&str> = tracks.iter().map(|t| t["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&id1.to_string().as_str()));
+    assert!(ids.contains(&id2.to_string().as_str()));
+}
+
+#[tokio::test]
+async fn test_v1_track_by_id_with_seeded_data() {
+    let (app, pool) = make_app().await;
+    let id = seed_track(&pool, "/music/x.flac", "X Song").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/tracks/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    let track: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(track["title"], "X Song");
+    assert_eq!(track["artist"], "Test Artist");
+}
+
+#[tokio::test]
+async fn test_v1_search_with_seeded_data() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/abba.flac", "Dancing Queen").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/search?q=dancing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0]["title"], "Dancing Queen");
+}
+
+#[tokio::test]
+async fn test_v1_library_stats_with_seeded_data() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/a.flac", "A").await;
+    seed_track(&pool, "/music/b.flac", "B").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/library/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    let stats: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(stats["tracks"], 2);
+}
+
+#[tokio::test]
+async fn test_v1_endpoints_old_still_work() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/r.flac", "R").await;
+
+    let old_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tracks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(old_response.status(), StatusCode::OK);
+
+    let stat_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stat_response.status(), StatusCode::OK);
 }

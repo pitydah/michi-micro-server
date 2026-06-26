@@ -6,7 +6,14 @@ pub async fn sw_js() -> impl axum::response::IntoResponse {
     ([("content-type", "application/javascript")], SW_JS)
 }
 
-const MANIFEST_JSON: &str = r##"{"name":"Michi Micro Server","short_name":"Michi","start_url":"/","display":"standalone","background_color":"#1a1a2e","theme_color":"#e94560"}"##;
+const MANIFEST_JSON: &str = r##"{
+  "name": "Michi Micro Server",
+  "short_name": "Michi",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#e94560"
+}"##;
 
 const SW_JS: &str = r#"const C='michi-v1';
 self.addEventListener('install',function(e){e.waitUntil(caches.open(C).then(function(c){return c.addAll(['/'])}))});

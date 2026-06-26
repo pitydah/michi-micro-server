@@ -80,13 +80,13 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                     *current = new_state;
                                 }
                                 // Notify local UI clients
-                                let _ = state_clone.tx.send(format!(
-                                    r#"{{"type":"sync_state","track_id":{},"position_ms":{},"playing":{},"volume":{}}}"#,
-                                    track_id.map(|id| format!("\"{}\"", id)).unwrap_or_else(|| "null".into()),
-                                    position_ms,
-                                    playing,
-                                    volume,
-                                ));
+                                let tid = track_id
+                                    .map(|id| format!("\"{}\"", id))
+                                    .unwrap_or_else(|| "null".into());
+                                let payload = format!(
+                                    r#"{{"type":"sync_state","track_id":{tid},"position_ms":{position_ms},"playing":{playing},"volume":{volume}}}"#,
+                                );
+                                let _ = state_clone.tx.send(payload);
                             }
                             michi_sync::SyncMessage::Identify { name, .. } => {
                                 info!("sync: peer identified as '{}'", name);
