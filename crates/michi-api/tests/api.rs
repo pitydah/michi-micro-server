@@ -12,7 +12,6 @@ use sqlx::SqlitePool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-
 async fn test_db() -> SqlitePool {
     michi_db::init_pool("sqlite::memory:").await.unwrap()
 }

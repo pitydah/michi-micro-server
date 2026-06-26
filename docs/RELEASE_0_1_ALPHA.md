@@ -128,9 +128,35 @@ cargo clippy --workspace --all-targets -- -D warnings
 docker build .
 ```
 
+## Alpha Validation Checklist
+
+- [x] CI green on GitHub Actions (`cargo fmt --check`, `cargo check`, `cargo test`, `cargo clippy -D warnings`, `docker build`)
+- [x] `cargo fmt --check` — no diffs
+- [x] `cargo check --workspace` — compiles clean
+- [x] `cargo test --workspace` — 144 tests, 0 failures
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` — 0 warnings
+- [x] `docker build .` — builds successfully
+- [ ] `docker compose up -d` — smoke test
+- [ ] `GET /api/status` — returns 200
+- [ ] `GET /api/v1/server/info` — returns features + server_id
+- [ ] `GET /api/v1/stream/:id` — streams with Range support
+
 ## Next Steps
 
 - Publish Docker image to ghcr.io
 - Start Michi Music Player integration via Michi Link v1
 - Stabilize auth for production use
 - Add playlist/artwork to v1 contract
+
+## Tag v0.1.0-alpha
+
+The existing tag was created before CI verification. Once GitHub Actions
+shows all-green, recreate or replace:
+
+```bash
+git tag -d v0.1.0-alpha && git push origin :v0.1.0-alpha
+git tag -a v0.1.0-alpha -m "Mich Micro Server v0.1.0-alpha — CI green, 144 tests"
+git push origin v0.1.0-alpha
+```
+
+Alternatively, tag `v0.1.1-alpha` after the first CI-green build.
