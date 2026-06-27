@@ -91,7 +91,13 @@ async fn publish_discovery(client: &AsyncClient) {
             "{}/{}/michi_{}/config",
             DISCOVERY_PREFIX, entity.domain, entity.object_id
         );
-        let payload = serde_json::to_string(&entity.config).unwrap();
+        let payload = match serde_json::to_string(&entity.config) {
+            Ok(p) => p,
+            Err(e) => {
+                error!("failed to serialize entity config: {e}");
+                continue;
+            }
+        };
         match client
             .publish(&topic, QoS::AtLeastOnce, true, payload)
             .await
@@ -312,5 +318,33 @@ pub async fn run(config: Config, playback_state: Arc<RwLock<PlaybackState>>, db:
 
         warn!("MQTT connection lost, reconnecting in 5 seconds...");
         tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_entities_count() {
+        let ents = entities();
+        assert_eq!(ents.len(), 7, "expected 4 sensors + 3 buttons");
+    }
+
+    #[test]
+    fn test_discovery_prefix() {
+        assert_eq!(DISCOVERY_PREFIX, "homeassistant");
+    }
+
+    #[test]
+    fn test_entities_config_serializable() {
+        for entity in entities() {
+            let payload = serde_json::to_string(&entity.config);
+            assert!(
+                payload.is_ok(),
+                "entity {} config should serialize",
+                entity.object_id
+            );
+        }
     }
 }

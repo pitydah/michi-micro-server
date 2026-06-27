@@ -306,3 +306,93 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::ApiClient;
+
+    fn test_app() -> App {
+        let client = ApiClient::new("http://localhost:8096".into(), None);
+        App {
+            api: client,
+            screen: Screen::Tracks,
+            tracks: vec![],
+            albums: vec![],
+            artists: vec![],
+            current_tracks: vec![],
+            search_query: String::new(),
+            selected: 0,
+            offset: 0,
+            status: "test".into(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn test_items_len_empty() {
+        let app = test_app();
+        assert_eq!(app.items_len(), 0);
+    }
+
+    #[test]
+    fn test_items_len_tracks() {
+        let mut app = test_app();
+        app.current_tracks = vec![michi_core::Track {
+            id: uuid::Uuid::new_v4(),
+            title: Some("A".into()),
+            artist: None,
+            album: None,
+            album_artist: None,
+            duration_ms: None,
+            file_path: "/a.flac".into(),
+            format: michi_core::AudioFormat::Flac,
+            sample_rate: None,
+            bit_depth: None,
+            channels: None,
+            artwork_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+        assert_eq!(app.items_len(), 1);
+    }
+
+    #[test]
+    fn test_ensure_visible_scrolls() {
+        let mut app = test_app();
+        app.current_tracks = vec![
+            michi_core::Track {
+                id: uuid::Uuid::new_v4(),
+                title: Some("X".into()),
+                artist: None,
+                album: None,
+                album_artist: None,
+                duration_ms: None,
+                file_path: "/x.flac".into(),
+                format: michi_core::AudioFormat::Flac,
+                sample_rate: None,
+                bit_depth: None,
+                channels: None,
+                artwork_id: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            30
+        ];
+        app.selected = 25;
+        app.ensure_visible();
+        assert!(
+            app.offset > 0,
+            "offset should scroll when selection is beyond visible area"
+        );
+    }
+
+    #[test]
+    fn test_app_initial_state() {
+        let app = test_app();
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.offset, 0);
+        assert!(app.search_query.is_empty());
+        assert!(app.error.is_none());
+    }
+}
