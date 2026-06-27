@@ -291,6 +291,19 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/search", get(v1::v1_search_handler))
         .route("/api/v1/stream/:id", get(v1::v1_stream_handler))
         .route("/api/v1/library/stats", get(v1::v1_stats_handler))
+        .route(
+            "/api/v1/playlists",
+            get(v1::v1_playlists_handler).post(v1::v1_create_playlist_handler),
+        )
+        .route(
+            "/api/v1/playlists/:id",
+            get(v1::v1_get_playlist_handler).delete(v1::v1_delete_playlist_handler),
+        )
+        .route(
+            "/api/v1/playlists/:id/tracks",
+            get(v1::v1_get_playlist_tracks_handler),
+        )
+        .route("/api/v1/artwork/:id", get(v1::v1_artwork_handler))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,

@@ -20,6 +20,12 @@ See [MICHI_LINK.md](MICHI_LINK.md) for the contract and
 | GET | `/api/v1/tracks/:id` | Yes* | Get track |
 | GET | `/api/v1/search?q=` | Yes* | Search |
 | GET | `/api/v1/stream/:id` | Yes* | Stream audio |
+| GET | `/api/v1/playlists` | Yes* | List playlists |
+| POST | `/api/v1/playlists` | Yes* | Create playlist |
+| GET | `/api/v1/playlists/:id` | Yes* | Get playlist |
+| DELETE | `/api/v1/playlists/:id` | Yes* | Delete playlist |
+| GET | `/api/v1/playlists/:id/tracks` | Yes* | Playlist tracks |
+| GET | `/api/v1/artwork/:id` | Yes* | Cover art |
 
 V1 error format:
 ```json

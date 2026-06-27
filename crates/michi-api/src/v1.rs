@@ -67,8 +67,8 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<ServerIn
             search: true,
             streaming: true,
             web_ui: true,
-            playlists: false,
-            artwork: false,
+            playlists: true,
+            artwork: true,
             sync: false,
             transcoding: false,
             websocket: false,
@@ -140,4 +140,74 @@ pub async fn v1_stats_handler(
     library::stats_handler(State(state))
         .await
         .map_err(|(status, err)| v1_map_err(status, &err.message, "INTERNAL_ERROR"))
+}
+
+pub async fn v1_playlists_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Vec<michi_core::Playlist>>, (StatusCode, Json<V1Error>)> {
+    library::playlists_handler(State(state), headers)
+        .await
+        .map_err(|(status, err)| v1_map_err(status, &err.message, "INTERNAL_ERROR"))
+}
+
+pub async fn v1_create_playlist_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(input): Json<michi_core::PlaylistCreate>,
+) -> Result<Json<michi_core::Playlist>, (StatusCode, Json<V1Error>)> {
+    library::create_playlist_handler(State(state), headers, Json(input))
+        .await
+        .map_err(|(status, err)| v1_map_err(status, &err.message, "INTERNAL_ERROR"))
+}
+
+pub async fn v1_get_playlist_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<michi_core::Playlist>, (StatusCode, Json<V1Error>)> {
+    library::get_playlist_handler(State(state), Path(id))
+        .await
+        .map_err(|(status, err)| {
+            let code = if status == StatusCode::NOT_FOUND {
+                "NOT_FOUND"
+            } else {
+                "INTERNAL_ERROR"
+            };
+            v1_map_err(status, &err.message, code)
+        })
+}
+
+pub async fn v1_delete_playlist_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<library::DeleteResponse>, (StatusCode, Json<V1Error>)> {
+    library::delete_playlist_handler(State(state), Path(id))
+        .await
+        .map_err(|(status, err)| v1_map_err(status, &err.message, "INTERNAL_ERROR"))
+}
+
+pub async fn v1_get_playlist_tracks_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<michi_core::Track>>, (StatusCode, Json<V1Error>)> {
+    library::get_playlist_tracks_handler(State(state), Path(id))
+        .await
+        .map_err(|(status, err)| v1_map_err(status, &err.message, "INTERNAL_ERROR"))
+}
+
+pub async fn v1_artwork_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<axum::response::Response, (StatusCode, Json<V1Error>)> {
+    match library::artwork_handler(State(state), Path(id)).await {
+        Ok(resp) => Ok(resp),
+        Err((status, err)) => {
+            let code = if status == StatusCode::NOT_FOUND {
+                "NOT_FOUND"
+            } else {
+                "INTERNAL_ERROR"
+            };
+            Err(v1_map_err(status, &err.message, code))
+        }
+    }
 }

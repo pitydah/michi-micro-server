@@ -1336,12 +1336,12 @@ async fn test_v1_server_info() {
     assert!(json["features"]["streaming"].as_bool().unwrap_or(false));
     assert!(json["features"]["web_ui"].as_bool().unwrap_or(false));
     assert!(
-        !json["features"]["playlists"].as_bool().unwrap_or(true),
-        "playlists should be false"
+        json["features"]["playlists"].as_bool().unwrap_or(false),
+        "playlists should be true"
     );
     assert!(
-        !json["features"]["artwork"].as_bool().unwrap_or(true),
-        "artwork should be false"
+        json["features"]["artwork"].as_bool().unwrap_or(false),
+        "artwork should be true"
     );
     assert!(
         !json["features"]["sync"].as_bool().unwrap_or(true),

@@ -91,8 +91,6 @@ enum ConnectionStatus {
 - Must use `/api/v1` endpoints only for native integration.
 - Must NOT depend on legacy `/api/...` endpoints.
 - Must NOT assume transcoding is available (feature flag is `false`).
-- Must NOT assume playlists are available (feature flag is `false`).
-- Must NOT assume artwork is available (feature flag is `false`).
 - Must NOT assume sync is available (feature flag is `false`).
 - Must NOT assume websocket is available (feature flag is `false`).
 - Must NOT block UI during network calls — all async.
@@ -119,8 +117,8 @@ GET /api/v1/server/info
     "search": true,
     "streaming": true,
     "web_ui": true,
-    "playlists": false,
-    "artwork": false,
+    "playlists": true,
+    "artwork": true,
     "sync": false,
     "transcoding": false,
     "websocket": false

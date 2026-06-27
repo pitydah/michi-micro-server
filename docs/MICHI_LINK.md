@@ -40,8 +40,8 @@ GET /api/v1/server/info
     "search": true,
     "streaming": true,
     "web_ui": true,
-    "playlists": false,
-    "artwork": false,
+    "playlists": true,
+    "artwork": true,
     "sync": false,
     "transcoding": false,
     "websocket": false
@@ -57,8 +57,8 @@ GET /api/v1/server/info
 | `search` | true | SQL LIKE case-insensitive — tested, stable |
 | `streaming` | true | Range requests (206), MIME detection — tested, stable |
 | `web_ui` | true | Vanilla HTML/CSS/JS, no build step — stable |
-| `playlists` | false | Functional but experimental. Will become true in v1.1 when specified and tested. |
-| `artwork` | false | Functional but experimental. Will become true when specified. |
+| `playlists` | true | CRUD, reorder, share, M3U — stable in v1.1 |
+| `artwork` | true | Cover art serving from disk cache — stable in v1.1 |
 | `sync` | false | Experimental multi-room sync. Not part of v1 contract. |
 | `transcoding` | false | Optional, requires external ffmpeg. Not guaranteed. |
 | `websocket` | false | Functional but experimental. Will become true when v1 WS spec exists. |
