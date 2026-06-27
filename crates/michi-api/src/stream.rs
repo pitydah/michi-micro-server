@@ -2,17 +2,18 @@ use axum::{
     body::Body,
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
     Json,
 };
 use serde::Deserialize;
+use std::io;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::{library::ErrorResponse, AppState};
 use michi_streaming::{
-    check_ffmpeg, open_track_file_async, parse_range, read_range_from_file_async, transcode_stream,
-    StreamError, TranscodeFormat,
+    check_ffmpeg, open_track_file_async, parse_range, transcode_stream, StreamError,
+    TranscodeFormat,
 };
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +52,33 @@ async fn track_from_db(
             )
         })?
         .ok_or_else(|| err_response(StatusCode::NOT_FOUND, &format!("track not found: {}", id)))
+}
+
+pub async fn stream_range_async(
+    mut file: tokio::fs::File,
+    range: &michi_streaming::ByteRange,
+    mime: &str,
+) -> Result<Response, StreamError> {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncSeekExt;
+
+    file.seek(std::io::SeekFrom::Start(range.start)).await?;
+
+    let taken = file.take(range.content_length());
+    let stream = ReaderStream::new(taken);
+    let body = Body::from_stream(stream);
+
+    let content_range = range.content_range_header();
+    let content_length = range.content_length().to_string();
+
+    Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::CONTENT_RANGE, &content_range)
+        .header(header::CONTENT_LENGTH, &content_length)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .body(body)
+        .map_err(|e| StreamError::Io(io::Error::other(e.to_string())))
 }
 
 #[utoipa::path(
@@ -127,7 +155,7 @@ pub async fn stream_handler(
         return Ok(resp);
     }
 
-    let (_canonical, mut file) = open_track_file_async(music_paths, &track)
+    let (_, file) = open_track_file_async(music_paths, &track)
         .await
         .map_err(|e| match e {
             StreamError::FileNotFound(msg) => err_response(StatusCode::NOT_FOUND, &msg),
@@ -156,25 +184,10 @@ pub async fn stream_handler(
 
         match parse_range(range_str, file_size) {
             Ok(range) => {
-                let data = read_range_from_file_async(&mut file, &range)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("error reading range: {}", e);
-                        err_response(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
-                    })?;
-
-                let content_range = range.content_range_header();
-                let resp = (
-                    StatusCode::PARTIAL_CONTENT,
-                    [
-                        (header::CONTENT_TYPE, mime),
-                        (header::CONTENT_RANGE, content_range.as_str()),
-                        (header::CONTENT_LENGTH, &data.len().to_string()),
-                        (header::ACCEPT_RANGES, "bytes"),
-                    ],
-                    data,
-                )
-                    .into_response();
+                let resp = stream_range_async(file, &range, mime).await.map_err(|e| {
+                    tracing::error!("error streaming range: {}", e);
+                    err_response(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+                })?;
                 Ok(resp)
             }
             Err(StreamError::InvalidRange(msg)) => Err(err_response(
