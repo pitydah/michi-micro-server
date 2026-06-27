@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use michi_core::{AlbumSummary, ArtistSummary, LibraryStats, Track};
+use michi_core::{AlbumSummary, ArtistSummary, LibraryStats, Playlist, PlaylistCreate, Track};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -292,6 +292,68 @@ impl MichiClient {
 
     pub fn timeout_secs(&self) -> u64 {
         self.timeout.as_secs()
+    }
+
+    pub async fn get_playlists(&self) -> Result<Vec<Playlist>, ClientError> {
+        let url = self.url("/api/v1/playlists");
+        let resp = self
+            .inner
+            .get(&url)
+            .header("Authorization", self.auth_header().unwrap_or_default())
+            .send()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+        let status = resp.status().as_u16();
+        if status != 200 {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(self.v1_error(status, &text));
+        }
+        resp.json()
+            .await
+            .map_err(|e| ClientError::InvalidResponse(e.to_string()))
+    }
+
+    pub async fn create_playlist(&self, input: PlaylistCreate) -> Result<Playlist, ClientError> {
+        let url = self.url("/api/v1/playlists");
+        let resp = self
+            .inner
+            .post(&url)
+            .header("Authorization", self.auth_header().unwrap_or_default())
+            .json(&input)
+            .send()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+        let status = resp.status().as_u16();
+        if status != 200 {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(self.v1_error(status, &text));
+        }
+        resp.json()
+            .await
+            .map_err(|e| ClientError::InvalidResponse(e.to_string()))
+    }
+
+    pub async fn get_playlist_tracks(&self, playlist_id: Uuid) -> Result<Vec<Track>, ClientError> {
+        let url = self.url(&format!("/api/v1/playlists/{playlist_id}/tracks"));
+        let resp = self
+            .inner
+            .get(&url)
+            .header("Authorization", self.auth_header().unwrap_or_default())
+            .send()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+        let status = resp.status().as_u16();
+        if status != 200 {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(self.v1_error(status, &text));
+        }
+        resp.json()
+            .await
+            .map_err(|e| ClientError::InvalidResponse(e.to_string()))
+    }
+
+    pub fn artwork_url(&self, artwork_id: Uuid) -> String {
+        self.url(&format!("/api/v1/artwork/{artwork_id}"))
     }
 
     pub async fn get_status(&self) -> Result<serde_json::Value, ClientError> {
