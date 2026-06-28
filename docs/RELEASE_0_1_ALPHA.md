@@ -170,6 +170,7 @@ Released with:
 - WebSocket in v1 contract (/api/v1/ws)
 - GHCR publish workflow (multi-arch amd64+arm64)
 - Python MichiServerClient reference client
+- Python Michi Music Player CLI player
 - michi-client crate for Rust clients
 - michi-tui refactored to use michi-client
 - 27 test suites, 0 clippy warnings
