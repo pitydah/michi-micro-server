@@ -149,6 +149,10 @@ pub struct Track {
     pub bit_depth: Option<u8>,
     pub channels: Option<u8>,
     pub artwork_id: Option<Uuid>,
+    pub genre: Option<String>,
+    pub year: Option<i32>,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

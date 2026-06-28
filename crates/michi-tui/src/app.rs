@@ -351,6 +351,10 @@ mod tests {
             bit_depth: None,
             channels: None,
             artwork_id: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            disc_number: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }];
@@ -374,6 +378,10 @@ mod tests {
                 bit_depth: None,
                 channels: None,
                 artwork_id: None,
+                genre: None,
+                year: None,
+                track_number: None,
+                disc_number: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
