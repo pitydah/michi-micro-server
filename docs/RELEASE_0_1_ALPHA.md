@@ -161,3 +161,17 @@ git push origin v0.1.1-alpha
 
 - Do not publish GHCR until CI is stable.
 - Docker must be built locally until GHCR package exists.
+
+## v0.2.0-beta (2026-06-27)
+
+Released with:
+- Streaming por chunks (ReaderStream + take, no Vec<u8> buffer)
+- Playlists and artwork in v1 contract (features=true)
+- WebSocket in v1 contract (/api/v1/ws)
+- GHCR publish workflow (multi-arch amd64+arm64)
+- Python MichiServerClient reference client
+- michi-client crate for Rust clients
+- michi-tui refactored to use michi-client
+- 27 test suites, 0 clippy warnings
+
+Tag: `v0.2.0-beta`
