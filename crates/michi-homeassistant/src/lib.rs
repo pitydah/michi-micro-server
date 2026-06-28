@@ -64,6 +64,25 @@ fn entities() -> Vec<HaEntity> {
             ),
         },
         HaEntity {
+            domain: "sensor",
+            object_id: "volume",
+            config: build_sensor_config("volume", "Michi Volume", "mdi:volume-high"),
+        },
+        HaEntity {
+            domain: "sensor",
+            object_id: "track_duration",
+            config: build_sensor_config(
+                "track_duration",
+                "Michi Track Duration",
+                "mdi:timer-outline",
+            ),
+        },
+        HaEntity {
+            domain: "sensor",
+            object_id: "server_status",
+            config: build_sensor_config("server_status", "Michi Server Status", "mdi:server"),
+        },
+        HaEntity {
             domain: "button",
             object_id: "play_pause",
             config: build_button_config("play_pause", "Michi Play/Pause", "mdi:play-pause"),
@@ -81,6 +100,20 @@ fn entities() -> Vec<HaEntity> {
                 "Michi Previous Track",
                 "mdi:skip-previous",
             ),
+        },
+        HaEntity {
+            domain: "number",
+            object_id: "volume_set",
+            config: json!({
+                "name": "Michi Volume Set",
+                "unique_id": "michi_volume_set",
+                "command_topic": "michi/volume_set/cmd",
+                "state_topic": "michi/volume_set/state",
+                "icon": "mdi:volume-high",
+                "min": 0,
+                "max": 100,
+                "step": 5,
+            }),
         },
     ]
 }
@@ -132,12 +165,17 @@ async fn publish_states(
     };
 
     let status = if state.playing { "playing" } else { "paused" };
+    let volume_pct = (state.volume * 100.0) as u32;
 
     let states = [
         ("track_title", title),
         ("artist", artist),
         ("album", album),
         ("playback_status", status.to_string()),
+        ("volume", volume_pct.to_string()),
+        ("track_duration", state.position_ms.to_string()),
+        ("server_status", "online".to_string()),
+        ("volume_set", volume_pct.to_string()),
     ];
 
     for (object_id, value) in &states {
@@ -328,7 +366,7 @@ mod tests {
     #[test]
     fn test_entities_count() {
         let ents = entities();
-        assert_eq!(ents.len(), 7, "expected 4 sensors + 3 buttons");
+        assert_eq!(ents.len(), 11, "expected 7 sensors + 3 buttons + 1 number");
     }
 
     #[test]

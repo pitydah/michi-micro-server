@@ -32,6 +32,7 @@ mod status;
 mod stream;
 mod sync_api;
 mod sync_ws;
+mod transcode;
 mod v1;
 mod ws;
 
@@ -50,6 +51,7 @@ pub struct AppState {
     pub auth_enabled: bool,
     pub admin_user_id: Option<Uuid>,
     pub started_at: Instant,
+    pub transcode_profiles: Arc<RwLock<Vec<crate::transcode::TranscodeProfile>>>,
 }
 
 impl AppState {
@@ -71,6 +73,7 @@ impl AppState {
             auth_enabled,
             admin_user_id,
             started_at: Instant::now(),
+            transcode_profiles: Arc::new(RwLock::new(crate::transcode::default_profiles())),
         }
     }
 
@@ -335,6 +338,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(sync_api::sync_router())
         .merge(rooms::rooms_router())
         .merge(players::players_router())
+        .merge(transcode::transcode_router())
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer(&state))
         .with_state(state)
