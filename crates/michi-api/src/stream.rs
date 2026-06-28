@@ -118,7 +118,7 @@ pub async fn stream_handler(
         let tf = format_str.parse::<TranscodeFormat>().map_err(|_| {
             err_response(
                 StatusCode::BAD_REQUEST,
-                &format!("invalid format: '{format_str}'. Supported: mp3, ogg"),
+                &format!("invalid format: '{format_str}'. Supported: mp3, ogg, hls"),
             )
         })?;
 
@@ -135,6 +135,51 @@ pub async fn stream_handler(
                     err_response(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
                 }
             })?;
+
+        if tf == TranscodeFormat::Hls {
+            let cache_path = &state.config.cache_path;
+            let track_id = id.to_string();
+            // Generate HLS segments if not already cached
+            let playlist_path =
+                michi_streaming::hls_output_dir(cache_path, &track_id).join("playlist.m3u8");
+            if !tokio::fs::try_exists(&playlist_path).await.unwrap_or(false) {
+                michi_streaming::generate_hls_playlist(&canonical, cache_path, &track_id)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("HLS generation failed: {e}");
+                        err_response(StatusCode::INTERNAL_SERVER_ERROR, "HLS generation failed")
+                    })?;
+            }
+            let playlist = michi_streaming::read_hls_playlist(cache_path, &track_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!("HLS playlist read failed: {e}");
+                    err_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "HLS playlist read failed",
+                    )
+                })?;
+            // Replace relative segment paths with absolute URLs
+            let prefix = format!("/api/hls/{track_id}/");
+            let playlist = playlist
+                .lines()
+                .map(|line| {
+                    if line.ends_with(".ts") {
+                        format!("{prefix}{line}")
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Response::builder()
+                .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+                .body(Body::from(playlist))
+                .map_err(|e| {
+                    tracing::error!("failed to build HLS response: {e}");
+                    err_response(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+                });
+        }
 
         let stream = transcode_stream(&canonical, &tf).await.map_err(|e| {
             tracing::error!("transcoding failed: {e}");
@@ -215,4 +260,43 @@ pub async fn stream_handler(
 
         Ok(resp)
     }
+}
+
+pub async fn hls_segment_handler(
+    State(state): State<AppState>,
+    Path((id, segment)): Path<(String, String)>,
+) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
+    use crate::library::ErrorResponse;
+    fn err(status: StatusCode, msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+        (
+            status,
+            Json(ErrorResponse {
+                status: "error".to_string(),
+                message: msg.to_string(),
+            }),
+        )
+    }
+
+    let segment_path = michi_streaming::hls_segment_path(&state.config.cache_path, &id, &segment);
+    if !segment_path.exists() {
+        return Err(err(StatusCode::NOT_FOUND, "HLS segment not found"));
+    }
+
+    let data = tokio::fs::read(&segment_path).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("failed to read segment: {e}"),
+        )
+    })?;
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "video/MP2T")
+        .header(header::CONTENT_LENGTH, data.len().to_string())
+        .body(Body::from(data))
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("response error: {e}"),
+            )
+        })
 }

@@ -212,6 +212,21 @@ pub async fn v1_artwork_handler(
     }
 }
 
+pub async fn v1_hls_segment_handler(
+    State(state): State<AppState>,
+    Path((id, segment)): Path<(String, String)>,
+) -> Result<axum::response::Response, (StatusCode, Json<V1Error>)> {
+    crate::stream::hls_segment_handler(State(state), Path((id, segment)))
+        .await
+        .map_err(|(status, err)| {
+            let code = match status {
+                StatusCode::NOT_FOUND => "NOT_FOUND",
+                _ => "INTERNAL_ERROR",
+            };
+            v1_map_err(status, &err.message, code)
+        })
+}
+
 pub async fn v1_ws_handler(
     ws: axum::extract::ws::WebSocketUpgrade,
     State(state): State<AppState>,

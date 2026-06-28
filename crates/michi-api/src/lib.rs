@@ -304,6 +304,8 @@ pub fn create_router(state: AppState) -> Router {
             get(v1::v1_get_playlist_tracks_handler),
         )
         .route("/api/v1/artwork/:id", get(v1::v1_artwork_handler))
+        .route("/api/v1/hls/:id/:segment", get(v1::v1_hls_segment_handler))
+        .route("/api/hls/:id/:segment", get(stream::hls_segment_handler))
         .route("/api/v1/ws", get(v1::v1_ws_handler))
         .layer(middleware::from_fn_with_state(
             state.clone(),

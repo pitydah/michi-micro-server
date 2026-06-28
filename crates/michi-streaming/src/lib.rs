@@ -204,6 +204,7 @@ pub async fn read_range_from_file_async(
 pub enum TranscodeFormat {
     Mp3,
     Ogg,
+    Hls,
 }
 
 impl TranscodeFormat {
@@ -211,6 +212,7 @@ impl TranscodeFormat {
         match self {
             Self::Mp3 => "audio/mpeg",
             Self::Ogg => "audio/ogg",
+            Self::Hls => "application/vnd.apple.mpegurl",
         }
     }
 
@@ -218,6 +220,7 @@ impl TranscodeFormat {
         match self {
             Self::Mp3 => "mp3",
             Self::Ogg => "ogg",
+            Self::Hls => "hls",
         }
     }
 
@@ -225,6 +228,7 @@ impl TranscodeFormat {
         match self {
             Self::Mp3 => "mp3",
             Self::Ogg => "ogg",
+            Self::Hls => "m3u8",
         }
     }
 }
@@ -235,6 +239,7 @@ impl FromStr for TranscodeFormat {
         match s.to_lowercase().as_str() {
             "mp3" => Ok(Self::Mp3),
             "ogg" => Ok(Self::Ogg),
+            "hls" => Ok(Self::Hls),
             _ => Err(()),
         }
     }
@@ -277,6 +282,67 @@ pub async fn transcode_stream(
         .ok_or_else(|| StreamError::Io(io::Error::other("failed to capture ffmpeg stdout")))?;
 
     Ok(ReaderStream::new(stdout).map(|r| r.map(|b| b.to_vec())))
+}
+
+pub const HLS_SEGMENT_DURATION: u64 = 10;
+
+pub fn hls_output_dir(cache_path: &Path, track_id: &str) -> PathBuf {
+    cache_path.join("hls").join(track_id)
+}
+
+pub async fn generate_hls_playlist(
+    file_path: &Path,
+    cache_path: &Path,
+    track_id: &str,
+) -> Result<(), StreamError> {
+    use tokio::process::Command;
+
+    let out_dir = hls_output_dir(cache_path, track_id);
+    let _ = tokio::fs::create_dir_all(&out_dir).await;
+
+    let playlist_path = out_dir.join("playlist.m3u8");
+
+    let status = Command::new("ffmpeg")
+        .arg("-i")
+        .arg(file_path)
+        .arg("-c")
+        .arg("copy")
+        .arg("-f")
+        .arg("hls")
+        .arg("-hls_time")
+        .arg(HLS_SEGMENT_DURATION.to_string())
+        .arg("-hls_list_size")
+        .arg("0")
+        .arg("-hls_segment_filename")
+        .arg(out_dir.join("seg_%05d.ts").to_str().unwrap())
+        .arg(&playlist_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(StreamError::Io)?
+        .wait()
+        .await
+        .map_err(StreamError::Io)?;
+
+    if !status.success() {
+        return Err(StreamError::Io(io::Error::other(
+            "ffmpeg hls segmentation failed",
+        )));
+    }
+
+    Ok(())
+}
+
+pub async fn read_hls_playlist(cache_path: &Path, track_id: &str) -> Result<String, StreamError> {
+    let path = hls_output_dir(cache_path, track_id).join("playlist.m3u8");
+    tokio::fs::read_to_string(&path).await.map_err(|_| {
+        StreamError::FileNotFound(format!("HLS playlist not found: {}", path.display()))
+    })
+}
+
+pub fn hls_segment_path(cache_path: &Path, track_id: &str, segment: &str) -> PathBuf {
+    // segment can be "seg_00001.ts" or a full filename
+    hls_output_dir(cache_path, track_id).join(segment)
 }
 
 #[cfg(test)]
@@ -456,6 +522,10 @@ mod tests {
         assert_eq!(
             "OGG".parse::<TranscodeFormat>().unwrap(),
             TranscodeFormat::Ogg
+        );
+        assert_eq!(
+            "hls".parse::<TranscodeFormat>().unwrap(),
+            TranscodeFormat::Hls
         );
         assert!("flac".parse::<TranscodeFormat>().is_err());
     }

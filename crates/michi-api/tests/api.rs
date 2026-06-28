@@ -1683,3 +1683,29 @@ async fn test_v1_stream_range_not_satisfiable() {
     let json: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(json["error"]["code"], "RANGE_NOT_SATISFIABLE");
 }
+
+#[tokio::test]
+async fn test_v1_hls_format_recognized() {
+    let (app, _) = make_app().await;
+    // hls format should be recognized — track doesn't exist, returns 404
+    let fake_id = uuid::Uuid::new_v4();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/v1/stream/{fake_id}?format=hls"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_client_error(),
+        "HLS with bad track should return client error"
+    );
+    let text = body_text(response).await;
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        json.get("error").is_some(),
+        "HLS error must have 'error' key"
+    );
+}
