@@ -25,6 +25,7 @@ mod openapi;
 mod pwa;
 mod root;
 mod scrobble;
+mod static_files;
 mod status;
 mod stream;
 mod sync_ws;
@@ -315,6 +316,9 @@ pub fn create_router(state: AppState) -> Router {
 
     Router::new()
         .route("/", get(root::root_handler))
+        .route("/static/styles.css", get(static_files::styles_css))
+        .route("/static/app.js", get(static_files::app_js))
+        .route("/static/assets/michi-logo.svg", get(static_files::logo_svg))
         .route("/manifest.json", get(pwa::manifest_json))
         .route("/sw.js", get(pwa::sw_js))
         .route("/api/shared/:code", get(library::shared_playlist_handler))

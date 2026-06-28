@@ -1692,7 +1692,7 @@ async fn test_v1_hls_format_recognized() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/v1/stream/{fake_id}?format=hls"))
+                .uri(format!("/api/v1/stream/{fake_id}?format=hls"))
                 .body(Body::empty())
                 .unwrap(),
         )
