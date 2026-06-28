@@ -28,6 +28,7 @@ mod scrobble;
 mod static_files;
 mod status;
 mod stream;
+mod sync_api;
 mod sync_ws;
 mod v1;
 mod ws;
@@ -329,6 +330,7 @@ pub fn create_router(state: AppState) -> Router {
                 .url("/api-docs/openapi.json", ApiDoc::openapi()),
         )
         .merge(protected)
+        .merge(sync_api::sync_router())
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer(&state))
         .with_state(state)

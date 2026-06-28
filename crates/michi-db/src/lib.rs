@@ -162,6 +162,46 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 8 applied");
     }
 
+    if current < 9 {
+        info!("applying migration 9: sync devices");
+        migration_009(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (9, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 9 applied");
+    }
+
+    if current < 10 {
+        info!("applying migration 10: sync pairing tokens");
+        migration_010(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (10, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 10 applied");
+    }
+
+    if current < 11 {
+        info!("applying migration 11: sync jobs");
+        migration_011(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (11, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 11 applied");
+    }
+
+    if current < 12 {
+        info!("applying migration 12: sync job items");
+        migration_012(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (12, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 12 applied");
+    }
+
     info!(
         "database schema at version {}",
         current
@@ -173,6 +213,10 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
             .max(6)
             .max(7)
             .max(8)
+            .max(9)
+            .max(10)
+            .max(11)
+            .max(12)
     );
     Ok(())
 }
@@ -324,6 +368,70 @@ async fn migration_008(pool: &SqlitePool) -> Result<(), DbError> {
         .execute(pool)
         .await?;
 
+    Ok(())
+}
+
+async fn migration_009(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sync_devices (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            device_type TEXT NOT NULL DEFAULT 'desktop',
+            fingerprint TEXT,
+            last_seen TEXT,
+            paired_at TEXT NOT NULL,
+            revoked INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn migration_010(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sync_pairing_tokens (
+            id TEXT PRIMARY KEY,
+            code TEXT NOT NULL UNIQUE,
+            device_name TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn migration_011(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sync_jobs (
+            id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL REFERENCES sync_devices(id),
+            status TEXT NOT NULL DEFAULT 'pending',
+            total_items INTEGER NOT NULL DEFAULT 0,
+            completed_items INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn migration_012(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sync_job_items (
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES sync_jobs(id) ON DELETE CASCADE,
+            track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'pending',
+            error TEXT
+        )",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1037,6 +1145,197 @@ pub async fn find_tracks_by_paths(
     }
     let rows = query.fetch_all(pool).await?;
     Ok(rows.iter().map(row_to_track).collect())
+}
+
+pub async fn create_sync_device(
+    pool: &SqlitePool,
+    id: &Uuid,
+    name: &str,
+    device_type: &str,
+    fingerprint: Option<&str>,
+) -> Result<(), DbError> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO sync_devices (id, name, device_type, fingerprint, paired_at) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(id.to_string())
+    .bind(name)
+    .bind(device_type)
+    .bind(fingerprint)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_sync_devices(
+    pool: &SqlitePool,
+) -> Result<Vec<(String, String, String, bool, Option<String>)>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, name, device_type, revoked, last_seen FROM sync_devices ORDER BY revoked ASC, name ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let revoked: bool = r.get::<i64, _>("revoked") != 0;
+            (
+                r.get("id"),
+                r.get("name"),
+                r.get("device_type"),
+                revoked,
+                r.get("last_seen"),
+            )
+        })
+        .collect())
+}
+
+pub async fn revoke_sync_device(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbError> {
+    let result = sqlx::query("UPDATE sync_devices SET revoked = 1 WHERE id = ?")
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn create_pairing_token(
+    pool: &SqlitePool,
+    id: &Uuid,
+    code: &str,
+    device_name: &str,
+    expires_at: &str,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO sync_pairing_tokens (id, code, device_name, expires_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(id.to_string())
+    .bind(code)
+    .bind(device_name)
+    .bind(expires_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn consume_pairing_token(
+    pool: &SqlitePool,
+    code: &str,
+) -> Result<Option<(Uuid, String)>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, device_name, expires_at FROM sync_pairing_tokens WHERE code = ? AND used = 0",
+    )
+    .bind(code)
+    .fetch_all(pool)
+    .await?;
+    if let Some(r) = rows.first() {
+        let expires_at: &str = r.get("expires_at");
+        if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(expires_at) {
+            if exp < Utc::now() {
+                return Ok(None);
+            }
+        }
+        let token_id: &str = r.get("id");
+        sqlx::query("UPDATE sync_pairing_tokens SET used = 1 WHERE id = ?")
+            .bind(token_id)
+            .execute(pool)
+            .await?;
+        Ok(Some((
+            Uuid::parse_str(r.get::<&str, _>("id")).unwrap_or(Uuid::nil()),
+            r.get::<&str, _>("device_name").to_string(),
+        )))
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn create_sync_job(
+    pool: &SqlitePool,
+    id: &Uuid,
+    device_id: &Uuid,
+) -> Result<(), DbError> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO sync_jobs (id, device_id, status, created_at, updated_at) VALUES (?, ?, 'pending', ?, ?)",
+    )
+    .bind(id.to_string())
+    .bind(device_id.to_string())
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn add_sync_job_item(
+    pool: &SqlitePool,
+    id: &Uuid,
+    job_id: &Uuid,
+    track_id: &Uuid,
+) -> Result<(), DbError> {
+    sqlx::query("INSERT INTO sync_job_items (id, job_id, track_id) VALUES (?, ?, ?)")
+        .bind(id.to_string())
+        .bind(job_id.to_string())
+        .bind(track_id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_sync_job(
+    pool: &SqlitePool,
+    job_id: &Uuid,
+) -> Result<Option<(String, i64, i64)>, DbError> {
+    let rows =
+        sqlx::query("SELECT status, total_items, completed_items FROM sync_jobs WHERE id = ?")
+            .bind(job_id.to_string())
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.first().map(|r| {
+        (
+            r.get("status"),
+            r.get("total_items"),
+            r.get("completed_items"),
+        )
+    }))
+}
+
+pub async fn get_all_tracks_manifest(
+    pool: &SqlitePool,
+) -> Result<
+    Vec<(
+        Uuid,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        String,
+    )>,
+    DbError,
+> {
+    let rows = sqlx::query(
+        "SELECT id, file_path, title, artist, album, duration_ms, artwork_id FROM tracks ORDER BY file_path ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let id = Uuid::parse_str(r.get::<&str, _>("id")).unwrap_or(Uuid::nil());
+            (
+                id,
+                r.get::<&str, _>("file_path").to_string(),
+                r.get("title"),
+                r.get("artist"),
+                r.get("album"),
+                r.get::<Option<i64>, _>("duration_ms"),
+                r.get::<Option<&str>, _>("artwork_id")
+                    .map(|s| s.to_string())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect())
 }
 
 pub async fn update_track(
