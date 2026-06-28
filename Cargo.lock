@@ -1429,6 +1429,7 @@ dependencies = [
  "michi-db",
  "michi-m3u",
  "michi-metadata",
+ "michi-opensubsonic",
  "michi-scanner",
  "michi-streaming",
  "michi-sync",
@@ -1535,6 +1536,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "michi-opensubsonic"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "michi-config",
+ "michi-core",
+ "michi-db",
+ "michi-streaming",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "michi-scanner"
 version = "0.1.0"
 dependencies = [
@@ -1556,6 +1575,7 @@ dependencies = [
  "michi-config",
  "michi-db",
  "michi-homeassistant",
+ "michi-opensubsonic",
  "tokio",
  "tracing",
  "tracing-subscriber",

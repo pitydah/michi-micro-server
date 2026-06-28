@@ -30,6 +30,14 @@ async fn main() -> Result<()> {
     let state = michi_api::AppState::new(config.clone(), pool, admin_user_id);
     let app = michi_api::create_router(state.clone());
 
+    // Mount OpenSubsonic compatible layer
+    let os_router = michi_opensubsonic::routes::router(michi_opensubsonic::routes::OsAppState {
+        db: state.db.clone(),
+        music_paths: config.music_paths.clone(),
+        cache_path: config.cache_path.clone(),
+    });
+    let app = app.merge(os_router);
+
     // Start sync peer connections in background
     michi_api::start_sync_peers(&state);
 

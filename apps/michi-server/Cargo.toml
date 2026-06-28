@@ -9,6 +9,7 @@ michi-api = { path = "../../crates/michi-api" }
 michi-config = { path = "../../crates/michi-config" }
 michi-db = { path = "../../crates/michi-db" }
 michi-homeassistant = { path = "../../crates/michi-homeassistant" }
+michi-opensubsonic = { path = "../../crates/michi-opensubsonic" }
 
 tokio.workspace = true
 axum.workspace = true
