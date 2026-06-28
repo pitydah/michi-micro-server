@@ -66,7 +66,9 @@
 - [x] Michi Link v1 contract stabilized (+ docs/CLIENT_INTEGRATION_SPEC.md)
 - [x] Persistent server_id
 - [x] conservative feature flags for stable v1 integration
-- [ ] Docker image published to ghcr.io
+- [x] Michi Music Player Python client (CLI + desktop PySide6 skeleton)
+- [x] GHCR publish CI (multi-arch amd64+arm64)
+- [ ] Docker image published to ghcr.io (CI configurado, verificar publicación)
 
 ## Phase 9: Future
 - [ ] Mobile client (Michi Music Player)

@@ -1,6 +1,6 @@
 services:
   michi-micro-server:
-    image: pitydah/michi-micro-server:latest
+    image: ghcr.io/pitydah/michi-micro-server:latest
     container_name: michi-micro-server
     ports:
       - "8096:8096"
