@@ -71,7 +71,7 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<ServerIn
             artwork: true,
             sync: false,
             transcoding: false,
-            websocket: false,
+            websocket: true,
         },
     })
 }
@@ -210,4 +210,11 @@ pub async fn v1_artwork_handler(
             Err(v1_map_err(status, &err.message, code))
         }
     }
+}
+
+pub async fn v1_ws_handler(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl axum::response::IntoResponse {
+    crate::ws::ws_handler(ws, State(state)).await
 }

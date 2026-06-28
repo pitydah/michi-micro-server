@@ -1352,8 +1352,8 @@ async fn test_v1_server_info() {
         "transcoding should be false"
     );
     assert!(
-        !json["features"]["websocket"].as_bool().unwrap_or(true),
-        "websocket should be false"
+        json["features"]["websocket"].as_bool().unwrap_or(false),
+        "websocket should be true"
     );
 }
 

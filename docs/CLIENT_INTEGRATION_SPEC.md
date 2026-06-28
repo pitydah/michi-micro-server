@@ -92,7 +92,6 @@ enum ConnectionStatus {
 - Must NOT depend on legacy `/api/...` endpoints.
 - Must NOT assume transcoding is available (feature flag is `false`).
 - Must NOT assume sync is available (feature flag is `false`).
-- Must NOT assume websocket is available (feature flag is `false`).
 - Must NOT block UI during network calls — all async.
 - Must use timeout on every request.
 - Must handle v1 error format.
@@ -121,7 +120,7 @@ GET /api/v1/server/info
     "artwork": true,
     "sync": false,
     "transcoding": false,
-    "websocket": false
+    "websocket": true
   }
 }
 ```

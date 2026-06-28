@@ -44,7 +44,7 @@ GET /api/v1/server/info
     "artwork": true,
     "sync": false,
     "transcoding": false,
-    "websocket": false
+    "websocket": true
   }
 }
 ```
@@ -61,7 +61,7 @@ GET /api/v1/server/info
 | `artwork` | true | Cover art serving from disk cache — stable in v1.1 |
 | `sync` | false | Experimental multi-room sync. Not part of v1 contract. |
 | `transcoding` | false | Optional, requires external ffmpeg. Not guaranteed. |
-| `websocket` | false | Functional but experimental. Will become true when v1 WS spec exists. |
+| `websocket` | true | Real-time events — stable in v1.1 |
 
 ## server_id
 

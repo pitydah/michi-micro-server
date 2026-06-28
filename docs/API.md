@@ -26,6 +26,7 @@ See [MICHI_LINK.md](MICHI_LINK.md) for the contract and
 | DELETE | `/api/v1/playlists/:id` | Yes* | Delete playlist |
 | GET | `/api/v1/playlists/:id/tracks` | Yes* | Playlist tracks |
 | GET | `/api/v1/artwork/:id` | Yes* | Cover art |
+| GET | `/api/v1/ws` | Yes* | Real-time events |
 
 V1 error format:
 ```json
