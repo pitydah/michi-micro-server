@@ -15,6 +15,7 @@ members = [
     "crates/michi-tui",
     "crates/michi-client",
     "crates/michi-opensubsonic",
+    "crates/michi-rooms",
 ]
 
 [workspace.package]

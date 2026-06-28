@@ -202,6 +202,26 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 12 applied");
     }
 
+    if current < 13 {
+        info!("applying migration 13: players");
+        migration_013(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (13, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 13 applied");
+    }
+
+    if current < 14 {
+        info!("applying migration 14: queues");
+        migration_014(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (14, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 14 applied");
+    }
+
     info!(
         "database schema at version {}",
         current
@@ -217,6 +237,8 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
             .max(10)
             .max(11)
             .max(12)
+            .max(13)
+            .max(14)
     );
     Ok(())
 }
@@ -432,6 +454,59 @@ async fn migration_012(pool: &SqlitePool) -> Result<(), DbError> {
     )
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn migration_013(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS players (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'webui',
+            state TEXT NOT NULL DEFAULT 'idle',
+            volume INTEGER NOT NULL DEFAULT 80,
+            muted INTEGER NOT NULL DEFAULT 0,
+            current_track_id TEXT REFERENCES tracks(id),
+            position_ms INTEGER NOT NULL DEFAULT 0,
+            last_seen TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn migration_014(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS queues (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            player_id TEXT REFERENCES players(id),
+            current_index INTEGER NOT NULL DEFAULT 0,
+            repeat_mode TEXT NOT NULL DEFAULT 'none',
+            shuffle INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS queue_items (
+            id TEXT PRIMARY KEY,
+            queue_id TEXT NOT NULL REFERENCES queues(id) ON DELETE CASCADE,
+            track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL,
+            added_by TEXT,
+            added_at TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
 

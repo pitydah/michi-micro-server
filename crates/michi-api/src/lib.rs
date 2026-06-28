@@ -22,7 +22,9 @@ use uuid::Uuid;
 mod auth;
 mod library;
 mod openapi;
+mod players;
 mod pwa;
+mod rooms;
 mod root;
 mod scrobble;
 mod static_files;
@@ -331,6 +333,8 @@ pub fn create_router(state: AppState) -> Router {
         )
         .merge(protected)
         .merge(sync_api::sync_router())
+        .merge(rooms::rooms_router())
+        .merge(players::players_router())
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer(&state))
         .with_state(state)
