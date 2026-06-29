@@ -21,35 +21,27 @@ async fn handle_events_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.tx.subscribe();
 
-    let init_event = json!({
+    let init = json!({
         "type": "server.status",
         "data": {
             "service": "michi-micro-server",
             "version": state.config.version(),
             "server_id": state.server_id(),
-            "uptime_seconds": state.started_at.elapsed().as_secs(),
         }
     });
-    let _ = sender.send(Message::Text(init_event.to_string())).await;
+    let _ = sender.send(Message::Text(init.to_string())).await;
 
     let send_task = tokio::spawn(async move {
         let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             tokio::select! {
                 msg = rx.recv() => {
-                    match msg {
-                        Ok(msg) => {
-                            if sender.send(Message::Text(msg)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => continue,
+                    if let Ok(msg) = msg {
+                        if sender.send(Message::Text(msg)).await.is_err() { break; }
                     }
                 }
                 _ = keepalive.tick() => {
-                    if sender.send(Message::Ping(vec![])).await.is_err() {
-                        break;
-                    }
+                    if sender.send(Message::Ping(vec![])).await.is_err() { break; }
                 }
             }
         }
@@ -63,6 +55,5 @@ async fn handle_events_socket(socket: WebSocket, state: AppState) {
         _ = send_task => {}
         _ = recv_task => {}
     }
-
     info!("events websocket disconnected");
 }

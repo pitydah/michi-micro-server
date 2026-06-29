@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Permission {
@@ -45,6 +46,33 @@ pub enum Permission {
     RoomWrite,
 }
 
+impl fmt::Display for Permission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ServerRead => write!(f, "server.read"),
+            Self::LibraryRead => write!(f, "library.read"),
+            Self::LibraryWrite => write!(f, "library.write"),
+            Self::StreamRead => write!(f, "stream.read"),
+            Self::DownloadRead => write!(f, "download.read"),
+            Self::ArtworkRead => write!(f, "artwork.read"),
+            Self::PlaylistRead => write!(f, "playlist.read"),
+            Self::PlaylistWrite => write!(f, "playlist.write"),
+            Self::SyncReadManifest => write!(f, "sync.read_manifest"),
+            Self::SyncUploadState => write!(f, "sync.upload_state"),
+            Self::PlaybackRead => write!(f, "playback.read"),
+            Self::PlaybackControl => write!(f, "playback.control"),
+            Self::QueueRead => write!(f, "queue.read"),
+            Self::QueueWrite => write!(f, "queue.write"),
+            Self::ReceiverRead => write!(f, "receiver.read"),
+            Self::ReceiverControl => write!(f, "receiver.control"),
+            Self::ReceiverSession => write!(f, "receiver.session"),
+            Self::ReceiverVolume => write!(f, "receiver.volume"),
+            Self::RoomRead => write!(f, "room.read"),
+            Self::RoomWrite => write!(f, "room.write"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevicePermissions {
     pub permissions: HashSet<Permission>,
@@ -57,6 +85,12 @@ impl DevicePermissions {
 
     pub fn has_all(&self, perms: &[Permission]) -> bool {
         perms.iter().all(|p| self.permissions.contains(p))
+    }
+
+    pub fn to_canonical_strings(&self) -> Vec<String> {
+        let mut result: Vec<String> = self.permissions.iter().map(|p| p.to_string()).collect();
+        result.sort();
+        result
     }
 
     pub fn player() -> Self {

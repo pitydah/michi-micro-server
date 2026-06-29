@@ -1,42 +1,56 @@
+use sha2::{Sha256, Digest};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::device_registry::hash_token;
 use crate::errors::LinkError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenType {
+    Device,
+    Refresh,
+}
 
 #[derive(Debug, Clone)]
 pub struct TokenStore {
-    tokens: Arc<RwLock<HashMap<String, TokenEntry>>>,
+    by_hash: Arc<RwLock<HashMap<String, TokenEntry>>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TokenEntry {
     pub device_id: uuid::Uuid,
-    pub token_hash: String,
+    pub token_type: TokenType,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub fn hash_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 impl TokenStore {
     pub fn new() -> Self {
         Self {
-            tokens: Arc::new(RwLock::new(HashMap::new())),
+            by_hash: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    pub async fn store(&self, device_token: &str, device_id: uuid::Uuid) {
-        let hash = hash_token(device_token);
+    pub async fn store(&self, token: &str, token_type: TokenType, device_id: uuid::Uuid) {
+        let hash = hash_token(token);
         let entry = TokenEntry {
             device_id,
-            token_hash: hash,
+            token_type,
             expires_at: chrono::Utc::now() + chrono::Duration::days(90),
         };
-        self.tokens.write().await.insert(device_token.to_string(), entry);
+        self.by_hash.write().await.insert(hash, entry);
     }
 
-    pub async fn validate(&self, token: &str) -> Result<uuid::Uuid, LinkError> {
-        let tokens = self.tokens.read().await;
-        match tokens.get(token) {
+    pub async fn validate(&self, token: &str, expected_type: TokenType) -> Result<uuid::Uuid, LinkError> {
+        let hash = hash_token(token);
+        let store = self.by_hash.read().await;
+        match store.get(&hash) {
+            Some(entry) if entry.token_type != expected_type => Err(LinkError::InvalidToken),
             Some(entry) if entry.expires_at > chrono::Utc::now() => Ok(entry.device_id),
             Some(_) => Err(LinkError::TokenExpired),
             None => Err(LinkError::InvalidToken),
@@ -44,12 +58,13 @@ impl TokenStore {
     }
 
     pub async fn revoke(&self, token: &str) {
-        self.tokens.write().await.remove(token);
+        let hash = hash_token(token);
+        self.by_hash.write().await.remove(&hash);
     }
 
     pub async fn cleanup(&self) {
-        let mut tokens = self.tokens.write().await;
-        tokens.retain(|_, entry| entry.expires_at > chrono::Utc::now());
+        let mut store = self.by_hash.write().await;
+        store.retain(|_, entry| entry.expires_at > chrono::Utc::now());
     }
 }
 

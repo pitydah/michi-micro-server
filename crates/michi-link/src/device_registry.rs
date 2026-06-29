@@ -96,10 +96,3 @@ pub fn generate_pairing_code() -> String {
 pub fn generate_device_token() -> String {
     Uuid::new_v4().to_string()
 }
-
-pub fn hash_token(token: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    token.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
-}

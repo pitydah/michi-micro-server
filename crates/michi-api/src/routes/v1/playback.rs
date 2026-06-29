@@ -8,16 +8,36 @@ use uuid::Uuid;
 
 use crate::AppState;
 
+fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (status, Json(serde_json::json!({
+        "error": { "code": code, "message": message, "details": {} }
+    })))
+}
+
+fn state_string(playing: bool) -> &'static str {
+    if playing { "playing" } else { "paused" }
+}
+
 pub async fn playback_state_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let current = state.playback_state.read().await;
+
+    let current_track = current.track_id.and_then(|_tid| {
+        // Try to fetch track info to include duration
+        None::<serde_json::Value>
+    });
+
     Ok(Json(serde_json::json!({
+        "state": state_string(current.playing),
         "track_id": current.track_id,
+        "current_track": current_track,
         "position_ms": current.position_ms,
-        "playing": current.playing,
+        "duration_ms": null,
         "volume": (current.volume * 100.0) as u32,
-        "updated_at": current.updated_at,
+        "shuffle": false,
+        "repeat": "none",
+        "playing": current.playing,
     })))
 }
 
@@ -26,6 +46,8 @@ pub struct PlaybackControlBody {
     pub command: Option<String>,
     pub action: Option<String>,
     pub value: Option<serde_json::Value>,
+    pub position_ms: Option<u64>,
+    pub volume: Option<u32>,
 }
 
 pub async fn playback_control_handler(
@@ -37,12 +59,7 @@ pub async fn playback_control_handler(
         .as_deref()
         .or(body.action.as_deref())
         .ok_or_else(|| {
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "error": {
-                    "code": "INVALID_REQUEST",
-                    "message": "command is required"
-                }
-            })))
+            v1_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST", "command is required")
         })?;
 
     let mut current = state.playback_state.write().await;
@@ -56,9 +73,11 @@ pub async fn playback_control_handler(
                         current.track_id = Some(uid);
                     }
                 }
-                if let Some(pos) = val.get("position_ms").and_then(|v| v.as_u64()) {
-                    current.position_ms = pos;
-                }
+            }
+            if let Some(pos) = body.position_ms.or_else(|| {
+                body.value.as_ref().and_then(|v| v.get("position_ms").and_then(|p| p.as_u64()))
+            }) {
+                current.position_ms = pos;
             }
         }
         "pause" => {
@@ -80,17 +99,19 @@ pub async fn playback_control_handler(
             current.position_ms = 0;
         }
         "seek" => {
-            if let Some(val) = &body.value {
-                if let Some(pos) = val.get("position_ms").and_then(|v| v.as_u64()) {
-                    current.position_ms = pos;
-                }
+            let pos = body.position_ms.or_else(|| {
+                body.value.as_ref().and_then(|v| v.get("position_ms").and_then(|p| p.as_u64()))
+            });
+            if let Some(p) = pos {
+                current.position_ms = p;
             }
         }
         "set_volume" => {
-            if let Some(val) = &body.value {
-                if let Some(vol) = val.get("volume").and_then(|v| v.as_u64()) {
-                    current.volume = (vol.min(100) as f64) / 100.0;
-                }
+            let vol = body.volume.or_else(|| {
+                body.value.as_ref().and_then(|v| v.get("volume").and_then(|p| p.as_u64()).map(|v| v as u32))
+            });
+            if let Some(v) = vol {
+                current.volume = (v.min(100) as f64) / 100.0;
             }
         }
         "mute" => {
@@ -102,12 +123,7 @@ pub async fn playback_control_handler(
             }
         }
         _ => {
-            return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "error": {
-                    "code": "INVALID_COMMAND",
-                    "message": format!("unknown command: {}", cmd)
-                }
-            }))));
+            return Err(v1_error(StatusCode::BAD_REQUEST, "INVALID_COMMAND", &format!("unknown command: {}", cmd)));
         }
     }
 
@@ -155,10 +171,7 @@ pub async fn playback_session_handler(
 
     michi_db::create_playback_session(&state.db, &db_session).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": {
-                "code": "DATABASE_ERROR",
-                "message": e.to_string()
-            }
+            "error": { "code": "DATABASE_ERROR", "message": e.to_string(), "details": {} }
         })))
     })?;
 

@@ -1,11 +1,18 @@
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     Json,
 };
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::AppState;
+
+fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (status, Json(serde_json::json!({
+        "error": { "code": code, "message": message, "details": {} }
+    })))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct TracksQuery {
@@ -42,7 +49,7 @@ pub fn track_to_safe_json(track: michi_core::Track) -> serde_json::Value {
 pub async fn tracks_handler(
     State(state): State<AppState>,
     Query(query): Query<TracksQuery>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let tracks = if let Some(limit) = query.limit {
         let limit = limit.clamp(1, 500);
         let offset = query.offset.unwrap_or(0).max(0);
@@ -51,12 +58,7 @@ pub async fn tracks_handler(
         michi_db::list_tracks(&state.db).await
     }
     .map_err(|e| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": {
-                "code": "DATABASE_ERROR",
-                "message": e.to_string()
-            }
-        })))
+        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string())
     })?;
 
     let safe_tracks: Vec<serde_json::Value> = tracks
@@ -70,25 +72,11 @@ pub async fn tracks_handler(
 pub async fn track_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let track = michi_db::get_track(&state.db, &id)
         .await
-        .map_err(|e| {
-            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": {
-                    "code": "DATABASE_ERROR",
-                    "message": e.to_string()
-                }
-            })))
-        })?
-        .ok_or_else(|| {
-            (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "error": {
-                    "code": "TRACK_NOT_FOUND",
-                    "message": format!("track not found: {}", id)
-                }
-            })))
-        })?;
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?
+        .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "TRACK_NOT_FOUND", &format!("track not found: {}", id)))?;
 
     Ok(Json(track_to_safe_json(track)))
 }
@@ -101,21 +89,14 @@ pub struct SearchQuery {
 pub async fn search_handler(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if query.q.trim().is_empty() {
         return Ok(Json(serde_json::json!({ "tracks": [] })));
     }
 
     let tracks = michi_db::search_tracks(&state.db, query.q.trim())
         .await
-        .map_err(|e| {
-            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": {
-                    "code": "DATABASE_ERROR",
-                    "message": e.to_string()
-                }
-            })))
-        })?;
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
 
     let safe_tracks: Vec<serde_json::Value> = tracks
         .into_iter()

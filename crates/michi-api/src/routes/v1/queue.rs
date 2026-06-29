@@ -8,6 +8,12 @@ use uuid::Uuid;
 
 use crate::AppState;
 
+fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (status, Json(serde_json::json!({
+        "error": { "code": code, "message": message, "details": {} }
+    })))
+}
+
 pub async fn queue_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -39,15 +45,11 @@ pub async fn queue_items_handler(
         .bind(&now)
         .execute(&state.db)
         .await
-        .map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": { "code": "DATABASE_ERROR", "message": e.to_string() }
-            })))
-        })?;
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
 
     for (i, track_id) in body.track_ids.iter().enumerate() {
         let item_id = Uuid::new_v4();
-        sqlx::query(
+        let _ = sqlx::query(
             "INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(item_id.to_string())
@@ -56,8 +58,7 @@ pub async fn queue_items_handler(
         .bind(i as i64)
         .bind(&now)
         .execute(&state.db)
-        .await
-        .ok();
+        .await;
     }
 
     Ok(Json(serde_json::json!({
@@ -80,11 +81,7 @@ pub async fn queue_jump_handler(
     current.updated_at = chrono::Utc::now();
     drop(current);
 
-    let _ = state.tx.send(serde_json::json!({
-        "type": "queue_jumped",
-        "index": body.index,
-    }).to_string());
-
+    let _ = state.tx.send(serde_json::json!({ "type": "queue_jumped", "index": body.index }).to_string());
     Ok(Json(serde_json::json!({ "status": "ok", "index": body.index })))
 }
 

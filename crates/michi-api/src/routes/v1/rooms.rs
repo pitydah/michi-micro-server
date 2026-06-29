@@ -12,8 +12,7 @@ pub async fn rooms_handler(
     State(_state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     Ok(Json(serde_json::json!({
-        "rooms": [],
-        "snapcast_available": false,
+        "rooms": [], "snapcast_available": false,
     })))
 }
 
@@ -49,12 +48,8 @@ pub async fn room_play_handler(
     current.playing = true;
     current.updated_at = chrono::Utc::now();
     drop(current);
-
     let _ = state.tx.send(serde_json::json!({
-        "type": "room_play",
-        "room_id": id,
-        "track_id": body.track_id,
+        "type": "room_play", "room_id": id, "track_id": body.track_id,
     }).to_string());
-
     Ok(Json(serde_json::json!({ "status": "playing", "room_id": id })))
 }

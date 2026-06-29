@@ -234,10 +234,10 @@ fn v1_link_routes() -> Router<AppState> {
         .route("/api/v1/server/info", get(routes::v1::server::server_info_handler))
         .route("/api/v1/status", get(routes::v1::server::status_handler))
         // Pairing
-        .route("/api/v1/pair/start", post(routes::v1::pair::pair_start_handler))
-        .route("/api/v1/pair/confirm", post(routes::v1::pair::pair_confirm_handler))
-        .route("/api/v1/token/refresh", post(routes::v1::pair::token_refresh_handler))
-        .route("/api/v1/devices/revoke", post(routes::v1::pair::devices_revoke_handler))
+        .route("/api/v1/pair/start", post(routes::v1::pair::link_pair_start))
+        .route("/api/v1/pair/confirm", post(routes::v1::pair::link_pair_confirm))
+        .route("/api/v1/token/refresh", post(routes::v1::pair::link_token_refresh))
+        .route("/api/v1/devices/revoke", post(routes::v1::pair::link_devices_revoke))
         // Library
         .route("/api/v1/library/stats", get(routes::v1::library::library_stats_handler))
         .route("/api/v1/library/scan", post(routes::v1::library::library_scan_handler))
@@ -254,7 +254,7 @@ fn v1_link_routes() -> Router<AppState> {
         .route("/api/v1/playlists", get(routes::v1::playlists::playlists_handler).post(routes::v1::playlists::create_playlist_handler))
         .route("/api/v1/playlists/:id", get(routes::v1::playlists::get_playlist_handler).put(routes::v1::playlists::update_playlist_handler).delete(routes::v1::playlists::delete_playlist_handler))
         // Sync (delta only - manifest is in sync_api::sync_router)
-        .route("/api/v1/sync/manifest/delta", post(routes::v1::sync::sync_manifest_delta_handler))
+        .route("/api/v1/sync/manifest/delta", get(routes::v1::sync::sync_manifest_delta_handler))
         .route("/api/v1/sync/state", post(routes::v1::sync::sync_state_handler))
         // Import
         .route("/api/v1/import/session", post(routes::v1::import::import_session_handler))

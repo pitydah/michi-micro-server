@@ -8,6 +8,7 @@ pub struct LinkServerInfo {
     pub server_id: Uuid,
     pub version: String,
     pub api_version: String,
+    pub michi_link_version: u32,
     pub roles: Vec<String>,
     pub features: LinkFeatures,
 }
@@ -28,6 +29,7 @@ pub struct LinkFeatures {
     pub rooms: bool,
     pub events: bool,
     pub transcoding: bool,
+    pub token_refresh: bool,
 }
 
 impl LinkFeatures {
@@ -43,19 +45,32 @@ impl LinkFeatures {
             import: true,
             playback: true,
             queue: true,
-            receivers: true,
-            rooms: true,
+            receivers: false,
+            rooms: false,
             events: true,
             transcoding: false,
+            token_refresh: true,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairStartRequest {
-    pub device_name: String,
+    pub device_name: Option<String>,
+    pub alias: Option<String>,
     pub device_type: Option<String>,
     pub device_model: Option<String>,
+    pub client_device_id: Option<String>,
+}
+
+impl PairStartRequest {
+    pub fn device_name(&self) -> &str {
+        self.alias.as_deref().or(self.device_name.as_deref()).unwrap_or("unknown")
+    }
+
+    pub fn client_device_id(&self) -> Option<String> {
+        self.client_device_id.clone().or(self.device_name.clone())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,8 +82,9 @@ pub struct PairStartResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairConfirmRequest {
-    pub pairing_id: Uuid,
+    pub pairing_id: Option<Uuid>,
     pub code: String,
+    pub client_device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +99,8 @@ pub struct PairConfirmResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenRefreshRequest {
     pub refresh_token: String,
-    pub device_id: Uuid,
+    pub device_id: Option<Uuid>,
+    pub client_device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,13 +110,8 @@ pub struct TokenRefreshResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceRevokeRequest {
-    pub device_id: Uuid,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportSessionRequest {
-    pub device_id: Uuid,
+    pub device_id: Option<Uuid>,
     pub total_tracks: u32,
     pub total_playlists: u32,
 }
@@ -172,7 +184,8 @@ pub enum PlaybackCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncManifestEntry {
     pub track_id: Uuid,
-    pub file_path: String,
+    #[serde(skip_serializing)]
+    pub internal_file_path: String,
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,

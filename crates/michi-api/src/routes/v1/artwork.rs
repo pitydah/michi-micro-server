@@ -8,6 +8,12 @@ use uuid::Uuid;
 
 use crate::AppState;
 
+fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (status, Json(serde_json::json!({
+        "error": { "code": code, "message": message, "details": {} }
+    })))
+}
+
 pub async fn artwork_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -24,13 +30,8 @@ pub async fn artwork_handler(
         let data = tokio::fs::read(&artwork_path).await.map_err(|e| {
             v1_error(StatusCode::INTERNAL_SERVER_ERROR, "IO_ERROR", &format!("failed to read artwork: {}", e))
         })?;
-        let mime = infer::get(&data)
-            .map(|t| t.mime_type())
-            .unwrap_or("image/jpeg");
-        return Ok((
-            [(axum::http::header::CONTENT_TYPE, mime)],
-            data,
-        ).into_response());
+        let mime = infer::get(&data).map(|t| t.mime_type()).unwrap_or("image/jpeg");
+        return Ok(([(axum::http::header::CONTENT_TYPE, mime)], data).into_response());
     }
 
     let path = std::path::Path::new(&track.file_path);
@@ -52,12 +53,6 @@ pub async fn artwork_handler(
     Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "no artwork found"))
 }
 
-fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({
-        "error": { "code": code, "message": message }
-    })))
-}
-
 async fn extract_and_cache(
     path: &std::path::Path,
     cache_path: &std::path::Path,
@@ -66,15 +61,9 @@ async fn extract_and_cache(
     match michi_metadata::extract_artwork(path) {
         Ok(data) => {
             tokio::fs::create_dir_all(cache_path).await.ok();
-            let artwork_path = cache_path.join(id.to_string());
-            let _ = tokio::fs::write(&artwork_path, &data).await;
-            let mime = infer::get(&data)
-                .map(|t| t.mime_type())
-                .unwrap_or("image/jpeg");
-            Ok((
-                [(axum::http::header::CONTENT_TYPE, mime)],
-                data,
-            ).into_response())
+            let _ = tokio::fs::write(&cache_path.join(id.to_string()), &data).await;
+            let mime = infer::get(&data).map(|t| t.mime_type()).unwrap_or("image/jpeg");
+            Ok(([(axum::http::header::CONTENT_TYPE, mime)], data).into_response())
         }
         Err(_) => Err(()),
     }
