@@ -13,8 +13,7 @@ pub async fn playlists_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let playlists = michi_db::list_playlists(&state.db, None).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": { "code": "DATABASE_ERROR", "message": e.to_string() }
         })))
     })?;
 
@@ -33,8 +32,7 @@ pub async fn create_playlist_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if body.name.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "validation_error",
-            "message": "playlist name is required"
+            "error": { "code": "VALIDATION_ERROR", "message": "playlist name is required" }
         }))));
     }
 
@@ -45,8 +43,7 @@ pub async fn create_playlist_handler(
 
     let playlist = michi_db::create_playlist(&state.db, &input, None).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": { "code": "DATABASE_ERROR", "message": e.to_string() }
         })))
     })?;
 
@@ -61,14 +58,12 @@ pub async fn get_playlist_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let playlist = michi_db::get_playlist(&state.db, &id).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": { "code": "DATABASE_ERROR", "message": e.to_string() }
         })))
     })?
     .ok_or_else(|| {
         (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "not_found",
-            "message": format!("playlist not found: {}", id)
+            "error": { "code": "NOT_FOUND", "message": format!("playlist not found: {}", id) }
         })))
     })?;
 
@@ -88,18 +83,15 @@ pub async fn update_playlist_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let _playlist = michi_db::get_playlist(&state.db, &id).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": { "code": "DATABASE_ERROR", "message": e.to_string() }
         })))
     })?
     .ok_or_else(|| {
         (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "not_found",
-            "message": format!("playlist not found: {}", id)
+            "error": { "code": "NOT_FOUND", "message": format!("playlist not found: {}", id) }
         })))
     })?;
 
-    // For now, update is a no-op beyond existence check; full update via legacy API
     Ok(Json(serde_json::json!({ "status": "ok" })))
 }
 
@@ -109,15 +101,13 @@ pub async fn delete_playlist_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let deleted = michi_db::delete_playlist(&state.db, &id).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": { "code": "DATABASE_ERROR", "message": e.to_string() }
         })))
     })?;
 
     if !deleted {
         return Err((StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "not_found",
-            "message": format!("playlist not found: {}", id)
+            "error": { "code": "NOT_FOUND", "message": format!("playlist not found: {}", id) }
         }))));
     }
 

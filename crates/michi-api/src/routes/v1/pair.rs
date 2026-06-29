@@ -10,6 +10,12 @@ use michi_link::{
     DeviceEntry,
 };
 
+fn v1_internal_error(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+        "error": { "code": "INTERNAL_ERROR", "message": msg }
+    })))
+}
+
 pub async fn pair_start_handler(
     State(state): State<AppState>,
     Json(body): Json<PairStartRequest>,
@@ -30,14 +36,9 @@ pub async fn pair_start_handler(
 
     michi_db::create_pairing_session(&state.db, &session)
         .await
-        .map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": "database_error",
-                "message": e.to_string()
-            })))
-        })?;
+        .map_err(|e| v1_internal_error(&e.to_string()))?;
 
-    info!("pairing session created: device={} code={}", body.device_name, code);
+    info!("pairing session created: device={}", body.device_name);
 
     Ok(Json(PairStartResponse {
         pairing_id,
@@ -52,23 +53,16 @@ pub async fn pair_confirm_handler(
 ) -> Result<Json<PairConfirmResponse>, (StatusCode, Json<serde_json::Value>)> {
     let session = michi_db::get_pairing_session_by_code(&state.db, &body.code)
         .await
-        .map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": "database_error",
-                "message": e.to_string()
-            })))
-        })?
+        .map_err(|e| v1_internal_error(&e.to_string()))?
         .ok_or_else(|| {
             (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "error": "invalid_code",
-                "message": "pairing code not found or expired"
+                "error": { "code": "INVALID_CODE", "message": "pairing code not found or expired" }
             })))
         })?;
 
     if session.confirmed {
         return Err((StatusCode::CONFLICT, Json(serde_json::json!({
-            "error": "already_confirmed",
-            "message": "pairing already confirmed"
+            "error": { "code": "ALREADY_CONFIRMED", "message": "pairing already confirmed" }
         }))));
     }
 
@@ -102,12 +96,7 @@ pub async fn pair_confirm_handler(
 
     michi_db::create_link_device(&state.db, &core_device)
         .await
-        .map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": "database_error",
-                "message": e.to_string()
-            })))
-        })?;
+        .map_err(|e| v1_internal_error(&e.to_string()))?;
 
     michi_db::confirm_pairing_session(&state.db, &session.pairing_id)
         .await
@@ -123,7 +112,7 @@ pub async fn pair_confirm_handler(
         .map(|p| format!("{:?}", p))
         .collect();
 
-    info!("device paired: {} ({}) - {}", device_name, device_type, device_id);
+    info!("device paired: {} ({})", device_name, device_type);
 
     Ok(Json(PairConfirmResponse {
         device_token,
@@ -142,16 +131,14 @@ pub async fn token_refresh_handler(
         Ok(id) => id,
         Err(_) => {
             return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({
-                "error": "invalid_token",
-                "message": "invalid or expired refresh token"
+                "error": { "code": "INVALID_TOKEN", "message": "invalid or expired refresh token" }
             }))));
         }
     };
 
     if device_id != body.device_id {
         return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": "device_mismatch",
-            "message": "device id does not match token"
+            "error": { "code": "DEVICE_MISMATCH", "message": "device id does not match token" }
         }))));
     }
 
@@ -176,22 +163,16 @@ pub async fn devices_revoke_handler(
         .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| {
             (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "error": "invalid_request",
-                "message": "device_id is required"
+                "error": { "code": "INVALID_REQUEST", "message": "device_id is required" }
             })))
         })?;
 
-    let revoked = michi_db::revoke_link_device(&state.db, &device_id).await.map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
-        })))
-    })?;
+    let revoked = michi_db::revoke_link_device(&state.db, &device_id).await
+        .map_err(|e| v1_internal_error(&e.to_string()))?;
 
     if !revoked {
         return Err((StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "not_found",
-            "message": "device not found"
+            "error": { "code": "NOT_FOUND", "message": "device not found" }
         }))));
     }
 

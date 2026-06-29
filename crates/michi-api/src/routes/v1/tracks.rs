@@ -13,6 +13,32 @@ pub struct TracksQuery {
     pub offset: Option<i64>,
 }
 
+pub fn track_to_safe_json(track: michi_core::Track) -> serde_json::Value {
+    let track_id = track.id;
+    serde_json::json!({
+        "id": track_id,
+        "title": track.title,
+        "artist": track.artist,
+        "album": track.album,
+        "album_artist": track.album_artist,
+        "duration_ms": track.duration_ms,
+        "format": track.format.as_str(),
+        "sample_rate": track.sample_rate,
+        "bit_depth": track.bit_depth,
+        "channels": track.channels,
+        "cover_id": track.artwork_id,
+        "artwork_id": track.artwork_id,
+        "genre": track.genre,
+        "year": track.year,
+        "track_number": track.track_number,
+        "disc_number": track.disc_number,
+        "created_at": track.created_at,
+        "updated_at": track.updated_at,
+        "stream_url": format!("/api/v1/stream/{}", track_id),
+        "download_url": format!("/api/v1/download/{}", track_id),
+    })
+}
+
 pub async fn tracks_handler(
     State(state): State<AppState>,
     Query(query): Query<TracksQuery>,
@@ -26,35 +52,16 @@ pub async fn tracks_handler(
     }
     .map_err(|e| {
         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": {
+                "code": "DATABASE_ERROR",
+                "message": e.to_string()
+            }
         })))
     })?;
 
-    // Strip file_path from response for security
     let safe_tracks: Vec<serde_json::Value> = tracks
         .into_iter()
-        .map(|t| {
-            serde_json::json!({
-                "id": t.id,
-                "title": t.title,
-                "artist": t.artist,
-                "album": t.album,
-                "album_artist": t.album_artist,
-                "duration_ms": t.duration_ms,
-                "format": t.format.as_str(),
-                "sample_rate": t.sample_rate,
-                "bit_depth": t.bit_depth,
-                "channels": t.channels,
-                "artwork_id": t.artwork_id,
-                "genre": t.genre,
-                "year": t.year,
-                "track_number": t.track_number,
-                "disc_number": t.disc_number,
-                "created_at": t.created_at,
-                "updated_at": t.updated_at,
-            })
-        })
+        .map(track_to_safe_json)
         .collect();
 
     Ok(Json(serde_json::json!({ "tracks": safe_tracks })))
@@ -68,37 +75,22 @@ pub async fn track_handler(
         .await
         .map_err(|e| {
             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": "database_error",
-                "message": e.to_string()
+                "error": {
+                    "code": "DATABASE_ERROR",
+                    "message": e.to_string()
+                }
             })))
         })?
         .ok_or_else(|| {
             (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "error": "not_found",
-                "message": format!("track not found: {}", id)
+                "error": {
+                    "code": "TRACK_NOT_FOUND",
+                    "message": format!("track not found: {}", id)
+                }
             })))
         })?;
 
-    // Safe response without file_path
-    Ok(Json(serde_json::json!({
-        "id": track.id,
-        "title": track.title,
-        "artist": track.artist,
-        "album": track.album,
-        "album_artist": track.album_artist,
-        "duration_ms": track.duration_ms,
-        "format": track.format.as_str(),
-        "sample_rate": track.sample_rate,
-        "bit_depth": track.bit_depth,
-        "channels": track.channels,
-        "artwork_id": track.artwork_id,
-        "genre": track.genre,
-        "year": track.year,
-        "track_number": track.track_number,
-        "disc_number": track.disc_number,
-        "created_at": track.created_at,
-        "updated_at": track.updated_at,
-    })))
+    Ok(Json(track_to_safe_json(track)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,25 +110,16 @@ pub async fn search_handler(
         .await
         .map_err(|e| {
             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": "database_error",
-                "message": e.to_string()
+                "error": {
+                    "code": "DATABASE_ERROR",
+                    "message": e.to_string()
+                }
             })))
         })?;
 
     let safe_tracks: Vec<serde_json::Value> = tracks
         .into_iter()
-        .map(|t| {
-            serde_json::json!({
-                "id": t.id,
-                "title": t.title,
-                "artist": t.artist,
-                "album": t.album,
-                "album_artist": t.album_artist,
-                "duration_ms": t.duration_ms,
-                "format": t.format.as_str(),
-                "artwork_id": t.artwork_id,
-            })
-        })
+        .map(track_to_safe_json)
         .collect();
 
     Ok(Json(serde_json::json!({ "tracks": safe_tracks })))

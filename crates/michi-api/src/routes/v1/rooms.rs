@@ -11,31 +11,9 @@ use crate::AppState;
 pub async fn rooms_handler(
     State(_state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let snapcast = michi_rooms::check_snapcast().await;
-    if !snapcast.available {
-        return Ok(Json(serde_json::json!({
-            "rooms": [],
-            "snapcast_available": false,
-        })));
-    }
-
-    let rooms = michi_rooms::get_groups().await.unwrap_or_default();
-    let result: Vec<serde_json::Value> = rooms
-        .into_iter()
-        .map(|r| {
-            serde_json::json!({
-                "id": r.id,
-                "name": r.name,
-                "volume": r.volume,
-                "muted": r.muted,
-                "client_count": r.client_count,
-            })
-        })
-        .collect();
-
     Ok(Json(serde_json::json!({
-        "rooms": result,
-        "snapcast_available": true,
+        "rooms": [],
+        "snapcast_available": false,
     })))
 }
 
@@ -46,11 +24,11 @@ pub struct CreateRoomBody {
 }
 
 pub async fn create_room_handler(
-    Json(body): Json<CreateRoomBody>,
+    Json(_body): Json<CreateRoomBody>,
 ) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
-        "name": body.name,
+        "message": "rooms feature not fully implemented in this version"
     }))
 }
 
@@ -63,7 +41,7 @@ pub struct RoomPlayBody {
 pub async fn room_play_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(body): Json<RoomPlayBody>,
+    body: Json<RoomPlayBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let mut current = state.playback_state.write().await;
     current.track_id = Some(body.track_id);

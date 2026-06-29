@@ -1,5 +1,8 @@
-use axum::{extract::State, Json};
-use serde::Deserialize;
+use axum::{
+    extract::{Query, State},
+    Json,
+};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -9,77 +12,92 @@ pub async fn sync_manifest_handler(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
     let tracks = michi_db::get_all_tracks_manifest(&state.db).await.map_err(|e| {
         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": {
+                "code": "DATABASE_ERROR",
+                "message": e.to_string()
+            }
         })))
     })?;
 
-    let manifest: Vec<serde_json::Value> = tracks
-        .into_iter()
-        .map(|(track_id, file_path, title, artist, album, duration_ms, artwork_id)| {
-            serde_json::json!({
-                "track_id": track_id,
-                "file_path": file_path,
-                "title": title,
-                "artist": artist,
-                "album": album,
-                "duration_ms": duration_ms,
-                "artwork_id": if artwork_id.is_empty() { None } else { Some(artwork_id) },
-            })
-        })
-        .collect();
+    let mut manifest: Vec<serde_json::Value> = Vec::new();
+    let mut max_index: i64 = 0;
+
+    for (i, (track_id, _file_path, title, artist, album, duration_ms, artwork_id)) in tracks.into_iter().enumerate() {
+        manifest.push(serde_json::json!({
+            "track_id": track_id,
+            "title": title,
+            "artist": artist,
+            "album": album,
+            "duration_ms": duration_ms,
+            "artwork_id": if artwork_id.is_empty() { None } else { Some(artwork_id) },
+        }));
+        max_index = i as i64;
+    }
 
     Ok(Json(serde_json::json!({
         "tracks": manifest,
         "total": manifest.len(),
+        "cursor": max_index + 1,
     })))
 }
 
 #[derive(Debug, Deserialize)]
-pub struct DeltaRequest {
-    pub known_ids: Vec<Uuid>,
+pub struct DeltaQuery {
+    pub device_id: Option<Uuid>,
+    pub cursor: Option<i64>,
+    pub since: Option<String>,
+    pub manifest_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeltaEntry {
+    pub track_id: Uuid,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub artwork_id: Option<String>,
 }
 
 pub async fn sync_manifest_delta_handler(
     State(state): State<AppState>,
-    Json(body): Json<DeltaRequest>,
+    Query(query): Query<DeltaQuery>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
     let all = michi_db::get_all_tracks_manifest(&state.db).await.map_err(|e| {
         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": {
+                "code": "DATABASE_ERROR",
+                "message": e.to_string()
+            }
         })))
     })?;
 
-    let known: std::collections::HashSet<Uuid> = body.known_ids.into_iter().collect();
-    let mut added = Vec::new();
-    let mut removed: Vec<Uuid> = Vec::new();
+    let total_count = all.len() as i64;
 
-    for (track_id, file_path, title, artist, album, duration_ms, artwork_id) in &all {
-        if !known.contains(track_id) {
-            added.push(serde_json::json!({
-                "track_id": track_id,
-                "file_path": file_path,
-                "title": title,
-                "artist": artist,
-                "album": album,
-                "duration_ms": duration_ms,
-                "artwork_id": if artwork_id.is_empty() { None } else { Some(artwork_id) },
-            }));
+    let cursor = query.cursor.or(query.manifest_id).unwrap_or(0);
+
+    let mut added: Vec<DeltaEntry> = Vec::new();
+    for (i, (track_id, _file_path, title, artist, album, duration_ms, artwork_id)) in all.into_iter().enumerate() {
+        let idx = i as i64;
+        if idx >= cursor {
+            added.push(DeltaEntry {
+                track_id,
+                title,
+                artist,
+                album,
+                duration_ms,
+                artwork_id: if artwork_id.is_empty() { None } else { Some(artwork_id) },
+            });
         }
     }
 
-    // Check for removed tracks: known IDs not in current manifest
-    let current_ids: std::collections::HashSet<Uuid> = all.iter().map(|(id, ..)| *id).collect();
-    for known_id in known {
-        if !current_ids.contains(&known_id) {
-            removed.push(known_id);
-        }
-    }
+    let new_cursor = total_count;
 
     Ok(Json(serde_json::json!({
         "added": added,
-        "removed": removed,
+        "removed": [],
+        "cursor": new_cursor,
+        "total": total_count,
     })))
 }
 

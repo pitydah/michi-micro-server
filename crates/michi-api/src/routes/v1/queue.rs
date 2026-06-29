@@ -16,6 +16,7 @@ pub async fn queue_handler(
         "current_track_id": current.track_id,
         "position_ms": current.position_ms,
         "playing": current.playing,
+        "volume": (current.volume * 100.0) as u32,
     })))
 }
 
@@ -40,8 +41,7 @@ pub async fn queue_items_handler(
         .await
         .map_err(|e| {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": "database_error",
-                "message": e.to_string()
+                "error": { "code": "DATABASE_ERROR", "message": e.to_string() }
             })))
         })?;
 
@@ -62,7 +62,7 @@ pub async fn queue_items_handler(
 
     Ok(Json(serde_json::json!({
         "queue_id": queue_id,
-        "added": body.track_ids.len(),
+        "items_count": body.track_ids.len(),
     })))
 }
 

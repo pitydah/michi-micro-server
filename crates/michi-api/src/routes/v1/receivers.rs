@@ -13,8 +13,7 @@ pub async fn receivers_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let receivers = michi_db::list_receivers(&state.db).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": { "code": "DATABASE_ERROR", "message": e.to_string() }
         })))
     })?;
 
@@ -45,14 +44,12 @@ pub async fn get_receiver_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let receiver = michi_db::get_receiver(&state.db, &id).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": { "code": "DATABASE_ERROR", "message": e.to_string() }
         })))
     })?
     .ok_or_else(|| {
         (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "not_found",
-            "message": format!("receiver not found: {}", id)
+            "error": { "code": "NOT_FOUND", "message": format!("receiver not found: {}", id) }
         })))
     })?;
 
@@ -101,8 +98,7 @@ pub async fn register_receiver_handler(
 
     michi_db::upsert_receiver(&state.db, &receiver).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": { "code": "DATABASE_ERROR", "message": e.to_string() }
         })))
     })?;
 

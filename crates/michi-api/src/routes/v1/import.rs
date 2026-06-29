@@ -17,7 +17,6 @@ pub struct ImportUploadBody {
     pub data: String,
 }
 
-// In-memory import session storage
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -35,6 +34,16 @@ pub struct ImportSessionState {
 lazy_static::lazy_static! {
     static ref IMPORT_SESSIONS: Arc<RwLock<HashMap<Uuid, ImportSessionState>>> =
         Arc::new(RwLock::new(HashMap::new()));
+}
+
+fn sanitize_filename(filename: &str) -> String {
+    let name = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect()
 }
 
 pub async fn import_session_handler(
@@ -59,8 +68,10 @@ pub async fn import_session_handler(
 
     michi_db::create_import_session(&state.db, &db_session).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": {
+                "code": "DATABASE_ERROR",
+                "message": e.to_string()
+            }
         })))
     })?;
 
@@ -93,23 +104,25 @@ pub async fn import_upload_handler(
         sessions.get(&session_id).cloned()
     }.ok_or_else(|| {
         (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "session_not_found",
-            "message": "import session not found or expired"
+            "error": {
+                "code": "SESSION_NOT_FOUND",
+                "message": "import session not found or expired"
+            }
         })))
     })?;
 
-    // Decode base64 data
     use base64::Engine;
     let data = base64::engine::general_purpose::STANDARD
         .decode(&body.data)
         .map_err(|_| {
             (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "error": "invalid_data",
-                "message": "invalid base64 data"
+                "error": {
+                    "code": "INVALID_DATA",
+                    "message": "invalid base64 data"
+                }
             })))
         })?;
 
-    // Check hash if provided
     if let Some(ref hash) = body.hash {
         use sha2::{Sha256, Digest};
         let mut hasher = Sha256::new();
@@ -117,24 +130,27 @@ pub async fn import_upload_handler(
         let computed = hex::encode(hasher.finalize());
         if computed != *hash {
             return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "error": "hash_mismatch",
-                "message": "SHA256 hash does not match data"
+                "error": {
+                    "code": "HASH_MISMATCH",
+                    "message": "SHA256 hash does not match data"
+                }
             }))));
         }
     }
 
-    // Determine import directory
+    let safe_name = sanitize_filename(&body.filename);
     let import_dir = state.config.cache_path.join("import").join(session_id.to_string());
     tokio::fs::create_dir_all(&import_dir).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "io_error",
-            "message": e.to_string()
+            "error": {
+                "code": "IO_ERROR",
+                "message": e.to_string()
+            }
         })))
     })?;
 
-    let file_path = import_dir.join(&body.filename);
+    let file_path = import_dir.join(&safe_name);
 
-    // Check for duplicate by filename
     let is_duplicate = file_path.exists();
     if is_duplicate {
         return Ok(Json(serde_json::json!({
@@ -146,12 +162,13 @@ pub async fn import_upload_handler(
 
     tokio::fs::write(&file_path, &data).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "io_error",
-            "message": e.to_string()
+            "error": {
+                "code": "IO_ERROR",
+                "message": e.to_string()
+            }
         })))
     })?;
 
-    // Update session state
     {
         let mut sessions = IMPORT_SESSIONS.write().await;
         if let Some(s) = sessions.get_mut(&session_id) {
@@ -164,8 +181,7 @@ pub async fn import_upload_handler(
         .await
         .ok();
 
-    // If audio file, scan metadata and upsert to library
-    let ext = std::path::Path::new(&body.filename)
+    let ext = std::path::Path::new(&safe_name)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
@@ -176,9 +192,8 @@ pub async fn import_upload_handler(
         let metadata = tokio::task::spawn_blocking({
             let fp = file_path.clone();
             move || michi_metadata::read_metadata_safe(&fp)
-        }).await.map_err(|_| ()) .unwrap_or_default();
+        }).await.map_err(|_| ()).unwrap_or_default();
 
-        // Add to library
         let tid = michi_core::track_id_from_path(file_path.to_str().unwrap_or(""));
         let track = michi_core::Track {
             id: tid,
@@ -223,14 +238,15 @@ pub async fn import_commit_handler(
         sessions.remove(&session_id)
     }.ok_or_else(|| {
         (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "session_not_found",
-            "message": "import session not found or expired"
+            "error": {
+                "code": "SESSION_NOT_FOUND",
+                "message": "import session not found or expired"
+            }
         })))
     })?;
 
     michi_db::close_import_session(&state.db, &session_id).await.ok();
 
-    // Trigger library scan for imported files
     let _ = state.tx.send(r#"{"type":"library_updated"}"#.to_string());
 
     let import_dir = state.config.cache_path.join("import").join(session_id.to_string());

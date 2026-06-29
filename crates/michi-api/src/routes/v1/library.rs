@@ -1,4 +1,7 @@
-use axum::{extract::State, Json};
+use axum::{
+    extract::State,
+    Json,
+};
 
 use crate::AppState;
 
@@ -7,8 +10,7 @@ pub async fn library_stats_handler(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
     let stats = michi_db::library_stats(&state.db).await.map_err(|e| {
         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": { "code": "DATABASE_ERROR", "message": e.to_string() }
         })))
     })?;
 
@@ -27,8 +29,7 @@ pub async fn library_scan_handler(
     let music_paths = &state.config.music_paths;
     if music_paths.is_empty() {
         return Err((axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "no_music_paths",
-            "message": "no music paths configured"
+            "error": { "code": "NO_MUSIC_PATHS", "message": "no music paths configured" }
         }))));
     }
 
@@ -36,8 +37,7 @@ pub async fn library_scan_handler(
     let scanned = tracks.len();
     let saved = michi_db::upsert_tracks(&state.db, &tracks).await.map_err(|e| {
         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": { "code": "DATABASE_ERROR", "message": e.to_string() }
         })))
     })?;
 

@@ -35,6 +35,10 @@ pub enum Permission {
     ReceiverRead,
     #[serde(rename = "receiver.control")]
     ReceiverControl,
+    #[serde(rename = "receiver.session")]
+    ReceiverSession,
+    #[serde(rename = "receiver.volume")]
+    ReceiverVolume,
     #[serde(rename = "room.read")]
     RoomRead,
     #[serde(rename = "room.write")]
@@ -105,6 +109,9 @@ impl DevicePermissions {
                 Permission::StreamRead,
                 Permission::PlaybackRead,
                 Permission::ReceiverRead,
+                Permission::ReceiverControl,
+                Permission::ReceiverSession,
+                Permission::ReceiverVolume,
                 Permission::RoomRead,
             ]),
         }

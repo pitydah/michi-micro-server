@@ -16,39 +16,56 @@ pub async fn playback_state_handler(
         "track_id": current.track_id,
         "position_ms": current.position_ms,
         "playing": current.playing,
-        "volume": current.volume,
+        "volume": (current.volume * 100.0) as u32,
         "updated_at": current.updated_at,
     })))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PlaybackControlBody {
-    pub command: String,
-    pub parameter: Option<serde_json::Value>,
+    pub command: Option<String>,
+    pub action: Option<String>,
+    pub value: Option<serde_json::Value>,
 }
 
 pub async fn playback_control_handler(
     State(state): State<AppState>,
     Json(body): Json<PlaybackControlBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let cmd = body
+        .command
+        .as_deref()
+        .or(body.action.as_deref())
+        .ok_or_else(|| {
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                "error": {
+                    "code": "INVALID_REQUEST",
+                    "message": "command is required"
+                }
+            })))
+        })?;
+
     let mut current = state.playback_state.write().await;
 
-    match body.command.as_str() {
+    match cmd {
         "play" => {
             current.playing = true;
-            if let Some(param) = &body.parameter {
-                if let Some(track_id) = param.get("track_id").and_then(|v| v.as_str()) {
+            if let Some(val) = &body.value {
+                if let Some(track_id) = val.get("track_id").and_then(|v| v.as_str()) {
                     if let Ok(uid) = Uuid::parse_str(track_id) {
                         current.track_id = Some(uid);
                     }
                 }
-                if let Some(pos) = param.get("position_ms").and_then(|v| v.as_u64()) {
+                if let Some(pos) = val.get("position_ms").and_then(|v| v.as_u64()) {
                     current.position_ms = pos;
                 }
             }
         }
         "pause" => {
             current.playing = false;
+        }
+        "toggle" => {
+            current.playing = !current.playing;
         }
         "next" => {
             current.track_id = None;
@@ -58,28 +75,38 @@ pub async fn playback_control_handler(
         "previous" => {
             current.position_ms = 0;
         }
+        "stop" => {
+            current.playing = false;
+            current.position_ms = 0;
+        }
         "seek" => {
-            if let Some(param) = &body.parameter {
-                if let Some(pos) = param.get("position_ms").and_then(|v| v.as_u64()) {
+            if let Some(val) = &body.value {
+                if let Some(pos) = val.get("position_ms").and_then(|v| v.as_u64()) {
                     current.position_ms = pos;
                 }
             }
         }
         "set_volume" => {
-            if let Some(param) = &body.parameter {
-                if let Some(vol) = param.get("volume").and_then(|v| v.as_f64()) {
-                    current.volume = vol.clamp(0.0, 1.0);
+            if let Some(val) = &body.value {
+                if let Some(vol) = val.get("volume").and_then(|v| v.as_u64()) {
+                    current.volume = (vol.min(100) as f64) / 100.0;
                 }
             }
         }
-        "stop" => {
-            current.playing = false;
-            current.position_ms = 0;
+        "mute" => {
+            current.volume = 0.0;
+        }
+        "unmute" => {
+            if current.volume == 0.0 {
+                current.volume = 0.8;
+            }
         }
         _ => {
             return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "error": "invalid_command",
-                "message": format!("unknown command: {}", body.command)
+                "error": {
+                    "code": "INVALID_COMMAND",
+                    "message": format!("unknown command: {}", cmd)
+                }
             }))));
         }
     }
@@ -91,7 +118,7 @@ pub async fn playback_control_handler(
     let _ = state.sync_tx.send(state_clone.into());
     let _ = state.tx.send(serde_json::json!({
         "type": "playback_state_changed",
-        "command": body.command,
+        "command": cmd,
     }).to_string());
 
     Ok(Json(serde_json::json!({ "status": "ok" })))
@@ -128,12 +155,13 @@ pub async fn playback_session_handler(
 
     michi_db::create_playback_session(&state.db, &db_session).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "database_error",
-            "message": e.to_string()
+            "error": {
+                "code": "DATABASE_ERROR",
+                "message": e.to_string()
+            }
         })))
     })?;
 
-    // Apply to in-memory playback state
     {
         let mut current = state.playback_state.write().await;
         current.track_id = body.current_track_id;

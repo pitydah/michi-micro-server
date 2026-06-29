@@ -31,6 +31,7 @@ pub struct V1Features {
     pub rooms: bool,
     pub events: bool,
     pub transcoding: bool,
+    pub token_refresh: bool,
 }
 
 pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1ServerInfo> {
@@ -59,10 +60,11 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
             import: true,
             playback: true,
             queue: true,
-            receivers: true,
-            rooms: true,
+            receivers: false,
+            rooms: false,
             events: true,
             transcoding: false,
+            token_refresh: true,
         },
     })
 }

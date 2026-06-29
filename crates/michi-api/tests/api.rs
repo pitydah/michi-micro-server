@@ -1444,7 +1444,7 @@ async fn test_v1_track_not_found_error() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let text = body_text(response).await;
     let json: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(json["error"], "not_found");
+    assert_eq!(json["error"]["code"], "TRACK_NOT_FOUND");
 }
 
 #[tokio::test]
@@ -1512,6 +1512,34 @@ async fn test_v1_tracks_with_seeded_data() {
     let ids: Vec<&str> = tracks.iter().map(|t| t["id"].as_str().unwrap()).collect();
     assert!(ids.contains(&id1.to_string().as_str()));
     assert!(ids.contains(&id2.to_string().as_str()));
+    // Confirm file_path is NOT exposed in v1 API
+    for track in tracks {
+        assert!(track.get("file_path").is_none(), "v1 tracks must not expose file_path");
+    }
+}
+
+#[tokio::test]
+async fn test_v1_tracks_no_file_path() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/hidden.flac", "Hidden Path").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tracks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    let body: Value = serde_json::from_str(&text).unwrap();
+    let tracks = body["tracks"].as_array().unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert!(tracks[0].get("file_path").is_none());
+    assert!(tracks[0].get("stream_url").is_some());
+    assert!(tracks[0].get("download_url").is_some());
 }
 
 #[tokio::test]
@@ -1691,7 +1719,27 @@ async fn test_v1_stream_range_not_satisfiable() {
     assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
     let text = body_text(response).await;
     let json: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(json["error"], "range_not_satisfiable");
+    assert_eq!(json["error"]["code"], "RANGE_NOT_SATISFIABLE");
+}
+
+#[tokio::test]
+async fn test_v1_stream_download_not_found() {
+    let (app, _pool) = make_app().await;
+    let fake_id = Uuid::new_v4();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/download/{fake_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let text = body_text(response).await;
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["error"]["code"], "TRACK_NOT_FOUND");
 }
 
 #[tokio::test]

@@ -21,7 +21,6 @@ async fn handle_events_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.tx.subscribe();
 
-    // Send initial server status event
     let init_event = json!({
         "type": "server.status",
         "data": {
@@ -34,9 +33,24 @@ async fn handle_events_socket(socket: WebSocket, state: AppState) {
     let _ = sender.send(Message::Text(init_event.to_string())).await;
 
     let send_task = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
-            if sender.send(Message::Text(msg)).await.is_err() {
-                break;
+        let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        Ok(msg) => {
+                            if sender.send(Message::Text(msg)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                _ = keepalive.tick() => {
+                    if sender.send(Message::Ping(vec![])).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });

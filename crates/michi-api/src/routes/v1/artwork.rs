@@ -14,28 +14,15 @@ pub async fn artwork_handler(
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
     let track = michi_db::get_track(&state.db, &id)
         .await
-        .map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": "database_error",
-                "message": e.to_string()
-            })))
-        })?
-        .ok_or_else(|| {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "error": "not_found",
-                "message": format!("track not found: {}", id)
-            })))
-        })?;
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?
+        .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "TRACK_NOT_FOUND", &format!("track not found: {}", id)))?;
 
     let cache_path = state.config.cache_path.join("artwork");
     let artwork_path = cache_path.join(id.to_string());
 
     if artwork_path.exists() {
         let data = tokio::fs::read(&artwork_path).await.map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": "io_error",
-                "message": format!("failed to read artwork: {}", e)
-            })))
+            v1_error(StatusCode::INTERNAL_SERVER_ERROR, "IO_ERROR", &format!("failed to read artwork: {}", e))
         })?;
         let mime = infer::get(&data)
             .map(|t| t.mime_type())
@@ -62,10 +49,13 @@ pub async fn artwork_handler(
         }
     }
 
-    Err((StatusCode::NOT_FOUND, Json(serde_json::json!({
-        "error": "not_found",
-        "message": "no artwork found"
-    }))))
+    Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "no artwork found"))
+}
+
+fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (status, Json(serde_json::json!({
+        "error": { "code": code, "message": message }
+    })))
 }
 
 async fn extract_and_cache(
