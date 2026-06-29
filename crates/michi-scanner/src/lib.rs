@@ -70,6 +70,7 @@ fn scan_directory_sync(library_root: &Path, path: &Path) -> Vec<Track> {
                 year: metadata.year,
                 track_number: metadata.track_number,
                 disc_number: metadata.disc_number,
+                content_hash: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };

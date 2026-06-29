@@ -262,6 +262,7 @@ fn v1_link_routes() -> Router<AppState> {
         .route("/api/v1/sync/state", post(routes::v1::sync::sync_state_handler))
         // Import
         .route("/api/v1/import/session", post(routes::v1::import::import_session_handler))
+        .route("/api/v1/import/preflight", post(routes::v1::import::import_preflight_handler))
         .route("/api/v1/import/upload/:session_id", post(routes::v1::import::import_upload_handler))
         .route("/api/v1/import/commit/:session_id", post(routes::v1::import::import_commit_handler))
         .route("/api/v1/import/rollback/:session_id", post(routes::v1::import::import_rollback_handler))

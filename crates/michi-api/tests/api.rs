@@ -71,6 +71,7 @@ async fn seed_track(pool: &SqlitePool, path: &str, title: &str) -> Uuid {
         year: None,
         track_number: None,
         disc_number: None,
+        content_hash: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -353,6 +354,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         year: None,
         track_number: None,
         disc_number: None,
+        content_hash: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -554,6 +556,7 @@ async fn test_stream_file_not_on_disk() {
         year: None,
         track_number: None,
         disc_number: None,
+        content_hash: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -1242,6 +1245,7 @@ async fn test_full_pipeline_scan_and_stream() {
         year: None,
         track_number: None,
         disc_number: None,
+        content_hash: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -1684,6 +1688,7 @@ async fn test_v1_stream_range_not_satisfiable() {
         year: None,
         track_number: None,
         disc_number: None,
+        content_hash: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -2376,6 +2381,7 @@ async fn test_v1_stream_and_download_range() {
         format: michi_core::AudioFormat::Flac, sample_rate: None, bit_depth: None,
         channels: None, artwork_id: None, genre: None, year: None,
         track_number: None, disc_number: None,
+        content_hash: None,
         created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
     };
     michi_db::upsert_track(&pool, &track).await.unwrap();
@@ -2538,4 +2544,123 @@ async fn test_v1_receiver_simulator_mock() {
 
     rx.heartbeat();
     assert!(rx.online);
+}
+
+#[tokio::test]
+async fn test_v1_import_preflight_already_present() {
+    let (app, pool) = make_app().await;
+    use michi_core::{Track, AudioFormat};
+    use chrono::Utc;
+    let tid = uuid::Uuid::new_v4();
+    let track = Track {
+        id: tid, title: Some("Existing".into()), artist: None, album: None,
+        album_artist: None, duration_ms: Some(200000),
+        file_path: "/tmp/michi-test/music/existing.flac".into(),
+        format: AudioFormat::Flac, sample_rate: None, bit_depth: None, channels: None,
+        artwork_id: None, genre: None, year: None, track_number: None, disc_number: None,
+        content_hash: Some("aaabbbccc111".into()),
+        created_at: Utc::now(), updated_at: Utc::now(),
+    };
+    michi_db::upsert_track(&pool, &track).await.unwrap();
+
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/import/preflight").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"tracks":[{"content_hash":"aaabbbccc111","file_size":1000,"duration_ms":200000}]}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results[0]["status"], "already_present");
+    assert_eq!(results[0]["local_track_id"], tid.to_string());
+}
+
+#[tokio::test]
+async fn test_v1_import_preflight_needs_upload() {
+    let (app, _) = make_app().await;
+
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/import/preflight").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"tracks":[{"content_hash":"nonexistent","file_size":1000,"duration_ms":200000}]}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results[0]["status"], "needs_upload");
+}
+
+#[tokio::test]
+async fn test_v1_import_preflight_conflict() {
+    let (app, pool) = make_app().await;
+    use michi_core::{Track, AudioFormat};
+    use chrono::Utc;
+    let tid = uuid::Uuid::new_v4();
+    let track = Track {
+        id: tid, title: Some("Conflict".into()), artist: None, album: None,
+        album_artist: None, duration_ms: Some(100000),
+        file_path: "/tmp/michi-test/music/conflict.flac".into(),
+        format: AudioFormat::Flac, sample_rate: None, bit_depth: None, channels: None,
+        artwork_id: None, genre: None, year: None, track_number: None, disc_number: None,
+        content_hash: Some("conflict_hash".into()),
+        created_at: Utc::now(), updated_at: Utc::now(),
+    };
+    michi_db::upsert_track(&pool, &track).await.unwrap();
+
+    // Same hash but different duration_ms -> conflict
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/import/preflight").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"tracks":[{"content_hash":"conflict_hash","file_size":999,"duration_ms":999999}]}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results[0]["status"], "conflict");
+}
+
+#[tokio::test]
+async fn test_v1_commit_returns_mapping() {
+    let (app, _) = make_app().await;
+
+    // Upload one track and commit
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/import/session").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"total_tracks":1,"total_playlists":0}"#))
+            .unwrap(),
+    ).await.unwrap();
+    let session: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let sid = session["session_id"].as_str().unwrap().to_string();
+
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(b"mapping test audio");
+    use sha2::{Sha256, Digest};
+    let mut h = Sha256::new();
+    h.update(b"mapping test audio");
+    let hash = hex::encode(h.finalize());
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/upload/{sid}")).method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"filename":"mapping.flac","data":"{data}","hash":"{hash}"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/commit/{sid}")).method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let commit: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert!(commit.get("mapping").is_some(), "commit must include mapping");
+    let mapping = commit["mapping"].as_array().unwrap();
+    assert!(!mapping.is_empty(), "mapping must have at least one entry");
+    assert!(mapping[0].get("local_track_id").is_some(), "mapping entry must have local_track_id");
+    assert!(mapping[0].get("hash").is_some(), "mapping entry must have hash");
+    assert!(mapping[0].get("matched").is_some(), "mapping entry must have matched");
 }

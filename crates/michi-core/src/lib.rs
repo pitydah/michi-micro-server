@@ -153,8 +153,41 @@ pub struct Track {
     pub year: Option<i32>,
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
+    pub content_hash: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackIdentity {
+    pub content_hash: String,
+    pub file_size: u64,
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportPreflightRequest {
+    pub tracks: Vec<TrackIdentity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportPreflightResult {
+    pub results: Vec<ImportPreflightItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportPreflightItem {
+    pub hash: String,
+    pub status: String,
+    pub local_track_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitMapping {
+    pub local_track_id: Uuid,
+    pub hash: String,
+    pub matched: bool,
+    pub existing_track_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

@@ -203,7 +203,7 @@ pub async fn import_upload_handler(
         if let Some(s) = sessions.get_mut(&session_id) {
             s.imported_tracks += 1;
             s.total_size_bytes += data.len() as u64;
-            s.seen_hashes.push(data_hash);
+            s.seen_hashes.push(data_hash.clone());
         }
     }
 
@@ -227,6 +227,7 @@ pub async fn import_upload_handler(
             bit_depth: metadata.bit_depth, channels: metadata.channels,
             artwork_id: None, genre: metadata.genre, year: metadata.year,
             track_number: metadata.track_number, disc_number: metadata.disc_number,
+            content_hash: Some(data_hash.clone()),
             created_at: Utc::now(), updated_at: Utc::now(),
         };
         michi_db::upsert_track(&state.db, &track).await.ok();
@@ -238,6 +239,35 @@ pub async fn import_upload_handler(
     Ok(Json(serde_json::json!({
         "accepted": true, "is_duplicate": false, "track_id": track_id,
     })))
+}
+
+pub async fn import_preflight_handler(
+    State(state): State<AppState>,
+    Json(body): Json<michi_core::ImportPreflightRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let mut results = Vec::new();
+    for identity in body.tracks {
+        let existing = michi_db::find_tracks_by_content_hash(&state.db, &identity.content_hash).await
+            .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+
+        let (status, track_id) = if existing.is_empty() {
+            ("needs_upload".to_string(), None)
+        } else if existing.iter().any(|t| {
+            t.duration_ms.map(|d| d as i64) == identity.duration_ms.map(|d| d as i64)
+        }) {
+            ("already_present".to_string(), existing.first().map(|t| t.id))
+        } else {
+            ("conflict".to_string(), existing.first().map(|t| t.id))
+        };
+
+        results.push(michi_core::ImportPreflightItem {
+            hash: identity.content_hash,
+            status,
+            local_track_id: track_id,
+        });
+    }
+
+    Ok(Json(serde_json::json!({ "results": results })))
 }
 
 pub async fn import_session_status_handler(
@@ -294,6 +324,30 @@ pub async fn import_commit_handler(
     michi_db::upsert_tracks(&state.db, &tracks).await.ok();
     cleanup_session_dir(&staging_dir).await;
 
+    // Build mapping (non-async, fetch content_hash data up front)
+    let mut tracks_with_hashes: Vec<(Uuid, Option<String>)> = Vec::new();
+    for track in &tracks {
+        tracks_with_hashes.push((track.id, track.content_hash.clone()));
+    }
+    drop(tracks);
+
+    let mut mapping: Vec<serde_json::Value> = Vec::new();
+    for (local_id, content_hash) in &tracks_with_hashes {
+        let existing_by_hash = if let Some(ref h) = content_hash {
+            michi_db::find_tracks_by_content_hash(&state.db, h).await.ok().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let matched = existing_by_hash.iter().any(|t| t.id != *local_id);
+        let existing_id = if matched { existing_by_hash.first().map(|t| t.id) } else { None };
+        mapping.push(serde_json::json!({
+            "local_track_id": local_id,
+            "hash": content_hash,
+            "matched": matched,
+            "existing_track_id": existing_id,
+        }));
+    }
+
     michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Committed, None).await.ok();
     michi_db::close_import_session(&state.db, &session_id).await.ok();
     let _ = state.tx.send(r#"{"type":"library_updated"}"#.to_string());
@@ -302,6 +356,7 @@ pub async fn import_commit_handler(
         "tracks_imported": _session_state.imported_tracks,
         "playlists_imported": 0,
         "total_size_bytes": _session_state.total_size_bytes,
+        "mapping": mapping,
     })))
 }
 
