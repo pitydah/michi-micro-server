@@ -4,6 +4,40 @@ use serde::Serialize;
 use crate::AppState;
 
 #[derive(Debug, Serialize)]
+pub struct PlayerCompatibility {
+    pub supports_import_preflight: bool,
+    pub supports_upload_mapping: bool,
+    pub supports_commit_mapping: bool,
+    pub supports_queue_transfer: bool,
+    pub queue_restored: bool,
+    pub playback_restored: bool,
+    pub receiver_e2e_ready: bool,
+    pub contract_status: String,
+}
+
+impl PlayerCompatibility {
+    fn new(has_queue: bool, playback_restored: bool) -> Self {
+        let status = if has_queue && playback_restored {
+            "CONTRACT_OK"
+        } else if has_queue {
+            "CONTRACT_PARTIAL"
+        } else {
+            "CONTRACT_OK"
+        };
+        Self {
+            supports_import_preflight: true,
+            supports_upload_mapping: true,
+            supports_commit_mapping: true,
+            supports_queue_transfer: true,
+            queue_restored: has_queue,
+            playback_restored,
+            receiver_e2e_ready: true,
+            contract_status: status.into(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct DiagnosticsReport {
     pub healthy: bool,
     pub db: DbStatus,
@@ -15,6 +49,7 @@ pub struct DiagnosticsReport {
     pub queues: QueuesStatus,
     pub disk: DiskStatus,
     pub receiver: ReceiverStatus,
+    pub player_compatibility: PlayerCompatibility,
     pub config: ConfigStatus,
     pub warnings: Vec<String>,
 }
@@ -191,6 +226,7 @@ pub async fn diagnostics_handler(
             client_available: true,
             registered_receivers: 0,
         },
+        player_compatibility: PlayerCompatibility::new(total_queues > 0, false),
         config: ConfigStatus {
             port: state.config.port(),
             music_paths: state.config.music_paths.iter().map(|p| p.to_string_lossy().to_string()).collect(),

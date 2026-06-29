@@ -2715,6 +2715,8 @@ async fn test_v1_diagnostics_has_disk_and_receiver() {
     assert!(json.get("receiver").is_some(), "diagnostics must have receiver section");
     assert!(json["receiver"]["client_available"].as_bool().is_some());
     assert!(json["disk"]["music_path_free_bytes"].is_null() || json["disk"]["music_path_free_bytes"].as_u64().is_some());
+    assert!(json.get("player_compatibility").is_some(), "diagnostics must have player_compatibility section");
+    assert!(json["player_compatibility"]["contract_status"].is_string());
 }
 
 #[tokio::test]
