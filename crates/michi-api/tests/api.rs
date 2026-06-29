@@ -1365,7 +1365,8 @@ async fn test_v1_server_info() {
     assert!(json["roles"].is_array());
     assert_eq!(json["auth"]["strategy"], "SERVER_CODE");
     assert!(json["auth"]["token_refresh"].as_bool().unwrap_or(false));
-    assert!(json["michi_link_version"].as_u64().unwrap_or(0) >= 1);
+    assert!(json["auth"]["required"].as_bool().unwrap_or(false));
+    assert_eq!(json["michi_link_version"], "1.0.0-alpha");
 }
 
 #[tokio::test]

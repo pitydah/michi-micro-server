@@ -11,7 +11,7 @@ pub struct V1ServerInfo {
     pub server_id: Uuid,
     pub version: String,
     pub api_version: String,
-    pub michi_link_version: u32,
+    pub michi_link_version: &'static str,
     pub roles: Vec<String>,
     pub features: V1Features,
     pub auth: V1AuthInfo,
@@ -19,6 +19,7 @@ pub struct V1ServerInfo {
 
 #[derive(Debug, Serialize)]
 pub struct V1AuthInfo {
+    pub required: bool,
     pub strategy: String,
     pub token_refresh: bool,
 }
@@ -76,6 +77,7 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
             token_refresh: true,
         },
         auth: V1AuthInfo {
+            required: true,
             strategy: "SERVER_CODE".into(),
             token_refresh: true,
         },
