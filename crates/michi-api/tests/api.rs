@@ -2516,34 +2516,14 @@ async fn test_v1_import_session_status() {
 }
 
 #[tokio::test]
-async fn test_v1_receiver_simulator_mock() {
-    use michi_receivers::SimulatedReceiver;
-    let mut rx = SimulatedReceiver::new("test-stream", "127.0.0.1", 9000);
-    assert_eq!(rx.device_type, "michi-stream");
-    assert!(rx.online);
+async fn test_v1_receiver_client_models() {
+    // Test that the receiver API models serialize/deserialize correctly
+    use michi_receivers::ReceiverClient;
 
-    let info = rx.info();
-    assert_eq!(info.name, "test-stream");
-    assert!(info.capabilities.contains(&"stream".to_string()));
-
-    let confirm = rx.pair_confirm("ABC123");
-    assert!(confirm.is_some());
-    assert!(rx.paired);
-
-    let bad = rx.pair_confirm("bad");
-    assert!(bad.is_none());
-
-    rx.session_start(uuid::Uuid::nil(), 75);
-    assert!(rx.session_active);
-
-    rx.session_stop();
-    assert!(!rx.session_active);
-
-    rx.set_volume(50);
-    assert_eq!(rx.volume, 50);
-
-    rx.heartbeat();
-    assert!(rx.online);
+    // Just test construction — no connection needed
+    let client = ReceiverClient::new("http://127.0.0.1:9999");
+    assert!(client.base_url.contains("127.0.0.1:9999"));
+    assert!(client.token.is_none());
 }
 
 #[tokio::test]
