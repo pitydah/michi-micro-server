@@ -282,7 +282,17 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 20 applied");
     }
 
-    info!("database schema at version 20");
+    if current < 21 {
+        info!("applying migration 21: import sessions extended");
+        migration_021(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (21, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 21 applied");
+    }
+
+    info!("database schema at version 21");
     Ok(())
 }
 
@@ -643,12 +653,30 @@ async fn migration_020(pool: &SqlitePool) -> Result<(), DbError> {
             repeat_mode TEXT NOT NULL DEFAULT 'none',
             shuffle INTEGER NOT NULL DEFAULT 0,
             volume REAL NOT NULL DEFAULT 0.8,
+            source TEXT NOT NULL DEFAULT 'player',
+            resume_policy TEXT NOT NULL DEFAULT 'manual',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )",
     )
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn migration_021(pool: &SqlitePool) -> Result<(), DbError> {
+    // Add status text field to import_sessions for state machine
+    sqlx::query("ALTER TABLE import_sessions ADD COLUMN status_text TEXT NOT NULL DEFAULT 'created'")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE import_sessions ADD COLUMN error_message TEXT")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_import_sessions_status ON import_sessions(status)")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1805,7 +1833,62 @@ pub async fn close_import_session(
     pool: &SqlitePool,
     session_id: &Uuid,
 ) -> Result<(), DbError> {
-    sqlx::query("UPDATE import_sessions SET status = 'completed' WHERE session_id = ?")
+    sqlx::query("UPDATE import_sessions SET status = 'completed', status_text = 'committed' WHERE session_id = ?")
+        .bind(session_id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_import_session_status(
+    pool: &SqlitePool,
+    session_id: &Uuid,
+    status: &michi_core::ImportState,
+    error_message: Option<&str>,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE import_sessions SET status = ?, status_text = ?, error_message = ? WHERE session_id = ?")
+        .bind(status.as_str())
+        .bind(status.as_str())
+        .bind(error_message)
+        .bind(session_id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_import_session_full(
+    pool: &SqlitePool,
+    session_id: &Uuid,
+) -> Result<Option<michi_core::ImportSessionDb>, DbError> {
+    let rows = sqlx::query(
+        "SELECT session_id, device_id, total_tracks, total_playlists, imported_tracks, imported_playlists, total_size_bytes, status, status_text, error_message, expires_at, created_at FROM import_sessions WHERE session_id = ?",
+    )
+    .bind(session_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.first().map(row_to_import_session_full))
+}
+
+pub async fn list_expired_import_sessions(
+    pool: &SqlitePool,
+    cutoff: &str,
+) -> Result<Vec<Uuid>, DbError> {
+    let rows = sqlx::query(
+        "SELECT session_id FROM import_sessions WHERE expires_at < ? AND status NOT IN ('committed', 'rolled_back')",
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(|r| {
+        Uuid::parse_str(r.get::<&str, _>("session_id")).unwrap_or(Uuid::nil())
+    }).collect())
+}
+
+pub async fn expire_import_session(
+    pool: &SqlitePool,
+    session_id: &Uuid,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE import_sessions SET status = 'expired', status_text = 'expired' WHERE session_id = ?")
         .bind(session_id.to_string())
         .execute(pool)
         .await?;
@@ -1986,6 +2069,21 @@ fn row_to_playback_session(row: &sqlx::sqlite::SqliteRow) -> michi_core::Playbac
         repeat_mode: row.get("repeat_mode"),
         shuffle: row.get::<i64, _>("shuffle") != 0,
         volume: row.get::<f64, _>("volume"),
+    }
+}
+
+fn row_to_import_session_full(row: &sqlx::sqlite::SqliteRow) -> michi_core::ImportSessionDb {
+    michi_core::ImportSessionDb {
+        session_id: Uuid::parse_str(row.get::<&str, _>("session_id")).unwrap_or(Uuid::nil()),
+        device_id: Uuid::parse_str(row.get::<&str, _>("device_id")).unwrap_or(Uuid::nil()),
+        total_tracks: row.get::<i64, _>("total_tracks") as u32,
+        total_playlists: row.get::<i64, _>("total_playlists") as u32,
+        imported_tracks: row.get::<i64, _>("imported_tracks") as u32,
+        imported_playlists: row.get::<i64, _>("imported_playlists") as u32,
+        total_size_bytes: row.get::<i64, _>("total_size_bytes") as u64,
+        status: row.get::<&str, _>("status").to_string(),
+        expires_at: row.get("expires_at"),
+        created_at: row.get("created_at"),
     }
 }
 

@@ -1,8 +1,10 @@
 use axum::{extract::{Path, State}, http::StatusCode, Json};
+use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::AppState;
+use michi_core::ImportState;
 
 fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
     (status, Json(serde_json::json!({
@@ -10,8 +12,8 @@ fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<
     })))
 }
 
-const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100 MB per file
-const MAX_SESSION_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB per session
+const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+const MAX_SESSION_SIZE: u64 = 1024 * 1024 * 1024;
 const ALLOWED_AUDIO_EXTS: &[&str] = &["mp3", "flac", "ogg", "opus", "aac", "m4a", "wav", "aiff", "dsf", "dff"];
 
 #[derive(Debug, Deserialize)]
@@ -93,30 +95,28 @@ pub async fn import_session_handler(
     Json(body): Json<ImportSessionRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let session_id = Uuid::new_v4();
-    let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
-    let device_id = Uuid::nil(); // TODO: extract from token middleware
+    let expires_at = Utc::now() + chrono::Duration::hours(1);
+    let device_id = Uuid::nil();
 
     if body.total_tracks == 0 && body.total_playlists == 0 {
         return Err(v1_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST", "total_tracks or total_playlists must be > 0"));
     }
-
     if body.total_tracks > 10000 {
         return Err(v1_error(StatusCode::BAD_REQUEST, "TOO_MANY_TRACKS", "max 10000 tracks per session"));
     }
 
     let db_session = michi_core::ImportSessionDb {
-        session_id,
-        device_id,
-        total_tracks: body.total_tracks,
-        total_playlists: body.total_playlists,
+        session_id, device_id,
+        total_tracks: body.total_tracks, total_playlists: body.total_playlists,
         imported_tracks: 0, imported_playlists: 0, total_size_bytes: 0,
-        status: "active".into(),
+        status: "created".into(),
         expires_at: expires_at.to_rfc3339(),
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: Utc::now().to_rfc3339(),
     };
 
     michi_db::create_import_session(&state.db, &db_session).await
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Created, None).await.ok();
 
     {
         let mut sessions = IMPORT_SESSIONS.write().await;
@@ -127,10 +127,8 @@ pub async fn import_session_handler(
     }
 
     Ok(Json(serde_json::json!({
-        "session_id": session_id,
-        "expires_at": expires_at.to_rfc3339(),
-        "max_chunk_size": 10485760,
-        "allowed_extensions": ALLOWED_AUDIO_EXTS,
+        "session_id": session_id, "expires_at": expires_at.to_rfc3339(),
+        "max_chunk_size": 10485760, "allowed_extensions": ALLOWED_AUDIO_EXTS,
         "max_file_size": MAX_FILE_SIZE,
     })))
 }
@@ -164,7 +162,6 @@ pub async fn import_upload_handler(
             "file exceeds max size of {} bytes", MAX_FILE_SIZE
         )));
     }
-
     if session_state.total_size_bytes + data.len() as u64 > MAX_SESSION_SIZE {
         return Err(v1_error(StatusCode::BAD_REQUEST, "SESSION_SIZE_EXCEEDED", &format!(
             "session exceeds max total size of {} bytes", MAX_SESSION_SIZE
@@ -172,7 +169,6 @@ pub async fn import_upload_handler(
     }
 
     let data_hash = compute_sha256(&data);
-
     if let Some(ref hash) = body.hash {
         if data_hash != *hash {
             return Err(v1_error(StatusCode::BAD_REQUEST, "HASH_MISMATCH", "SHA256 hash does not match data"));
@@ -186,15 +182,11 @@ pub async fn import_upload_handler(
     }
 
     let safe_name = sanitize_filename(&body.filename);
-
-    // Write to staging directory under .import
     let import_dir = get_session_dir(&state.config.music_paths, &session_id);
-
     tokio::fs::create_dir_all(&import_dir).await
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "IO_ERROR", &e.to_string()))?;
 
     let file_path = import_dir.join(&safe_name);
-
     if file_path.exists() {
         return Ok(Json(serde_json::json!({
             "accepted": false, "is_duplicate": true, "track_id": null,
@@ -203,6 +195,8 @@ pub async fn import_upload_handler(
 
     tokio::fs::write(&file_path, &data).await
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "IO_ERROR", &e.to_string()))?;
+
+    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Uploading, None).await.ok();
 
     {
         let mut sessions = IMPORT_SESSIONS.write().await;
@@ -223,7 +217,6 @@ pub async fn import_upload_handler(
             let fp = file_path.clone();
             move || michi_metadata::read_metadata_safe(&fp)
         }).await.unwrap_or_default();
-
         let tid = michi_core::track_id_from_path(file_path.to_str().unwrap_or(""));
         let track = michi_core::Track {
             id: tid, title: metadata.title, artist: metadata.artist,
@@ -234,7 +227,7 @@ pub async fn import_upload_handler(
             bit_depth: metadata.bit_depth, channels: metadata.channels,
             artwork_id: None, genre: metadata.genre, year: metadata.year,
             track_number: metadata.track_number, disc_number: metadata.disc_number,
-            created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+            created_at: Utc::now(), updated_at: Utc::now(),
         };
         michi_db::upsert_track(&state.db, &track).await.ok();
         Some(tid)
@@ -247,15 +240,22 @@ pub async fn import_upload_handler(
     })))
 }
 
-pub async fn import_rollback_handler(
+pub async fn import_session_status_handler(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
-) -> Json<serde_json::Value> {
-    IMPORT_SESSIONS.write().await.remove(&session_id);
-    let staging_dir = get_session_dir(&state.config.music_paths, &session_id);
-    cleanup_session_dir(&staging_dir).await;
-    michi_db::close_import_session(&state.db, &session_id).await.ok();
-    Json(serde_json::json!({ "status": "rolled_back" }))
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let db_session = michi_db::get_import_session_full(&state.db, &session_id).await
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?
+        .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", "import session not found"))?;
+
+    Ok(Json(serde_json::json!({
+        "session_id": db_session.session_id,
+        "status": db_session.status,
+        "total_tracks": db_session.total_tracks,
+        "total_playlists": db_session.total_playlists,
+        "imported_tracks": db_session.imported_tracks,
+        "total_size_bytes": db_session.total_size_bytes,
+    })))
 }
 
 pub async fn import_commit_handler(
@@ -269,7 +269,8 @@ pub async fn import_commit_handler(
         v1_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", "import session not found or expired")
     })?;
 
-    // Move files from staging to first music path root
+    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Committing, None).await.ok();
+
     let staging_dir = get_session_dir(&state.config.music_paths, &session_id);
     let final_dir = state.config.music_paths.first()
         .cloned()
@@ -277,28 +278,24 @@ pub async fn import_commit_handler(
 
     if staging_dir.exists() {
         if let Ok(mut entries) = tokio::fs::read_dir(&staging_dir).await {
-            use tokio::fs;
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let src = entry.path();
                 if src.is_file() {
                     let dest = final_dir.join(src.file_name().unwrap());
                     if !dest.exists() {
-                        let _ = fs::copy(&src, &dest).await;
+                        let _ = tokio::fs::copy(&src, &dest).await;
                     }
                 }
             }
         }
     }
 
-    michi_db::close_import_session(&state.db, &session_id).await.ok();
-
-    // Scan final library directory
     let tracks = michi_scanner::scan_directories(&[final_dir]).await;
     michi_db::upsert_tracks(&state.db, &tracks).await.ok();
-
-    // Clean up staging directory
     cleanup_session_dir(&staging_dir).await;
 
+    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Committed, None).await.ok();
+    michi_db::close_import_session(&state.db, &session_id).await.ok();
     let _ = state.tx.send(r#"{"type":"library_updated"}"#.to_string());
 
     Ok(Json(serde_json::json!({
@@ -306,4 +303,51 @@ pub async fn import_commit_handler(
         "playlists_imported": 0,
         "total_size_bytes": _session_state.total_size_bytes,
     })))
+}
+
+pub async fn import_rollback_handler(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+) -> Json<serde_json::Value> {
+    IMPORT_SESSIONS.write().await.remove(&session_id);
+    let staging_dir = get_session_dir(&state.config.music_paths, &session_id);
+    cleanup_session_dir(&staging_dir).await;
+    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::RolledBack, None).await.ok();
+    michi_db::close_import_session(&state.db, &session_id).await.ok();
+    Json(serde_json::json!({ "status": "rolled_back" }))
+}
+
+/// Background job to clean up expired import sessions and stale staging dirs
+pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool) {
+    let music_paths = config.music_paths.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            let cutoff = (Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+            if let Ok(expired) = michi_db::list_expired_import_sessions(&db, &cutoff).await {
+                for sid in expired {
+                    michi_db::expire_import_session(&db, &sid).await.ok();
+                    let dir = get_session_dir(&music_paths, &sid);
+                    cleanup_session_dir(&dir).await;
+                }
+            }
+            // Also clean old staging dirs with no DB record
+            let staging = get_staging_dir(&music_paths);
+            if staging.exists() {
+                if let Ok(mut entries) = tokio::fs::read_dir(&staging).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        if entry.path().is_dir() {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            if let Ok(uid) = Uuid::parse_str(&name) {
+                                if michi_db::get_import_session_full(&db, &uid).await.ok().flatten().is_none() {
+                                    cleanup_session_dir(&entry.path()).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
 }

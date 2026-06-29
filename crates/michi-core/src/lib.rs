@@ -334,6 +334,50 @@ pub struct PlaybackSessionDb {
     pub volume: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum ImportState {
+    Created,
+    Uploading,
+    Uploaded,
+    Verifying,
+    Committing,
+    Committed,
+    Failed,
+    RolledBack,
+    Expired,
+}
+
+impl ImportState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Uploading => "uploading",
+            Self::Uploaded => "uploaded",
+            Self::Verifying => "verifying",
+            Self::Committing => "committing",
+            Self::Committed => "committed",
+            Self::Failed => "failed",
+            Self::RolledBack => "rolled_back",
+            Self::Expired => "expired",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "created" => Self::Created,
+            "uploading" => Self::Uploading,
+            "uploaded" => Self::Uploaded,
+            "verifying" => Self::Verifying,
+            "committing" => Self::Committing,
+            "committed" => Self::Committed,
+            "failed" => Self::Failed,
+            "rolled_back" => Self::RolledBack,
+            "expired" => Self::Expired,
+            _ => Self::Created,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

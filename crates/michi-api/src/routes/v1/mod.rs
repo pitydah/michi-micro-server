@@ -12,3 +12,4 @@ pub mod queue;
 pub mod receivers;
 pub mod rooms;
 pub mod events;
+pub mod diagnostics;

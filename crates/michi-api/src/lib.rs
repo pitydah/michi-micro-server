@@ -67,6 +67,7 @@ impl AppState {
         }
         let token_store = michi_link::TokenStore::new();
         michi_link::spawn_token_cleanup(token_store.clone());
+        routes::v1::import::spawn_import_cleanup(&config, db.clone());
         Self {
             config,
             db,
@@ -262,6 +263,9 @@ fn v1_link_routes() -> Router<AppState> {
         .route("/api/v1/import/upload/:session_id", post(routes::v1::import::import_upload_handler))
         .route("/api/v1/import/commit/:session_id", post(routes::v1::import::import_commit_handler))
         .route("/api/v1/import/rollback/:session_id", post(routes::v1::import::import_rollback_handler))
+        .route("/api/v1/import/session/:session_id/status", get(routes::v1::import::import_session_status_handler))
+        // Diagnostics
+        .route("/api/v1/diagnostics", get(routes::v1::diagnostics::diagnostics_handler))
         // Playback
         .route("/api/v1/playback/state", get(routes::v1::playback::playback_state_handler))
         .route("/api/v1/playback/control", post(routes::v1::playback::playback_control_handler))
