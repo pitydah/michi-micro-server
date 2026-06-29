@@ -2084,8 +2084,9 @@ async fn test_v1_import_flow() {
     ).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let upload: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    assert!(upload["accepted"].as_bool().unwrap_or(false));
-    assert!(upload["track_id"].is_string());
+    assert_eq!(upload["status"], "uploaded");
+    assert!(upload["remote_track_id"].is_string());
+    assert!(upload["checksum"].is_string());
 
     // 3. import/upload track 2
     let audio_data2 = base64::engine::general_purpose::STANDARD.encode(b"fake flac data 2");
@@ -2112,7 +2113,7 @@ async fn test_v1_import_flow() {
     ).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let dupe: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    assert!(dupe["is_duplicate"].as_bool().unwrap_or(false));
+    assert_eq!(dupe["status"], "duplicate");
 
     // 5. hash mismatch rejected
     let resp = app.clone().oneshot(
@@ -2553,7 +2554,8 @@ async fn test_v1_import_preflight_already_present() {
     let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
     let results = json["results"].as_array().unwrap();
     assert_eq!(results[0]["status"], "already_present");
-    assert_eq!(results[0]["local_track_id"], tid.to_string());
+    assert_eq!(results[0]["remote_track_id"], tid.to_string());
+    assert_eq!(results[0]["match"], "exact_hash");
 }
 
 #[tokio::test]
@@ -2589,17 +2591,18 @@ async fn test_v1_import_preflight_conflict() {
     };
     michi_db::upsert_track(&pool, &track).await.unwrap();
 
-    // Same hash but different duration_ms -> conflict
+    // Same title but different duration_ms and no matching hash -> conflict
     let resp = app.clone().oneshot(
         Request::builder().uri("/api/v1/import/preflight").method("POST")
             .header("Content-Type", "application/json")
-            .body(Body::from(r#"{"tracks":[{"content_hash":"conflict_hash","file_size":999,"duration_ms":999999}]}"#))
+            .body(Body::from(r#"{"tracks":[{"title":"Conflict","duration_ms":999999,"file_size":999}]}"#))
             .unwrap(),
     ).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
     let results = json["results"].as_array().unwrap();
     assert_eq!(results[0]["status"], "conflict");
+    assert_eq!(results[0]["match"], "metadata_duration");
 }
 
 #[tokio::test]
@@ -2641,8 +2644,8 @@ async fn test_v1_commit_returns_mapping() {
     let mapping = commit["mapping"].as_array().unwrap();
     assert!(!mapping.is_empty(), "mapping must have at least one entry");
     assert!(mapping[0].get("local_track_id").is_some(), "mapping entry must have local_track_id");
-    assert!(mapping[0].get("hash").is_some(), "mapping entry must have hash");
-    assert!(mapping[0].get("matched").is_some(), "mapping entry must have matched");
+    assert!(mapping[0].get("status").is_some(), "mapping entry must have status");
+    assert!(mapping[0].get("remote_track_id").is_some(), "mapping entry must have remote_track_id");
 }
 
 #[tokio::test]
@@ -2712,4 +2715,175 @@ async fn test_v1_diagnostics_has_disk_and_receiver() {
     assert!(json.get("receiver").is_some(), "diagnostics must have receiver section");
     assert!(json["receiver"]["client_available"].as_bool().is_some());
     assert!(json["disk"]["music_path_free_bytes"].is_null() || json["disk"]["music_path_free_bytes"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn test_v1_import_preflight_exact_hash() {
+    let (app, pool) = make_app().await;
+    use michi_core::{Track, AudioFormat};
+    use chrono::Utc;
+    let tid = uuid::Uuid::new_v4();
+    let track = Track {
+        id: tid, title: Some("Exact Hash".into()), artist: Some("Artist".into()),
+        album: Some("Album".into()), album_artist: None, duration_ms: Some(200000),
+        file_path: "/tmp/test/exact.flac".into(), format: AudioFormat::Flac,
+        sample_rate: None, bit_depth: None, channels: None, artwork_id: None,
+        genre: None, year: None, track_number: None, disc_number: None,
+        content_hash: Some("aaabbbcccdddeeefff000111222333444555666777888999000aaabbbcccddd".into()),
+        created_at: Utc::now(), updated_at: Utc::now(),
+    };
+    michi_db::upsert_track(&pool, &track).await.unwrap();
+
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/import/preflight").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"tracks":[{"content_hash":"aaabbbcccdddeeefff000111222333444555666777888999000aaabbbcccddd","file_size":1000,"duration_ms":200000,"title":"Exact Hash"}]}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results[0]["status"], "already_present");
+    assert_eq!(results[0]["match"], "exact_hash");
+}
+
+#[tokio::test]
+async fn test_v1_import_preflight_quick_hash() {
+    let (app, pool) = make_app().await;
+    use michi_core::{Track, AudioFormat};
+    use chrono::Utc;
+    let full_hash = "deadbeef123456789000111222333444555666777888999000aaabbbcccddd";
+    let tid = uuid::Uuid::new_v4();
+    let track = Track {
+        id: tid, title: Some("Quick Hash Match".into()), artist: None,
+        album: None, album_artist: None, duration_ms: Some(180000),
+        file_path: "/tmp/test/quick.flac".into(), format: AudioFormat::Flac,
+        sample_rate: None, bit_depth: None, channels: None, artwork_id: None,
+        genre: None, year: None, track_number: None, disc_number: None,
+        content_hash: Some(full_hash.into()),
+        created_at: Utc::now(), updated_at: Utc::now(),
+    };
+    michi_db::upsert_track(&pool, &track).await.unwrap();
+
+    let quick = &full_hash[..16];
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/import/preflight").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"tracks":[{{"quick_hash":"{quick}","file_size":1000}}]}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(json["results"][0]["status"], "already_present");
+    assert_eq!(json["results"][0]["match"], "quick_hash");
+}
+
+#[tokio::test]
+async fn test_v1_import_upload_returns_remote_track_id() {
+    let (app, _) = make_app().await;
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/import/session").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"total_tracks":1,"total_playlists":0}"#))
+            .unwrap(),
+    ).await.unwrap();
+    let session: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let sid = session["session_id"].as_str().unwrap().to_string();
+
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(b"remote track id test");
+    use sha2::{Sha256, Digest};
+    let mut h = Sha256::new();
+    h.update(b"remote track id test");
+    let hash = hex::encode(h.finalize());
+
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/upload/{sid}")).method("POST")
+            .header("Content-Type", "application/json")
+            .header("X-Track-Id", "00000000-0000-0000-0000-000000000001")
+            .body(Body::from(format!(r#"{{"filename":"remote.flac","data":"{data}","hash":"{hash}"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let upload: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(upload["local_track_id"], "00000000-0000-0000-0000-000000000001");
+    assert!(upload["remote_track_id"].is_string(), "remote_track_id must be present");
+    assert_eq!(upload["status"], "uploaded");
+    assert!(upload["checksum"].is_string());
+}
+
+#[tokio::test]
+async fn test_v1_queue_transfer_success() {
+    let (app, pool) = make_app().await;
+    let tid1 = seed_track(&pool, "/music/transfer1.flac", "Transfer One").await;
+    let tid2 = seed_track(&pool, "/music/transfer2.flac", "Transfer Two").await;
+
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/queue/transfer").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"track_ids":["{tid1}","{tid2}"],"current_index":0,"position_ms":5000,"source":"michi-music-player"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert!(json["queue_id"].is_string(), "must return queue_id");
+    assert!(json["session_id"].is_string(), "must return session_id");
+    assert!(json["accepted"].as_bool().unwrap_or(false));
+    assert_eq!(json["current_index"], 0);
+    assert_eq!(json["position_ms"], 5000);
+}
+
+#[tokio::test]
+async fn test_v1_queue_transfer_unknown_track() {
+    let (app, _) = make_app().await;
+    let fake = uuid::Uuid::new_v4();
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/queue/transfer").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"track_ids":["{fake}"],"current_index":0,"position_ms":0,"source":"michi-music-player"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(json["error"]["code"], "UNKNOWN_TRACKS");
+}
+
+#[tokio::test]
+async fn test_v1_import_commit_returns_mapping_with_status() {
+    let (app, _) = make_app().await;
+
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/import/session").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"total_tracks":1,"total_playlists":0}"#))
+            .unwrap(),
+    ).await.unwrap();
+    let session: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let sid = session["session_id"].as_str().unwrap().to_string();
+
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(b"commit mapping status test");
+    use sha2::{Sha256, Digest};
+    let mut h = Sha256::new();
+    h.update(b"commit mapping status test");
+    let hash = hex::encode(h.finalize());
+    let _ = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/upload/{sid}")).method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"filename":"mapstatus.flac","data":"{data}","hash":"{hash}"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/commit/{sid}")).method("POST")
+            .header("Content-Type", "application/json").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let commit: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let mapping = commit["mapping"].as_array().unwrap();
+    assert!(!mapping.is_empty(), "mapping must have entries");
+    assert!(mapping[0].get("local_track_id").is_some(), "mapping must have local_track_id");
+    assert!(mapping[0].get("status").is_some(), "mapping must have per-track status");
+    assert!(mapping[0].get("remote_track_id").is_some(), "mapping must have remote_track_id");
+    assert!(mapping[0].get("checksum").is_some(), "mapping must have checksum");
 }

@@ -136,6 +136,7 @@ pub async fn import_session_handler(
 pub async fn import_upload_handler(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<ImportUploadBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     use base64::Engine;
@@ -153,6 +154,18 @@ pub async fn import_upload_handler(
         )));
     }
 
+    // Read X-Track-Id header if present (Player sends this)
+    let local_track_id: Option<Uuid> = headers
+        .get("X-Track-Id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| Uuid::parse_str(s).ok());
+
+    // Read X-Checksum header if present
+    let checksum_header = headers
+        .get("X-Checksum")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     let data = base64::engine::general_purpose::STANDARD
         .decode(&body.data)
         .map_err(|_| v1_error(StatusCode::BAD_REQUEST, "INVALID_DATA", "invalid base64 data"))?;
@@ -169,7 +182,10 @@ pub async fn import_upload_handler(
     }
 
     let data_hash = compute_sha256(&data);
-    if let Some(ref hash) = body.hash {
+
+    // Prefer X-Checksum header if present, fall back to body.hash
+    let expected_hash = checksum_header.as_ref().or(body.hash.as_ref());
+    if let Some(hash) = expected_hash {
         if data_hash != *hash {
             return Err(v1_error(StatusCode::BAD_REQUEST, "HASH_MISMATCH", "SHA256 hash does not match data"));
         }
@@ -177,7 +193,10 @@ pub async fn import_upload_handler(
 
     if session_state.seen_hashes.contains(&data_hash) {
         return Ok(Json(serde_json::json!({
-            "accepted": false, "is_duplicate": true, "track_id": null,
+            "local_track_id": local_track_id,
+            "status": "duplicate",
+            "remote_track_id": null,
+            "checksum": data_hash,
         })));
     }
 
@@ -189,7 +208,10 @@ pub async fn import_upload_handler(
     let file_path = import_dir.join(&safe_name);
     if file_path.exists() {
         return Ok(Json(serde_json::json!({
-            "accepted": false, "is_duplicate": true, "track_id": null,
+            "local_track_id": local_track_id,
+            "status": "duplicate",
+            "remote_track_id": null,
+            "checksum": data_hash,
         })));
     }
 
@@ -212,7 +234,7 @@ pub async fn import_upload_handler(
     let ext = std::path::Path::new(&safe_name)
         .extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
 
-    let track_id = if ALLOWED_AUDIO_EXTS.contains(&ext.as_str()) {
+    let remote_track_id = if ALLOWED_AUDIO_EXTS.contains(&ext.as_str()) {
         let metadata = tokio::task::spawn_blocking({
             let fp = file_path.clone();
             move || michi_metadata::read_metadata_safe(&fp)
@@ -237,7 +259,10 @@ pub async fn import_upload_handler(
     };
 
     Ok(Json(serde_json::json!({
-        "accepted": true, "is_duplicate": false, "track_id": track_id,
+        "local_track_id": local_track_id,
+        "remote_track_id": remote_track_id,
+        "status": "uploaded",
+        "checksum": data_hash,
     })))
 }
 
@@ -245,26 +270,100 @@ pub async fn import_preflight_handler(
     State(state): State<AppState>,
     Json(body): Json<michi_core::ImportPreflightRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let mut results = Vec::new();
-    for identity in body.tracks {
-        let existing = michi_db::find_tracks_by_content_hash(&state.db, &identity.content_hash).await
-            .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for track in body.tracks {
+        let local_track_id = track.local_track_id;
+        let content_hash = track.content_hash.clone();
+        let quick_hash = track.quick_hash.clone();
+        let sha256_prefix = track.sha256_prefix.clone();
+        let duration_ms = track.duration_ms;
+        let title = track.title.clone();
 
-        let (status, track_id) = if existing.is_empty() {
-            ("needs_upload".to_string(), None)
-        } else if existing.iter().any(|t| {
-            t.duration_ms.map(|d| d as i64) == identity.duration_ms.map(|d| d as i64)
-        }) {
-            ("already_present".to_string(), existing.first().map(|t| t.id))
+        // Try exact match by full content_hash
+        let exact_match = if let Some(ref h) = content_hash {
+            michi_db::find_tracks_by_content_hash(&state.db, h).await
+                .ok().and_then(|t| t.into_iter().next())
         } else {
-            ("conflict".to_string(), existing.first().map(|t| t.id))
+            None
         };
 
-        results.push(michi_core::ImportPreflightItem {
-            hash: identity.content_hash,
-            status,
-            local_track_id: track_id,
-        });
+        // Try quick_hash (first 16 hex chars) as fallback
+        let quick_match = if exact_match.is_none() {
+            if let Some(ref qh) = quick_hash {
+                let all = michi_db::list_tracks(&state.db).await.ok().unwrap_or_default();
+                all.into_iter().find(|t| {
+                    t.content_hash.as_deref().map(|ch| ch.starts_with(qh)).unwrap_or(false)
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Try sha256_prefix as legacy fallback
+        let legacy_match = if exact_match.is_none() && quick_match.is_none() {
+            if let Some(ref sp) = sha256_prefix {
+                let all = michi_db::list_tracks(&state.db).await.ok().unwrap_or_default();
+                all.into_iter().find(|t| {
+                    t.content_hash.as_deref().map(|ch| ch.starts_with(sp)).unwrap_or(false)
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Try metadata+duration as last resort
+        let metadata_match = if exact_match.is_none() && quick_match.is_none() && legacy_match.is_none() {
+            if let Some(ref ttl) = title {
+                if let Some(dur) = duration_ms {
+                    let all = michi_db::list_tracks(&state.db).await.ok().unwrap_or_default();
+                    all.into_iter().find(|t| {
+                        t.title.as_deref() == Some(ttl) &&
+                        t.duration_ms.map(|d| (d as i64 - dur as i64).abs() < 2000).unwrap_or(false)
+                    })
+                } else { None }
+            } else { None }
+        } else {
+            None
+        };
+
+        // Check for partial conflict (same title, different duration)
+        let conflict = if exact_match.is_none() && quick_match.is_none() && legacy_match.is_none() && metadata_match.is_none() {
+            if let Some(ref ttl) = title {
+                if let Some(dur) = duration_ms {
+                    let all = michi_db::list_tracks(&state.db).await.ok().unwrap_or_default();
+                    all.into_iter().find(|t| {
+                        t.title.as_deref() == Some(ttl) &&
+                        t.duration_ms.map(|d| (d as i64 - dur as i64).abs() >= 2000).unwrap_or(false)
+                    })
+                } else { None }
+            } else { None }
+        } else {
+            None
+        };
+
+        let matched_track = exact_match.as_ref().or(quick_match.as_ref()).or(legacy_match.as_ref()).or(metadata_match.as_ref());
+
+        let (status, remote_track_id, match_type): (String, Option<Uuid>, String) = match matched_track {
+            Some(t) if exact_match.is_some() => ("already_present".into(), Some(t.id), "exact_hash".into()),
+            Some(t) if quick_match.is_some() => ("already_present".into(), Some(t.id), "quick_hash".into()),
+            Some(t) if legacy_match.is_some() => ("already_present".into(), Some(t.id), "sha256_prefix".into()),
+            Some(t) => ("already_present".into(), Some(t.id), "metadata_duration".into()),
+            None => match conflict.as_ref() {
+                Some(t) => ("conflict".into(), Some(t.id), "metadata_duration".into()),
+                None => ("needs_upload".into(), None, "none".into()),
+            }
+        };
+
+        results.push(serde_json::json!({
+            "local_track_id": local_track_id,
+            "status": status,
+            "remote_track_id": remote_track_id,
+            "match": match_type,
+        }));
     }
 
     Ok(Json(serde_json::json!({ "results": results })))
@@ -321,30 +420,60 @@ pub async fn import_commit_handler(
     }
 
     let tracks = michi_scanner::scan_directories(&[final_dir]).await;
+    let _scanned_count = tracks.len();
+
+    // Check for unresolved conflicts: same content_hash but different duration_ms already in library
+    let has_conflicts = {
+        let mut conflict = false;
+        for track in &tracks {
+            if let Some(ref hash) = track.content_hash {
+                let existing = michi_db::find_tracks_by_content_hash(&state.db, hash).await.ok().unwrap_or_default();
+                if existing.iter().any(|t| {
+                    t.id != track.id &&
+                    t.duration_ms.map(|d| (d as i64 - track.duration_ms.unwrap_or(0) as i64).abs() > 2000).unwrap_or(false)
+                }) {
+                    conflict = true;
+                    break;
+                }
+            }
+        }
+        conflict
+    };
+
+    if has_conflicts {
+        michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Failed, Some("unresolved conflicts")).await.ok();
+        return Err(v1_error(StatusCode::CONFLICT, "UNRESOLVED_CONFLICTS",
+            "Import has duration conflicts with existing tracks. Rollback and fix metadata before retrying."));
+    }
+
     michi_db::upsert_tracks(&state.db, &tracks).await.ok();
     cleanup_session_dir(&staging_dir).await;
 
-    // Build mapping (non-async, fetch content_hash data up front)
-    let mut tracks_with_hashes: Vec<(Uuid, Option<String>)> = Vec::new();
-    for track in &tracks {
-        tracks_with_hashes.push((track.id, track.content_hash.clone()));
-    }
-    drop(tracks);
-
+    // Build mapping with per-track status
     let mut mapping: Vec<serde_json::Value> = Vec::new();
-    for (local_id, content_hash) in &tracks_with_hashes {
-        let existing_by_hash = if let Some(ref h) = content_hash {
+    for track in &tracks {
+        let existing_by_hash = if let Some(ref h) = track.content_hash {
             michi_db::find_tracks_by_content_hash(&state.db, h).await.ok().unwrap_or_default()
         } else {
             Vec::new()
         };
-        let matched = existing_by_hash.iter().any(|t| t.id != *local_id);
-        let existing_id = if matched { existing_by_hash.first().map(|t| t.id) } else { None };
+
+        let (status, remote_id): (String, Uuid) = if existing_by_hash.iter().any(|t| t.id == track.id) {
+            // This exact track was just inserted
+            ("inserted".into(), track.id)
+        } else if existing_by_hash.iter().any(|t| t.id != track.id) {
+            // Hash matched a different track — merged
+            let existing_id = existing_by_hash.first().map(|t| t.id).unwrap_or(track.id);
+            ("merged".into(), existing_id)
+        } else {
+            ("inserted".into(), track.id)
+        };
+
         mapping.push(serde_json::json!({
-            "local_track_id": local_id,
-            "hash": content_hash,
-            "matched": matched,
-            "existing_track_id": existing_id,
+            "local_track_id": track.id,
+            "status": status,
+            "remote_track_id": remote_id,
+            "checksum": track.content_hash,
         }));
     }
 

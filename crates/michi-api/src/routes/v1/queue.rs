@@ -80,6 +80,108 @@ pub async fn queue_jump_handler(
     Ok(Json(serde_json::json!({ "status": "ok", "index": body.index })))
 }
 
+// ── Queue Transfer (Player → Server) ───────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct QueueTransferBody {
+    pub track_ids: Vec<Uuid>,
+    pub current_index: u32,
+    pub position_ms: u64,
+    pub source: String,
+}
+
+pub async fn queue_transfer_handler(
+    State(state): State<AppState>,
+    Json(body): Json<QueueTransferBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if body.track_ids.is_empty() {
+        return Err(v1_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST", "track_ids must not be empty"));
+    }
+    if body.current_index as usize >= body.track_ids.len() {
+        return Err(v1_error(StatusCode::BAD_REQUEST, "INVALID_INDEX", "current_index exceeds track_ids length"));
+    }
+
+    // Validate all track_ids exist in library
+    let mut unknown_tracks: Vec<Uuid> = Vec::new();
+    for tid in &body.track_ids {
+        let exists = michi_db::get_track(&state.db, tid).await
+            .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+        if exists.is_none() {
+            unknown_tracks.push(*tid);
+        }
+    }
+
+    if !unknown_tracks.is_empty() {
+        return Err(v1_error(StatusCode::BAD_REQUEST, "UNKNOWN_TRACKS", &format!(
+            "tracks not found: {:?}", unknown_tracks
+        )));
+    }
+
+    // Create new queue
+    let queue_id = Uuid::new_v4();
+    let name = format!("transfer-{}", &body.source);
+    let now = chrono::Utc::now().to_rfc3339();
+
+    sqlx::query("INSERT INTO queues (id, name, source_device_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+        .bind(queue_id.to_string()).bind(&name).bind(&body.source).bind(&now).bind(&now)
+        .execute(&state.db)
+        .await
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+
+    for (i, track_id) in body.track_ids.iter().enumerate() {
+        let item_id = Uuid::new_v4();
+        let _ = sqlx::query(
+            "INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(item_id.to_string()).bind(queue_id.to_string())
+        .bind(track_id.to_string()).bind(i as i64).bind(&now)
+        .execute(&state.db).await;
+    }
+
+    // Update playback state
+    {
+        let mut current = state.playback_state.write().await;
+        current.track_id = body.track_ids.get(body.current_index as usize).copied();
+        current.position_ms = body.position_ms;
+        current.playing = true;
+        current.updated_at = chrono::Utc::now();
+    }
+
+    // Create playback session
+    let session_id = Uuid::new_v4();
+    let queue_json = serde_json::to_string(&body.track_ids).unwrap_or_default();
+    let db_session = michi_core::PlaybackSessionDb {
+        id: session_id,
+        device_id: Uuid::nil(),
+        queue_id: Some(queue_id),
+        queue_state_json: queue_json,
+        current_index: body.current_index as i32,
+        current_track_id: body.track_ids.get(body.current_index as usize).copied(),
+        position_ms: body.position_ms,
+        playing: true,
+        repeat_mode: "none".into(),
+        shuffle: false,
+        volume: 0.8,
+        source: body.source.clone(),
+        resume_policy: "manual".into(),
+        restored: false,
+    };
+    michi_db::create_playback_session(&state.db, &db_session).await
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+
+    let _ = state.tx.send(serde_json::json!({
+        "type": "queue_transferred", "session_id": session_id,
+    }).to_string());
+
+    Ok(Json(serde_json::json!({
+        "queue_id": queue_id,
+        "session_id": session_id,
+        "accepted": true,
+        "current_index": body.current_index,
+        "position_ms": body.position_ms,
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct QueueReorderBody {
     pub item_ids: Vec<Uuid>,

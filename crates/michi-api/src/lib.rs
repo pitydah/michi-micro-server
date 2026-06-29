@@ -279,6 +279,7 @@ fn v1_link_routes() -> Router<AppState> {
         .route("/api/v1/queue", get(routes::v1::queue::queue_handler))
         .route("/api/v1/queue/items", post(routes::v1::queue::queue_items_handler))
         .route("/api/v1/queue/jump", post(routes::v1::queue::queue_jump_handler))
+        .route("/api/v1/queue/transfer", post(routes::v1::queue::queue_transfer_handler))
         .route("/api/v1/queue/reorder", put(routes::v1::queue::queue_reorder_handler))
         .route("/api/v1/queue/:queue_id", delete(routes::v1::queue::queue_delete_handler))
         // Receivers

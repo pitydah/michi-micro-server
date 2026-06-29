@@ -166,28 +166,38 @@ pub struct TrackIdentity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImportPreflightRequest {
-    pub tracks: Vec<TrackIdentity>,
+pub struct ImportPreflightTrack {
+    pub local_track_id: Option<Uuid>,
+    pub quick_hash: Option<String>,
+    pub content_hash: Option<String>,
+    pub sha256_prefix: Option<String>,
+    pub file_size: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImportPreflightResult {
-    pub results: Vec<ImportPreflightItem>,
+pub struct ImportPreflightRequest {
+    pub tracks: Vec<ImportPreflightTrack>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportPreflightItem {
-    pub hash: String,
-    pub status: String,
     pub local_track_id: Option<Uuid>,
+    pub status: String,
+    pub remote_track_id: Option<Uuid>,
+    #[serde(rename = "match")]
+    pub match_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitMapping {
     pub local_track_id: Uuid,
-    pub hash: String,
-    pub matched: bool,
-    pub existing_track_id: Option<Uuid>,
+    pub status: String,
+    pub remote_track_id: Uuid,
+    pub checksum: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
