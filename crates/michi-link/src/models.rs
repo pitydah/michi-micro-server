@@ -11,6 +11,14 @@ pub struct LinkServerInfo {
     pub michi_link_version: String,
     pub roles: Vec<String>,
     pub features: LinkFeatures,
+    pub auth: LinkAuthInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkAuthInfo {
+    pub required: bool,
+    pub strategy: String,
+    pub token_refresh: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +57,16 @@ impl LinkFeatures {
             rooms: false,
             events: true,
             transcoding: false,
+            token_refresh: true,
+        }
+    }
+}
+
+impl LinkAuthInfo {
+    pub fn server_code() -> Self {
+        Self {
+            required: true,
+            strategy: "SERVER_CODE".into(),
             token_refresh: true,
         }
     }
