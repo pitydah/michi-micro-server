@@ -171,5 +171,7 @@ pub async fn link_devices_revoke(
         return Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "device not found"));
     }
 
+    state.token_store.revoke_all_by_device(device_id).await;
+
     Ok(Json(serde_json::json!({ "status": "revoked" })))
 }

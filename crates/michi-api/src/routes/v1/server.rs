@@ -14,6 +14,13 @@ pub struct V1ServerInfo {
     pub michi_link_version: u32,
     pub roles: Vec<String>,
     pub features: V1Features,
+    pub auth: V1AuthInfo,
+}
+
+#[derive(Debug, Serialize)]
+pub struct V1AuthInfo {
+    pub strategy: String,
+    pub token_refresh: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,6 +73,10 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
             rooms: false,
             events: true,
             transcoding: false,
+            token_refresh: true,
+        },
+        auth: V1AuthInfo {
+            strategy: "SERVER_CODE".into(),
             token_refresh: true,
         },
     })

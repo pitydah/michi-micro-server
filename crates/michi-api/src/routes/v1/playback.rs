@@ -23,17 +23,26 @@ pub async fn playback_state_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let current = state.playback_state.read().await;
 
-    let current_track = current.track_id.and_then(|_tid| {
-        // Try to fetch track info to include duration
-        None::<serde_json::Value>
-    });
+    let current_track = if let Some(tid) = current.track_id {
+        michi_db::get_track(&state.db, &tid).await.ok().flatten().map(|t| {
+            serde_json::json!({
+                "id": t.id,
+                "title": t.title,
+                "artist": t.artist,
+                "album": t.album,
+                "duration_ms": t.duration_ms,
+            })
+        })
+    } else {
+        None
+    };
 
     Ok(Json(serde_json::json!({
         "state": state_string(current.playing),
         "track_id": current.track_id,
         "current_track": current_track,
         "position_ms": current.position_ms,
-        "duration_ms": null,
+        "duration_ms": current_track.as_ref().and_then(|t| t.get("duration_ms")).and_then(|v| v.as_u64()),
         "volume": (current.volume * 100.0) as u32,
         "shuffle": false,
         "repeat": "none",
@@ -108,7 +117,11 @@ pub async fn playback_control_handler(
         }
         "set_volume" => {
             let vol = body.volume.or_else(|| {
-                body.value.as_ref().and_then(|v| v.get("volume").and_then(|p| p.as_u64()).map(|v| v as u32))
+                body.value.as_ref().and_then(|v| {
+                    v.get("volume")
+                        .and_then(|p| p.as_u64().or_else(|| p.as_f64().map(|f| f as u64)))
+                        .map(|v| v as u32)
+                })
             });
             if let Some(v) = vol {
                 current.volume = (v.min(100) as f64) / 100.0;

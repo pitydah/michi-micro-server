@@ -62,6 +62,11 @@ impl TokenStore {
         self.by_hash.write().await.remove(&hash);
     }
 
+    pub async fn revoke_all_by_device(&self, device_id: uuid::Uuid) {
+        let mut store = self.by_hash.write().await;
+        store.retain(|_, entry| entry.device_id != device_id);
+    }
+
     pub async fn cleanup(&self) {
         let mut store = self.by_hash.write().await;
         store.retain(|_, entry| entry.expires_at > chrono::Utc::now());

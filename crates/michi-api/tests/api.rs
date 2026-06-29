@@ -1363,6 +1363,9 @@ async fn test_v1_server_info() {
         "transcoding should be false"
     );
     assert!(json["roles"].is_array());
+    assert_eq!(json["auth"]["strategy"], "SERVER_CODE");
+    assert!(json["auth"]["token_refresh"].as_bool().unwrap_or(false));
+    assert!(json["michi_link_version"].as_u64().unwrap_or(0) >= 1);
 }
 
 #[tokio::test]
@@ -1766,4 +1769,154 @@ async fn test_v1_hls_format_recognized() {
         json.get("error").is_some(),
         "HLS error must have 'error' key"
     );
+}
+
+#[tokio::test]
+async fn test_v1_pair_confirm_returns_canonical_permissions() {
+    let (app, pool) = make_app().await;
+
+    // Start pairing
+    let start_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/pair/start")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"device_name":"test-mobile","device_type":"mobile"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(start_resp.status(), StatusCode::OK);
+    let start_text = body_text(start_resp).await;
+    let start_json: Value = serde_json::from_str(&start_text).unwrap();
+    let code = start_json["code"].as_str().unwrap().to_string();
+
+    // Confirm pairing
+    let confirm_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/pair/confirm")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(r#"{{"code":"{code}"}}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(confirm_resp.status(), StatusCode::OK);
+    let confirm_text = body_text(confirm_resp).await;
+    let confirm_json: Value = serde_json::from_str(&confirm_text).unwrap();
+
+    let permissions = confirm_json["permissions"].as_array().unwrap();
+    let perm_strings: Vec<&str> = permissions.iter().map(|p| p.as_str().unwrap()).collect();
+    assert!(perm_strings.contains(&"library.read"), "should contain library.read");
+    assert!(perm_strings.contains(&"stream.read"), "should contain stream.read");
+    assert!(perm_strings.contains(&"download.read"), "mobile should have download.read");
+    assert!(perm_strings.contains(&"playback.control"), "should contain playback.control");
+    assert!(perm_strings.contains(&"sync.read_manifest"), "should contain sync.read_manifest");
+
+    // Verify no Debug-format strings leak through
+    for p in &perm_strings {
+        assert!(!p.contains('{'), "permission {:?} contains debug formatting", p);
+        assert!(!p.contains('('), "permission {:?} contains debug formatting", p);
+    }
+}
+
+#[tokio::test]
+async fn test_v1_error_format_includes_details() {
+    let (app, _) = make_app().await;
+    let fake_id = Uuid::new_v4();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/tracks/{fake_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let text = body_text(response).await;
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert!(json.get("error").is_some(), "must have error key");
+    assert!(json["error"].get("code").is_some(), "error must have code");
+    assert!(json["error"].get("message").is_some(), "error must have message");
+    assert!(json["error"].get("details").is_some(), "error must have details: {{}}");
+}
+
+#[tokio::test]
+async fn test_v1_sync_manifest_no_file_path() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/secret.flac", "Secret").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sync/manifest")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    let json: Value = serde_json::from_str(&text).unwrap();
+    let tracks = json["tracks"].as_array().unwrap();
+    for t in tracks {
+        assert!(t.get("file_path").is_none(), "sync manifest must not expose file_path");
+    }
+    assert!(json.get("cursor").is_some(), "manifest must have cursor");
+}
+
+#[tokio::test]
+async fn test_v1_playback_state_returns_state_field() {
+    let (app, _) = make_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/state")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert!(json.get("state").is_some(), "playback state must have 'state' field");
+    assert!(json.get("track_id").is_some(), "playback state must have track_id");
+    assert!(json.get("position_ms").is_some(), "playback state must have position_ms");
+    assert!(json.get("volume").is_some(), "playback state must have volume");
+    assert!(json.get("shuffle").is_some(), "playback state must have shuffle");
+    assert!(json.get("repeat").is_some(), "playback state must have repeat");
+}
+
+#[tokio::test]
+async fn test_v1_sync_manifest_delta_with_cursor() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/delta1.flac", "Delta One").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sync/manifest/delta?cursor=0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert!(json.get("added").is_some(), "delta must have added");
+    assert!(json.get("cursor").is_some(), "delta must have cursor");
+    assert!(json.get("total").is_some(), "delta must have total");
+    let added = json["added"].as_array().unwrap();
+    assert!(added.len() >= 1, "should have at least one added track");
+    assert!(added[0].get("file_path").is_none(), "delta entries must not expose file_path");
 }

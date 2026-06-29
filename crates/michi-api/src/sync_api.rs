@@ -221,5 +221,4 @@ pub fn sync_router() -> Router<AppState> {
         .route("/api/v1/sync/devices/:id", delete(revoke_device_handler))
         .route("/api/v1/sync/pair/start", post(pair_start_handler))
         .route("/api/v1/sync/pair/confirm", post(pair_confirm_handler))
-        .route("/api/v1/sync/manifest", get(manifest_handler))
 }

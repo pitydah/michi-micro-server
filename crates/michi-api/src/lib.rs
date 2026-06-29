@@ -253,7 +253,8 @@ fn v1_link_routes() -> Router<AppState> {
         // Playlists
         .route("/api/v1/playlists", get(routes::v1::playlists::playlists_handler).post(routes::v1::playlists::create_playlist_handler))
         .route("/api/v1/playlists/:id", get(routes::v1::playlists::get_playlist_handler).put(routes::v1::playlists::update_playlist_handler).delete(routes::v1::playlists::delete_playlist_handler))
-        // Sync (delta only - manifest is in sync_api::sync_router)
+        // Sync
+        .route("/api/v1/sync/manifest", get(routes::v1::sync::sync_manifest_handler))
         .route("/api/v1/sync/manifest/delta", get(routes::v1::sync::sync_manifest_delta_handler))
         .route("/api/v1/sync/state", post(routes::v1::sync::sync_state_handler))
         // Import
