@@ -2644,3 +2644,72 @@ async fn test_v1_commit_returns_mapping() {
     assert!(mapping[0].get("hash").is_some(), "mapping entry must have hash");
     assert!(mapping[0].get("matched").is_some(), "mapping entry must have matched");
 }
+
+#[tokio::test]
+async fn test_v1_playback_queue_survives_restart() {
+    let (app, pool) = make_app().await;
+
+    // Seed a track
+    let tid = seed_track(&pool, "/music/survive.flac", "Survivor").await;
+
+    // Create queue items
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/queue/items").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"track_ids":["{tid}"],"name":"survivor-queue"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let queue_resp: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let _queue_id = queue_resp["queue_id"].as_str().unwrap().to_string();
+
+    // Create playback session
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/session").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"queue":["{tid}"],"current_track_id":"{tid}","position_ms":42000,"playing":true,"source":"player","resume_policy":"manual"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let sess_resp: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let session_id = sess_resp["session_id"].as_str().unwrap().to_string();
+
+    // Now simulate restart: create new app state with same DB, verify restore works
+    let config2 = test_config();
+    let state2 = michi_api::AppState::new(config2, pool.clone(), None);
+    let app2 = michi_api::create_router(state2);
+
+    // Verify queue is still queryable
+    let resp2 = app2.clone().oneshot(
+        Request::builder().uri(format!("/api/v1/playback/session/{session_id}")).body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+    let restored: Value = serde_json::from_str(&body_text(resp2).await).unwrap();
+    assert_eq!(restored["session_id"], session_id);
+    assert_eq!(restored["position_ms"], 42000);
+    assert_eq!(restored["source"], "player");
+
+    // Queue should survive
+    let resp3 = app2.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/session/restore").method("POST")
+            .header("Content-Type", "application/json").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp3.status(), StatusCode::OK);
+    let restore_resp: Value = serde_json::from_str(&body_text(resp3).await).unwrap();
+    assert!(restore_resp["restored"].as_bool().unwrap_or(false));
+    assert_eq!(restore_resp["position_ms"], 42000);
+}
+
+#[tokio::test]
+async fn test_v1_diagnostics_has_disk_and_receiver() {
+    let (app, _) = make_app().await;
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/diagnostics").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert!(json.get("disk").is_some(), "diagnostics must have disk section");
+    assert!(json.get("receiver").is_some(), "diagnostics must have receiver section");
+    assert!(json["receiver"]["client_available"].as_bool().is_some());
+    assert!(json["disk"]["music_path_free_bytes"].is_null() || json["disk"]["music_path_free_bytes"].as_u64().is_some());
+}

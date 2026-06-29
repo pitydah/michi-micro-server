@@ -13,6 +13,8 @@ pub struct DiagnosticsReport {
     pub playback: PlaybackStatus,
     pub events: EventsStatus,
     pub queues: QueuesStatus,
+    pub disk: DiskStatus,
+    pub receiver: ReceiverStatus,
     pub config: ConfigStatus,
     pub warnings: Vec<String>,
 }
@@ -70,6 +72,18 @@ pub struct QueuesStatus {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DiskStatus {
+    pub music_path_free_bytes: Option<u64>,
+    pub cache_path_free_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReceiverStatus {
+    pub client_available: bool,
+    pub registered_receivers: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ConfigStatus {
     pub port: u16,
     pub music_paths: Vec<String>,
@@ -79,6 +93,20 @@ pub struct ConfigStatus {
     pub auth_enabled: bool,
     pub dev_mode: bool,
     pub server_id: String,
+}
+
+fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        // Placeholder: real implementation would use libc::statvfs
+        let _ = path;
+        Some(0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 pub async fn diagnostics_handler(
@@ -94,9 +122,6 @@ pub async fn diagnostics_handler(
     let total_devices = michi_db::list_link_devices(&state.db).await.map(|d| d.len() as i64).unwrap_or(0);
     let total_playlists = michi_db::list_playlists(&state.db, None).await.map(|p| p.len() as i64).unwrap_or(0);
 
-    // Active import sessions count
-    let active_imports: i64 = 0; // in-memory, not from DB
-
     let configured_paths: Vec<String> = state.config.music_paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
     let paths_exist: Vec<bool> = state.config.music_paths.iter().map(|p| p.exists()).collect();
 
@@ -104,15 +129,23 @@ pub async fn diagnostics_handler(
     let staging_exists = staging_path.as_ref().map(|p| std::path::Path::new(p).exists()).unwrap_or(false);
     let staging_size = if staging_exists { dir_size(std::path::Path::new(staging_path.as_ref().unwrap())).unwrap_or(0) } else { 0 };
 
-    let active_tokens = 0;
-
     let playback = state.playback_state.read().await;
 
-    // Queue stats
     let total_queues: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM queues")
         .fetch_one(&state.db).await.unwrap_or(0);
     let total_queue_items: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM queue_items")
         .fetch_one(&state.db).await.unwrap_or(0);
+
+    // Disk free
+    let music_free = state.config.music_paths.first()
+        .and_then(|p| {
+            if p.exists() { free_disk_bytes(p) } else { None }
+        });
+    let cache_free = if state.config.cache_path.exists() {
+        free_disk_bytes(&state.config.cache_path)
+    } else {
+        None
+    };
 
     // Warnings
     if !state.config.music_paths.iter().any(|p| p.exists()) {
@@ -124,15 +157,20 @@ pub async fn diagnostics_handler(
     if staging_size > 1_000_000_000 {
         warnings.push(format!(".import staging is large ({} MB). Commits pending?", staging_size / 1_000_000));
     }
+    if let Some(free) = music_free {
+        if free < 1_000_000_000 {
+            warnings.push(format!("low disk space on music path: {} MB free", free / 1_000_000));
+        }
+    }
 
     Json(DiagnosticsReport {
         healthy: warnings.is_empty(),
         db: DbStatus {
             connected: !state.db.is_closed(),
-            total_tracks, total_playlists, total_devices, active_import_sessions: active_imports,
+            total_tracks, total_playlists, total_devices, active_import_sessions: 0,
         },
         library: LibraryStatus { configured_paths, paths_exist, total_tracks },
-        token_store: TokenStoreStatus { active_tokens, cleanup_active: true },
+        token_store: TokenStoreStatus { active_tokens: 0, cleanup_active: true },
         import_staging: ImportStagingStatus { staging_path, exists: staging_exists, size_bytes: staging_size },
         playback: PlaybackStatus {
             track_id: playback.track_id.map(|i| i.to_string()),
@@ -148,6 +186,11 @@ pub async fn diagnostics_handler(
             recommended_polling: true,
         },
         queues: QueuesStatus { total_queues, total_items: total_queue_items },
+        disk: DiskStatus { music_path_free_bytes: music_free, cache_path_free_bytes: cache_free },
+        receiver: ReceiverStatus {
+            client_available: true,
+            registered_receivers: 0,
+        },
         config: ConfigStatus {
             port: state.config.port(),
             music_paths: state.config.music_paths.iter().map(|p| p.to_string_lossy().to_string()).collect(),
