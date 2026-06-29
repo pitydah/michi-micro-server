@@ -2218,3 +2218,206 @@ async fn test_v1_auth_flow_pairing_roundtrip() {
     let err: Value = serde_json::from_str(&body_text(resp).await).unwrap();
     assert_eq!(err["error"]["code"], "INVALID_CODE");
 }
+
+#[tokio::test]
+async fn test_v1_import_rollback_cleans_staging() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/existing.flac", "Existing").await;
+
+    // session
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/import/session").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"total_tracks":1,"total_playlists":0}"#))
+            .unwrap(),
+    ).await.unwrap();
+    let session: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let sid = session["session_id"].as_str().unwrap().to_string();
+
+    // upload
+    let data = base64::engine::general_purpose::STANDARD.encode(b"rollback test audio");
+    use sha2::{Sha256, Digest};
+    let mut h = Sha256::new();
+    h.update(b"rollback test audio");
+    let hash = hex::encode(h.finalize());
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/upload/{sid}")).method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"filename":"rollback.flac","data":"{data}","hash":"{hash}"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // rollback
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/rollback/{sid}")).method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rb: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(rb["status"], "rolled_back");
+
+    // commit after rollback should fail
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/commit/{sid}")).method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_v1_autonomous_playback_state_independent() {
+    let (app, _) = make_app().await;
+
+    // Initial state is stopped/paused
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/state").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let state: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(state["state"], "paused");
+    assert!(state["track_id"].is_null());
+
+    // Control: play without track_id
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/control").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"command":"play"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Verify state changed
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/state").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    let state: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(state["state"], "playing");
+
+    // Control: pause
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/control").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"command":"pause"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/state").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    let state: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(state["state"], "paused");
+
+    // Volume control: set_volume 50
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/control").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"command":"set_volume","volume":50}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/state").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    let state: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(state["volume"], 50);
+
+    // seek by position_ms
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/control").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"command":"seek","position_ms":30000}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/state").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    let state: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(state["position_ms"], 30000);
+
+    // stop
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/control").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"command":"stop"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/state").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    let state: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(state["state"], "paused");
+    assert_eq!(state["position_ms"], 0);
+}
+
+#[tokio::test]
+async fn test_v1_stream_and_download_range() {
+    use tokio::io::AsyncWriteExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let music = tmp.path().join("music");
+    std::fs::create_dir_all(&music).unwrap();
+    let file_path = music.join("stream_range.flac");
+    let content = vec![0u8; 65536]; // 64KB file
+    let mut f = tokio::fs::File::create(&file_path).await.unwrap();
+    f.write_all(&content).await.unwrap();
+    drop(f);
+
+    let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+    let id = michi_core::track_id_from_path(file_path.to_str().unwrap());
+    let track = michi_core::Track {
+        id, title: Some("Range Test".into()), artist: None, album: None, album_artist: None,
+        duration_ms: Some(10000), file_path: file_path.to_str().unwrap().to_string(),
+        format: michi_core::AudioFormat::Flac, sample_rate: None, bit_depth: None,
+        channels: None, artwork_id: None, genre: None, year: None,
+        track_number: None, disc_number: None,
+        created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+    };
+    michi_db::upsert_track(&pool, &track).await.unwrap();
+
+    let config = michi_config::Config {
+        port: 9999, music_paths: vec![music.clone()],
+        config_path: tmp.path().join("config"), cache_path: tmp.path().join("cache"),
+        database_url: "sqlite::memory:".to_string(), version: "test",
+        sync_peers: vec![], sync_name: "test".into(),
+        listenbrainz_token: None, scrobble_enabled: false,
+        auth_username: None, auth_password: None, auth_enabled: false,
+        allow_registration: false, server_id: uuid::Uuid::new_v4(),
+        cors_origin: None, dev_mode: true,
+    };
+    let state = michi_api::AppState::new(config, pool, None);
+    let app = michi_api::create_router(state);
+
+    // Full file 200
+    let resp = app.clone().oneshot(
+        Request::builder().uri(format!("/api/v1/stream/{id}")).body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Range request 206
+    let resp = app.clone().oneshot(
+        Request::builder().uri(format!("/api/v1/stream/{id}"))
+            .header("Range", "bytes=0-1023")
+            .body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+
+    // Download full 200
+    let resp = app.clone().oneshot(
+        Request::builder().uri(format!("/api/v1/download/{id}")).body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert!(resp.status() == StatusCode::OK || resp.status() == StatusCode::NOT_FOUND);
+
+    // Range not satisfiable 416
+    let resp = app.clone().oneshot(
+        Request::builder().uri(format!("/api/v1/stream/{id}"))
+            .header("Range", "bytes=999999999-")
+            .body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+}

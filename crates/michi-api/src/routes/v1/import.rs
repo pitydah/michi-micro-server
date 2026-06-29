@@ -72,8 +72,20 @@ fn is_allowed_extension(filename: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn get_persistent_import_dir(music_paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
-    music_paths.first().map(|p| p.join(".import"))
+fn get_staging_dir(music_paths: &[std::path::PathBuf]) -> std::path::PathBuf {
+    music_paths.first()
+        .map(|p| p.join(".import"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/michi-import"))
+}
+
+fn get_session_dir(music_paths: &[std::path::PathBuf], session_id: &Uuid) -> std::path::PathBuf {
+    get_staging_dir(music_paths).join(session_id.to_string())
+}
+
+async fn cleanup_session_dir(path: &std::path::Path) {
+    if path.exists() {
+        let _ = tokio::fs::remove_dir_all(path).await;
+    }
 }
 
 pub async fn import_session_handler(
@@ -175,10 +187,8 @@ pub async fn import_upload_handler(
 
     let safe_name = sanitize_filename(&body.filename);
 
-    // Write to persistent import directory under first music path
-    let import_dir = get_persistent_import_dir(&state.config.music_paths)
-        .unwrap_or_else(|| state.config.cache_path.join("import"))
-        .join(session_id.to_string());
+    // Write to staging directory under .import
+    let import_dir = get_session_dir(&state.config.music_paths, &session_id);
 
     tokio::fs::create_dir_all(&import_dir).await
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "IO_ERROR", &e.to_string()))?;
@@ -237,6 +247,17 @@ pub async fn import_upload_handler(
     })))
 }
 
+pub async fn import_rollback_handler(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+) -> Json<serde_json::Value> {
+    IMPORT_SESSIONS.write().await.remove(&session_id);
+    let staging_dir = get_session_dir(&state.config.music_paths, &session_id);
+    cleanup_session_dir(&staging_dir).await;
+    michi_db::close_import_session(&state.db, &session_id).await.ok();
+    Json(serde_json::json!({ "status": "rolled_back" }))
+}
+
 pub async fn import_commit_handler(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
@@ -248,18 +269,37 @@ pub async fn import_commit_handler(
         v1_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", "import session not found or expired")
     })?;
 
-    michi_db::close_import_session(&state.db, &session_id).await.ok();
-    let _ = state.tx.send(r#"{"type":"library_updated"}"#.to_string());
+    // Move files from staging to first music path root
+    let staging_dir = get_session_dir(&state.config.music_paths, &session_id);
+    let final_dir = state.config.music_paths.first()
+        .cloned()
+        .unwrap_or_else(|| staging_dir.clone());
 
-    // Scan persistent import directory
-    let import_dir = get_persistent_import_dir(&state.config.music_paths)
-        .unwrap_or_else(|| state.config.cache_path.join("import"))
-        .join(session_id.to_string());
-
-    if import_dir.exists() {
-        let tracks = michi_scanner::scan_directories(&[import_dir]).await;
-        michi_db::upsert_tracks(&state.db, &tracks).await.ok();
+    if staging_dir.exists() {
+        if let Ok(mut entries) = tokio::fs::read_dir(&staging_dir).await {
+            use tokio::fs;
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let src = entry.path();
+                if src.is_file() {
+                    let dest = final_dir.join(src.file_name().unwrap());
+                    if !dest.exists() {
+                        let _ = fs::copy(&src, &dest).await;
+                    }
+                }
+            }
+        }
     }
+
+    michi_db::close_import_session(&state.db, &session_id).await.ok();
+
+    // Scan final library directory
+    let tracks = michi_scanner::scan_directories(&[final_dir]).await;
+    michi_db::upsert_tracks(&state.db, &tracks).await.ok();
+
+    // Clean up staging directory
+    cleanup_session_dir(&staging_dir).await;
+
+    let _ = state.tx.send(r#"{"type":"library_updated"}"#.to_string());
 
     Ok(Json(serde_json::json!({
         "tracks_imported": _session_state.imported_tracks,
