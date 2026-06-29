@@ -292,7 +292,17 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 21 applied");
     }
 
-    info!("database schema at version 21");
+    if current < 22 {
+        info!("applying migration 22: playback sessions extended");
+        migration_022(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (22, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 22 applied");
+    }
+
+    info!("database schema at version 22");
     Ok(())
 }
 
@@ -677,6 +687,30 @@ async fn migration_021(pool: &SqlitePool) -> Result<(), DbError> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_import_sessions_status ON import_sessions(status)")
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+async fn migration_022(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query("ALTER TABLE playback_sessions ADD COLUMN queue_id TEXT")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE playback_sessions ADD COLUMN source TEXT NOT NULL DEFAULT 'player'")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE playback_sessions ADD COLUMN resume_policy TEXT NOT NULL DEFAULT 'manual'")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE playback_sessions ADD COLUMN restored INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE queues ADD COLUMN source_device_id TEXT")
+        .execute(pool)
+        .await
+        .ok();
     Ok(())
 }
 
@@ -1949,10 +1983,11 @@ pub async fn create_playback_session(
 ) -> Result<(), DbError> {
     let now = Utc::now().to_rfc3339();
     sqlx::query(
-        "INSERT INTO playback_sessions (id, device_id, queue_state, current_index, current_track_id, position_ms, playing, repeat_mode, shuffle, volume, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO playback_sessions (id, device_id, queue_id, queue_state, current_index, current_track_id, position_ms, playing, repeat_mode, shuffle, volume, source, resume_policy, restored, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(session.id.to_string())
     .bind(session.device_id.to_string())
+    .bind(session.queue_id.map(|u| u.to_string()))
     .bind(&session.queue_state_json)
     .bind(session.current_index)
     .bind(session.current_track_id.map(|u| u.to_string()))
@@ -1961,6 +1996,9 @@ pub async fn create_playback_session(
     .bind(&session.repeat_mode)
     .bind(session.shuffle as i64)
     .bind(session.volume)
+    .bind(&session.source)
+    .bind(&session.resume_policy)
+    .bind(session.restored as i64)
     .bind(&now)
     .bind(&now)
     .execute(pool)
@@ -1974,8 +2012,9 @@ pub async fn update_playback_session(
 ) -> Result<(), DbError> {
     let now = Utc::now().to_rfc3339();
     sqlx::query(
-        "UPDATE playback_sessions SET queue_state = ?, current_index = ?, current_track_id = ?, position_ms = ?, playing = ?, repeat_mode = ?, shuffle = ?, volume = ?, updated_at = ? WHERE id = ?",
+        "UPDATE playback_sessions SET queue_id = ?, queue_state = ?, current_index = ?, current_track_id = ?, position_ms = ?, playing = ?, repeat_mode = ?, shuffle = ?, volume = ?, source = ?, resume_policy = ?, restored = ?, updated_at = ? WHERE id = ?",
     )
+    .bind(session.queue_id.map(|u| u.to_string()))
     .bind(&session.queue_state_json)
     .bind(session.current_index)
     .bind(session.current_track_id.map(|u| u.to_string()))
@@ -1984,6 +2023,9 @@ pub async fn update_playback_session(
     .bind(&session.repeat_mode)
     .bind(session.shuffle as i64)
     .bind(session.volume)
+    .bind(&session.source)
+    .bind(&session.resume_policy)
+    .bind(session.restored as i64)
     .bind(&now)
     .bind(session.id.to_string())
     .execute(pool)
@@ -1996,12 +2038,40 @@ pub async fn get_playback_session(
     id: &Uuid,
 ) -> Result<Option<michi_core::PlaybackSessionDb>, DbError> {
     let rows = sqlx::query(
-        "SELECT id, device_id, queue_state, current_index, current_track_id, position_ms, playing, repeat_mode, shuffle, volume, created_at, updated_at FROM playback_sessions WHERE id = ?",
+        "SELECT id, device_id, queue_id, queue_state, current_index, current_track_id, position_ms, playing, repeat_mode, shuffle, volume, source, resume_policy, restored, created_at, updated_at FROM playback_sessions WHERE id = ?",
     )
     .bind(id.to_string())
     .fetch_all(pool)
     .await?;
     Ok(rows.first().map(row_to_playback_session))
+}
+
+pub async fn get_latest_playback_session(
+    pool: &SqlitePool,
+) -> Result<Option<michi_core::PlaybackSessionDb>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, device_id, queue_id, queue_state, current_index, current_track_id, position_ms, playing, repeat_mode, shuffle, volume, source, resume_policy, restored, created_at, updated_at FROM playback_sessions ORDER BY updated_at DESC LIMIT 1",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.first().map(row_to_playback_session))
+}
+
+pub async fn get_queue_items(
+    pool: &SqlitePool,
+    queue_id: &Uuid,
+) -> Result<Vec<(Uuid, i64)>, DbError> {
+    let rows = sqlx::query(
+        "SELECT track_id, position FROM queue_items WHERE queue_id = ? ORDER BY position ASC",
+    )
+    .bind(queue_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(|r| {
+        let tid = Uuid::parse_str(r.get::<&str, _>("track_id")).unwrap_or(Uuid::nil());
+        let pos: i64 = r.get("position");
+        (tid, pos)
+    }).collect())
 }
 
 fn row_to_link_device(row: &sqlx::sqlite::SqliteRow) -> michi_core::LinkDevice {
@@ -2061,6 +2131,7 @@ fn row_to_playback_session(row: &sqlx::sqlite::SqliteRow) -> michi_core::Playbac
     michi_core::PlaybackSessionDb {
         id: Uuid::parse_str(row.get::<&str, _>("id")).unwrap_or(Uuid::nil()),
         device_id: Uuid::parse_str(row.get::<&str, _>("device_id")).unwrap_or(Uuid::nil()),
+        queue_id: row.get::<Option<&str>, _>("queue_id").and_then(|s| Uuid::parse_str(s).ok()),
         queue_state_json: row.get("queue_state"),
         current_index: row.get::<i64, _>("current_index") as i32,
         current_track_id: row.get::<Option<&str>, _>("current_track_id").and_then(|s| Uuid::parse_str(s).ok()),
@@ -2069,6 +2140,9 @@ fn row_to_playback_session(row: &sqlx::sqlite::SqliteRow) -> michi_core::Playbac
         repeat_mode: row.get("repeat_mode"),
         shuffle: row.get::<i64, _>("shuffle") != 0,
         volume: row.get::<f64, _>("volume"),
+        source: row.get("source"),
+        resume_policy: row.get("resume_policy"),
+        restored: row.get::<i64, _>("restored") != 0,
     }
 }
 

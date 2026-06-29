@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     Json,
 };
@@ -29,6 +29,7 @@ pub async fn queue_handler(
 #[derive(Debug, Deserialize)]
 pub struct QueueItemsBody {
     pub track_ids: Vec<Uuid>,
+    pub name: Option<String>,
 }
 
 pub async fn queue_items_handler(
@@ -37,12 +38,10 @@ pub async fn queue_items_handler(
 ) -> Result<Json<serde_json::value::Value>, (StatusCode, Json<serde_json::Value>)> {
     let queue_id = Uuid::new_v4();
     let now = chrono::Utc::now().to_rfc3339();
+    let name = body.name.unwrap_or_else(|| "v1-queue".into());
 
     sqlx::query("INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
-        .bind(queue_id.to_string())
-        .bind("v1-queue")
-        .bind(&now)
-        .bind(&now)
+        .bind(queue_id.to_string()).bind(&name).bind(&now).bind(&now)
         .execute(&state.db)
         .await
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
@@ -52,24 +51,20 @@ pub async fn queue_items_handler(
         let _ = sqlx::query(
             "INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
         )
-        .bind(item_id.to_string())
-        .bind(queue_id.to_string())
-        .bind(track_id.to_string())
-        .bind(i as i64)
-        .bind(&now)
-        .execute(&state.db)
-        .await;
+        .bind(item_id.to_string()).bind(queue_id.to_string())
+        .bind(track_id.to_string()).bind(i as i64).bind(&now)
+        .execute(&state.db).await;
     }
 
     Ok(Json(serde_json::json!({
-        "queue_id": queue_id,
-        "items_count": body.track_ids.len(),
+        "queue_id": queue_id, "items_count": body.track_ids.len(),
     })))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct QueueJumpBody {
     pub index: u32,
+    pub queue_id: Option<Uuid>,
 }
 
 pub async fn queue_jump_handler(
@@ -88,13 +83,59 @@ pub async fn queue_jump_handler(
 #[derive(Debug, Deserialize)]
 pub struct QueueReorderBody {
     pub item_ids: Vec<Uuid>,
+    pub queue_id: Option<Uuid>,
 }
 
 pub async fn queue_reorder_handler(
+    State(state): State<AppState>,
     Json(body): Json<QueueReorderBody>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "ok",
-        "reordered": body.item_ids.len(),
-    }))
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let queue_id = body.queue_id.ok_or_else(|| {
+        v1_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST", "queue_id is required")
+    })?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut tx = state.db.begin().await.map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+
+    sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
+        .bind(queue_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .ok();
+
+    for (i, item_id) in body.item_ids.iter().enumerate() {
+        sqlx::query("INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)")
+            .bind(Uuid::new_v4().to_string()).bind(queue_id.to_string())
+            .bind(item_id.to_string()).bind(i as i64).bind(&now)
+            .execute(&mut *tx)
+            .await
+            .ok();
+    }
+
+    tx.commit().await.map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "ok", "reordered": body.item_ids.len() })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueueDeleteBody {
+    pub queue_id: Uuid,
+}
+
+pub async fn queue_delete_handler(
+    State(state): State<AppState>,
+    Path(queue_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
+        .bind(queue_id.to_string())
+        .execute(&state.db)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM queues WHERE id = ?")
+        .bind(queue_id.to_string())
+        .execute(&state.db)
+        .await
+        .ok();
+
+    Ok(Json(serde_json::json!({ "status": "deleted" })))
 }

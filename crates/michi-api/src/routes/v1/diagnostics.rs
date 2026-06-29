@@ -1,6 +1,5 @@
 use axum::{extract::State, Json};
 use serde::Serialize;
-use std::path::PathBuf;
 
 use crate::AppState;
 
@@ -70,7 +69,7 @@ pub async fn diagnostics_handler(
     let mut warnings: Vec<String> = Vec::new();
 
     // Library stats
-    let (total_tracks, total_albums, total_artists) = match michi_db::library_stats(&state.db).await {
+    let (total_tracks, _total_albums, _total_artists) = match michi_db::library_stats(&state.db).await {
         Ok(s) => (s.tracks, s.albums, s.artists),
         Err(e) => {
             warnings.push(format!("library_stats failed: {}", e));

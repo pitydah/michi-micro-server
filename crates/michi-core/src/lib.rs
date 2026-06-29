@@ -324,6 +324,7 @@ pub struct ReceiverDb {
 pub struct PlaybackSessionDb {
     pub id: Uuid,
     pub device_id: Uuid,
+    pub queue_id: Option<Uuid>,
     pub queue_state_json: String,
     pub current_index: i32,
     pub current_track_id: Option<Uuid>,
@@ -332,6 +333,9 @@ pub struct PlaybackSessionDb {
     pub repeat_mode: String,
     pub shuffle: bool,
     pub volume: f64,
+    pub source: String,
+    pub resume_policy: String,
+    pub restored: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

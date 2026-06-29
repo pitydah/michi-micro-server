@@ -67,12 +67,14 @@ impl AppState {
         }
         let token_store = michi_link::TokenStore::new();
         michi_link::spawn_token_cleanup(token_store.clone());
+        let playback_state = Arc::new(RwLock::new(PlaybackState::default()));
         routes::v1::import::spawn_import_cleanup(&config, db.clone());
+        routes::v1::playback::auto_restore_playback_state(db.clone(), playback_state.clone());
         Self {
             config,
             db,
             tx,
-            playback_state: Arc::new(RwLock::new(PlaybackState::default())),
+            playback_state,
             sync_tx,
             auth_sessions,
             auth_enabled,
@@ -270,11 +272,14 @@ fn v1_link_routes() -> Router<AppState> {
         .route("/api/v1/playback/state", get(routes::v1::playback::playback_state_handler))
         .route("/api/v1/playback/control", post(routes::v1::playback::playback_control_handler))
         .route("/api/v1/playback/session", post(routes::v1::playback::playback_session_handler))
+        .route("/api/v1/playback/session/:session_id", get(routes::v1::playback::playback_session_get_handler))
+        .route("/api/v1/playback/session/restore", post(routes::v1::playback::playback_session_restore_handler))
         // Queue
         .route("/api/v1/queue", get(routes::v1::queue::queue_handler))
         .route("/api/v1/queue/items", post(routes::v1::queue::queue_items_handler))
         .route("/api/v1/queue/jump", post(routes::v1::queue::queue_jump_handler))
         .route("/api/v1/queue/reorder", put(routes::v1::queue::queue_reorder_handler))
+        .route("/api/v1/queue/:queue_id", delete(routes::v1::queue::queue_delete_handler))
         // Receivers
         .route("/api/v1/receivers", get(routes::v1::receivers::receivers_handler).post(routes::v1::receivers::register_receiver_handler))
         .route("/api/v1/receivers/:id", get(routes::v1::receivers::get_receiver_handler))
