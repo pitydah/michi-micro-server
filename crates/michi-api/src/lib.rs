@@ -33,8 +33,9 @@ mod stream;
 mod sync_api;
 mod sync_ws;
 mod transcode;
-mod v1;
 mod ws;
+
+pub mod routes;
 
 use openapi::ApiDoc;
 
@@ -52,6 +53,7 @@ pub struct AppState {
     pub admin_user_id: Option<Uuid>,
     pub started_at: Instant,
     pub transcode_profiles: Arc<RwLock<Vec<crate::transcode::TranscodeProfile>>>,
+    pub token_store: michi_link::TokenStore,
 }
 
 impl AppState {
@@ -63,6 +65,8 @@ impl AppState {
         if auth_enabled {
             auth::spawn_session_cleanup(auth_sessions.clone());
         }
+        let token_store = michi_link::TokenStore::new();
+        michi_link::spawn_token_cleanup(token_store.clone());
         Self {
             config,
             db,
@@ -74,6 +78,7 @@ impl AppState {
             admin_user_id,
             started_at: Instant::now(),
             transcode_profiles: Arc::new(RwLock::new(crate::transcode::default_profiles())),
+            token_store,
         }
     }
 
@@ -145,7 +150,6 @@ pub fn start_sync_peers(state: &AppState) {
                     let (mut sender, mut receiver) = ws_stream.split();
                     let mut local_sync_rx = sync_tx.subscribe();
 
-                    // Send identify
                     let identify = michi_sync::SyncMessage::Identify {
                         name: sync_name.clone(),
                         version: "0.1.0".into(),
@@ -154,7 +158,6 @@ pub fn start_sync_peers(state: &AppState) {
                         let _ = sender.send(Message::Text(json)).await;
                     }
 
-                    // Relay local state changes to peer
                     let send_task = tokio::spawn(async move {
                         while let Ok(msg) = local_sync_rx.recv().await {
                             if let Ok(json) = msg.serialize() {
@@ -165,7 +168,6 @@ pub fn start_sync_peers(state: &AppState) {
                         }
                     });
 
-                    // Receive state from peer
                     let recv_tx = tx.clone();
                     let recv_playback = playback_state.clone();
                     let recv_task = tokio::spawn(async move {
@@ -224,6 +226,57 @@ pub fn start_sync_peers(state: &AppState) {
             }
         }
     });
+}
+
+fn v1_link_routes() -> Router<AppState> {
+    Router::new()
+        // Server
+        .route("/api/v1/server/info", get(routes::v1::server::server_info_handler))
+        .route("/api/v1/status", get(routes::v1::server::status_handler))
+        // Pairing
+        .route("/api/v1/pair/start", post(routes::v1::pair::pair_start_handler))
+        .route("/api/v1/pair/confirm", post(routes::v1::pair::pair_confirm_handler))
+        .route("/api/v1/token/refresh", post(routes::v1::pair::token_refresh_handler))
+        .route("/api/v1/devices/revoke", post(routes::v1::pair::devices_revoke_handler))
+        // Library
+        .route("/api/v1/library/stats", get(routes::v1::library::library_stats_handler))
+        .route("/api/v1/library/scan", post(routes::v1::library::library_scan_handler))
+        // Tracks
+        .route("/api/v1/tracks", get(routes::v1::tracks::tracks_handler))
+        .route("/api/v1/tracks/:id", get(routes::v1::tracks::track_handler))
+        .route("/api/v1/search", get(routes::v1::tracks::search_handler))
+        // Stream
+        .route("/api/v1/stream/:id", get(routes::v1::stream::stream_handler))
+        .route("/api/v1/download/:id", get(routes::v1::stream::download_handler))
+        // Artwork
+        .route("/api/v1/artwork/:id", get(routes::v1::artwork::artwork_handler))
+        // Playlists
+        .route("/api/v1/playlists", get(routes::v1::playlists::playlists_handler).post(routes::v1::playlists::create_playlist_handler))
+        .route("/api/v1/playlists/:id", get(routes::v1::playlists::get_playlist_handler).put(routes::v1::playlists::update_playlist_handler).delete(routes::v1::playlists::delete_playlist_handler))
+        // Sync (delta only - manifest is in sync_api::sync_router)
+        .route("/api/v1/sync/manifest/delta", post(routes::v1::sync::sync_manifest_delta_handler))
+        .route("/api/v1/sync/state", post(routes::v1::sync::sync_state_handler))
+        // Import
+        .route("/api/v1/import/session", post(routes::v1::import::import_session_handler))
+        .route("/api/v1/import/upload/:session_id", post(routes::v1::import::import_upload_handler))
+        .route("/api/v1/import/commit/:session_id", post(routes::v1::import::import_commit_handler))
+        // Playback
+        .route("/api/v1/playback/state", get(routes::v1::playback::playback_state_handler))
+        .route("/api/v1/playback/control", post(routes::v1::playback::playback_control_handler))
+        .route("/api/v1/playback/session", post(routes::v1::playback::playback_session_handler))
+        // Queue
+        .route("/api/v1/queue", get(routes::v1::queue::queue_handler))
+        .route("/api/v1/queue/items", post(routes::v1::queue::queue_items_handler))
+        .route("/api/v1/queue/jump", post(routes::v1::queue::queue_jump_handler))
+        .route("/api/v1/queue/reorder", put(routes::v1::queue::queue_reorder_handler))
+        // Receivers
+        .route("/api/v1/receivers", get(routes::v1::receivers::receivers_handler).post(routes::v1::receivers::register_receiver_handler))
+        .route("/api/v1/receivers/:id", get(routes::v1::receivers::get_receiver_handler))
+        // Rooms
+        .route("/api/v1/rooms", get(routes::v1::rooms::rooms_handler).post(routes::v1::rooms::create_room_handler))
+        .route("/api/v1/rooms/:id/play", post(routes::v1::rooms::room_play_handler))
+        // Events
+        .route("/api/v1/events", get(routes::v1::events::events_handler))
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -292,28 +345,6 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/stream/:id", get(stream::stream_handler))
         .route("/api/playback/record", post(scrobble::record_play_handler))
         .route("/api/history", get(scrobble::history_handler))
-        .route("/api/v1/status", get(v1::v1_status_handler))
-        .route("/api/v1/tracks", get(v1::v1_tracks_handler))
-        .route("/api/v1/tracks/:id", get(v1::v1_track_handler))
-        .route("/api/v1/search", get(v1::v1_search_handler))
-        .route("/api/v1/stream/:id", get(v1::v1_stream_handler))
-        .route("/api/v1/library/stats", get(v1::v1_stats_handler))
-        .route(
-            "/api/v1/playlists",
-            get(v1::v1_playlists_handler).post(v1::v1_create_playlist_handler),
-        )
-        .route(
-            "/api/v1/playlists/:id",
-            get(v1::v1_get_playlist_handler).delete(v1::v1_delete_playlist_handler),
-        )
-        .route(
-            "/api/v1/playlists/:id/tracks",
-            get(v1::v1_get_playlist_tracks_handler),
-        )
-        .route("/api/v1/artwork/:id", get(v1::v1_artwork_handler))
-        .route("/api/v1/hls/:id/:segment", get(v1::v1_hls_segment_handler))
-        .route("/api/hls/:id/:segment", get(stream::hls_segment_handler))
-        .route("/api/v1/ws", get(v1::v1_ws_handler))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,
@@ -328,7 +359,6 @@ pub fn create_router(state: AppState) -> Router {
         .route("/manifest.json", get(pwa::manifest_json))
         .route("/sw.js", get(pwa::sw_js))
         .route("/api/shared/:code", get(library::shared_playlist_handler))
-        .route("/api/v1/server/info", get(v1::server_info_handler))
         .merge(auth::auth_router())
         .merge(
             utoipa_swagger_ui::SwaggerUi::new("/api/docs")
@@ -339,6 +369,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(rooms::rooms_router())
         .merge(players::players_router())
         .merge(transcode::transcode_router())
+        .merge(v1_link_routes())
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer(&state))
         .with_state(state)

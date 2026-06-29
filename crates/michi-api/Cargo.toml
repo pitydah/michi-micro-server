@@ -33,6 +33,12 @@ utoipa-swagger-ui.workspace = true
 argon2.workspace = true
 michi-opensubsonic = { path = "../michi-opensubsonic" }
 michi-rooms = { path = "../michi-rooms" }
+michi-link = { path = "../michi-link" }
+rand = "0.8"
+base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
+lazy_static = "1.4"
 
 [dev-dependencies]
 tower = "0.5"

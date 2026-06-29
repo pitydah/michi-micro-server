@@ -261,6 +261,79 @@ pub struct TrackUpdate {
     pub channels: Option<u8>,
 }
 
+// --- Link Device ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkDevice {
+    pub device_id: Uuid,
+    pub alias: String,
+    pub device_type: String,
+    pub device_model: Option<String>,
+    pub token_hash: String,
+    pub permissions_json: String,
+    pub created_at: DateTime<Utc>,
+    pub last_seen: Option<String>,
+    pub revoked: bool,
+}
+
+// --- Pairing Session DB ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingSessionDb {
+    pub pairing_id: Uuid,
+    pub code: String,
+    pub device_name: String,
+    pub device_type: String,
+    pub expires_at: String,
+    pub confirmed: bool,
+}
+
+// --- Import Session DB ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportSessionDb {
+    pub session_id: Uuid,
+    pub device_id: Uuid,
+    pub total_tracks: u32,
+    pub total_playlists: u32,
+    pub imported_tracks: u32,
+    pub imported_playlists: u32,
+    pub total_size_bytes: u64,
+    pub status: String,
+    pub expires_at: String,
+    pub created_at: String,
+}
+
+// --- Receiver DB ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiverDb {
+    pub id: Uuid,
+    pub name: String,
+    pub device_type: String,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub capabilities_json: String,
+    pub online: bool,
+    pub last_seen: Option<String>,
+}
+
+// --- Playback Session DB ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackSessionDb {
+    pub id: Uuid,
+    pub device_id: Uuid,
+    pub queue_state_json: String,
+    pub current_index: i32,
+    pub current_track_id: Option<Uuid>,
+    pub position_ms: u64,
+    pub playing: bool,
+    pub repeat_mode: String,
+    pub shuffle: bool,
+    pub volume: f64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

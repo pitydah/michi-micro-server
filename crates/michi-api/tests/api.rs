@@ -1344,33 +1344,25 @@ async fn test_v1_server_info() {
     let json: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(json["name"], "Michi Micro Server");
     assert_eq!(json["api_version"], "v1");
+    assert_eq!(json["service"], "michi-micro-server");
     assert!(json["server_id"].is_string());
     let sid = json["server_id"].as_str().unwrap();
     assert!(Uuid::parse_str(sid).is_ok(), "server_id must be valid UUID");
     assert!(json["features"]["library"].as_bool().unwrap_or(false));
     assert!(json["features"]["search"].as_bool().unwrap_or(false));
     assert!(json["features"]["streaming"].as_bool().unwrap_or(false));
-    assert!(json["features"]["web_ui"].as_bool().unwrap_or(false));
-    assert!(
-        json["features"]["playlists"].as_bool().unwrap_or(false),
-        "playlists should be true"
-    );
+    assert!(json["features"]["download"].as_bool().unwrap_or(false));
+    assert!(json["features"]["playlists"].as_bool().unwrap_or(false));
     assert!(
         json["features"]["artwork"].as_bool().unwrap_or(false),
         "artwork should be true"
     );
-    assert!(
-        !json["features"]["sync"].as_bool().unwrap_or(true),
-        "sync should be false"
-    );
+    assert!(json["features"]["events"].as_bool().unwrap_or(false));
     assert!(
         !json["features"]["transcoding"].as_bool().unwrap_or(true),
         "transcoding should be false"
     );
-    assert!(
-        json["features"]["websocket"].as_bool().unwrap_or(false),
-        "websocket should be true"
-    );
+    assert!(json["roles"].is_array());
 }
 
 #[tokio::test]
@@ -1452,11 +1444,7 @@ async fn test_v1_track_not_found_error() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let text = body_text(response).await;
     let json: Value = serde_json::from_str(&text).unwrap();
-    assert!(
-        json.get("error").is_some(),
-        "v1 error must have 'error' key"
-    );
-    assert_eq!(json["error"]["code"], "TRACK_NOT_FOUND");
+    assert_eq!(json["error"], "not_found");
 }
 
 #[tokio::test]
@@ -1518,7 +1506,8 @@ async fn test_v1_tracks_with_seeded_data() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let text = body_text(response).await;
-    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    let body: Value = serde_json::from_str(&text).unwrap();
+    let tracks = body["tracks"].as_array().unwrap();
     assert_eq!(tracks.len(), 2);
     let ids: Vec<&str> = tracks.iter().map(|t| t["id"].as_str().unwrap()).collect();
     assert!(ids.contains(&id1.to_string().as_str()));
@@ -1564,7 +1553,8 @@ async fn test_v1_search_with_seeded_data() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let text = body_text(response).await;
-    let tracks: Vec<Value> = serde_json::from_str(&text).unwrap();
+    let body: Value = serde_json::from_str(&text).unwrap();
+    let tracks = body["tracks"].as_array().unwrap();
     assert_eq!(tracks.len(), 1);
     assert_eq!(tracks[0]["title"], "Dancing Queen");
 }
@@ -1701,7 +1691,7 @@ async fn test_v1_stream_range_not_satisfiable() {
     assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
     let text = body_text(response).await;
     let json: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(json["error"]["code"], "RANGE_NOT_SATISFIABLE");
+    assert_eq!(json["error"], "range_not_satisfiable");
 }
 
 #[tokio::test]

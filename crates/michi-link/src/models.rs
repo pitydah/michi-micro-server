@@ -1,0 +1,254 @@
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkServerInfo {
+    pub service: String,
+    pub name: String,
+    pub server_id: Uuid,
+    pub version: String,
+    pub api_version: String,
+    pub roles: Vec<String>,
+    pub features: LinkFeatures,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkFeatures {
+    pub library: bool,
+    pub search: bool,
+    pub streaming: bool,
+    pub download: bool,
+    pub artwork: bool,
+    pub playlists: bool,
+    pub sync_manifest: bool,
+    pub import: bool,
+    pub playback: bool,
+    pub queue: bool,
+    pub receivers: bool,
+    pub rooms: bool,
+    pub events: bool,
+    pub transcoding: bool,
+}
+
+impl LinkFeatures {
+    pub fn all_enabled() -> Self {
+        Self {
+            library: true,
+            search: true,
+            streaming: true,
+            download: true,
+            artwork: true,
+            playlists: true,
+            sync_manifest: true,
+            import: true,
+            playback: true,
+            queue: true,
+            receivers: true,
+            rooms: true,
+            events: true,
+            transcoding: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairStartRequest {
+    pub device_name: String,
+    pub device_type: Option<String>,
+    pub device_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairStartResponse {
+    pub pairing_id: Uuid,
+    pub code: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairConfirmRequest {
+    pub pairing_id: Uuid,
+    pub code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairConfirmResponse {
+    pub device_token: String,
+    pub refresh_token: String,
+    pub device_id: Uuid,
+    pub alias: String,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenRefreshRequest {
+    pub refresh_token: String,
+    pub device_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenRefreshResponse {
+    pub device_token: String,
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceRevokeRequest {
+    pub device_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportSessionRequest {
+    pub device_id: Uuid,
+    pub total_tracks: u32,
+    pub total_playlists: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportSessionResponse {
+    pub session_id: Uuid,
+    pub expires_at: String,
+    pub max_chunk_size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportUploadRequest {
+    pub session_id: Uuid,
+    pub track_index: u32,
+    pub filename: String,
+    pub hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportUploadResponse {
+    pub accepted: bool,
+    pub is_duplicate: bool,
+    pub track_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportCommitRequest {
+    pub session_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportCommitResponse {
+    pub tracks_imported: u32,
+    pub playlists_imported: u32,
+    pub total_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackSessionRequest {
+    pub queue: Vec<Uuid>,
+    pub current_track_id: Option<Uuid>,
+    pub position_ms: u64,
+    pub playing: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackSessionResponse {
+    pub session_id: Uuid,
+    pub accepted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackControlRequest {
+    pub command: PlaybackCommand,
+    pub parameter: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum PlaybackCommand {
+    Play,
+    Pause,
+    Next,
+    Previous,
+    Seek,
+    SetVolume,
+    Stop,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncManifestEntry {
+    pub track_id: Uuid,
+    pub file_path: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub artwork_id: Option<String>,
+    pub hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncManifestDeltaRequest {
+    pub known_track_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncManifestDeltaResponse {
+    pub added: Vec<SyncManifestEntry>,
+    pub removed: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncStateUpload {
+    pub track_id: Option<Uuid>,
+    pub position_ms: u64,
+    pub playing: bool,
+    pub volume: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiverInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub device_type: String,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub capabilities: Vec<String>,
+    pub online: bool,
+    pub last_seen: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomInfo {
+    pub id: String,
+    pub name: String,
+    pub receivers: Vec<Uuid>,
+    pub volume: u32,
+    pub muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomPlayRequest {
+    pub track_id: Uuid,
+    pub position_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueItem {
+    pub id: Uuid,
+    pub track_id: Uuid,
+    pub position: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueState {
+    pub id: Uuid,
+    pub items: Vec<QueueItem>,
+    pub current_index: i32,
+    pub repeat_mode: String,
+    pub shuffle: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueJumpRequest {
+    pub index: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueReorderRequest {
+    pub item_ids: Vec<Uuid>,
+}

@@ -1421,12 +1421,16 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "axum",
+ "base64",
  "chrono",
  "futures-util",
+ "hex",
  "infer",
+ "lazy_static",
  "michi-config",
  "michi-core",
  "michi-db",
+ "michi-link",
  "michi-m3u",
  "michi-metadata",
  "michi-opensubsonic",
@@ -1434,9 +1438,11 @@ dependencies = [
  "michi-scanner",
  "michi-streaming",
  "michi-sync",
+ "rand 0.8.6",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "tokio",
@@ -1515,6 +1521,24 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "michi-link"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "chrono",
+ "michi-config",
+ "michi-core",
+ "michi-db",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

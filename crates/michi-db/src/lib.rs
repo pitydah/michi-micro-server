@@ -232,25 +232,57 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 15 applied");
     }
 
-    info!(
-        "database schema at version {}",
-        current
-            .max(1)
-            .max(2)
-            .max(3)
-            .max(4)
-            .max(5)
-            .max(6)
-            .max(7)
-            .max(8)
-            .max(9)
-            .max(10)
-            .max(11)
-            .max(12)
-            .max(13)
-            .max(14)
-            .max(15)
-    );
+    if current < 16 {
+        info!("applying migration 16: link devices");
+        migration_016(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (16, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 16 applied");
+    }
+
+    if current < 17 {
+        info!("applying migration 17: pairing sessions");
+        migration_017(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (17, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 17 applied");
+    }
+
+    if current < 18 {
+        info!("applying migration 18: import sessions");
+        migration_018(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (18, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 18 applied");
+    }
+
+    if current < 19 {
+        info!("applying migration 19: receivers");
+        migration_019(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (19, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 19 applied");
+    }
+
+    if current < 20 {
+        info!("applying migration 20: playback sessions");
+        migration_020(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (20, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 20 applied");
+    }
+
+    info!("database schema at version 20");
     Ok(())
 }
 
@@ -518,6 +550,105 @@ async fn migration_014(pool: &SqlitePool) -> Result<(), DbError> {
     .execute(pool)
     .await?;
 
+    Ok(())
+}
+
+async fn migration_016(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS link_devices (
+            device_id TEXT PRIMARY KEY,
+            alias TEXT NOT NULL,
+            device_type TEXT NOT NULL DEFAULT 'unknown',
+            device_model TEXT,
+            token_hash TEXT NOT NULL,
+            permissions TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            last_seen TEXT,
+            revoked INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn migration_017(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS pairing_sessions (
+            pairing_id TEXT PRIMARY KEY,
+            code TEXT NOT NULL,
+            device_name TEXT NOT NULL,
+            device_type TEXT NOT NULL DEFAULT 'unknown',
+            expires_at TEXT NOT NULL,
+            confirmed INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_pairing_code ON pairing_sessions(code)")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn migration_018(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS import_sessions (
+            session_id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            total_tracks INTEGER NOT NULL DEFAULT 0,
+            total_playlists INTEGER NOT NULL DEFAULT 0,
+            imported_tracks INTEGER NOT NULL DEFAULT 0,
+            imported_playlists INTEGER NOT NULL DEFAULT 0,
+            total_size_bytes INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active',
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn migration_019(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS receivers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            device_type TEXT NOT NULL,
+            host TEXT,
+            port INTEGER,
+            capabilities TEXT NOT NULL DEFAULT '[]',
+            online INTEGER NOT NULL DEFAULT 0,
+            last_seen TEXT,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn migration_020(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS playback_sessions (
+            id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            queue_state TEXT NOT NULL DEFAULT '[]',
+            current_index INTEGER NOT NULL DEFAULT 0,
+            current_track_id TEXT,
+            position_ms INTEGER NOT NULL DEFAULT 0,
+            playing INTEGER NOT NULL DEFAULT 0,
+            repeat_mode TEXT NOT NULL DEFAULT 'none',
+            shuffle INTEGER NOT NULL DEFAULT 0,
+            volume REAL NOT NULL DEFAULT 0.8,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1494,6 +1625,368 @@ pub async fn update_track(
     .rows_affected();
 
     Ok(rows_affected > 0)
+}
+
+// --- Link Device functions ---
+
+pub async fn create_link_device(
+    pool: &SqlitePool,
+    device: &michi_core::LinkDevice,
+) -> Result<(), DbError> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO link_devices (device_id, alias, device_type, device_model, token_hash, permissions, created_at, last_seen, revoked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+    )
+    .bind(device.device_id.to_string())
+    .bind(&device.alias)
+    .bind(&device.device_type)
+    .bind(&device.device_model)
+    .bind(&device.token_hash)
+    .bind(&device.permissions_json)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_link_device_by_token_hash(
+    pool: &SqlitePool,
+    token_hash: &str,
+) -> Result<Option<michi_core::LinkDevice>, DbError> {
+    let rows = sqlx::query(
+        "SELECT device_id, alias, device_type, device_model, token_hash, permissions, created_at, last_seen, revoked FROM link_devices WHERE token_hash = ?",
+    )
+    .bind(token_hash)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.first().map(row_to_link_device))
+}
+
+pub async fn get_link_device(
+    pool: &SqlitePool,
+    device_id: &Uuid,
+) -> Result<Option<michi_core::LinkDevice>, DbError> {
+    let rows = sqlx::query(
+        "SELECT device_id, alias, device_type, device_model, token_hash, permissions, created_at, last_seen, revoked FROM link_devices WHERE device_id = ?",
+    )
+    .bind(device_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.first().map(row_to_link_device))
+}
+
+pub async fn list_link_devices(
+    pool: &SqlitePool,
+) -> Result<Vec<michi_core::LinkDevice>, DbError> {
+    let rows = sqlx::query(
+        "SELECT device_id, alias, device_type, device_model, token_hash, permissions, created_at, last_seen, revoked FROM link_devices ORDER BY created_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(row_to_link_device).collect())
+}
+
+pub async fn revoke_link_device(pool: &SqlitePool, device_id: &Uuid) -> Result<bool, DbError> {
+    let result = sqlx::query("UPDATE link_devices SET revoked = 1 WHERE device_id = ?")
+        .bind(device_id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn update_link_device_last_seen(
+    pool: &SqlitePool,
+    device_id: &Uuid,
+) -> Result<(), DbError> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query("UPDATE link_devices SET last_seen = ? WHERE device_id = ?")
+        .bind(&now)
+        .bind(device_id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// --- Pairing functions ---
+
+pub async fn create_pairing_session(
+    pool: &SqlitePool,
+    session: &michi_core::PairingSessionDb,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO pairing_sessions (pairing_id, code, device_name, device_type, expires_at, confirmed) VALUES (?, ?, ?, ?, ?, 0)",
+    )
+    .bind(session.pairing_id.to_string())
+    .bind(&session.code)
+    .bind(&session.device_name)
+    .bind(&session.device_type)
+    .bind(&session.expires_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_pairing_session_by_code(
+    pool: &SqlitePool,
+    code: &str,
+) -> Result<Option<michi_core::PairingSessionDb>, DbError> {
+    let rows = sqlx::query(
+        "SELECT pairing_id, code, device_name, device_type, expires_at, confirmed FROM pairing_sessions WHERE code = ? AND confirmed = 0",
+    )
+    .bind(code)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.first().map(row_to_pairing_session))
+}
+
+pub async fn confirm_pairing_session(
+    pool: &SqlitePool,
+    pairing_id: &Uuid,
+) -> Result<bool, DbError> {
+    let result = sqlx::query("UPDATE pairing_sessions SET confirmed = 1 WHERE pairing_id = ?")
+        .bind(pairing_id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+// --- Import Session functions ---
+
+pub async fn create_import_session(
+    pool: &SqlitePool,
+    session: &michi_core::ImportSessionDb,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO import_sessions (session_id, device_id, total_tracks, total_playlists, imported_tracks, imported_playlists, total_size_bytes, status, expires_at, created_at) VALUES (?, ?, ?, ?, 0, 0, 0, 'active', ?, ?)",
+    )
+    .bind(session.session_id.to_string())
+    .bind(session.device_id.to_string())
+    .bind(session.total_tracks)
+    .bind(session.total_playlists)
+    .bind(&session.expires_at)
+    .bind(&session.created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_import_session(
+    pool: &SqlitePool,
+    session_id: &Uuid,
+) -> Result<Option<michi_core::ImportSessionDb>, DbError> {
+    let rows = sqlx::query(
+        "SELECT session_id, device_id, total_tracks, total_playlists, imported_tracks, imported_playlists, total_size_bytes, status, expires_at, created_at FROM import_sessions WHERE session_id = ?",
+    )
+    .bind(session_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.first().map(row_to_import_session))
+}
+
+pub async fn update_import_session_progress(
+    pool: &SqlitePool,
+    session_id: &Uuid,
+    imported_tracks: u32,
+    size_bytes: u64,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE import_sessions SET imported_tracks = imported_tracks + ?, total_size_bytes = total_size_bytes + ? WHERE session_id = ?",
+    )
+    .bind(imported_tracks)
+    .bind(size_bytes as i64)
+    .bind(session_id.to_string())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn close_import_session(
+    pool: &SqlitePool,
+    session_id: &Uuid,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE import_sessions SET status = 'completed' WHERE session_id = ?")
+        .bind(session_id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// --- Receiver functions ---
+
+pub async fn upsert_receiver(
+    pool: &SqlitePool,
+    receiver: &michi_core::ReceiverDb,
+) -> Result<(), DbError> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO receivers (id, name, device_type, host, port, capabilities, online, last_seen, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, host = excluded.host, port = excluded.port, capabilities = excluded.capabilities, online = excluded.online, last_seen = excluded.last_seen",
+    )
+    .bind(receiver.id.to_string())
+    .bind(&receiver.name)
+    .bind(&receiver.device_type)
+    .bind(&receiver.host)
+    .bind(receiver.port.map(|p| p as i64))
+    .bind(&receiver.capabilities_json)
+    .bind(receiver.online as i64)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_receivers(pool: &SqlitePool) -> Result<Vec<michi_core::ReceiverDb>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, name, device_type, host, port, capabilities, online, last_seen, created_at FROM receivers ORDER BY name ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(row_to_receiver).collect())
+}
+
+pub async fn get_receiver(
+    pool: &SqlitePool,
+    id: &Uuid,
+) -> Result<Option<michi_core::ReceiverDb>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, name, device_type, host, port, capabilities, online, last_seen, created_at FROM receivers WHERE id = ?",
+    )
+    .bind(id.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.first().map(row_to_receiver))
+}
+
+// --- Playback Session functions ---
+
+pub async fn create_playback_session(
+    pool: &SqlitePool,
+    session: &michi_core::PlaybackSessionDb,
+) -> Result<(), DbError> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO playback_sessions (id, device_id, queue_state, current_index, current_track_id, position_ms, playing, repeat_mode, shuffle, volume, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(session.id.to_string())
+    .bind(session.device_id.to_string())
+    .bind(&session.queue_state_json)
+    .bind(session.current_index)
+    .bind(session.current_track_id.map(|u| u.to_string()))
+    .bind(session.position_ms as i64)
+    .bind(session.playing as i64)
+    .bind(&session.repeat_mode)
+    .bind(session.shuffle as i64)
+    .bind(session.volume)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn update_playback_session(
+    pool: &SqlitePool,
+    session: &michi_core::PlaybackSessionDb,
+) -> Result<(), DbError> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE playback_sessions SET queue_state = ?, current_index = ?, current_track_id = ?, position_ms = ?, playing = ?, repeat_mode = ?, shuffle = ?, volume = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(&session.queue_state_json)
+    .bind(session.current_index)
+    .bind(session.current_track_id.map(|u| u.to_string()))
+    .bind(session.position_ms as i64)
+    .bind(session.playing as i64)
+    .bind(&session.repeat_mode)
+    .bind(session.shuffle as i64)
+    .bind(session.volume)
+    .bind(&now)
+    .bind(session.id.to_string())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_playback_session(
+    pool: &SqlitePool,
+    id: &Uuid,
+) -> Result<Option<michi_core::PlaybackSessionDb>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, device_id, queue_state, current_index, current_track_id, position_ms, playing, repeat_mode, shuffle, volume, created_at, updated_at FROM playback_sessions WHERE id = ?",
+    )
+    .bind(id.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.first().map(row_to_playback_session))
+}
+
+fn row_to_link_device(row: &sqlx::sqlite::SqliteRow) -> michi_core::LinkDevice {
+    michi_core::LinkDevice {
+        device_id: Uuid::parse_str(row.get::<&str, _>("device_id")).unwrap_or(Uuid::nil()),
+        alias: row.get("alias"),
+        device_type: row.get("device_type"),
+        device_model: row.get("device_model"),
+        token_hash: row.get("token_hash"),
+        permissions_json: row.get("permissions"),
+        created_at: row.get::<&str, _>("created_at").parse().unwrap_or_else(|_| Utc::now()),
+        last_seen: row.get("last_seen"),
+        revoked: row.get::<i64, _>("revoked") != 0,
+    }
+}
+
+fn row_to_pairing_session(row: &sqlx::sqlite::SqliteRow) -> michi_core::PairingSessionDb {
+    michi_core::PairingSessionDb {
+        pairing_id: Uuid::parse_str(row.get::<&str, _>("pairing_id")).unwrap_or(Uuid::nil()),
+        code: row.get("code"),
+        device_name: row.get("device_name"),
+        device_type: row.get("device_type"),
+        expires_at: row.get("expires_at"),
+        confirmed: row.get::<i64, _>("confirmed") != 0,
+    }
+}
+
+fn row_to_import_session(row: &sqlx::sqlite::SqliteRow) -> michi_core::ImportSessionDb {
+    michi_core::ImportSessionDb {
+        session_id: Uuid::parse_str(row.get::<&str, _>("session_id")).unwrap_or(Uuid::nil()),
+        device_id: Uuid::parse_str(row.get::<&str, _>("device_id")).unwrap_or(Uuid::nil()),
+        total_tracks: row.get::<i64, _>("total_tracks") as u32,
+        total_playlists: row.get::<i64, _>("total_playlists") as u32,
+        imported_tracks: row.get::<i64, _>("imported_tracks") as u32,
+        imported_playlists: row.get::<i64, _>("imported_playlists") as u32,
+        total_size_bytes: row.get::<i64, _>("total_size_bytes") as u64,
+        status: row.get("status"),
+        expires_at: row.get("expires_at"),
+        created_at: row.get("created_at"),
+    }
+}
+
+fn row_to_receiver(row: &sqlx::sqlite::SqliteRow) -> michi_core::ReceiverDb {
+    michi_core::ReceiverDb {
+        id: Uuid::parse_str(row.get::<&str, _>("id")).unwrap_or(Uuid::nil()),
+        name: row.get("name"),
+        device_type: row.get("device_type"),
+        host: row.get("host"),
+        port: row.get::<Option<i64>, _>("port").map(|v| v as u16),
+        capabilities_json: row.get("capabilities"),
+        online: row.get::<i64, _>("online") != 0,
+        last_seen: row.get("last_seen"),
+    }
+}
+
+fn row_to_playback_session(row: &sqlx::sqlite::SqliteRow) -> michi_core::PlaybackSessionDb {
+    michi_core::PlaybackSessionDb {
+        id: Uuid::parse_str(row.get::<&str, _>("id")).unwrap_or(Uuid::nil()),
+        device_id: Uuid::parse_str(row.get::<&str, _>("device_id")).unwrap_or(Uuid::nil()),
+        queue_state_json: row.get("queue_state"),
+        current_index: row.get::<i64, _>("current_index") as i32,
+        current_track_id: row.get::<Option<&str>, _>("current_track_id").and_then(|s| Uuid::parse_str(s).ok()),
+        position_ms: row.get::<i64, _>("position_ms") as u64,
+        playing: row.get::<i64, _>("playing") != 0,
+        repeat_mode: row.get("repeat_mode"),
+        shuffle: row.get::<i64, _>("shuffle") != 0,
+        volume: row.get::<f64, _>("volume"),
+    }
 }
 
 fn row_to_track(row: &sqlx::sqlite::SqliteRow) -> Track {
