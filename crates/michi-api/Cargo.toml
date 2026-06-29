@@ -50,5 +50,6 @@ urlencoding = "2"
 futures-util.workspace = true
 michi-m3u = { path = "../michi-m3u" }
 michi-core = { path = "../michi-core" }
+michi-receivers = { path = "../michi-receivers" }
 tokio-tungstenite = "0.24"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

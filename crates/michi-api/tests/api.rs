@@ -2421,3 +2421,121 @@ async fn test_v1_stream_and_download_range() {
     ).await.unwrap();
     assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
 }
+
+#[tokio::test]
+async fn test_v1_diagnostics_endpoint() {
+    let (app, _) = make_app().await;
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/diagnostics").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert!(json.get("db").is_some(), "diagnostics must have db");
+    assert!(json.get("library").is_some(), "diagnostics must have library");
+    assert!(json.get("playback").is_some(), "diagnostics must have playback");
+    assert!(json.get("queues").is_some(), "diagnostics must have queues");
+    assert!(json.get("events").is_some(), "diagnostics must have events");
+    assert!(json.get("warnings").is_some(), "diagnostics must have warnings");
+    assert!(json["healthy"].as_bool().is_some());
+}
+
+#[tokio::test]
+async fn test_v1_playback_session_persist_and_restore() {
+    let (app, pool) = make_app().await;
+    let tid = seed_track(&pool, "/music/persist.flac", "Persist").await;
+
+    // Create playback session
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/session").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"queue":["{tid}"],"current_track_id":"{tid}","position_ms":5000,"playing":true}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let session_resp: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let session_id = session_resp["session_id"].as_str().unwrap().to_string();
+    let queue_id = session_resp["queue_id"].as_str().unwrap().to_string();
+
+    // Get session
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/playback/session/{session_id}")).body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let get_resp: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(get_resp["session_id"], session_id);
+    assert_eq!(get_resp["queue_id"], queue_id);
+    assert!(!get_resp["queue_items"].as_array().unwrap().is_empty());
+
+    // Restore session
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/session/restore").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let restore: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert!(restore["restored"].as_bool().unwrap_or(false));
+    assert_eq!(restore["position_ms"], 5000);
+
+    // Delete queue
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/queue/{queue_id}")).method("DELETE").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_v1_import_session_status() {
+    let (app, _) = make_app().await;
+
+    // Create session
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/import/session").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"total_tracks":1,"total_playlists":0}"#))
+            .unwrap(),
+    ).await.unwrap();
+    let session: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let sid = session["session_id"].as_str().unwrap().to_string();
+
+    // Get status
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/session/{sid}/status")).body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let status: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(status["session_id"], sid);
+    assert_eq!(status["status"], "created");
+    assert_eq!(status["total_tracks"], 1);
+}
+
+#[tokio::test]
+async fn test_v1_receiver_simulator_mock() {
+    use michi_receivers::SimulatedReceiver;
+    let mut rx = SimulatedReceiver::new("test-stream", "127.0.0.1", 9000);
+    assert_eq!(rx.device_type, "michi-stream");
+    assert!(rx.online);
+
+    let info = rx.info();
+    assert_eq!(info.name, "test-stream");
+    assert!(info.capabilities.contains(&"stream".to_string()));
+
+    let confirm = rx.pair_confirm("ABC123");
+    assert!(confirm.is_some());
+    assert!(rx.paired);
+
+    let bad = rx.pair_confirm("bad");
+    assert!(bad.is_none());
+
+    rx.session_start(uuid::Uuid::nil(), 75);
+    assert!(rx.session_active);
+
+    rx.session_stop();
+    assert!(!rx.session_active);
+
+    rx.set_volume(50);
+    assert_eq!(rx.volume, 50);
+
+    rx.heartbeat();
+    assert!(rx.online);
+}
