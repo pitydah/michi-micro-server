@@ -10,6 +10,10 @@ fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<
     })))
 }
 
+const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100 MB per file
+const MAX_SESSION_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB per session
+const ALLOWED_AUDIO_EXTS: &[&str] = &["mp3", "flac", "ogg", "opus", "aac", "m4a", "wav", "aiff", "dsf", "dff"];
+
 #[derive(Debug, Deserialize)]
 pub struct ImportSessionRequest {
     pub total_tracks: u32,
@@ -60,8 +64,16 @@ fn compute_sha256(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn get_import_dir(cache_path: &std::path::Path, session_id: &Uuid) -> std::path::PathBuf {
-    cache_path.join("import").join(session_id.to_string())
+fn is_allowed_extension(filename: &str) -> bool {
+    std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| ALLOWED_AUDIO_EXTS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+fn get_persistent_import_dir(music_paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    music_paths.first().map(|p| p.join(".import"))
 }
 
 pub async fn import_session_handler(
@@ -70,10 +82,19 @@ pub async fn import_session_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let session_id = Uuid::new_v4();
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let device_id = Uuid::nil(); // TODO: extract from token middleware
+
+    if body.total_tracks == 0 && body.total_playlists == 0 {
+        return Err(v1_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST", "total_tracks or total_playlists must be > 0"));
+    }
+
+    if body.total_tracks > 10000 {
+        return Err(v1_error(StatusCode::BAD_REQUEST, "TOO_MANY_TRACKS", "max 10000 tracks per session"));
+    }
 
     let db_session = michi_core::ImportSessionDb {
         session_id,
-        device_id: Uuid::nil(),
+        device_id,
         total_tracks: body.total_tracks,
         total_playlists: body.total_playlists,
         imported_tracks: 0, imported_playlists: 0, total_size_bytes: 0,
@@ -89,7 +110,7 @@ pub async fn import_session_handler(
         let mut sessions = IMPORT_SESSIONS.write().await;
         sessions.insert(session_id, ImportSessionState {
             session_id, total_tracks: body.total_tracks, total_playlists: body.total_playlists,
-            imported_tracks: 0, total_size_bytes: 0, device_id: Uuid::nil(), seen_hashes: Vec::new(),
+            imported_tracks: 0, total_size_bytes: 0, device_id, seen_hashes: Vec::new(),
         });
     }
 
@@ -97,6 +118,8 @@ pub async fn import_session_handler(
         "session_id": session_id,
         "expires_at": expires_at.to_rfc3339(),
         "max_chunk_size": 10485760,
+        "allowed_extensions": ALLOWED_AUDIO_EXTS,
+        "max_file_size": MAX_FILE_SIZE,
     })))
 }
 
@@ -107,9 +130,34 @@ pub async fn import_upload_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     use base64::Engine;
 
+    let session_state = {
+        let sessions = IMPORT_SESSIONS.read().await;
+        sessions.get(&session_id).cloned()
+    }.ok_or_else(|| {
+        v1_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", "import session not found or expired")
+    })?;
+
+    if !is_allowed_extension(&body.filename) {
+        return Err(v1_error(StatusCode::BAD_REQUEST, "INVALID_EXTENSION", &format!(
+            "extension not allowed. Accepted: {}", ALLOWED_AUDIO_EXTS.join(", ")
+        )));
+    }
+
     let data = base64::engine::general_purpose::STANDARD
         .decode(&body.data)
         .map_err(|_| v1_error(StatusCode::BAD_REQUEST, "INVALID_DATA", "invalid base64 data"))?;
+
+    if data.len() as u64 > MAX_FILE_SIZE {
+        return Err(v1_error(StatusCode::BAD_REQUEST, "FILE_TOO_LARGE", &format!(
+            "file exceeds max size of {} bytes", MAX_FILE_SIZE
+        )));
+    }
+
+    if session_state.total_size_bytes + data.len() as u64 > MAX_SESSION_SIZE {
+        return Err(v1_error(StatusCode::BAD_REQUEST, "SESSION_SIZE_EXCEEDED", &format!(
+            "session exceeds max total size of {} bytes", MAX_SESSION_SIZE
+        )));
+    }
 
     let data_hash = compute_sha256(&data);
 
@@ -119,26 +167,25 @@ pub async fn import_upload_handler(
         }
     }
 
-    let is_duplicate_by_hash = {
-        let sessions = IMPORT_SESSIONS.read().await;
-        sessions.get(&session_id).map(|s| s.seen_hashes.contains(&data_hash)).unwrap_or(false)
-    };
-
-    if is_duplicate_by_hash {
+    if session_state.seen_hashes.contains(&data_hash) {
         return Ok(Json(serde_json::json!({
             "accepted": false, "is_duplicate": true, "track_id": null,
         })));
     }
 
     let safe_name = sanitize_filename(&body.filename);
-    let import_dir = get_import_dir(&state.config.cache_path, &session_id);
+
+    // Write to persistent import directory under first music path
+    let import_dir = get_persistent_import_dir(&state.config.music_paths)
+        .unwrap_or_else(|| state.config.cache_path.join("import"))
+        .join(session_id.to_string());
+
     tokio::fs::create_dir_all(&import_dir).await
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "IO_ERROR", &e.to_string()))?;
 
     let file_path = import_dir.join(&safe_name);
 
-    let is_duplicate_by_name = file_path.exists();
-    if is_duplicate_by_name {
+    if file_path.exists() {
         return Ok(Json(serde_json::json!({
             "accepted": false, "is_duplicate": true, "track_id": null,
         })));
@@ -160,9 +207,8 @@ pub async fn import_upload_handler(
 
     let ext = std::path::Path::new(&safe_name)
         .extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    let audio_exts = ["mp3", "flac", "ogg", "opus", "aac", "m4a", "wav", "aiff", "dsf", "dff"];
 
-    let track_id = if audio_exts.contains(&ext.as_str()) {
+    let track_id = if ALLOWED_AUDIO_EXTS.contains(&ext.as_str()) {
         let metadata = tokio::task::spawn_blocking({
             let fp = file_path.clone();
             move || michi_metadata::read_metadata_safe(&fp)
@@ -205,7 +251,11 @@ pub async fn import_commit_handler(
     michi_db::close_import_session(&state.db, &session_id).await.ok();
     let _ = state.tx.send(r#"{"type":"library_updated"}"#.to_string());
 
-    let import_dir = get_import_dir(&state.config.cache_path, &session_id);
+    // Scan persistent import directory
+    let import_dir = get_persistent_import_dir(&state.config.music_paths)
+        .unwrap_or_else(|| state.config.cache_path.join("import"))
+        .join(session_id.to_string());
+
     if import_dir.exists() {
         let tracks = michi_scanner::scan_directories(&[import_dir]).await;
         michi_db::upsert_tracks(&state.db, &tracks).await.ok();

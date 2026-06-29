@@ -11,6 +11,7 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 use tower::ServiceExt;
 use uuid::Uuid;
+use base64::Engine;
 
 async fn test_db() -> SqlitePool {
     michi_db::init_pool("sqlite::memory:").await.unwrap()
@@ -1920,4 +1921,300 @@ async fn test_v1_sync_manifest_delta_with_cursor() {
     let added = json["added"].as_array().unwrap();
     assert!(added.len() >= 1, "should have at least one added track");
     assert!(added[0].get("file_path").is_none(), "delta entries must not expose file_path");
+}
+
+#[tokio::test]
+async fn test_v1_e2e_mobile_flow() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/e2e.flac", "E2E Song").await;
+
+    // 1. server/info
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/server/info").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let info: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(info["service"], "michi-micro-server");
+    assert_eq!(info["michi_link_version"], "1.0.0-alpha");
+
+    // 2. status
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/status").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 3. pair/start
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/pair/start").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"device_name":"e2e-mobile","device_type":"mobile"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let start: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let code = start["code"].as_str().unwrap().to_string();
+
+    // 4. pair/confirm
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/pair/confirm").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"code":"{code}"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let confirm: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let _device_token = confirm["device_token"].as_str().unwrap().to_string();
+    let refresh_token = confirm["refresh_token"].as_str().unwrap().to_string();
+    let device_id = confirm["device_id"].as_str().unwrap().to_string();
+    let perms = confirm["permissions"].as_array().unwrap();
+    assert!(perms.iter().any(|p| p == "library.read"));
+
+    // 5. token/refresh
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/token/refresh").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"refresh_token":"{refresh_token}","device_id":"{device_id}"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 6. library/stats
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/library/stats").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stats: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert!(stats["tracks"].as_i64().unwrap_or(0) >= 1);
+
+    // 7. tracks
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/tracks").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let tracks_body: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let tracks = tracks_body["tracks"].as_array().unwrap();
+    assert!(!tracks.is_empty());
+    assert!(tracks[0].get("file_path").is_none(), "no file_path in response");
+    assert!(tracks[0].get("stream_url").is_some(), "must have stream_url");
+
+    // 8. sync/manifest
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/sync/manifest").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let manifest: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert!(manifest["cursor"].as_i64().unwrap_or(0) >= 1);
+    assert!(manifest["tracks"][0].get("file_path").is_none());
+
+    // 9. sync/manifest/delta
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/sync/manifest/delta?cursor=0").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let delta: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert!(delta["added"].as_array().unwrap().len() >= 1);
+
+    // 10. playback/state
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/state").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ps: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert!(ps.get("state").is_some());
+
+    // 11. playback/control
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/playback/control").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"command":"play"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 12. queue
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/queue").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 13. devices/revoke
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/devices/revoke").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"device_id":"{device_id}"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_v1_import_flow() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/before.flac", "Before").await;
+
+    // 1. import/session
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/import/session").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"total_tracks":2,"total_playlists":0}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let session: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let session_id = session["session_id"].as_str().unwrap().to_string();
+
+    // 2. import/upload track 1
+    let audio_data = base64::engine::general_purpose::STANDARD.encode(b"fake flac data 1");
+    let hash = {
+        use sha2::{Sha256, Digest};
+        let mut h = Sha256::new();
+        h.update(b"fake flac data 1");
+        hex::encode(h.finalize())
+    };
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/upload/{session_id}")).method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"filename":"song1.flac","data":"{audio_data}","hash":"{hash}"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let upload: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert!(upload["accepted"].as_bool().unwrap_or(false));
+    assert!(upload["track_id"].is_string());
+
+    // 3. import/upload track 2
+    let audio_data2 = base64::engine::general_purpose::STANDARD.encode(b"fake flac data 2");
+    let hash2 = {
+        use sha2::{Sha256, Digest};
+        let mut h = Sha256::new();
+        h.update(b"fake flac data 2");
+        hex::encode(h.finalize())
+    };
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/upload/{session_id}")).method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"filename":"song2.flac","data":"{audio_data2}","hash":"{hash2}"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 4. duplicate upload rejected
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/upload/{session_id}")).method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"filename":"song1-dupe.flac","data":"{audio_data}","hash":"{hash}"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let dupe: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert!(dupe["is_duplicate"].as_bool().unwrap_or(false));
+
+    // 5. hash mismatch rejected
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/upload/{session_id}")).method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"filename":"bad.flac","data":"{audio_data}","hash":"0000dead"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let err: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(err["error"]["code"], "HASH_MISMATCH");
+
+    // 6. invalid extension rejected
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/upload/{session_id}")).method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"filename":"bad.exe","data":"{audio_data}","hash":"{hash}"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let err: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(err["error"]["code"], "INVALID_EXTENSION");
+
+    // 7. import/commit
+    let resp = app.clone().oneshot(
+        Request::builder().uri(&format!("/api/v1/import/commit/{session_id}")).method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let commit: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(commit["tracks_imported"], 2);
+}
+
+#[tokio::test]
+async fn test_v1_import_session_validation() {
+    let (app, _) = make_app().await;
+
+    // Reject zero-track session
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/import/session").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"total_tracks":0,"total_playlists":0}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Reject too many tracks
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/import/session").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"total_tracks":99999,"total_playlists":0}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_v1_auth_flow_pairing_roundtrip() {
+    let (app, _) = make_app().await;
+
+    // pair/start
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/pair/start").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"device_name":"auth-test","device_type":"player"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let start: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert!(start["code"].as_str().unwrap().len() == 6);
+
+    // pair/confirm with wrong code
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/pair/confirm").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"code":"ZZZZZZ"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let err: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(err["error"]["code"], "INVALID_CODE");
+
+    // pair/confirm success
+    let code = start["code"].as_str().unwrap();
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/pair/confirm").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"code":"{code}"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let confirm: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert!(confirm["device_token"].as_str().unwrap().len() > 10);
+    assert!(confirm["refresh_token"].as_str().unwrap().len() > 10);
+    assert!(confirm["permissions"].is_array());
+    assert!(confirm["permissions"].as_array().unwrap().contains(&Value::String("playback.control".into())));
+
+    // confirm again -> consumed (code already used from DB)
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/api/v1/pair/confirm").method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"code":"{code}"}}"#)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let err: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(err["error"]["code"], "INVALID_CODE");
 }
