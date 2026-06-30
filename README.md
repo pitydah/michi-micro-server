@@ -1,8 +1,9 @@
 # Michi Micro Server
 
 [![CI](https://github.com/pitydah/michi-micro-server/actions/workflows/ci.yml/badge.svg)](https://github.com/pitydah/michi-micro-server/actions/workflows/ci.yml)
+[![v0.2.0-beta](https://img.shields.io/badge/version-0.2.0--beta-blue)](https://github.com/pitydah/michi-micro-server/releases)
 
-> Lightweight, robust, and efficient home music server written in Rust.
+> Lightweight, robust, and efficient home music server written in Rust. **Beta ready.**
 
 Michi Micro Server centralizes your local music library, reads advanced metadata,
 manages playlists, and serves music over your local network or Tailscale.
