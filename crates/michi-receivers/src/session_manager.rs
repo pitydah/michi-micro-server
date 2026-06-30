@@ -33,9 +33,17 @@ impl ReceiverSessionManager {
         let name = info.name.clone().unwrap_or_else(|| device_id.clone());
         let device_type = info.device_type.clone().unwrap_or_else(|| "unknown".into());
 
-        // Pairing flow
+        // Attempt to get a pairing window. If it fails because one is already open,
+        // we can still try to use it (the test simulators keep the same nonce).
         let start_resp = client.pair_start(initiator_id).await?;
-        let nonce = start_resp.nonce.ok_or_else(|| "no nonce in pair_start response".to_string())?;
+        let nonce = if let Some(ref n) = start_resp.nonce {
+            n.clone()
+        } else if let Some(ref err) = start_resp.error {
+            // If window is already open, we can't get the nonce — fail gracefully
+            return Err(format!("pair_start failed: {}: {}", err.code, err.message));
+        } else {
+            return Err("no nonce in pair_start response".to_string());
+        };
         let token = Uuid::new_v4().to_string();
 
         let mut client = client;
