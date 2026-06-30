@@ -6,6 +6,7 @@ use crate::client::ReceiverClient;
 use crate::models::*;
 
 /// Manages receiver sessions: pairing, heartbeat, session start/stop, volume.
+#[derive(Debug, Clone)]
 pub struct ReceiverSessionManager {
     registry: Arc<RwLock<ReceiverRegistry>>,
 }

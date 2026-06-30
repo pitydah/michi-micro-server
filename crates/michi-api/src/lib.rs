@@ -54,6 +54,7 @@ pub struct AppState {
     pub started_at: Instant,
     pub transcode_profiles: Arc<RwLock<Vec<crate::transcode::TranscodeProfile>>>,
     pub token_store: michi_link::TokenStore,
+    pub receiver_manager: michi_receivers::ReceiverSessionManager,
 }
 
 impl AppState {
@@ -68,8 +69,27 @@ impl AppState {
         let token_store = michi_link::TokenStore::new();
         michi_link::spawn_token_cleanup(token_store.clone());
         let playback_state = Arc::new(RwLock::new(PlaybackState::default()));
+        let receiver_manager = michi_receivers::ReceiverSessionManager::new();
         routes::v1::import::spawn_import_cleanup(&config, db.clone());
         routes::v1::playback::auto_restore_playback_state(db.clone(), playback_state.clone());
+        // Spawn receiver heartbeat monitor
+        let rm = receiver_manager.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let reg = rm.registry().await;
+                let reg_read = reg.read().await;
+                let now = chrono::Utc::now();
+                for entry in reg_read.list() {
+                    if let Some(last) = entry.last_seen {
+                        if (now - last).num_seconds() > 180 {
+                            tracing::warn!("receiver {} not seen for >180s, marking offline", entry.receiver_id);
+                        }
+                    }
+                }
+            }
+        });
         Self {
             config,
             db,
@@ -82,6 +102,7 @@ impl AppState {
             started_at: Instant::now(),
             transcode_profiles: Arc::new(RwLock::new(crate::transcode::default_profiles())),
             token_store,
+            receiver_manager,
         }
     }
 
@@ -283,8 +304,13 @@ fn v1_link_routes() -> Router<AppState> {
         .route("/api/v1/queue/reorder", put(routes::v1::queue::queue_reorder_handler))
         .route("/api/v1/queue/:queue_id", delete(routes::v1::queue::queue_delete_handler))
         // Receivers
-        .route("/api/v1/receivers", get(routes::v1::receivers::receivers_handler).post(routes::v1::receivers::register_receiver_handler))
+        .route("/api/v1/receivers", get(routes::v1::receivers::receivers_handler))
+        .route("/api/v1/receivers/discover", post(routes::v1::receivers::discover_receiver_handler))
         .route("/api/v1/receivers/:id", get(routes::v1::receivers::get_receiver_handler))
+        .route("/api/v1/receivers/:id/session/start", post(routes::v1::receivers::receiver_session_start_handler))
+        .route("/api/v1/receivers/:id/session/stop", post(routes::v1::receivers::receiver_session_stop_handler))
+        .route("/api/v1/receivers/:id/volume", post(routes::v1::receivers::receiver_volume_handler))
+        .route("/api/v1/receivers/:id/heartbeat", post(routes::v1::receivers::receiver_heartbeat_handler))
         // Rooms
         .route("/api/v1/rooms", get(routes::v1::rooms::rooms_handler).post(routes::v1::rooms::create_room_handler))
         .route("/api/v1/rooms/:id/play", post(routes::v1::rooms::room_play_handler))

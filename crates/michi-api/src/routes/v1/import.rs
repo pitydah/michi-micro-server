@@ -501,7 +501,6 @@ pub async fn import_rollback_handler(
     Json(serde_json::json!({ "status": "rolled_back" }))
 }
 
-/// Background job to clean up expired import sessions and stale staging dirs
 pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool) {
     let music_paths = config.music_paths.clone();
     tokio::spawn(async move {
