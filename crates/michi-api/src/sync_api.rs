@@ -25,38 +25,6 @@ pub struct DeviceInfo {
     pub last_seen: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ManifestTrackInfo {
-    pub track_id: Uuid,
-    pub file_path: String,
-    pub title: Option<String>,
-    pub artist: Option<String>,
-    pub album: Option<String>,
-    pub duration_ms: Option<i64>,
-    pub artwork_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PairStartRequest {
-    pub device_name: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PairStartResponse {
-    pub code: String,
-    pub expires_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PairConfirmRequest {
-    pub code: String,
-}
-#[derive(Debug, Serialize)]
-pub struct SyncManifestResponse {
-    pub tracks: Vec<ManifestTrackInfo>,
-    pub total: usize,
-}
-
 fn ok<T: Serialize>(data: T) -> (StatusCode, Json<T>) {
     (StatusCode::OK, Json(data))
 }
@@ -115,10 +83,37 @@ pub async fn revoke_device_handler(
     Ok(ok(serde_json::json!({"status": "revoked"})))
 }
 
+pub fn sync_router() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/sync/capabilities", get(capabilities_handler))
+        .route("/api/v1/sync/devices", get(devices_handler))
+        .route("/api/v1/sync/devices/:id", delete(revoke_device_handler))
+        .route("/api/v1/sync/pair/start", post(pair_start_handler))
+        .route("/api/v1/sync/pair/confirm", post(pair_confirm_handler))
+}
+
+// ── Legacy pairing handlers (separate from v1 link pairing) ──
+
+#[derive(Debug, Deserialize)]
+pub struct LegacyPairStart {
+    device_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LegacyPairStartResp {
+    code: String,
+    expires_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LegacyPairConfirm {
+    code: String,
+}
+
 pub async fn pair_start_handler(
     State(state): State<AppState>,
-    Json(body): Json<PairStartRequest>,
-) -> Result<(StatusCode, Json<PairStartResponse>), (StatusCode, Json<serde_json::Value>)> {
+    Json(body): Json<LegacyPairStart>,
+) -> Result<(StatusCode, Json<LegacyPairStartResp>), (StatusCode, Json<serde_json::Value>)> {
     let code = Uuid::new_v4().to_string()[..8].to_string();
     let token_id = Uuid::new_v4();
     let expires_at = (chrono::Utc::now() + chrono::Duration::seconds(300)).to_rfc3339();
@@ -132,12 +127,12 @@ pub async fn pair_start_handler(
             )
         })?;
 
-    Ok(ok(PairStartResponse { code, expires_at }))
+    Ok(ok(LegacyPairStartResp { code, expires_at }))
 }
 
 pub async fn pair_confirm_handler(
     State(state): State<AppState>,
-    Json(body): Json<PairConfirmRequest>,
+    Json(body): Json<LegacyPairConfirm>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
     let result = michi_db::consume_pairing_token(&state.db, &body.code)
         .await
@@ -172,53 +167,4 @@ pub async fn pair_confirm_handler(
             ),
         )),
     }
-}
-
-pub async fn manifest_handler(
-    State(state): State<AppState>,
-) -> Result<(StatusCode, Json<SyncManifestResponse>), (StatusCode, Json<serde_json::Value>)> {
-    let tracks = michi_db::get_all_tracks_manifest(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?;
-
-    let manifest: Vec<ManifestTrackInfo> = tracks
-        .into_iter()
-        .map(
-            |(track_id, file_path, title, artist, album, duration_ms, artwork_id)| {
-                ManifestTrackInfo {
-                    track_id,
-                    file_path,
-                    title,
-                    artist,
-                    album,
-                    duration_ms,
-                    artwork_id: if artwork_id.is_empty() {
-                        None
-                    } else {
-                        Some(artwork_id)
-                    },
-                }
-            },
-        )
-        .collect();
-
-    let total = manifest.len();
-    Ok(ok(SyncManifestResponse {
-        tracks: manifest,
-        total,
-    }))
-}
-
-pub fn sync_router() -> Router<AppState> {
-    Router::new()
-        .route("/api/v1/sync/capabilities", get(capabilities_handler))
-        .route("/api/v1/sync/devices", get(devices_handler))
-        .route("/api/v1/sync/devices/:id", delete(revoke_device_handler))
-        .route("/api/v1/sync/pair/start", post(pair_start_handler))
-        .route("/api/v1/sync/pair/confirm", post(pair_confirm_handler))
 }

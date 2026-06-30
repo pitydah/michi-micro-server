@@ -171,6 +171,10 @@ pub async fn diagnostics_handler(
     let total_queue_items: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM queue_items")
         .fetch_one(&state.db).await.unwrap_or(0);
 
+    // Check if playback was restored
+    let playback_restored = michi_db::get_latest_playback_session(&state.db).await
+        .ok().flatten().map(|s| s.restored).unwrap_or(false);
+
     // Disk free
     let music_free = state.config.music_paths.first()
         .and_then(|p| {
@@ -226,7 +230,7 @@ pub async fn diagnostics_handler(
             client_available: true,
             registered_receivers: 0,
         },
-        player_compatibility: PlayerCompatibility::new(total_queues > 0, false),
+        player_compatibility: PlayerCompatibility::new(total_queues > 0, playback_restored),
         config: ConfigStatus {
             port: state.config.port(),
             music_paths: state.config.music_paths.iter().map(|p| p.to_string_lossy().to_string()).collect(),

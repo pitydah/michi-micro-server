@@ -13,6 +13,9 @@ pub async fn events_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
+    // Auth check: require Bearer token in the first message
+    // But since axum WebSocketUpgrade can't reject after upgrade,
+    // we'll validate on first text message
     ws.on_upgrade(move |socket| handle_events_socket(socket, state))
 }
 
@@ -20,6 +23,47 @@ async fn handle_events_socket(socket: WebSocket, state: AppState) {
     info!("events websocket connected");
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.tx.subscribe();
+
+    // First, require client to send auth token
+    let auth_ok = if let Some(Ok(msg)) = receiver.next().await {
+        match msg {
+            Message::Text(text) => {
+                let parsed: Result<serde_json::Value, _> = serde_json::from_str(&text);
+                match parsed {
+                    Ok(val) => {
+                        if let Some(token) = val.get("token").and_then(|t| t.as_str()) {
+                            // Validate via token_store (link tokens) or auth_sessions (login tokens)
+                            let link_valid = state.token_store.validate(token, michi_link::TokenType::Device).await.is_ok();
+                            let sess_valid = if state.auth_enabled {
+                                state.auth_sessions.validate(token).await
+                            } else {
+                                false
+                            };
+                            link_valid || sess_valid || !state.auth_enabled
+                        } else {
+                            !state.auth_enabled
+                        }
+                    }
+                    Err(_) => !state.auth_enabled,
+                }
+            }
+            _ => !state.auth_enabled,
+        }
+    } else {
+        !state.auth_enabled
+    };
+
+    if !auth_ok {
+        info!("events websocket auth failed");
+        let _ = sender.send(Message::Text(json!({
+            "type": "error",
+            "code": "AUTH_REQUIRED",
+            "message": "send {\"token\":\"...\"} as first message"
+        }).to_string())).await;
+        return;
+    }
+
+    info!("events websocket authenticated");
 
     let init = json!({
         "type": "server.status",

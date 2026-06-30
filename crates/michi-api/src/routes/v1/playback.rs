@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::AppState;
@@ -267,13 +268,31 @@ pub async fn playback_session_restore_handler(
 
 pub fn auto_restore_playback_state(db: sqlx::SqlitePool, playback_state: std::sync::Arc<tokio::sync::RwLock<michi_sync::PlaybackState>>) {
     tokio::spawn(async move {
-        if let Ok(Some(session)) = michi_db::get_latest_playback_session(&db).await {
-            let mut state = playback_state.write().await;
-            state.track_id = session.current_track_id;
-            state.position_ms = session.position_ms;
-            state.playing = false; // never auto-play
-            state.volume = session.volume;
-            state.updated_at = chrono::Utc::now();
+        match michi_db::get_latest_playback_session(&db).await {
+            Ok(Some(session)) => {
+                let mut state = playback_state.write().await;
+                state.track_id = session.current_track_id;
+                state.position_ms = session.position_ms;
+                state.playing = false; // never auto-play
+                state.volume = session.volume;
+                state.updated_at = chrono::Utc::now();
+                drop(state);
+
+                // Also restore queue items from DB
+                if let Some(qid) = session.queue_id {
+                    if let Ok(items) = michi_db::get_queue_items(&db, &qid).await {
+                        if !items.is_empty() {
+                            info!("restored {} queue items from session {}", items.len(), session.id);
+                        }
+                    }
+                }
+            }
+            Ok(None) => {
+                info!("no saved playback session to restore");
+            }
+            Err(e) => {
+                tracing::warn!("failed to restore playback state: {} (server will start fresh)", e);
+            }
         }
     });
 }
