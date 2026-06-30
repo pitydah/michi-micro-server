@@ -7,10 +7,17 @@ use serde::Deserialize;
 
 use crate::AppState;
 
-fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({
-        "error": { "code": code, "message": message, "details": {} }
-    })))
+fn v1_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": { "code": code, "message": message, "details": {} }
+        })),
+    )
 }
 
 pub async fn receivers_handler(
@@ -18,21 +25,25 @@ pub async fn receivers_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let reg = state.receiver_manager.registry().await;
     let reg_read = reg.read().await;
-    let receivers: Vec<serde_json::Value> = reg_read.list().iter().map(|e| {
-        serde_json::json!({
-            "id": e.receiver_id,
-            "name": e.name,
-            "device_type": e.device_type,
-            "host": e.base_url,
-            "paired": e.paired,
-            "online": !e.active_session_id.is_some() && e.last_seen.map(|ls| {
-                (chrono::Utc::now() - ls).num_seconds() < 180
-            }).unwrap_or(false),
-            "capabilities": e.capabilities,
-            "active_session_id": e.active_session_id,
-            "last_seen": e.last_seen,
+    let receivers: Vec<serde_json::Value> = reg_read
+        .list()
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.receiver_id,
+                "name": e.name,
+                "device_type": e.device_type,
+                "host": e.base_url,
+                "paired": e.paired,
+                "online": !e.active_session_id.is_some() && e.last_seen.map(|ls| {
+                    (chrono::Utc::now() - ls).num_seconds() < 180
+                }).unwrap_or(false),
+                "capabilities": e.capabilities,
+                "active_session_id": e.active_session_id,
+                "last_seen": e.last_seen,
+            })
         })
-    }).collect();
+        .collect();
     Ok(Json(serde_json::json!({ "receivers": receivers })))
 }
 
@@ -43,7 +54,11 @@ pub async fn get_receiver_handler(
     let reg = state.receiver_manager.registry().await;
     let reg_read = reg.read().await;
     let entry = reg_read.get(&id).ok_or_else(|| {
-        v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", &format!("receiver not found: {}", id))
+        v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            &format!("receiver not found: {}", id),
+        )
     })?;
     Ok(Json(serde_json::json!({
         "id": entry.receiver_id,
@@ -70,8 +85,14 @@ pub async fn discover_receiver_handler(
     State(state): State<AppState>,
     Json(body): Json<DiscoverReceiverBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let initiator_id = body.initiator_id.unwrap_or_else(|| "michi-micro-server".into());
-    match state.receiver_manager.discover_and_pair(&body.base_url, &initiator_id).await {
+    let initiator_id = body
+        .initiator_id
+        .unwrap_or_else(|| "michi-micro-server".into());
+    match state
+        .receiver_manager
+        .discover_and_pair(&body.base_url, &initiator_id)
+        .await
+    {
         Ok(device_id) => Ok(Json(serde_json::json!({
             "status": "paired",
             "device_id": device_id,
@@ -97,17 +118,32 @@ pub async fn receiver_session_start_handler(
     Path(id): Path<String>,
     Json(body): Json<ReceiverSessionStartBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    match state.receiver_manager.start_session(
-        &id, &body.session_id, &body.codec, body.sample_rate,
-        body.bit_depth, body.channels, body.stream_port, body.buffer_ms, body.volume,
-    ).await {
+    match state
+        .receiver_manager
+        .start_session(
+            &id,
+            &body.session_id,
+            &body.codec,
+            body.sample_rate,
+            body.bit_depth,
+            body.channels,
+            body.stream_port,
+            body.buffer_ms,
+            body.volume,
+        )
+        .await
+    {
         Ok(resp) => Ok(Json(serde_json::json!({
             "status": resp.status,
             "session_id": resp.session_id,
             "stream_port": resp.stream_port,
             "buffer_ms": resp.buffer_ms,
         }))),
-        Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "SESSION_START_FAILED", &e)),
+        Err(e) => Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "SESSION_START_FAILED",
+            &e,
+        )),
     }
 }
 
@@ -116,7 +152,9 @@ pub async fn receiver_session_stop_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     match state.receiver_manager.stop_session(&id).await {
-        Ok(resp) => Ok(Json(serde_json::json!({ "status": resp.status, "session_id": resp.session_id }))),
+        Ok(resp) => Ok(Json(
+            serde_json::json!({ "status": resp.status, "session_id": resp.session_id }),
+        )),
         Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "SESSION_STOP_FAILED", &e)),
     }
 }
@@ -132,7 +170,9 @@ pub async fn receiver_volume_handler(
     Json(body): Json<ReceiverVolumeBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     match state.receiver_manager.set_volume(&id, body.volume).await {
-        Ok(resp) => Ok(Json(serde_json::json!({ "status": "ok", "volume": resp.volume }))),
+        Ok(resp) => Ok(Json(
+            serde_json::json!({ "status": "ok", "volume": resp.volume }),
+        )),
         Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "VOLUME_FAILED", &e)),
     }
 }
@@ -142,7 +182,9 @@ pub async fn receiver_heartbeat_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     match state.receiver_manager.heartbeat(&id).await {
-        Ok(resp) => Ok(Json(serde_json::json!({ "status": resp.status, "uptime_seconds": resp.uptime_seconds }))),
+        Ok(resp) => Ok(Json(
+            serde_json::json!({ "status": resp.status, "uptime_seconds": resp.uptime_seconds }),
+        )),
         Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "HEARTBEAT_FAILED", &e)),
     }
 }

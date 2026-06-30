@@ -8,10 +8,17 @@ use uuid::Uuid;
 
 use crate::AppState;
 
-fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({
-        "error": { "code": code, "message": message, "details": {} }
-    })))
+fn v1_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": { "code": code, "message": message, "details": {} }
+        })),
+    )
 }
 
 pub async fn queue_handler(
@@ -41,10 +48,19 @@ pub async fn queue_items_handler(
     let name = body.name.unwrap_or_else(|| "v1-queue".into());
 
     sqlx::query("INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
-        .bind(queue_id.to_string()).bind(&name).bind(&now).bind(&now)
+        .bind(queue_id.to_string())
+        .bind(&name)
+        .bind(&now)
+        .bind(&now)
         .execute(&state.db)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     for (i, track_id) in body.track_ids.iter().enumerate() {
         let item_id = Uuid::new_v4();
@@ -76,8 +92,12 @@ pub async fn queue_jump_handler(
     current.updated_at = chrono::Utc::now();
     drop(current);
 
-    let _ = state.tx.send(serde_json::json!({ "type": "queue_jumped", "index": body.index }).to_string());
-    Ok(Json(serde_json::json!({ "status": "ok", "index": body.index })))
+    let _ = state
+        .tx
+        .send(serde_json::json!({ "type": "queue_jumped", "index": body.index }).to_string());
+    Ok(Json(
+        serde_json::json!({ "status": "ok", "index": body.index }),
+    ))
 }
 
 // ── Queue Transfer (Player → Server) ───────────────────────
@@ -95,26 +115,41 @@ pub async fn queue_transfer_handler(
     Json(body): Json<QueueTransferBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if body.track_ids.is_empty() {
-        return Err(v1_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST", "track_ids must not be empty"));
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "track_ids must not be empty",
+        ));
     }
     if body.current_index as usize >= body.track_ids.len() {
-        return Err(v1_error(StatusCode::BAD_REQUEST, "INVALID_INDEX", "current_index exceeds track_ids length"));
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_INDEX",
+            "current_index exceeds track_ids length",
+        ));
     }
 
     // Validate all track_ids exist in library
     let mut unknown_tracks: Vec<Uuid> = Vec::new();
     for tid in &body.track_ids {
-        let exists = michi_db::get_track(&state.db, tid).await
-            .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+        let exists = michi_db::get_track(&state.db, tid).await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
         if exists.is_none() {
             unknown_tracks.push(*tid);
         }
     }
 
     if !unknown_tracks.is_empty() {
-        return Err(v1_error(StatusCode::BAD_REQUEST, "UNKNOWN_TRACKS", &format!(
-            "tracks not found: {:?}", unknown_tracks
-        )));
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "UNKNOWN_TRACKS",
+            &format!("tracks not found: {:?}", unknown_tracks),
+        ));
     }
 
     // Create new queue
@@ -166,12 +201,22 @@ pub async fn queue_transfer_handler(
         resume_policy: "manual".into(),
         restored: false,
     };
-    michi_db::create_playback_session(&state.db, &db_session).await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    michi_db::create_playback_session(&state.db, &db_session)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
-    let _ = state.tx.send(serde_json::json!({
-        "type": "queue_transferred", "session_id": session_id,
-    }).to_string());
+    let _ = state.tx.send(
+        serde_json::json!({
+            "type": "queue_transferred", "session_id": session_id,
+        })
+        .to_string(),
+    );
 
     Ok(Json(serde_json::json!({
         "queue_id": queue_id,
@@ -193,11 +238,21 @@ pub async fn queue_reorder_handler(
     Json(body): Json<QueueReorderBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let queue_id = body.queue_id.ok_or_else(|| {
-        v1_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST", "queue_id is required")
+        v1_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "queue_id is required",
+        )
     })?;
 
     let now = chrono::Utc::now().to_rfc3339();
-    let mut tx = state.db.begin().await.map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    let mut tx = state.db.begin().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
         .bind(queue_id.to_string())
@@ -214,9 +269,17 @@ pub async fn queue_reorder_handler(
             .ok();
     }
 
-    tx.commit().await.map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    tx.commit().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
-    Ok(Json(serde_json::json!({ "status": "ok", "reordered": body.item_ids.len() })))
+    Ok(Json(
+        serde_json::json!({ "status": "ok", "reordered": body.item_ids.len() }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

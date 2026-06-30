@@ -26,10 +26,17 @@ impl ReceiverSessionManager {
         self.registry.clone()
     }
 
-    pub async fn discover_and_pair(&self, base_url: &str, initiator_id: &str) -> Result<String, String> {
+    pub async fn discover_and_pair(
+        &self,
+        base_url: &str,
+        initiator_id: &str,
+    ) -> Result<String, String> {
         let client = ReceiverClient::new(base_url);
         let info = client.get_info().await?;
-        let device_id = info.device_id.clone().unwrap_or_else(|| base_url.to_string());
+        let device_id = info
+            .device_id
+            .clone()
+            .unwrap_or_else(|| base_url.to_string());
         let name = info.name.clone().unwrap_or_else(|| device_id.clone());
         let device_type = info.device_type.clone().unwrap_or_else(|| "unknown".into());
 
@@ -51,12 +58,24 @@ impl ReceiverSessionManager {
 
         // Extract capabilities
         let output = info.output.as_ref();
-        let max_sr = output.and_then(|o| o.get("max_sample_rate").and_then(|v| v.as_u64())).unwrap_or(48000) as u32;
-        let max_bd = output.and_then(|o| o.get("max_bit_depth").and_then(|v| v.as_u64())).unwrap_or(16) as u32;
+        let max_sr = output
+            .and_then(|o| o.get("max_sample_rate").and_then(|v| v.as_u64()))
+            .unwrap_or(48000) as u32;
+        let max_bd = output
+            .and_then(|o| o.get("max_bit_depth").and_then(|v| v.as_u64()))
+            .unwrap_or(16) as u32;
         let codecs = info.supported_codecs.clone().unwrap_or_default();
-        let mut caps = vec!["stream".to_string(), "volume".to_string(), "heartbeat".to_string()];
+        let mut caps = vec![
+            "stream".to_string(),
+            "volume".to_string(),
+            "heartbeat".to_string(),
+        ];
         if let Some(feats) = &info.features {
-            if feats.get("ota_update").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if feats
+                .get("ota_update")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 caps.push("ota_update".to_string());
             }
         }
@@ -95,14 +114,26 @@ impl ReceiverSessionManager {
         let entry = {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
-        }.ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
+        }
+        .ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
 
         let base_url = entry.base_url.clone();
         let token = entry.token.clone();
         let mut client = ReceiverClient::new(&base_url);
         client.token = token;
 
-        let resp = client.session_start(session_id, codec, sample_rate, bit_depth, channels, stream_port, buffer_ms, volume).await?;
+        let resp = client
+            .session_start(
+                session_id,
+                codec,
+                sample_rate,
+                bit_depth,
+                channels,
+                stream_port,
+                buffer_ms,
+                volume,
+            )
+            .await?;
 
         {
             let mut reg = self.registry.write().await;
@@ -119,7 +150,8 @@ impl ReceiverSessionManager {
         let entry = {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
-        }.ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
+        }
+        .ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
 
         let mut client = ReceiverClient::new(&entry.base_url);
         client.token = entry.token.clone();
@@ -136,11 +168,16 @@ impl ReceiverSessionManager {
         Ok(resp)
     }
 
-    pub async fn set_volume(&self, receiver_id: &str, volume: u32) -> Result<VolumeResponse, String> {
+    pub async fn set_volume(
+        &self,
+        receiver_id: &str,
+        volume: u32,
+    ) -> Result<VolumeResponse, String> {
         let entry = {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
-        }.ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
+        }
+        .ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
 
         let mut client = ReceiverClient::new(&entry.base_url);
         client.token = entry.token.clone();
@@ -151,7 +188,8 @@ impl ReceiverSessionManager {
         let entry = {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
-        }.ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
+        }
+        .ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
 
         let mut client = ReceiverClient::new(&entry.base_url);
         client.token = entry.token.clone();
@@ -171,7 +209,8 @@ impl ReceiverSessionManager {
         let entry = {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
-        }.ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
+        }
+        .ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
 
         let client = ReceiverClient::new(&entry.base_url);
         client.get_info().await

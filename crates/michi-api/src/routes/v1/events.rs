@@ -33,7 +33,11 @@ async fn handle_events_socket(socket: WebSocket, state: AppState) {
                     Ok(val) => {
                         if let Some(token) = val.get("token").and_then(|t| t.as_str()) {
                             // Validate via token_store (link tokens) or auth_sessions (login tokens)
-                            let link_valid = state.token_store.validate(token, michi_link::TokenType::Device).await.is_ok();
+                            let link_valid = state
+                                .token_store
+                                .validate(token, michi_link::TokenType::Device)
+                                .await
+                                .is_ok();
                             let sess_valid = if state.auth_enabled {
                                 state.auth_sessions.validate(token).await
                             } else {
@@ -55,11 +59,16 @@ async fn handle_events_socket(socket: WebSocket, state: AppState) {
 
     if !auth_ok {
         info!("events websocket auth failed");
-        let _ = sender.send(Message::Text(json!({
-            "type": "error",
-            "code": "AUTH_REQUIRED",
-            "message": "send {\"token\":\"...\"} as first message"
-        }).to_string())).await;
+        let _ = sender
+            .send(Message::Text(
+                json!({
+                    "type": "error",
+                    "code": "AUTH_REQUIRED",
+                    "message": "send {\"token\":\"...\"} as first message"
+                })
+                .to_string(),
+            ))
+            .await;
         return;
     }
 
@@ -91,9 +100,7 @@ async fn handle_events_socket(socket: WebSocket, state: AppState) {
         }
     });
 
-    let recv_task = tokio::spawn(async move {
-        while let Some(Ok(_)) = receiver.next().await {}
-    });
+    let recv_task = tokio::spawn(async move { while let Some(Ok(_)) = receiver.next().await {} });
 
     tokio::select! {
         _ = send_task => {}

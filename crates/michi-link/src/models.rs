@@ -83,7 +83,10 @@ pub struct PairStartRequest {
 
 impl PairStartRequest {
     pub fn device_name(&self) -> &str {
-        self.alias.as_deref().or(self.device_name.as_deref()).unwrap_or("unknown")
+        self.alias
+            .as_deref()
+            .or(self.device_name.as_deref())
+            .unwrap_or("unknown")
     }
 
     pub fn client_device_id(&self) -> Option<String> {

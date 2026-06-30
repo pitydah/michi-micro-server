@@ -232,8 +232,9 @@ tr:hover td { background: var(--panel-hover); }
   font-size: .78rem;
 }
 .feature-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-.feature-dot.on { background: var(--online); }
+.feature-dot.on { background: var(--online); box-shadow: 0 0 4px var(--online); }
 .feature-dot.off { background: var(--text-dim); }
+.feature-item .badge { margin-left: auto; font-size: .6rem; padding: 1px 6px; border-radius: 8px; }
 .copy-field {
   display: flex; align-items: center; gap: 6px;
   padding: 6px 10px; border-radius: 6px;

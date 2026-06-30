@@ -1417,7 +1417,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "michi-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "axum",
@@ -1475,7 +1475,7 @@ dependencies = [
 
 [[package]]
 name = "michi-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "temp-env",
  "uuid",
@@ -1483,7 +1483,7 @@ dependencies = [
 
 [[package]]
 name = "michi-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "michi-db"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "michi-core",
@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "michi-homeassistant"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "michi-config",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "michi-link"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "chrono",
@@ -1546,7 +1546,7 @@ dependencies = [
 
 [[package]]
 name = "michi-m3u"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "michi-metadata"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "lofty",
  "michi-core",
@@ -1583,7 +1583,7 @@ dependencies = [
 
 [[package]]
 name = "michi-receivers"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "reqwest",
@@ -1609,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "michi-scanner"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "michi-core",
@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "michi-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "michi-streaming"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "michi-core",
@@ -1652,7 +1652,7 @@ dependencies = [
 
 [[package]]
 name = "michi-sync"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",

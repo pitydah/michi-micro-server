@@ -355,7 +355,7 @@ mod tests {
             year: None,
             track_number: None,
             disc_number: None,
-                content_hash: None,
+            content_hash: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }];

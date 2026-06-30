@@ -8,10 +8,17 @@ use uuid::Uuid;
 
 use crate::AppState;
 
-fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({
-        "error": { "code": code, "message": message, "details": {} }
-    })))
+fn v1_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": { "code": code, "message": message, "details": {} }
+        })),
+    )
 }
 
 pub async fn artwork_handler(
@@ -20,17 +27,35 @@ pub async fn artwork_handler(
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
     let track = michi_db::get_track(&state.db, &id)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?
-        .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "TRACK_NOT_FOUND", &format!("track not found: {}", id)))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "TRACK_NOT_FOUND",
+                &format!("track not found: {}", id),
+            )
+        })?;
 
     let cache_path = state.config.cache_path.join("artwork");
     let artwork_path = cache_path.join(id.to_string());
 
     if artwork_path.exists() {
         let data = tokio::fs::read(&artwork_path).await.map_err(|e| {
-            v1_error(StatusCode::INTERNAL_SERVER_ERROR, "IO_ERROR", &format!("failed to read artwork: {}", e))
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "IO_ERROR",
+                &format!("failed to read artwork: {}", e),
+            )
         })?;
-        let mime = infer::get(&data).map(|t| t.mime_type()).unwrap_or("image/jpeg");
+        let mime = infer::get(&data)
+            .map(|t| t.mime_type())
+            .unwrap_or("image/jpeg");
         return Ok(([(axum::http::header::CONTENT_TYPE, mime)], data).into_response());
     }
 
@@ -50,7 +75,11 @@ pub async fn artwork_handler(
         }
     }
 
-    Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "no artwork found"))
+    Err(v1_error(
+        StatusCode::NOT_FOUND,
+        "NOT_FOUND",
+        "no artwork found",
+    ))
 }
 
 async fn extract_and_cache(
@@ -62,7 +91,9 @@ async fn extract_and_cache(
         Ok(data) => {
             tokio::fs::create_dir_all(cache_path).await.ok();
             let _ = tokio::fs::write(&cache_path.join(id.to_string()), &data).await;
-            let mime = infer::get(&data).map(|t| t.mime_type()).unwrap_or("image/jpeg");
+            let mime = infer::get(&data)
+                .map(|t| t.mime_type())
+                .unwrap_or("image/jpeg");
             Ok(([(axum::http::header::CONTENT_TYPE, mime)], data).into_response())
         }
         Err(_) => Err(()),

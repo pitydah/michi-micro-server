@@ -18,28 +18,40 @@ impl ReceiverClient {
 
     /// GET /api/v1/receiver/info
     pub async fn get_info(&self) -> Result<ReceiverInfo, String> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(format!("{}/api/v1/receiver/info", self.base_url))
             .send()
             .await
             .map_err(|e| format!("info request failed: {}", e))?;
-        resp.json().await.map_err(|e| format!("info parse failed: {}", e))
+        resp.json()
+            .await
+            .map_err(|e| format!("info parse failed: {}", e))
     }
 
     /// POST /api/v1/receiver/pair/start
     pub async fn pair_start(&self, initiator_id: &str) -> Result<PairStartResponse, String> {
-        let resp = self.client
+        let resp = self
+            .client
             .post(format!("{}/api/v1/receiver/pair/start", self.base_url))
             .json(&serde_json::json!({"initiator_id": initiator_id}))
             .send()
             .await
             .map_err(|e| format!("pair_start request failed: {}", e))?;
-        resp.json().await.map_err(|e| format!("pair_start parse failed: {}", e))
+        resp.json()
+            .await
+            .map_err(|e| format!("pair_start parse failed: {}", e))
     }
 
     /// POST /api/v1/receiver/pair/confirm
-    pub async fn pair_confirm(&mut self, nonce: &str, initiator_id: &str, token: &str) -> Result<PairConfirmResponse, String> {
-        let resp = self.client
+    pub async fn pair_confirm(
+        &mut self,
+        nonce: &str,
+        initiator_id: &str,
+        token: &str,
+    ) -> Result<PairConfirmResponse, String> {
+        let resp = self
+            .client
             .post(format!("{}/api/v1/receiver/pair/confirm", self.base_url))
             .json(&serde_json::json!({
                 "nonce": nonce,
@@ -49,7 +61,10 @@ impl ReceiverClient {
             .send()
             .await
             .map_err(|e| format!("pair_confirm request failed: {}", e))?;
-        let result: PairConfirmResponse = resp.json().await.map_err(|e| format!("pair_confirm parse failed: {}", e))?;
+        let result: PairConfirmResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("pair_confirm parse failed: {}", e))?;
         if let Some(ref t) = result.token {
             self.token = Some(t.clone());
         }
@@ -62,13 +77,19 @@ impl ReceiverClient {
 
     /// POST /api/v1/receiver/heartbeat
     pub async fn heartbeat(&self) -> Result<HeartbeatResponse, String> {
-        let mut req = self.client
+        let mut req = self
+            .client
             .post(format!("{}/api/v1/receiver/heartbeat", self.base_url));
         if let Some(h) = self.auth_header() {
             req = req.header("Authorization", &h);
         }
-        let resp = req.send().await.map_err(|e| format!("heartbeat request failed: {}", e))?;
-        resp.json().await.map_err(|e| format!("heartbeat parse failed: {}", e))
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("heartbeat request failed: {}", e))?;
+        resp.json()
+            .await
+            .map_err(|e| format!("heartbeat parse failed: {}", e))
     }
 
     /// POST /api/v1/receiver/session/start
@@ -83,7 +104,8 @@ impl ReceiverClient {
         buffer_ms: u64,
         volume: u32,
     ) -> Result<SessionStartResponse, String> {
-        let mut req = self.client
+        let mut req = self
+            .client
             .post(format!("{}/api/v1/receiver/session/start", self.base_url));
         if let Some(h) = self.auth_header() {
             req = req.header("Authorization", &h);
@@ -102,23 +124,32 @@ impl ReceiverClient {
             .send()
             .await
             .map_err(|e| format!("session_start request failed: {}", e))?;
-        resp.json().await.map_err(|e| format!("session_start parse failed: {}", e))
+        resp.json()
+            .await
+            .map_err(|e| format!("session_start parse failed: {}", e))
     }
 
     /// POST /api/v1/receiver/session/stop
     pub async fn session_stop(&self) -> Result<SessionStopResponse, String> {
-        let mut req = self.client
+        let mut req = self
+            .client
             .post(format!("{}/api/v1/receiver/session/stop", self.base_url));
         if let Some(h) = self.auth_header() {
             req = req.header("Authorization", &h);
         }
-        let resp = req.send().await.map_err(|e| format!("session_stop request failed: {}", e))?;
-        resp.json().await.map_err(|e| format!("session_stop parse failed: {}", e))
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("session_stop request failed: {}", e))?;
+        resp.json()
+            .await
+            .map_err(|e| format!("session_stop parse failed: {}", e))
     }
 
     /// POST /api/v1/receiver/volume
     pub async fn set_volume(&self, volume: u32) -> Result<VolumeResponse, String> {
-        let mut req = self.client
+        let mut req = self
+            .client
             .post(format!("{}/api/v1/receiver/volume", self.base_url));
         if let Some(h) = self.auth_header() {
             req = req.header("Authorization", &h);
@@ -128,6 +159,8 @@ impl ReceiverClient {
             .send()
             .await
             .map_err(|e| format!("volume request failed: {}", e))?;
-        resp.json().await.map_err(|e| format!("volume parse failed: {}", e))
+        resp.json()
+            .await
+            .map_err(|e| format!("volume parse failed: {}", e))
     }
 }

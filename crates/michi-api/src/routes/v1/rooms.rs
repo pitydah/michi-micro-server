@@ -8,10 +8,17 @@ use uuid::Uuid;
 
 use crate::AppState;
 
-fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({
-        "error": { "code": code, "message": message, "details": {} }
-    })))
+fn v1_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": { "code": code, "message": message, "details": {} }
+        })),
+    )
 }
 
 pub async fn rooms_handler(
@@ -19,14 +26,19 @@ pub async fn rooms_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let reg = state.receiver_manager.registry().await;
     let reg_read = reg.read().await;
-    let receivers_in_rooms: Vec<serde_json::Value> = reg_read.list().iter().filter(|e| e.active_session_id.is_some()).map(|e| {
-        serde_json::json!({
-            "receiver_id": e.receiver_id,
-            "name": e.name,
-            "device_type": e.device_type,
-            "active_session_id": e.active_session_id,
+    let receivers_in_rooms: Vec<serde_json::Value> = reg_read
+        .list()
+        .iter()
+        .filter(|e| e.active_session_id.is_some())
+        .map(|e| {
+            serde_json::json!({
+                "receiver_id": e.receiver_id,
+                "name": e.name,
+                "device_type": e.device_type,
+                "active_session_id": e.active_session_id,
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(Json(serde_json::json!({
         "rooms": [{
@@ -57,7 +69,11 @@ pub async fn create_room_handler(
         }
     }
     if !unknown.is_empty() {
-        return Err(v1_error(StatusCode::BAD_REQUEST, "UNKNOWN_RECEIVERS", &format!("{:?}", unknown)));
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "UNKNOWN_RECEIVERS",
+            &format!("{:?}", unknown),
+        ));
     }
     Ok(Json(serde_json::json!({
         "status": "created",
@@ -84,8 +100,13 @@ pub async fn room_play_handler(
     current.playing = true;
     current.updated_at = chrono::Utc::now();
     drop(current);
-    let _ = state.tx.send(serde_json::json!({
-        "type": "room_play", "room_id": id, "track_id": body.track_id,
-    }).to_string());
-    Ok(Json(serde_json::json!({ "status": "playing", "room_id": id })))
+    let _ = state.tx.send(
+        serde_json::json!({
+            "type": "room_play", "room_id": id, "track_id": body.track_id,
+        })
+        .to_string(),
+    );
+    Ok(Json(
+        serde_json::json!({ "status": "playing", "room_id": id }),
+    ))
 }

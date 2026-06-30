@@ -1,4 +1,8 @@
-use axum::{extract::{Path, State}, http::StatusCode, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
 use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -6,15 +10,24 @@ use uuid::Uuid;
 use crate::AppState;
 use michi_core::ImportState;
 
-fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({
-        "error": { "code": code, "message": message, "details": {} }
-    })))
+fn v1_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": { "code": code, "message": message, "details": {} }
+        })),
+    )
 }
 
 const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 const MAX_SESSION_SIZE: u64 = 1024 * 1024 * 1024;
-const ALLOWED_AUDIO_EXTS: &[&str] = &["mp3", "flac", "ogg", "opus", "aac", "m4a", "wav", "aiff", "dsf", "dff"];
+const ALLOWED_AUDIO_EXTS: &[&str] = &[
+    "mp3", "flac", "ogg", "opus", "aac", "m4a", "wav", "aiff", "dsf", "dff",
+];
 
 #[derive(Debug, Deserialize)]
 pub struct ImportSessionRequest {
@@ -55,12 +68,18 @@ fn sanitize_filename(filename: &str) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
 fn compute_sha256(data: &[u8]) -> String {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(data);
     hex::encode(hasher.finalize())
@@ -75,7 +94,8 @@ fn is_allowed_extension(filename: &str) -> bool {
 }
 
 fn get_staging_dir(music_paths: &[std::path::PathBuf]) -> std::path::PathBuf {
-    music_paths.first()
+    music_paths
+        .first()
         .map(|p| p.join(".import"))
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/michi-import"))
 }
@@ -99,31 +119,60 @@ pub async fn import_session_handler(
     let device_id = Uuid::nil();
 
     if body.total_tracks == 0 && body.total_playlists == 0 {
-        return Err(v1_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST", "total_tracks or total_playlists must be > 0"));
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "total_tracks or total_playlists must be > 0",
+        ));
     }
     if body.total_tracks > 10000 {
-        return Err(v1_error(StatusCode::BAD_REQUEST, "TOO_MANY_TRACKS", "max 10000 tracks per session"));
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "TOO_MANY_TRACKS",
+            "max 10000 tracks per session",
+        ));
     }
 
     let db_session = michi_core::ImportSessionDb {
-        session_id, device_id,
-        total_tracks: body.total_tracks, total_playlists: body.total_playlists,
-        imported_tracks: 0, imported_playlists: 0, total_size_bytes: 0,
+        session_id,
+        device_id,
+        total_tracks: body.total_tracks,
+        total_playlists: body.total_playlists,
+        imported_tracks: 0,
+        imported_playlists: 0,
+        total_size_bytes: 0,
         status: "created".into(),
         expires_at: expires_at.to_rfc3339(),
         created_at: Utc::now().to_rfc3339(),
     };
 
-    michi_db::create_import_session(&state.db, &db_session).await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
-    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Created, None).await.ok();
+    michi_db::create_import_session(&state.db, &db_session)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Created, None)
+        .await
+        .ok();
 
     {
         let mut sessions = IMPORT_SESSIONS.write().await;
-        sessions.insert(session_id, ImportSessionState {
-            session_id, total_tracks: body.total_tracks, total_playlists: body.total_playlists,
-            imported_tracks: 0, total_size_bytes: 0, device_id, seen_hashes: Vec::new(),
-        });
+        sessions.insert(
+            session_id,
+            ImportSessionState {
+                session_id,
+                total_tracks: body.total_tracks,
+                total_playlists: body.total_playlists,
+                imported_tracks: 0,
+                total_size_bytes: 0,
+                device_id,
+                seen_hashes: Vec::new(),
+            },
+        );
     }
 
     Ok(Json(serde_json::json!({
@@ -144,14 +193,24 @@ pub async fn import_upload_handler(
     let session_state = {
         let sessions = IMPORT_SESSIONS.read().await;
         sessions.get(&session_id).cloned()
-    }.ok_or_else(|| {
-        v1_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", "import session not found or expired")
+    }
+    .ok_or_else(|| {
+        v1_error(
+            StatusCode::NOT_FOUND,
+            "SESSION_NOT_FOUND",
+            "import session not found or expired",
+        )
     })?;
 
     if !is_allowed_extension(&body.filename) {
-        return Err(v1_error(StatusCode::BAD_REQUEST, "INVALID_EXTENSION", &format!(
-            "extension not allowed. Accepted: {}", ALLOWED_AUDIO_EXTS.join(", ")
-        )));
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_EXTENSION",
+            &format!(
+                "extension not allowed. Accepted: {}",
+                ALLOWED_AUDIO_EXTS.join(", ")
+            ),
+        ));
     }
 
     // Read X-Track-Id header if present (Player sends this)
@@ -168,17 +227,30 @@ pub async fn import_upload_handler(
 
     let data = base64::engine::general_purpose::STANDARD
         .decode(&body.data)
-        .map_err(|_| v1_error(StatusCode::BAD_REQUEST, "INVALID_DATA", "invalid base64 data"))?;
+        .map_err(|_| {
+            v1_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_DATA",
+                "invalid base64 data",
+            )
+        })?;
 
     if data.len() as u64 > MAX_FILE_SIZE {
-        return Err(v1_error(StatusCode::BAD_REQUEST, "FILE_TOO_LARGE", &format!(
-            "file exceeds max size of {} bytes", MAX_FILE_SIZE
-        )));
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "FILE_TOO_LARGE",
+            &format!("file exceeds max size of {} bytes", MAX_FILE_SIZE),
+        ));
     }
     if session_state.total_size_bytes + data.len() as u64 > MAX_SESSION_SIZE {
-        return Err(v1_error(StatusCode::BAD_REQUEST, "SESSION_SIZE_EXCEEDED", &format!(
-            "session exceeds max total size of {} bytes", MAX_SESSION_SIZE
-        )));
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "SESSION_SIZE_EXCEEDED",
+            &format!(
+                "session exceeds max total size of {} bytes",
+                MAX_SESSION_SIZE
+            ),
+        ));
     }
 
     let data_hash = compute_sha256(&data);
@@ -187,7 +259,11 @@ pub async fn import_upload_handler(
     let expected_hash = checksum_header.as_ref().or(body.hash.as_ref());
     if let Some(hash) = expected_hash {
         if data_hash != *hash {
-            return Err(v1_error(StatusCode::BAD_REQUEST, "HASH_MISMATCH", "SHA256 hash does not match data"));
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "HASH_MISMATCH",
+                "SHA256 hash does not match data",
+            ));
         }
     }
 
@@ -202,8 +278,13 @@ pub async fn import_upload_handler(
 
     let safe_name = sanitize_filename(&body.filename);
     let import_dir = get_session_dir(&state.config.music_paths, &session_id);
-    tokio::fs::create_dir_all(&import_dir).await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "IO_ERROR", &e.to_string()))?;
+    tokio::fs::create_dir_all(&import_dir).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "IO_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     let file_path = import_dir.join(&safe_name);
     if file_path.exists() {
@@ -215,10 +296,17 @@ pub async fn import_upload_handler(
         })));
     }
 
-    tokio::fs::write(&file_path, &data).await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "IO_ERROR", &e.to_string()))?;
+    tokio::fs::write(&file_path, &data).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "IO_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
-    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Uploading, None).await.ok();
+    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Uploading, None)
+        .await
+        .ok();
 
     {
         let mut sessions = IMPORT_SESSIONS.write().await;
@@ -229,28 +317,44 @@ pub async fn import_upload_handler(
         }
     }
 
-    michi_db::update_import_session_progress(&state.db, &session_id, 1, data.len() as u64).await.ok();
+    michi_db::update_import_session_progress(&state.db, &session_id, 1, data.len() as u64)
+        .await
+        .ok();
 
     let ext = std::path::Path::new(&safe_name)
-        .extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
 
     let remote_track_id = if ALLOWED_AUDIO_EXTS.contains(&ext.as_str()) {
         let metadata = tokio::task::spawn_blocking({
             let fp = file_path.clone();
             move || michi_metadata::read_metadata_safe(&fp)
-        }).await.unwrap_or_default();
+        })
+        .await
+        .unwrap_or_default();
         let tid = michi_core::track_id_from_path(file_path.to_str().unwrap_or(""));
         let track = michi_core::Track {
-            id: tid, title: metadata.title, artist: metadata.artist,
-            album: metadata.album, album_artist: metadata.album_artist,
+            id: tid,
+            title: metadata.title,
+            artist: metadata.artist,
+            album: metadata.album,
+            album_artist: metadata.album_artist,
             duration_ms: metadata.duration_ms,
             file_path: file_path.to_string_lossy().to_string(),
-            format: metadata.format, sample_rate: metadata.sample_rate,
-            bit_depth: metadata.bit_depth, channels: metadata.channels,
-            artwork_id: None, genre: metadata.genre, year: metadata.year,
-            track_number: metadata.track_number, disc_number: metadata.disc_number,
+            format: metadata.format,
+            sample_rate: metadata.sample_rate,
+            bit_depth: metadata.bit_depth,
+            channels: metadata.channels,
+            artwork_id: None,
+            genre: metadata.genre,
+            year: metadata.year,
+            track_number: metadata.track_number,
+            disc_number: metadata.disc_number,
             content_hash: Some(data_hash.clone()),
-            created_at: Utc::now(), updated_at: Utc::now(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         };
         michi_db::upsert_track(&state.db, &track).await.ok();
         Some(tid)
@@ -281,8 +385,10 @@ pub async fn import_preflight_handler(
 
         // Try exact match by full content_hash
         let exact_match = if let Some(ref h) = content_hash {
-            michi_db::find_tracks_by_content_hash(&state.db, h).await
-                .ok().and_then(|t| t.into_iter().next())
+            michi_db::find_tracks_by_content_hash(&state.db, h)
+                .await
+                .ok()
+                .and_then(|t| t.into_iter().next())
         } else {
             None
         };
@@ -290,9 +396,15 @@ pub async fn import_preflight_handler(
         // Try quick_hash (first 16 hex chars) as fallback
         let quick_match = if exact_match.is_none() {
             if let Some(ref qh) = quick_hash {
-                let all = michi_db::list_tracks(&state.db).await.ok().unwrap_or_default();
+                let all = michi_db::list_tracks(&state.db)
+                    .await
+                    .ok()
+                    .unwrap_or_default();
                 all.into_iter().find(|t| {
-                    t.content_hash.as_deref().map(|ch| ch.starts_with(qh)).unwrap_or(false)
+                    t.content_hash
+                        .as_deref()
+                        .map(|ch| ch.starts_with(qh))
+                        .unwrap_or(false)
                 })
             } else {
                 None
@@ -304,9 +416,15 @@ pub async fn import_preflight_handler(
         // Try sha256_prefix as legacy fallback
         let legacy_match = if exact_match.is_none() && quick_match.is_none() {
             if let Some(ref sp) = sha256_prefix {
-                let all = michi_db::list_tracks(&state.db).await.ok().unwrap_or_default();
+                let all = michi_db::list_tracks(&state.db)
+                    .await
+                    .ok()
+                    .unwrap_or_default();
                 all.into_iter().find(|t| {
-                    t.content_hash.as_deref().map(|ch| ch.starts_with(sp)).unwrap_or(false)
+                    t.content_hash
+                        .as_deref()
+                        .map(|ch| ch.starts_with(sp))
+                        .unwrap_or(false)
                 })
             } else {
                 None
@@ -316,47 +434,85 @@ pub async fn import_preflight_handler(
         };
 
         // Try metadata+duration as last resort
-        let metadata_match = if exact_match.is_none() && quick_match.is_none() && legacy_match.is_none() {
-            if let Some(ref ttl) = title {
-                if let Some(dur) = duration_ms {
-                    let all = michi_db::list_tracks(&state.db).await.ok().unwrap_or_default();
-                    all.into_iter().find(|t| {
-                        t.title.as_deref() == Some(ttl) &&
-                        t.duration_ms.map(|d| (d as i64 - dur as i64).abs() < 2000).unwrap_or(false)
-                    })
-                } else { None }
-            } else { None }
-        } else {
-            None
-        };
+        let metadata_match =
+            if exact_match.is_none() && quick_match.is_none() && legacy_match.is_none() {
+                if let Some(ref ttl) = title {
+                    if let Some(dur) = duration_ms {
+                        let all = michi_db::list_tracks(&state.db)
+                            .await
+                            .ok()
+                            .unwrap_or_default();
+                        all.into_iter().find(|t| {
+                            t.title.as_deref() == Some(ttl)
+                                && t.duration_ms
+                                    .map(|d| (d as i64 - dur as i64).abs() < 2000)
+                                    .unwrap_or(false)
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
         // Check for partial conflict (same title, different duration)
-        let conflict = if exact_match.is_none() && quick_match.is_none() && legacy_match.is_none() && metadata_match.is_none() {
+        let conflict = if exact_match.is_none()
+            && quick_match.is_none()
+            && legacy_match.is_none()
+            && metadata_match.is_none()
+        {
             if let Some(ref ttl) = title {
                 if let Some(dur) = duration_ms {
-                    let all = michi_db::list_tracks(&state.db).await.ok().unwrap_or_default();
+                    let all = michi_db::list_tracks(&state.db)
+                        .await
+                        .ok()
+                        .unwrap_or_default();
                     all.into_iter().find(|t| {
-                        t.title.as_deref() == Some(ttl) &&
-                        t.duration_ms.map(|d| (d as i64 - dur as i64).abs() >= 2000).unwrap_or(false)
+                        t.title.as_deref() == Some(ttl)
+                            && t.duration_ms
+                                .map(|d| (d as i64 - dur as i64).abs() >= 2000)
+                                .unwrap_or(false)
                     })
-                } else { None }
-            } else { None }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         } else {
             None
         };
 
-        let matched_track = exact_match.as_ref().or(quick_match.as_ref()).or(legacy_match.as_ref()).or(metadata_match.as_ref());
+        let matched_track = exact_match
+            .as_ref()
+            .or(quick_match.as_ref())
+            .or(legacy_match.as_ref())
+            .or(metadata_match.as_ref());
 
-        let (status, remote_track_id, match_type): (String, Option<Uuid>, String) = match matched_track {
-            Some(t) if exact_match.is_some() => ("already_present".into(), Some(t.id), "exact_hash".into()),
-            Some(t) if quick_match.is_some() => ("already_present".into(), Some(t.id), "quick_hash".into()),
-            Some(t) if legacy_match.is_some() => ("already_present".into(), Some(t.id), "sha256_prefix".into()),
-            Some(t) => ("already_present".into(), Some(t.id), "metadata_duration".into()),
-            None => match conflict.as_ref() {
-                Some(t) => ("conflict".into(), Some(t.id), "metadata_duration".into()),
-                None => ("needs_upload".into(), None, "none".into()),
-            }
-        };
+        let (status, remote_track_id, match_type): (String, Option<Uuid>, String) =
+            match matched_track {
+                Some(t) if exact_match.is_some() => {
+                    ("already_present".into(), Some(t.id), "exact_hash".into())
+                }
+                Some(t) if quick_match.is_some() => {
+                    ("already_present".into(), Some(t.id), "quick_hash".into())
+                }
+                Some(t) if legacy_match.is_some() => {
+                    ("already_present".into(), Some(t.id), "sha256_prefix".into())
+                }
+                Some(t) => (
+                    "already_present".into(),
+                    Some(t.id),
+                    "metadata_duration".into(),
+                ),
+                None => match conflict.as_ref() {
+                    Some(t) => ("conflict".into(), Some(t.id), "metadata_duration".into()),
+                    None => ("needs_upload".into(), None, "none".into()),
+                },
+            };
 
         results.push(serde_json::json!({
             "local_track_id": local_track_id,
@@ -373,9 +529,22 @@ pub async fn import_session_status_handler(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let db_session = michi_db::get_import_session_full(&state.db, &session_id).await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?
-        .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", "import session not found"))?;
+    let db_session = michi_db::get_import_session_full(&state.db, &session_id)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "SESSION_NOT_FOUND",
+                "import session not found",
+            )
+        })?;
 
     Ok(Json(serde_json::json!({
         "session_id": db_session.session_id,
@@ -394,14 +563,24 @@ pub async fn import_commit_handler(
     let _session_state = {
         let mut sessions = IMPORT_SESSIONS.write().await;
         sessions.remove(&session_id)
-    }.ok_or_else(|| {
-        v1_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", "import session not found or expired")
+    }
+    .ok_or_else(|| {
+        v1_error(
+            StatusCode::NOT_FOUND,
+            "SESSION_NOT_FOUND",
+            "import session not found or expired",
+        )
     })?;
 
-    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Committing, None).await.ok();
+    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Committing, None)
+        .await
+        .ok();
 
     let staging_dir = get_session_dir(&state.config.music_paths, &session_id);
-    let final_dir = state.config.music_paths.first()
+    let final_dir = state
+        .config
+        .music_paths
+        .first()
         .cloned()
         .unwrap_or_else(|| staging_dir.clone());
 
@@ -427,10 +606,17 @@ pub async fn import_commit_handler(
         let mut conflict = false;
         for track in &tracks {
             if let Some(ref hash) = track.content_hash {
-                let existing = michi_db::find_tracks_by_content_hash(&state.db, hash).await.ok().unwrap_or_default();
+                let existing = michi_db::find_tracks_by_content_hash(&state.db, hash)
+                    .await
+                    .ok()
+                    .unwrap_or_default();
                 if existing.iter().any(|t| {
-                    t.id != track.id &&
-                    t.duration_ms.map(|d| (d as i64 - track.duration_ms.unwrap_or(0) as i64).abs() > 2000).unwrap_or(false)
+                    t.id != track.id
+                        && t.duration_ms
+                            .map(|d| {
+                                (d as i64 - track.duration_ms.unwrap_or(0) as i64).abs() > 2000
+                            })
+                            .unwrap_or(false)
                 }) {
                     conflict = true;
                     break;
@@ -441,7 +627,14 @@ pub async fn import_commit_handler(
     };
 
     if has_conflicts {
-        michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Failed, Some("unresolved conflicts")).await.ok();
+        michi_db::set_import_session_status(
+            &state.db,
+            &session_id,
+            &ImportState::Failed,
+            Some("unresolved conflicts"),
+        )
+        .await
+        .ok();
         return Err(v1_error(StatusCode::CONFLICT, "UNRESOLVED_CONFLICTS",
             "Import has duration conflicts with existing tracks. Rollback and fix metadata before retrying."));
     }
@@ -453,21 +646,25 @@ pub async fn import_commit_handler(
     let mut mapping: Vec<serde_json::Value> = Vec::new();
     for track in &tracks {
         let existing_by_hash = if let Some(ref h) = track.content_hash {
-            michi_db::find_tracks_by_content_hash(&state.db, h).await.ok().unwrap_or_default()
+            michi_db::find_tracks_by_content_hash(&state.db, h)
+                .await
+                .ok()
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
 
-        let (status, remote_id): (String, Uuid) = if existing_by_hash.iter().any(|t| t.id == track.id) {
-            // This exact track was just inserted
-            ("inserted".into(), track.id)
-        } else if existing_by_hash.iter().any(|t| t.id != track.id) {
-            // Hash matched a different track — merged
-            let existing_id = existing_by_hash.first().map(|t| t.id).unwrap_or(track.id);
-            ("merged".into(), existing_id)
-        } else {
-            ("inserted".into(), track.id)
-        };
+        let (status, remote_id): (String, Uuid) =
+            if existing_by_hash.iter().any(|t| t.id == track.id) {
+                // This exact track was just inserted
+                ("inserted".into(), track.id)
+            } else if existing_by_hash.iter().any(|t| t.id != track.id) {
+                // Hash matched a different track — merged
+                let existing_id = existing_by_hash.first().map(|t| t.id).unwrap_or(track.id);
+                ("merged".into(), existing_id)
+            } else {
+                ("inserted".into(), track.id)
+            };
 
         mapping.push(serde_json::json!({
             "local_track_id": track.id,
@@ -477,8 +674,12 @@ pub async fn import_commit_handler(
         }));
     }
 
-    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Committed, None).await.ok();
-    michi_db::close_import_session(&state.db, &session_id).await.ok();
+    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Committed, None)
+        .await
+        .ok();
+    michi_db::close_import_session(&state.db, &session_id)
+        .await
+        .ok();
     let _ = state.tx.send(r#"{"type":"library_updated"}"#.to_string());
 
     Ok(Json(serde_json::json!({
@@ -496,8 +697,12 @@ pub async fn import_rollback_handler(
     IMPORT_SESSIONS.write().await.remove(&session_id);
     let staging_dir = get_session_dir(&state.config.music_paths, &session_id);
     cleanup_session_dir(&staging_dir).await;
-    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::RolledBack, None).await.ok();
-    michi_db::close_import_session(&state.db, &session_id).await.ok();
+    michi_db::set_import_session_status(&state.db, &session_id, &ImportState::RolledBack, None)
+        .await
+        .ok();
+    michi_db::close_import_session(&state.db, &session_id)
+        .await
+        .ok();
     Json(serde_json::json!({ "status": "rolled_back" }))
 }
 
@@ -523,7 +728,12 @@ pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool)
                         if entry.path().is_dir() {
                             let name = entry.file_name().to_string_lossy().to_string();
                             if let Ok(uid) = Uuid::parse_str(&name) {
-                                if michi_db::get_import_session_full(&db, &uid).await.ok().flatten().is_none() {
+                                if michi_db::get_import_session_full(&db, &uid)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .is_none()
+                                {
                                     cleanup_session_dir(&entry.path()).await;
                                 }
                             }

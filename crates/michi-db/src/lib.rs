@@ -686,10 +686,12 @@ async fn migration_020(pool: &SqlitePool) -> Result<(), DbError> {
 
 async fn migration_021(pool: &SqlitePool) -> Result<(), DbError> {
     // Add status text field to import_sessions for state machine
-    sqlx::query("ALTER TABLE import_sessions ADD COLUMN status_text TEXT NOT NULL DEFAULT 'created'")
-        .execute(pool)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE import_sessions ADD COLUMN status_text TEXT NOT NULL DEFAULT 'created'",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query("ALTER TABLE import_sessions ADD COLUMN error_message TEXT")
         .execute(pool)
         .await
@@ -709,10 +711,12 @@ async fn migration_022(pool: &SqlitePool) -> Result<(), DbError> {
         .execute(pool)
         .await
         .ok();
-    sqlx::query("ALTER TABLE playback_sessions ADD COLUMN resume_policy TEXT NOT NULL DEFAULT 'manual'")
-        .execute(pool)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE playback_sessions ADD COLUMN resume_policy TEXT NOT NULL DEFAULT 'manual'",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query("ALTER TABLE playback_sessions ADD COLUMN restored INTEGER NOT NULL DEFAULT 0")
         .execute(pool)
         .await
@@ -1777,9 +1781,7 @@ pub async fn get_link_device(
     Ok(rows.first().map(row_to_link_device))
 }
 
-pub async fn list_link_devices(
-    pool: &SqlitePool,
-) -> Result<Vec<michi_core::LinkDevice>, DbError> {
+pub async fn list_link_devices(pool: &SqlitePool) -> Result<Vec<michi_core::LinkDevice>, DbError> {
     let rows = sqlx::query(
         "SELECT device_id, alias, device_type, device_model, token_hash, permissions, created_at, last_seen, revoked FROM link_devices ORDER BY created_at DESC",
     )
@@ -1902,10 +1904,7 @@ pub async fn update_import_session_progress(
     Ok(())
 }
 
-pub async fn close_import_session(
-    pool: &SqlitePool,
-    session_id: &Uuid,
-) -> Result<(), DbError> {
+pub async fn close_import_session(pool: &SqlitePool, session_id: &Uuid) -> Result<(), DbError> {
     sqlx::query("UPDATE import_sessions SET status = 'completed', status_text = 'committed' WHERE session_id = ?")
         .bind(session_id.to_string())
         .execute(pool)
@@ -1952,15 +1951,13 @@ pub async fn list_expired_import_sessions(
     .bind(cutoff)
     .fetch_all(pool)
     .await?;
-    Ok(rows.iter().map(|r| {
-        Uuid::parse_str(r.get::<&str, _>("session_id")).unwrap_or(Uuid::nil())
-    }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| Uuid::parse_str(r.get::<&str, _>("session_id")).unwrap_or(Uuid::nil()))
+        .collect())
 }
 
-pub async fn expire_import_session(
-    pool: &SqlitePool,
-    session_id: &Uuid,
-) -> Result<(), DbError> {
+pub async fn expire_import_session(pool: &SqlitePool, session_id: &Uuid) -> Result<(), DbError> {
     sqlx::query("UPDATE import_sessions SET status = 'expired', status_text = 'expired' WHERE session_id = ?")
         .bind(session_id.to_string())
         .execute(pool)
@@ -2106,11 +2103,14 @@ pub async fn get_queue_items(
     .bind(queue_id.to_string())
     .fetch_all(pool)
     .await?;
-    Ok(rows.iter().map(|r| {
-        let tid = Uuid::parse_str(r.get::<&str, _>("track_id")).unwrap_or(Uuid::nil());
-        let pos: i64 = r.get("position");
-        (tid, pos)
-    }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let tid = Uuid::parse_str(r.get::<&str, _>("track_id")).unwrap_or(Uuid::nil());
+            let pos: i64 = r.get("position");
+            (tid, pos)
+        })
+        .collect())
 }
 
 fn row_to_link_device(row: &sqlx::sqlite::SqliteRow) -> michi_core::LinkDevice {
@@ -2121,7 +2121,10 @@ fn row_to_link_device(row: &sqlx::sqlite::SqliteRow) -> michi_core::LinkDevice {
         device_model: row.get("device_model"),
         token_hash: row.get("token_hash"),
         permissions_json: row.get("permissions"),
-        created_at: row.get::<&str, _>("created_at").parse().unwrap_or_else(|_| Utc::now()),
+        created_at: row
+            .get::<&str, _>("created_at")
+            .parse()
+            .unwrap_or_else(|_| Utc::now()),
         last_seen: row.get("last_seen"),
         revoked: row.get::<i64, _>("revoked") != 0,
     }
@@ -2170,10 +2173,14 @@ fn row_to_playback_session(row: &sqlx::sqlite::SqliteRow) -> michi_core::Playbac
     michi_core::PlaybackSessionDb {
         id: Uuid::parse_str(row.get::<&str, _>("id")).unwrap_or(Uuid::nil()),
         device_id: Uuid::parse_str(row.get::<&str, _>("device_id")).unwrap_or(Uuid::nil()),
-        queue_id: row.get::<Option<&str>, _>("queue_id").and_then(|s| Uuid::parse_str(s).ok()),
+        queue_id: row
+            .get::<Option<&str>, _>("queue_id")
+            .and_then(|s| Uuid::parse_str(s).ok()),
         queue_state_json: row.get("queue_state"),
         current_index: row.get::<i64, _>("current_index") as i32,
-        current_track_id: row.get::<Option<&str>, _>("current_track_id").and_then(|s| Uuid::parse_str(s).ok()),
+        current_track_id: row
+            .get::<Option<&str>, _>("current_track_id")
+            .and_then(|s| Uuid::parse_str(s).ok()),
         position_ms: row.get::<i64, _>("position_ms") as u64,
         playing: row.get::<i64, _>("playing") != 0,
         repeat_mode: row.get("repeat_mode"),

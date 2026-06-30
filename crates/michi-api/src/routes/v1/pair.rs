@@ -5,14 +5,24 @@ use uuid::Uuid;
 use crate::AppState;
 use michi_link::{
     generate_device_token, hash_token,
-    models::{PairConfirmRequest, PairConfirmResponse, PairStartResponse, TokenRefreshRequest, TokenRefreshResponse},
+    models::{
+        PairConfirmRequest, PairConfirmResponse, PairStartResponse, TokenRefreshRequest,
+        TokenRefreshResponse,
+    },
     DeviceEntry, TokenType,
 };
 
-fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({
-        "error": { "code": code, "message": message, "details": {} }
-    })))
+fn v1_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": { "code": code, "message": message, "details": {} }
+        })),
+    )
 }
 
 fn v1_internal_error(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
@@ -35,7 +45,12 @@ pub async fn link_pair_start(
     let pairing_id = Uuid::new_v4();
     let code = michi_link::generate_pairing_code();
     let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
-    let device_name = body.alias.as_deref().or(body.device_name.as_deref()).unwrap_or("unknown").to_string();
+    let device_name = body
+        .alias
+        .as_deref()
+        .or(body.device_name.as_deref())
+        .unwrap_or("unknown")
+        .to_string();
     let device_type = body.device_type.unwrap_or_else(|| "unknown".into());
 
     let session = michi_core::PairingSessionDb {
@@ -66,11 +81,19 @@ pub async fn link_pair_confirm(
         .await
         .map_err(|e| v1_internal_error(&e.to_string()))?
         .ok_or_else(|| {
-            v1_error(StatusCode::NOT_FOUND, "INVALID_CODE", "pairing code not found or expired")
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "INVALID_CODE",
+                "pairing code not found or expired",
+            )
         })?;
 
     if session.confirmed {
-        return Err(v1_error(StatusCode::CONFLICT, "ALREADY_CONFIRMED", "pairing already confirmed"));
+        return Err(v1_error(
+            StatusCode::CONFLICT,
+            "ALREADY_CONFIRMED",
+            "pairing already confirmed",
+        ));
     }
 
     let device_token = generate_device_token();
@@ -106,8 +129,14 @@ pub async fn link_pair_confirm(
         .await
         .ok();
 
-    state.token_store.store(&device_token, TokenType::Device, device_id).await;
-    state.token_store.store(&refresh_token, TokenType::Refresh, device_id).await;
+    state
+        .token_store
+        .store(&device_token, TokenType::Device, device_id)
+        .await;
+    state
+        .token_store
+        .store(&refresh_token, TokenType::Refresh, device_id)
+        .await;
 
     let permissions = device_entry.permissions.to_canonical_strings();
 
@@ -124,28 +153,48 @@ pub async fn link_token_refresh(
     State(state): State<AppState>,
     Json(body): Json<TokenRefreshRequest>,
 ) -> Result<Json<TokenRefreshResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let device_id = match state.token_store.validate(&body.refresh_token, TokenType::Refresh).await {
+    let device_id = match state
+        .token_store
+        .validate(&body.refresh_token, TokenType::Refresh)
+        .await
+    {
         Ok(id) => id,
         Err(_) => {
-            return Err(v1_error(StatusCode::UNAUTHORIZED, "INVALID_TOKEN", "invalid or expired refresh token"));
+            return Err(v1_error(
+                StatusCode::UNAUTHORIZED,
+                "INVALID_TOKEN",
+                "invalid or expired refresh token",
+            ));
         }
     };
 
-    let req_device_id = body
-        .device_id
-        .or_else(|| body.client_device_id.as_ref().and_then(|s| Uuid::parse_str(s).ok()));
+    let req_device_id = body.device_id.or_else(|| {
+        body.client_device_id
+            .as_ref()
+            .and_then(|s| Uuid::parse_str(s).ok())
+    });
 
     if let Some(req_id) = req_device_id {
         if req_id != device_id {
-            return Err(v1_error(StatusCode::FORBIDDEN, "DEVICE_MISMATCH", "device id does not match token"));
+            return Err(v1_error(
+                StatusCode::FORBIDDEN,
+                "DEVICE_MISMATCH",
+                "device id does not match token",
+            ));
         }
     }
 
     let new_device_token = generate_device_token();
     let new_refresh_token = generate_device_token();
 
-    state.token_store.store(&new_device_token, TokenType::Device, device_id).await;
-    state.token_store.store(&new_refresh_token, TokenType::Refresh, device_id).await;
+    state
+        .token_store
+        .store(&new_device_token, TokenType::Device, device_id)
+        .await;
+    state
+        .token_store
+        .store(&new_refresh_token, TokenType::Refresh, device_id)
+        .await;
 
     Ok(Json(TokenRefreshResponse {
         device_token: new_device_token,
@@ -157,18 +206,28 @@ pub async fn link_devices_revoke(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let device_id = body.get("device_id")
+    let device_id = body
+        .get("device_id")
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| {
-            v1_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST", "device_id is required")
+            v1_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_REQUEST",
+                "device_id is required",
+            )
         })?;
 
-    let revoked = michi_db::revoke_link_device(&state.db, &device_id).await
+    let revoked = michi_db::revoke_link_device(&state.db, &device_id)
+        .await
         .map_err(|e| v1_internal_error(&e.to_string()))?;
 
     if !revoked {
-        return Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "device not found"));
+        return Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "device not found",
+        ));
     }
 
     state.token_store.revoke_all_by_device(device_id).await;

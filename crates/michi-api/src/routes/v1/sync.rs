@@ -8,23 +8,38 @@ use uuid::Uuid;
 
 use crate::AppState;
 
-fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({
-        "error": { "code": code, "message": message, "details": {} }
-    })))
+fn v1_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": { "code": code, "message": message, "details": {} }
+        })),
+    )
 }
 
 pub async fn sync_manifest_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let tracks = michi_db::get_all_tracks_manifest(&state.db).await.map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string())
-    })?;
+    let tracks = michi_db::get_all_tracks_manifest(&state.db)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     let mut manifest: Vec<serde_json::Value> = Vec::new();
     let mut max_index: i64 = 0;
 
-    for (i, (_track_id, _file_path, title, artist, album, duration_ms, artwork_id)) in tracks.into_iter().enumerate() {
+    for (i, (_track_id, _file_path, title, artist, album, duration_ms, artwork_id)) in
+        tracks.into_iter().enumerate()
+    {
         manifest.push(serde_json::json!({
             "track_id": _track_id,
             "title": title,
@@ -65,15 +80,23 @@ pub async fn sync_manifest_delta_handler(
     State(state): State<AppState>,
     Query(query): Query<DeltaQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let all = michi_db::get_all_tracks_manifest(&state.db).await.map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string())
-    })?;
+    let all = michi_db::get_all_tracks_manifest(&state.db)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     let total_count = all.len() as i64;
     let cursor = query.cursor.or(query.manifest_id).unwrap_or(0);
 
     let mut added: Vec<DeltaEntry> = Vec::new();
-    for (i, (track_id, _file_path, title, artist, album, duration_ms, artwork_id)) in all.into_iter().enumerate() {
+    for (i, (track_id, _file_path, title, artist, album, duration_ms, artwork_id)) in
+        all.into_iter().enumerate()
+    {
         let idx = i as i64;
         if idx >= cursor {
             added.push(DeltaEntry {
@@ -82,7 +105,11 @@ pub async fn sync_manifest_delta_handler(
                 artist,
                 album,
                 duration_ms,
-                artwork_id: if artwork_id.is_empty() { None } else { Some(artwork_id) },
+                artwork_id: if artwork_id.is_empty() {
+                    None
+                } else {
+                    Some(artwork_id)
+                },
             });
         }
     }
@@ -123,12 +150,15 @@ pub async fn sync_state_handler(
     }
 
     let _ = state.sync_tx.send(new_state.into());
-    let _ = state.tx.send(serde_json::json!({
-        "type": "sync_state",
-        "track_id": body.track_id,
-        "position_ms": body.position_ms,
-        "playing": body.playing,
-    }).to_string());
+    let _ = state.tx.send(
+        serde_json::json!({
+            "type": "sync_state",
+            "track_id": body.track_id,
+            "position_ms": body.position_ms,
+            "playing": body.playing,
+        })
+        .to_string(),
+    );
 
     Ok(Json(serde_json::json!({ "status": "ok" })))
 }

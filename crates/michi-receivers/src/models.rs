@@ -103,7 +103,9 @@ pub struct ReceiverRegistry {
 
 impl ReceiverRegistry {
     pub fn new() -> Self {
-        Self { receivers: HashMap::new() }
+        Self {
+            receivers: HashMap::new(),
+        }
     }
 
     pub fn add(&mut self, entry: ReceiverRegistryEntry) {

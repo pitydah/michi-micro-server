@@ -1,4 +1,4 @@
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -46,7 +46,11 @@ impl TokenStore {
         self.by_hash.write().await.insert(hash, entry);
     }
 
-    pub async fn validate(&self, token: &str, expected_type: TokenType) -> Result<uuid::Uuid, LinkError> {
+    pub async fn validate(
+        &self,
+        token: &str,
+        expected_type: TokenType,
+    ) -> Result<uuid::Uuid, LinkError> {
         let hash = hash_token(token);
         let store = self.by_hash.read().await;
         match store.get(&hash) {

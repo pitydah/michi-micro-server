@@ -84,7 +84,10 @@ impl AppState {
                 for entry in reg_read.list() {
                     if let Some(last) = entry.last_seen {
                         if (now - last).num_seconds() > 180 {
-                            tracing::warn!("receiver {} not seen for >180s, marking offline", entry.receiver_id);
+                            tracing::warn!(
+                                "receiver {} not seen for >180s, marking offline",
+                                entry.receiver_id
+                            );
                         }
                     }
                 }
@@ -255,65 +258,191 @@ pub fn start_sync_peers(state: &AppState) {
 fn v1_link_routes() -> Router<AppState> {
     Router::new()
         // Server
-        .route("/api/v1/server/info", get(routes::v1::server::server_info_handler))
+        .route(
+            "/api/v1/server/info",
+            get(routes::v1::server::server_info_handler),
+        )
         .route("/api/v1/status", get(routes::v1::server::status_handler))
         // Pairing
-        .route("/api/v1/pair/start", post(routes::v1::pair::link_pair_start))
-        .route("/api/v1/pair/confirm", post(routes::v1::pair::link_pair_confirm))
-        .route("/api/v1/token/refresh", post(routes::v1::pair::link_token_refresh))
-        .route("/api/v1/devices/revoke", post(routes::v1::pair::link_devices_revoke))
+        .route(
+            "/api/v1/pair/start",
+            post(routes::v1::pair::link_pair_start),
+        )
+        .route(
+            "/api/v1/pair/confirm",
+            post(routes::v1::pair::link_pair_confirm),
+        )
+        .route(
+            "/api/v1/token/refresh",
+            post(routes::v1::pair::link_token_refresh),
+        )
+        .route(
+            "/api/v1/devices/revoke",
+            post(routes::v1::pair::link_devices_revoke),
+        )
         // Library
-        .route("/api/v1/library/stats", get(routes::v1::library::library_stats_handler))
-        .route("/api/v1/library/scan", post(routes::v1::library::library_scan_handler))
+        .route(
+            "/api/v1/library/stats",
+            get(routes::v1::library::library_stats_handler),
+        )
+        .route(
+            "/api/v1/library/scan",
+            post(routes::v1::library::library_scan_handler),
+        )
         // Tracks
         .route("/api/v1/tracks", get(routes::v1::tracks::tracks_handler))
         .route("/api/v1/tracks/:id", get(routes::v1::tracks::track_handler))
         .route("/api/v1/search", get(routes::v1::tracks::search_handler))
         // Stream
-        .route("/api/v1/stream/:id", get(routes::v1::stream::stream_handler))
-        .route("/api/v1/download/:id", get(routes::v1::stream::download_handler))
+        .route(
+            "/api/v1/stream/:id",
+            get(routes::v1::stream::stream_handler),
+        )
+        .route(
+            "/api/v1/download/:id",
+            get(routes::v1::stream::download_handler),
+        )
         // Artwork
-        .route("/api/v1/artwork/:id", get(routes::v1::artwork::artwork_handler))
+        .route(
+            "/api/v1/artwork/:id",
+            get(routes::v1::artwork::artwork_handler),
+        )
         // Playlists
-        .route("/api/v1/playlists", get(routes::v1::playlists::playlists_handler).post(routes::v1::playlists::create_playlist_handler))
-        .route("/api/v1/playlists/:id", get(routes::v1::playlists::get_playlist_handler).put(routes::v1::playlists::update_playlist_handler).delete(routes::v1::playlists::delete_playlist_handler))
+        .route(
+            "/api/v1/playlists",
+            get(routes::v1::playlists::playlists_handler)
+                .post(routes::v1::playlists::create_playlist_handler),
+        )
+        .route(
+            "/api/v1/playlists/:id",
+            get(routes::v1::playlists::get_playlist_handler)
+                .put(routes::v1::playlists::update_playlist_handler)
+                .delete(routes::v1::playlists::delete_playlist_handler),
+        )
         // Sync
-        .route("/api/v1/sync/manifest", get(routes::v1::sync::sync_manifest_handler))
-        .route("/api/v1/sync/manifest/delta", get(routes::v1::sync::sync_manifest_delta_handler))
-        .route("/api/v1/sync/state", post(routes::v1::sync::sync_state_handler))
+        .route(
+            "/api/v1/sync/manifest",
+            get(routes::v1::sync::sync_manifest_handler),
+        )
+        .route(
+            "/api/v1/sync/manifest/delta",
+            get(routes::v1::sync::sync_manifest_delta_handler),
+        )
+        .route(
+            "/api/v1/sync/state",
+            post(routes::v1::sync::sync_state_handler),
+        )
         // Import
-        .route("/api/v1/import/session", post(routes::v1::import::import_session_handler))
-        .route("/api/v1/import/preflight", post(routes::v1::import::import_preflight_handler))
-        .route("/api/v1/import/upload/:session_id", post(routes::v1::import::import_upload_handler))
-        .route("/api/v1/import/commit/:session_id", post(routes::v1::import::import_commit_handler))
-        .route("/api/v1/import/rollback/:session_id", post(routes::v1::import::import_rollback_handler))
-        .route("/api/v1/import/session/:session_id/status", get(routes::v1::import::import_session_status_handler))
+        .route(
+            "/api/v1/import/session",
+            post(routes::v1::import::import_session_handler),
+        )
+        .route(
+            "/api/v1/import/preflight",
+            post(routes::v1::import::import_preflight_handler),
+        )
+        .route(
+            "/api/v1/import/upload/:session_id",
+            post(routes::v1::import::import_upload_handler),
+        )
+        .route(
+            "/api/v1/import/commit/:session_id",
+            post(routes::v1::import::import_commit_handler),
+        )
+        .route(
+            "/api/v1/import/rollback/:session_id",
+            post(routes::v1::import::import_rollback_handler),
+        )
+        .route(
+            "/api/v1/import/session/:session_id/status",
+            get(routes::v1::import::import_session_status_handler),
+        )
         // Diagnostics
-        .route("/api/v1/diagnostics", get(routes::v1::diagnostics::diagnostics_handler))
+        .route(
+            "/api/v1/diagnostics",
+            get(routes::v1::diagnostics::diagnostics_handler),
+        )
         // Playback
-        .route("/api/v1/playback/state", get(routes::v1::playback::playback_state_handler))
-        .route("/api/v1/playback/control", post(routes::v1::playback::playback_control_handler))
-        .route("/api/v1/playback/session", post(routes::v1::playback::playback_session_handler))
-        .route("/api/v1/playback/session/:session_id", get(routes::v1::playback::playback_session_get_handler))
-        .route("/api/v1/playback/session/restore", post(routes::v1::playback::playback_session_restore_handler))
+        .route(
+            "/api/v1/playback/state",
+            get(routes::v1::playback::playback_state_handler),
+        )
+        .route(
+            "/api/v1/playback/control",
+            post(routes::v1::playback::playback_control_handler),
+        )
+        .route(
+            "/api/v1/playback/session",
+            post(routes::v1::playback::playback_session_handler),
+        )
+        .route(
+            "/api/v1/playback/session/:session_id",
+            get(routes::v1::playback::playback_session_get_handler),
+        )
+        .route(
+            "/api/v1/playback/session/restore",
+            post(routes::v1::playback::playback_session_restore_handler),
+        )
         // Queue
         .route("/api/v1/queue", get(routes::v1::queue::queue_handler))
-        .route("/api/v1/queue/items", post(routes::v1::queue::queue_items_handler))
-        .route("/api/v1/queue/jump", post(routes::v1::queue::queue_jump_handler))
-        .route("/api/v1/queue/transfer", post(routes::v1::queue::queue_transfer_handler))
-        .route("/api/v1/queue/reorder", put(routes::v1::queue::queue_reorder_handler))
-        .route("/api/v1/queue/:queue_id", delete(routes::v1::queue::queue_delete_handler))
+        .route(
+            "/api/v1/queue/items",
+            post(routes::v1::queue::queue_items_handler),
+        )
+        .route(
+            "/api/v1/queue/jump",
+            post(routes::v1::queue::queue_jump_handler),
+        )
+        .route(
+            "/api/v1/queue/transfer",
+            post(routes::v1::queue::queue_transfer_handler),
+        )
+        .route(
+            "/api/v1/queue/reorder",
+            put(routes::v1::queue::queue_reorder_handler),
+        )
+        .route(
+            "/api/v1/queue/:queue_id",
+            delete(routes::v1::queue::queue_delete_handler),
+        )
         // Receivers
-        .route("/api/v1/receivers", get(routes::v1::receivers::receivers_handler))
-        .route("/api/v1/receivers/discover", post(routes::v1::receivers::discover_receiver_handler))
-        .route("/api/v1/receivers/:id", get(routes::v1::receivers::get_receiver_handler))
-        .route("/api/v1/receivers/:id/session/start", post(routes::v1::receivers::receiver_session_start_handler))
-        .route("/api/v1/receivers/:id/session/stop", post(routes::v1::receivers::receiver_session_stop_handler))
-        .route("/api/v1/receivers/:id/volume", post(routes::v1::receivers::receiver_volume_handler))
-        .route("/api/v1/receivers/:id/heartbeat", post(routes::v1::receivers::receiver_heartbeat_handler))
+        .route(
+            "/api/v1/receivers",
+            get(routes::v1::receivers::receivers_handler),
+        )
+        .route(
+            "/api/v1/receivers/discover",
+            post(routes::v1::receivers::discover_receiver_handler),
+        )
+        .route(
+            "/api/v1/receivers/:id",
+            get(routes::v1::receivers::get_receiver_handler),
+        )
+        .route(
+            "/api/v1/receivers/:id/session/start",
+            post(routes::v1::receivers::receiver_session_start_handler),
+        )
+        .route(
+            "/api/v1/receivers/:id/session/stop",
+            post(routes::v1::receivers::receiver_session_stop_handler),
+        )
+        .route(
+            "/api/v1/receivers/:id/volume",
+            post(routes::v1::receivers::receiver_volume_handler),
+        )
+        .route(
+            "/api/v1/receivers/:id/heartbeat",
+            post(routes::v1::receivers::receiver_heartbeat_handler),
+        )
         // Rooms
-        .route("/api/v1/rooms", get(routes::v1::rooms::rooms_handler).post(routes::v1::rooms::create_room_handler))
-        .route("/api/v1/rooms/:id/play", post(routes::v1::rooms::room_play_handler))
+        .route(
+            "/api/v1/rooms",
+            get(routes::v1::rooms::rooms_handler).post(routes::v1::rooms::create_room_handler),
+        )
+        .route(
+            "/api/v1/rooms/:id/play",
+            post(routes::v1::rooms::room_play_handler),
+        )
         // Events
         .route("/api/v1/events", get(routes::v1::events::events_handler))
 }

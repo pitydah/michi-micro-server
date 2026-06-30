@@ -32,7 +32,11 @@ pub fn extract_bearer_token(request: &Request) -> Option<String> {
 pub async fn resolve_device_id(state: &AppState, request: &Request) -> Option<Uuid> {
     let token = extract_bearer_token(request)?;
     // Try link token (v1 pairing)
-    if let Ok(device_id) = state.token_store.validate(&token, michi_link::TokenType::Device).await {
+    if let Ok(device_id) = state
+        .token_store
+        .validate(&token, michi_link::TokenType::Device)
+        .await
+    {
         return Some(device_id);
     }
     // Try auth session login

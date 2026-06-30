@@ -1,9 +1,9 @@
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::Response,
     Json,
-    body::Body,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -16,10 +16,17 @@ pub struct StreamQuery {
     pub format: Option<String>,
 }
 
-fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({
-        "error": { "code": code, "message": message, "details": {} }
-    })))
+fn v1_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": { "code": code, "message": message, "details": {} }
+        })),
+    )
 }
 
 async fn stream_file(
@@ -33,7 +40,11 @@ async fn stream_file(
         .map_err(|e| v1_error(StatusCode::NOT_FOUND, "FILE_NOT_FOUND", &e.to_string()))?;
 
     let metadata = file.metadata().await.map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "IO_ERROR", &e.to_string())
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "IO_ERROR",
+            &e.to_string(),
+        )
     })?;
 
     let file_size = metadata.len();
@@ -44,15 +55,25 @@ async fn stream_file(
 
     if let Some(range_header) = headers.get(header::RANGE) {
         let range_str = range_header.to_str().map_err(|_| {
-            v1_error(StatusCode::BAD_REQUEST, "INVALID_RANGE", "invalid range header encoding")
+            v1_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_RANGE",
+                "invalid range header encoding",
+            )
         })?;
 
         match michi_streaming::parse_range(range_str, file_size) {
             Ok(range) => {
                 let mut file = file;
-                file.seek(std::io::SeekFrom::Start(range.start)).await.map_err(|e| {
-                    v1_error(StatusCode::INTERNAL_SERVER_ERROR, "IO_ERROR", &e.to_string())
-                })?;
+                file.seek(std::io::SeekFrom::Start(range.start))
+                    .await
+                    .map_err(|e| {
+                        v1_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "IO_ERROR",
+                            &e.to_string(),
+                        )
+                    })?;
                 let taken = file.take(range.content_length());
                 let stream = tokio_util::io::ReaderStream::new(taken);
                 let content_range = range.content_range_header();
@@ -61,7 +82,10 @@ async fn stream_file(
                     .header(header::CONTENT_RANGE, content_range)
                     .header(header::CONTENT_LENGTH, range.content_length().to_string());
                 if let Some(d) = disposition {
-                    builder = builder.header(header::CONTENT_DISPOSITION, format!("{}; filename=\"{}\"", d, filename));
+                    builder = builder.header(
+                        header::CONTENT_DISPOSITION,
+                        format!("{}; filename=\"{}\"", d, filename),
+                    );
                 }
                 return Ok(builder
                     .header(header::CONTENT_TYPE, mime)
@@ -70,7 +94,11 @@ async fn stream_file(
                     .unwrap());
             }
             Err(_) => {
-                return Err(v1_error(StatusCode::RANGE_NOT_SATISFIABLE, "RANGE_NOT_SATISFIABLE", "range not satisfiable"));
+                return Err(v1_error(
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    "RANGE_NOT_SATISFIABLE",
+                    "range not satisfiable",
+                ));
             }
         }
     }
@@ -81,7 +109,10 @@ async fn stream_file(
         .header(header::CONTENT_LENGTH, file_size.to_string())
         .header(header::ACCEPT_RANGES, "bytes");
     if let Some(d) = disposition {
-        builder = builder.header(header::CONTENT_DISPOSITION, format!("{}; filename=\"{}\"", d, filename));
+        builder = builder.header(
+            header::CONTENT_DISPOSITION,
+            format!("{}; filename=\"{}\"", d, filename),
+        );
     }
     Ok(builder.body(Body::from_stream(stream)).unwrap())
 }
@@ -94,23 +125,52 @@ pub async fn stream_handler(
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
     let track = michi_db::get_track(&state.db, &id)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?
-        .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "TRACK_NOT_FOUND", &format!("track not found: {}", id)))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "TRACK_NOT_FOUND",
+                &format!("track not found: {}", id),
+            )
+        })?;
 
     let music_paths = &state.config.music_paths;
 
     if let Some(ref format_str) = query.format {
         if !michi_streaming::check_ffmpeg() {
-            return Err(v1_error(StatusCode::BAD_REQUEST, "FFMPEG_UNAVAILABLE", "ffmpeg is not available on this system"));
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "FFMPEG_UNAVAILABLE",
+                "ffmpeg is not available on this system",
+            ));
         }
-        let tf = format_str.parse::<michi_streaming::TranscodeFormat>().map_err(|_| {
-            v1_error(StatusCode::BAD_REQUEST, "INVALID_FORMAT", &format!("invalid format: '{format_str}'. Supported: mp3, ogg, hls"))
-        })?;
+        let tf = format_str
+            .parse::<michi_streaming::TranscodeFormat>()
+            .map_err(|_| {
+                v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_FORMAT",
+                    &format!("invalid format: '{format_str}'. Supported: mp3, ogg, hls"),
+                )
+            })?;
         let file_path = std::path::Path::new(&track.file_path);
         let canonical = michi_streaming::validate_track_path(music_paths, file_path)
             .map_err(|e| v1_error(StatusCode::NOT_FOUND, "FILE_NOT_FOUND", &e.to_string()))?;
-        let stream = michi_streaming::transcode_stream(&canonical, &tf).await
-            .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "TRANSCODING_FAILED", &e.to_string()))?;
+        let stream = michi_streaming::transcode_stream(&canonical, &tf)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "TRANSCODING_FAILED",
+                    &e.to_string(),
+                )
+            })?;
         let mime = tf.mime_type();
         return Ok(Response::builder()
             .header(header::CONTENT_TYPE, mime)
@@ -128,8 +188,20 @@ pub async fn download_handler(
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
     let track = michi_db::get_track(&state.db, &id)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?
-        .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "TRACK_NOT_FOUND", &format!("track not found: {}", id)))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "TRACK_NOT_FOUND",
+                &format!("track not found: {}", id),
+            )
+        })?;
 
     let music_paths = &state.config.music_paths;
     stream_file(music_paths, &track, &headers, Some("attachment")).await

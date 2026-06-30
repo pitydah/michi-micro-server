@@ -9,14 +9,25 @@ use uuid::Uuid;
 
 use crate::AppState;
 
-fn v1_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({
-        "error": { "code": code, "message": message, "details": {} }
-    })))
+fn v1_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": { "code": code, "message": message, "details": {} }
+        })),
+    )
 }
 
 fn state_string(playing: bool) -> &'static str {
-    if playing { "playing" } else { "paused" }
+    if playing {
+        "playing"
+    } else {
+        "paused"
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -39,12 +50,16 @@ pub async fn playback_state_handler(
     let current = state.playback_state.read().await;
 
     let current_track = if let Some(tid) = current.track_id {
-        michi_db::get_track(&state.db, &tid).await.ok().flatten().map(|t| {
-            serde_json::json!({
-                "id": t.id, "title": t.title, "artist": t.artist,
-                "album": t.album, "duration_ms": t.duration_ms,
+        michi_db::get_track(&state.db, &tid)
+            .await
+            .ok()
+            .flatten()
+            .map(|t| {
+                serde_json::json!({
+                    "id": t.id, "title": t.title, "artist": t.artist,
+                    "album": t.album, "duration_ms": t.duration_ms,
+                })
             })
-        })
     } else {
         None
     };
@@ -76,9 +91,17 @@ pub async fn playback_control_handler(
     State(state): State<AppState>,
     Json(body): Json<PlaybackControlBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let cmd = body.command.as_deref().or(body.action.as_deref()).ok_or_else(|| {
-        v1_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST", "command is required")
-    })?;
+    let cmd = body
+        .command
+        .as_deref()
+        .or(body.action.as_deref())
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_REQUEST",
+                "command is required",
+            )
+        })?;
 
     let mut current = state.playback_state.write().await;
 
@@ -87,33 +110,72 @@ pub async fn playback_control_handler(
             current.playing = true;
             if let Some(val) = &body.value {
                 if let Some(track_id) = val.get("track_id").and_then(|v| v.as_str()) {
-                    if let Ok(uid) = Uuid::parse_str(track_id) { current.track_id = Some(uid); }
+                    if let Ok(uid) = Uuid::parse_str(track_id) {
+                        current.track_id = Some(uid);
+                    }
                 }
             }
             if let Some(pos) = body.position_ms.or_else(|| {
-                body.value.as_ref().and_then(|v| v.get("position_ms").and_then(|p| p.as_u64()))
-            }) { current.position_ms = pos; }
+                body.value
+                    .as_ref()
+                    .and_then(|v| v.get("position_ms").and_then(|p| p.as_u64()))
+            }) {
+                current.position_ms = pos;
+            }
         }
-        "pause" => { current.playing = false; }
-        "toggle" => { current.playing = !current.playing; }
-        "next" => { current.track_id = None; current.position_ms = 0; current.playing = false; }
-        "previous" => { current.position_ms = 0; }
-        "stop" => { current.playing = false; current.position_ms = 0; }
+        "pause" => {
+            current.playing = false;
+        }
+        "toggle" => {
+            current.playing = !current.playing;
+        }
+        "next" => {
+            current.track_id = None;
+            current.position_ms = 0;
+            current.playing = false;
+        }
+        "previous" => {
+            current.position_ms = 0;
+        }
+        "stop" => {
+            current.playing = false;
+            current.position_ms = 0;
+        }
         "seek" => {
             if let Some(p) = body.position_ms.or_else(|| {
-                body.value.as_ref().and_then(|v| v.get("position_ms").and_then(|p| p.as_u64()))
-            }) { current.position_ms = p; }
+                body.value
+                    .as_ref()
+                    .and_then(|v| v.get("position_ms").and_then(|p| p.as_u64()))
+            }) {
+                current.position_ms = p;
+            }
         }
         "set_volume" => {
             let vol = body.volume.or_else(|| {
-                body.value.as_ref().and_then(|v| v.get("volume").and_then(|p| p.as_u64().or_else(|| p.as_f64().map(|f| f as u64))).map(|v| v as u32))
+                body.value.as_ref().and_then(|v| {
+                    v.get("volume")
+                        .and_then(|p| p.as_u64().or_else(|| p.as_f64().map(|f| f as u64)))
+                        .map(|v| v as u32)
+                })
             });
-            if let Some(v) = vol { current.volume = (v.min(100) as f64) / 100.0; }
+            if let Some(v) = vol {
+                current.volume = (v.min(100) as f64) / 100.0;
+            }
         }
-        "mute" => { current.volume = 0.0; }
-        "unmute" => { if current.volume == 0.0 { current.volume = 0.8; } }
+        "mute" => {
+            current.volume = 0.0;
+        }
+        "unmute" => {
+            if current.volume == 0.0 {
+                current.volume = 0.8;
+            }
+        }
         _ => {
-            return Err(v1_error(StatusCode::BAD_REQUEST, "INVALID_COMMAND", &format!("unknown command: {}", cmd)));
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_COMMAND",
+                &format!("unknown command: {}", cmd),
+            ));
         }
     }
 
@@ -122,9 +184,12 @@ pub async fn playback_control_handler(
     drop(current);
 
     let _ = state.sync_tx.send(state_clone.into());
-    let _ = state.tx.send(serde_json::json!({
-        "type": "playback_state_changed", "command": cmd,
-    }).to_string());
+    let _ = state.tx.send(
+        serde_json::json!({
+            "type": "playback_state_changed", "command": cmd,
+        })
+        .to_string(),
+    );
 
     Ok(Json(serde_json::json!({ "status": "ok" })))
 }
@@ -151,8 +216,13 @@ pub async fn playback_session_handler(
 
     // Create queue
     sqlx::query("INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
-        .bind(queue_id.to_string()).bind("playback-session").bind(&now).bind(&now)
-        .execute(&state.db).await.ok();
+        .bind(queue_id.to_string())
+        .bind("playback-session")
+        .bind(&now)
+        .bind(&now)
+        .execute(&state.db)
+        .await
+        .ok();
 
     for (i, track_id) in body.queue.iter().enumerate() {
         let item_id = Uuid::new_v4();
@@ -164,18 +234,31 @@ pub async fn playback_session_handler(
     }
 
     let db_session = michi_core::PlaybackSessionDb {
-        id: session_id, device_id: Uuid::nil(), queue_id: Some(queue_id),
-        queue_state_json: queue_json, current_index: 0,
-        current_track_id: body.current_track_id, position_ms: body.position_ms,
-        playing: body.playing, repeat_mode: "none".into(), shuffle: false,
+        id: session_id,
+        device_id: Uuid::nil(),
+        queue_id: Some(queue_id),
+        queue_state_json: queue_json,
+        current_index: 0,
+        current_track_id: body.current_track_id,
+        position_ms: body.position_ms,
+        playing: body.playing,
+        repeat_mode: "none".into(),
+        shuffle: false,
         volume: body.volume.unwrap_or(0.8),
         source: body.source.unwrap_or_else(|| "player".into()),
         resume_policy: body.resume_policy.unwrap_or_else(|| "manual".into()),
         restored: false,
     };
 
-    michi_db::create_playback_session(&state.db, &db_session).await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    michi_db::create_playback_session(&state.db, &db_session)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     {
         let mut current = state.playback_state.write().await;
@@ -186,9 +269,12 @@ pub async fn playback_session_handler(
         current.updated_at = chrono::Utc::now();
     }
 
-    let _ = state.tx.send(serde_json::json!({
-        "type": "playback_session_created", "session_id": session_id,
-    }).to_string());
+    let _ = state.tx.send(
+        serde_json::json!({
+            "type": "playback_session_created", "session_id": session_id,
+        })
+        .to_string(),
+    );
 
     Ok(Json(serde_json::json!({
         "session_id": session_id, "queue_id": queue_id, "accepted": true,
@@ -204,12 +290,28 @@ pub async fn playback_session_get_handler(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let session = michi_db::get_playback_session(&state.db, &session_id).await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?
-        .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", "playback session not found"))?;
+    let session = michi_db::get_playback_session(&state.db, &session_id)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "SESSION_NOT_FOUND",
+                "playback session not found",
+            )
+        })?;
 
     let queue_items = if let Some(qid) = session.queue_id {
-        michi_db::get_queue_items(&state.db, &qid).await.ok().unwrap_or_default()
+        michi_db::get_queue_items(&state.db, &qid)
+            .await
+            .ok()
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -231,8 +333,15 @@ pub async fn playback_session_get_handler(
 pub async fn playback_session_restore_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let latest = michi_db::get_latest_playback_session(&state.db).await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    let latest = michi_db::get_latest_playback_session(&state.db)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     match latest {
         Some(session) => {
@@ -247,7 +356,9 @@ pub async fn playback_session_restore_handler(
 
             let mut updated = session;
             updated.restored = true;
-            michi_db::update_playback_session(&state.db, &updated).await.ok();
+            michi_db::update_playback_session(&state.db, &updated)
+                .await
+                .ok();
 
             Ok(Json(serde_json::json!({
                 "restored": true,
@@ -266,7 +377,10 @@ pub async fn playback_session_restore_handler(
     }
 }
 
-pub fn auto_restore_playback_state(db: sqlx::SqlitePool, playback_state: std::sync::Arc<tokio::sync::RwLock<michi_sync::PlaybackState>>) {
+pub fn auto_restore_playback_state(
+    db: sqlx::SqlitePool,
+    playback_state: std::sync::Arc<tokio::sync::RwLock<michi_sync::PlaybackState>>,
+) {
     tokio::spawn(async move {
         match michi_db::get_latest_playback_session(&db).await {
             Ok(Some(session)) => {
@@ -282,7 +396,11 @@ pub fn auto_restore_playback_state(db: sqlx::SqlitePool, playback_state: std::sy
                 if let Some(qid) = session.queue_id {
                     if let Ok(items) = michi_db::get_queue_items(&db, &qid).await {
                         if !items.is_empty() {
-                            info!("restored {} queue items from session {}", items.len(), session.id);
+                            info!(
+                                "restored {} queue items from session {}",
+                                items.len(),
+                                session.id
+                            );
                         }
                     }
                 }
@@ -291,7 +409,10 @@ pub fn auto_restore_playback_state(db: sqlx::SqlitePool, playback_state: std::sy
                 info!("no saved playback session to restore");
             }
             Err(e) => {
-                tracing::warn!("failed to restore playback state: {} (server will start fresh)", e);
+                tracing::warn!(
+                    "failed to restore playback state: {} (server will start fresh)",
+                    e
+                );
             }
         }
     });
