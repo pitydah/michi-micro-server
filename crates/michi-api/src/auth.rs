@@ -22,6 +22,27 @@ use crate::AppState;
 
 const SESSION_DURATION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
+/// Extract a Bearer token from the Authorization header
+pub fn extract_bearer_token(request: &Request) -> Option<String> {
+    let auth_header = request.headers().get("Authorization")?.to_str().ok()?;
+    auth_header.strip_prefix("Bearer ").map(|s| s.to_string())
+}
+
+/// Resolve the device_id from a request using either link tokens or auth sessions
+pub async fn resolve_device_id(state: &AppState, request: &Request) -> Option<Uuid> {
+    let token = extract_bearer_token(request)?;
+    // Try link token (v1 pairing)
+    if let Ok(device_id) = state.token_store.validate(&token, michi_link::TokenType::Device).await {
+        return Some(device_id);
+    }
+    // Try auth session login
+    if state.auth_enabled {
+        state.auth_sessions.extract_user_id(&token).await
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionData {
     pub expiry: std::time::Instant,

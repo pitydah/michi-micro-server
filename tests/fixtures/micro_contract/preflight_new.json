@@ -1,0 +1,15 @@
+{
+  "tracks": [
+    {
+      "local_track_id": "11111111-1111-1111-1111-111111111111",
+      "content_hash": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+      "quick_hash": "abcdef1234567890",
+      "sha256_prefix": "abcdef12",
+      "file_size": 5242880,
+      "duration_ms": 240000,
+      "title": "Test Song",
+      "artist": "Test Artist",
+      "album": "Test Album"
+    }
+  ]
+}
