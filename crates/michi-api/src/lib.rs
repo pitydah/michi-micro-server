@@ -319,6 +319,19 @@ fn v1_link_routes() -> Router<AppState> {
                 .put(routes::v1::playlists::update_playlist_handler)
                 .delete(routes::v1::playlists::delete_playlist_handler),
         )
+        // Favorites / Star / Rating
+        .route(
+            "/api/v1/starred",
+            get(routes::v1::favorites::starred_tracks_handler),
+        )
+        .route(
+            "/api/v1/star/:id",
+            post(routes::v1::favorites::star_track_handler),
+        )
+        .route(
+            "/api/v1/rate/:id",
+            post(routes::v1::favorites::rate_track_handler),
+        )
         // Sync
         .route(
             "/api/v1/sync/manifest",

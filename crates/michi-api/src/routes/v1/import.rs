@@ -353,6 +353,9 @@ pub async fn import_upload_handler(
             track_number: metadata.track_number,
             disc_number: metadata.disc_number,
             content_hash: Some(data_hash.clone()),
+            starred: false,
+            rating: 0,
+            starred_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

@@ -1,6 +1,7 @@
 pub mod artwork;
 pub mod diagnostics;
 pub mod events;
+pub mod favorites;
 pub mod import;
 pub mod library;
 pub mod pair;

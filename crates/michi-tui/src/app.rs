@@ -356,6 +356,9 @@ mod tests {
             track_number: None,
             disc_number: None,
             content_hash: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }];
@@ -384,6 +387,9 @@ mod tests {
                 track_number: None,
                 disc_number: None,
                 content_hash: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };

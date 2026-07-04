@@ -71,6 +71,9 @@ fn scan_directory_sync(library_root: &Path, path: &Path) -> Vec<Track> {
                 track_number: metadata.track_number,
                 disc_number: metadata.disc_number,
                 content_hash: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };

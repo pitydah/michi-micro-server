@@ -50,6 +50,9 @@ pub fn track_to_safe_json(track: michi_core::Track) -> serde_json::Value {
         "updated_at": track.updated_at,
         "stream_url": format!("/api/v1/stream/{}", track_id),
         "download_url": format!("/api/v1/download/{}", track_id),
+        "starred": track.starred,
+        "rating": track.rating,
+        "starred_at": track.starred_at,
     })
 }
 

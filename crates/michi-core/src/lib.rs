@@ -154,6 +154,9 @@ pub struct Track {
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
     pub content_hash: Option<String>,
+    pub starred: bool,
+    pub rating: u8,
+    pub starred_at: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -72,6 +72,9 @@ async fn seed_track(pool: &SqlitePool, path: &str, title: &str) -> Uuid {
         track_number: None,
         disc_number: None,
         content_hash: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -355,6 +358,9 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         track_number: None,
         disc_number: None,
         content_hash: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -557,6 +563,9 @@ async fn test_stream_file_not_on_disk() {
         track_number: None,
         disc_number: None,
         content_hash: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -1246,6 +1255,9 @@ async fn test_full_pipeline_scan_and_stream() {
         track_number: None,
         disc_number: None,
         content_hash: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -1692,6 +1704,9 @@ async fn test_v1_stream_range_not_satisfiable() {
         track_number: None,
         disc_number: None,
         content_hash: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -2739,6 +2754,9 @@ async fn test_v1_stream_and_download_range() {
         track_number: None,
         disc_number: None,
         content_hash: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -2994,6 +3012,9 @@ async fn test_v1_import_preflight_already_present() {
         track_number: None,
         disc_number: None,
         content_hash: Some("aaabbbccc111".into()),
+        starred: false,
+        rating: 0,
+        starred_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -3053,6 +3074,9 @@ async fn test_v1_import_preflight_conflict() {
         track_number: None,
         disc_number: None,
         content_hash: Some("conflict_hash".into()),
+        starred: false,
+        rating: 0,
+        starred_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -3292,9 +3316,10 @@ async fn test_v1_import_preflight_exact_hash() {
         year: None,
         track_number: None,
         disc_number: None,
-        content_hash: Some(
-            "aaabbbcccdddeeefff000111222333444555666777888999000aaabbbcccddd".into(),
-        ),
+        content_hash: Some("aaabbbcccdddeeefff000111222333444555666777888999000aaabbbcccddd".into()),
+        starred: false,
+        rating: 0,
+        starred_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -3338,6 +3363,9 @@ async fn test_v1_import_preflight_quick_hash() {
         track_number: None,
         disc_number: None,
         content_hash: Some(full_hash.into()),
+        starred: false,
+        rating: 0,
+        starred_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
