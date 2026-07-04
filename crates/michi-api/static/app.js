@@ -179,18 +179,17 @@ function renderStatusPage() {
   if (!container) return;
   const s = State.status;
   if (!s) {
-    renderError(container, 'Could not load server status', 'loadStatus');
+    container.innerHTML = '<div class="empty-state"><p style="color:var(--error)">Could not load server status</p></div>';
     return;
   }
   container.innerHTML =
-    '<div class="section-header"><span>Status</span><span class="badge ' + (s.status === 'ok' ? 'stable' : 'disabled') + '">' + esc(s.status) + '</span></div>' +
-    '<div class="section-header"><span>Service</span><span>' + esc(s.name || 'No disponible') + '</span></div>' +
-    '<div class="section-header"><span>Version</span><span>' + esc(s.version || 'No disponible') + '</span></div>' +
-    '<div class="section-header"><span>Port</span><span>' + esc(s.port) + '</span></div>' +
-    '<div class="section-header"><span>Uptime</span><span>' + fmtDur((s.uptime_seconds || 0) * 1000) + '</span></div>' +
-    '<div class="section-header"><span>Server ID</span><span style="font-family:monospace;font-size:.78rem">' + esc(s.server_id || 'No disponible') + '</span></div>' +
-    '<div class="section-header"><span>Database</span><span class="badge ' + (s.database === 'ok' ? 'stable' : 'disabled') + '">' + esc(s.database || 'No disponible') + '</span></div>' +
-    '<div class="section-header"><span>Music Paths</span><span>' + esc(s.music_paths != null ? s.music_paths : 'No disponible') + '</span></div>';
+    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--online)" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg></div><div class="info"><div class="label">Status</div><div class="value"><span class="badge ' + (s.status === 'ok' ? 'stable' : 'disabled') + '">' + esc(s.status) + '</span></div></div></div>' +
+    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="info"><div class="label">Service</div><div class="value">' + esc(s.name || 'No disponible') + '</div></div></div>' +
+    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div><div class="info"><div class="label">Uptime</div><div class="value">' + fmtDur((s.uptime_seconds || 0) * 1000) + '</div></div></div>' +
+    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></div><div class="info"><div class="label">Version</div><div class="value">' + esc(s.version || 'No disponible') + '</div></div></div>' +
+    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/></svg></div><div class="info"><div class="label">Database</div><div class="value"><span class="badge ' + (s.database === 'ok' ? 'stable' : 'disabled') + '">' + esc(s.database || 'No disponible') + '</span></div></div></div>' +
+    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="info"><div class="label">Server ID</div><div class="value" style="font-family:var(--font-mono);font-size:.75rem">' + esc(s.server_id || 'No disponible') + '</div></div></div>' +
+    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div><div class="info"><div class="label">Music Paths</div><div class="value">' + esc(s.music_paths != null ? s.music_paths : 'No disponible') + '</div></div></div>';
 }
 
 // ── Server Info & Michi Link ────────────────────────────────────
@@ -282,10 +281,10 @@ function renderStats() {
   const artists = s?.artists ?? 'N/D';
 
   cd.innerHTML =
-    '<div class="card"><div class="card-icon">🎵</div><div class="card-value">' + esc(tracks) + '</div><div class="card-label">Tracks</div></div>' +
-    '<div class="card"><div class="card-icon">💿</div><div class="card-value">' + esc(albums) + '</div><div class="card-label">Albums</div></div>' +
-    '<div class="card"><div class="card-icon">👤</div><div class="card-value">' + esc(artists) + '</div><div class="card-label">Artists</div></div>' +
-    '<div class="card"><div class="card-icon">📋</div><div class="card-value">' + (State.serverInfo?.features?.playlists ? '✓' : '--') + '</div><div class="card-label">Playlists</div></div>';
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><div class="card-value">' + esc(tracks) + '</div><div class="card-label">Tracks</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h18"/><rect x="3" y="8" width="18" height="12" rx="2"/></svg></div><div class="card-value">' + esc(albums) + '</div><div class="card-label">Albums</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + esc(artists) + '</div><div class="card-label">Artists</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></div><div class="card-value">' + (State.serverInfo?.features?.playlists ? '✓' : '--') + '</div><div class="card-label">Playlists</div></div>';
 }
 
 // ── Tracks / Library ────────────────────────────────────────────
@@ -333,7 +332,7 @@ function renderTracks(tracks, tableId) {
       '<td class="track-title">' + esc(t.title || 'Unknown') + '</td>' +
       '<td class="track-artist">' + esc(t.artist || '—') + '</td>' +
       '<td class="track-artist">' + esc(t.album || '—') + '</td>' +
-      '<td><span class="badge format">' + esc(t.format || '?') + '</span></td>' +
+      '<td><span class="badge format" data-format="' + esc(t.format || '').toLowerCase() + '">' + esc(t.format || '?') + '</span></td>' +
       '<td style="color:var(--text-dim)">' + fmtDur(t.duration_ms) + '</td>' +
       '<td><button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();playTrack(' + realIdx + ')">Play</button></td>' +
       '</tr>';
@@ -414,6 +413,7 @@ function playTrack(idx) {
   audio.play().catch(function (err) {
     showToast('Could not play: ' + err.message, true);
   });
+  updatePlayButtons();
 }
 
 function playPause() {
@@ -427,6 +427,7 @@ function playPause() {
   } else {
     audio.pause();
   }
+  updatePlayButtons();
 }
 
 function onTrackEnd() {
@@ -445,6 +446,17 @@ function updatePlaybackProgress() {
 
   const cur = $('#np-current');
   if (cur) cur.textContent = fmtDur(audio.currentTime * 1000);
+}
+
+function updatePlayButtons() {
+  const audio = getAudio();
+  const isPlaying = !audio.paused;
+  const playBtns = $$('[data-play-icon]');
+  playBtns.forEach(btn => {
+    btn.innerHTML = isPlaying
+      ? '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>'
+      : '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+  });
 }
 
 function updateNowPlaying(t) {

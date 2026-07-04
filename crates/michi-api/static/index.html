@@ -14,42 +14,81 @@
     <!-- Sidebar -->
     <aside class="sidebar">
         <div class="sidebar-logo">
-            <img src="/static/assets/michi-logo.svg" alt="Michi">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 18V5l12-2v13" stroke="var(--primary)"/>
+                <circle cx="6" cy="18" r="3" fill="var(--primary)" stroke="var(--primary)"/>
+                <circle cx="18" cy="16" r="3" fill="var(--accent)" stroke="var(--accent)"/>
+            </svg>
             <div>
-                <h1>Michi Server</h1>
+                <h1>Michi</h1>
                 <span class="ver" id="sidebar-ver">--</span>
             </div>
         </div>
         <nav class="sidebar-nav">
             <div class="nav-section">
                 <h3>Main</h3>
-                <button class="nav-item active" data-section="dashboard" onclick="showSection('dashboard')">📊 Dashboard</button>
-                <button class="nav-item" data-section="library" onclick="showSection('library')">🎵 Library</button>
-                <button class="nav-item" data-section="scan" onclick="showSection('scan')">🔍 Scan</button>
+                <button class="nav-item active" data-section="dashboard" onclick="showSection('dashboard')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="4" rx="1"/>
+                        <rect x="3" y="14" width="4" height="7" rx="1"/><rect x="14" y="11" width="7" height="10" rx="1"/>
+                    </svg>
+                    Dashboard
+                </button>
+                <button class="nav-item" data-section="library" onclick="showSection('library')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
+                    </svg>
+                    Library
+                </button>
+                <button class="nav-item" data-section="scan" onclick="showSection('scan')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/>
+                    </svg>
+                    Scan
+                </button>
             </div>
             <div class="nav-section">
                 <h3>Server</h3>
-                <button class="nav-item" data-section="michilink" onclick="showSection('michilink')">🔗 Michi Link <span class="badge beta">v1</span></button>
-                <button class="nav-item" data-section="status" onclick="showSection('status')">📡 Status</button>
+                <button class="nav-item" data-section="michilink" onclick="showSection('michilink')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                    </svg>
+                    Michi Link <span class="badge beta">v1</span>
+                </button>
+                <button class="nav-item" data-section="status" onclick="showSection('status')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+                    </svg>
+                    Status
+                </button>
             </div>
         </nav>
         <div class="sidebar-footer">
-            <div style="margin-bottom:6px">
-                <span class="server-status-dot online" id="server-status-dot"></span>
-                <span id="server-status-label">Loading...</span>
+            <div class="server-status-row">
+                <span class="server-status-dot" id="server-status-dot"></span>
+                <span class="server-label" id="server-status-label">Loading...</span>
             </div>
-            <div>URL: <span id="sidebar-url">localhost:8096</span></div>
-            <div>ID: <span id="sidebar-server-id">--</span></div>
-            <div>Uptime: <span id="sidebar-uptime">--</span></div>
+            <div class="sidebar-meta">
+                <span><span class="label">ID</span><span class="value" id="sidebar-server-id">--</span></span>
+                <span><span class="label">Up</span><span class="value" id="sidebar-uptime">--</span></span>
+            </div>
         </div>
     </aside>
 
     <!-- Topbar -->
     <header class="topbar">
-        <input class="topbar-search" id="search-input" type="text" placeholder="Search tracks..." aria-label="Search">
-        <span class="status-pill online" id="status-pill"><span class="server-status-dot online"></span>Online</span>
-        <button class="btn btn-primary btn-sm" onclick="handleScan()" id="scan-btn">Scan</button>
-        <button class="btn btn-ghost btn-sm" onclick="testMichiLink()">Test Link</button>
+        <div class="search-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+            </svg>
+            <input class="topbar-search" id="search-input" type="text" placeholder="Search tracks..." aria-label="Search">
+        </div>
+        <div class="topbar-actions">
+            <span class="status-pill" id="status-pill"><span class="server-status-dot"></span>Online</span>
+            <button class="btn btn-ghost btn-sm" onclick="handleScan()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>Scan</button>
+            <button class="btn btn-ghost btn-sm" onclick="testMichiLink()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Test</button>
+        </div>
     </header>
 
     <!-- Main area -->
@@ -78,12 +117,20 @@
         <section class="section-page hidden" id="page-scan">
             <div class="page-header"><h2>Library Scan</h2><p>Manage music scanning</p></div>
             <div class="link-panel" id="scan-panel">
-                <h3>Scan library</h3>
-                <p style="color:var(--text-muted);font-size:.85rem;margin-bottom:12px">Scan configured music paths for new and updated tracks.</p>
+                <div class="scan-progress">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>
+                    <div>
+                        <h3 style="margin-bottom:4px">Scan library</h3>
+                        <p style="color:var(--text-muted);font-size:.82rem">Scan configured music paths for new and updated tracks.</p>
+                    </div>
+                </div>
                 <button class="btn btn-primary" onclick="handleScan()">Start Scan</button>
             </div>
             <div class="link-panel">
-                <h3>Music Paths</h3>
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    <h3 style="margin:0">Music Paths</h3>
+                </div>
                 <p style="color:var(--text-muted);font-size:.85rem" id="scan-paths">--</p>
             </div>
         </section>
@@ -91,18 +138,23 @@
         <!-- Michi Link -->
         <section class="section-page hidden" id="page-michilink">
             <div class="page-header"><h2>Michi Link <span class="badge beta">v1</span></h2><p>Native integration contract</p></div>
-            <div class="link-panel" id="michilink-connection">
-                <h3>Connection</h3>
+            <div class="link-panel">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                    <h3 style="margin:0">Connection</h3>
+                </div>
                 <div class="copy-field"><input id="server-url-input" value="http://localhost:8096" readonly><button class="btn btn-sm btn-ghost" onclick="copyServerUrl()">Copy</button></div>
-                <div class="section-header" style="margin-top:8px"><span style="color:var(--text-dim);font-size:.82rem">Server ID:</span><span style="font-size:.82rem;font-family:monospace" id="server-info-id">--</span></div>
-                <div class="section-header"><span style="color:var(--text-dim);font-size:.82rem">API Version:</span><span style="font-size:.82rem">v1</span></div>
+                <div style="display:flex;justify-content:space-between;margin-bottom:4px;font-size:.78rem"><span style="color:var(--text-dim)">Server ID</span><span style="font-family:var(--font-mono);font-size:.72rem" id="server-info-id">--</span></div>
+                <div style="display:flex;justify-content:space-between;font-size:.78rem"><span style="color:var(--text-dim)">API Version</span><span>v1</span></div>
             </div>
             <div class="link-panel">
-                <h3>Features</h3>
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
+                    <h3 style="margin:0">Features</h3>
+                </div>
                 <div class="feature-grid" id="features-grid"></div>
             </div>
             <div class="link-panel">
-                <h3>Test</h3>
                 <button class="btn btn-primary" onclick="testMichiLink()">Test Connection</button>
             </div>
         </section>
@@ -110,7 +162,7 @@
         <!-- Status -->
         <section class="section-page hidden" id="page-status">
             <div class="page-header"><h2>Server Status</h2><p>Health and information</p></div>
-            <div class="link-panel" id="status-content"></div>
+            <div class="status-grid" id="status-content"></div>
         </section>
 
     </main>
@@ -122,14 +174,16 @@
         <div class="np-info">
             <h4 id="np-title">Stopped</h4>
             <p id="np-artist">—</p>
-            <p style="font-size:.75rem;color:var(--text-dim)" id="np-format"></p>
+            <p style="font-size:.72rem;color:var(--text-dim)" id="np-format"></p>
         </div>
         <div class="np-progress">
             <div class="progress-bar"><div class="fill" id="np-progress-fill"></div></div>
             <div class="progress-labels"><span id="np-current">0:00</span><span id="np-duration">--:--</span></div>
         </div>
         <div class="np-controls">
-            <button onclick="playPause()">⏯</button>
+            <button class="btn-circle" onclick="playPause()" title="Play/Pause" data-play-icon>
+                <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            </button>
         </div>
         <div class="np-queue">
             <h4>Queue</h4>
@@ -146,9 +200,11 @@
         </div>
         <div class="np-mini-progress"><div class="fill" style="width:0%" id="mini-progress-fill"></div></div>
         <div class="np-mini-controls">
-            <button onclick="playPause()">⏯</button>
+            <button class="btn-circle" onclick="playPause()" title="Play/Pause" data-play-icon>
+                <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            </button>
         </div>
-        <div class="waveform" id="waveform"><span></span><span></span><span></span><span></span><span></span></div>
+        <div class="waveform"><span></span><span></span><span></span><span></span><span></span></div>
     </div>
 
     <script src="/static/app.js"></script>
