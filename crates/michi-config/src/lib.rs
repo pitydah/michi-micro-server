@@ -14,6 +14,7 @@ pub struct Config {
     pub sync_peers: Vec<String>,
     pub sync_name: String,
     pub listenbrainz_token: Option<String>,
+    pub lastfm_token: Option<String>,
     pub scrobble_enabled: bool,
     pub auth_username: Option<String>,
     pub auth_password: Option<String>,
@@ -66,6 +67,7 @@ impl Config {
         let sync_name = env::var("MICHI_SYNC_NAME").unwrap_or_else(|_| "default".to_string());
 
         let listenbrainz_token = env::var("MICHI_LISTENBRAINZ_TOKEN").ok();
+        let lastfm_token = env::var("MICHI_LASTFM_TOKEN").ok();
         let scrobble_enabled = env::var("MICHI_SCROBBLE_ENABLED")
             .ok()
             .map(|v| v == "1" || v.to_lowercase() == "true")
@@ -97,6 +99,7 @@ impl Config {
             sync_peers,
             sync_name,
             listenbrainz_token,
+            lastfm_token,
             scrobble_enabled,
             auth_username,
             auth_password,

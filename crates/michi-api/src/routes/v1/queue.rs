@@ -304,3 +304,68 @@ pub async fn queue_delete_handler(
 
     Ok(Json(serde_json::json!({ "status": "deleted" })))
 }
+
+// ── Queue Save/Load (cross-device) ─────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct QueueSaveBody {
+    pub track_ids: Vec<Uuid>,
+    pub current_index: u32,
+    pub position_ms: u64,
+}
+
+pub async fn queue_save_handler(
+    State(state): State<AppState>,
+    Json(body): Json<QueueSaveBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let session_id = michi_db::save_queue_state(
+        &state.db,
+        "saved-queue",
+        &body.track_ids,
+        body.current_index as i32,
+        body.position_ms,
+    )
+    .await
+    .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "saved",
+        "session_id": session_id,
+        "queue_size": body.track_ids.len(),
+    })))
+}
+
+pub async fn queue_saved_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let session = michi_db::get_latest_playback_session(&state.db)
+        .await
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+
+    match session {
+        Some(s) => {
+            let queue_items = if let Some(qid) = s.queue_id {
+                michi_db::get_queue_items(&state.db, &qid).await.ok().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+            Ok(Json(serde_json::json!({
+                "found": true,
+                "session_id": s.id,
+                "queue_id": s.queue_id,
+                "current_index": s.current_index,
+                "position_ms": s.position_ms,
+                "source": s.source,
+                "items": queue_items.iter().map(|(tid, pos)| serde_json::json!({
+                    "track_id": tid,
+                    "position": pos,
+                })).collect::<Vec<_>>(),
+            })))
+        }
+        None => Ok(Json(serde_json::json!({
+            "found": false,
+            "queue_id": null,
+        }))),
+    }
+}

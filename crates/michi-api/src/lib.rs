@@ -426,6 +426,14 @@ fn v1_link_routes() -> Router<AppState> {
             "/api/v1/queue/:queue_id",
             delete(routes::v1::queue::queue_delete_handler),
         )
+        .route(
+            "/api/v1/queue/save",
+            post(routes::v1::queue::queue_save_handler),
+        )
+        .route(
+            "/api/v1/queue/saved",
+            get(routes::v1::queue::queue_saved_handler),
+        )
         // Receivers
         .route(
             "/api/v1/receivers",

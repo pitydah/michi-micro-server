@@ -86,6 +86,18 @@ pub async fn record_play_handler(
                 submit_listenbrainz(&db, &token, &play_id, &track_id, played_at).await;
             });
         }
+
+        // Also submit to Last.fm if configured
+        if let Some(token) = &state.config.lastfm_token {
+            let db = state.db.clone();
+            let token = token.clone();
+            let track_id = input.track_id;
+            let played_at = now.timestamp() as i64;
+
+            tokio::spawn(async move {
+                submit_lastfm(&db, &token, &track_id, played_at).await;
+            });
+        }
     }
 
     Ok(Json(RecordPlayResponse {
@@ -205,6 +217,58 @@ async fn submit_listenbrainz(
         }
         Err(e) => {
             tracing::warn!("scrobble request error: {}", e);
+        }
+    }
+}
+
+async fn submit_lastfm(
+    db: &sqlx::SqlitePool,
+    token: &str,
+    track_id: &Uuid,
+    listened_at: i64,
+) {
+    let track = match michi_db::get_track(db, track_id).await {
+        Ok(Some(t)) => t,
+        _ => return,
+    };
+
+    let artist = track.artist.unwrap_or_else(|| "Unknown Artist".to_string());
+    let title = track.title.unwrap_or_else(|| "Unknown Track".to_string());
+    let album = track.album.unwrap_or_default();
+
+    // Last.fm API: POST https://ws.audioscrobbler.com/2.0/
+    // Uses token-based auth (Mobile Last.fm Web Auth or API key + shared secret)
+    let client = reqwest::Client::new();
+    let params = [
+        ("method", "track.scrobble"),
+        ("api_key", "michi_lastfm_proxy"),
+        ("sk", token),
+        ("artist", &artist),
+        ("track", &title),
+        ("album", &album),
+        ("timestamp", &listened_at.to_string()),
+        ("format", "json"),
+    ];
+
+    match client
+        .post("https://ws.audioscrobbler.com/2.0/")
+        .form(&params)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                tracing::info!("last.fm scrobble submitted for track {}", track_id);
+            } else {
+                tracing::warn!(
+                    "last.fm scrobble failed: {} {}",
+                    resp.status(),
+                    resp.text().await.unwrap_or_default()
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!("last.fm request error: {}", e);
         }
     }
 }

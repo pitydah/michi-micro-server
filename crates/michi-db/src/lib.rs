@@ -2187,6 +2187,55 @@ pub async fn get_queue_items(
         .collect())
 }
 
+pub async fn save_queue_state(
+    pool: &SqlitePool,
+    name: &str,
+    track_ids: &[Uuid],
+    current_index: i32,
+    position_ms: u64,
+) -> Result<Uuid, DbError> {
+    let queue_id = Uuid::new_v4();
+    let now = Utc::now().to_rfc3339();
+
+    sqlx::query("INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+        .bind(queue_id.to_string()).bind(name).bind(&now).bind(&now)
+        .execute(pool).await?;
+
+    for (i, tid) in track_ids.iter().enumerate() {
+        let item_id = Uuid::new_v4();
+        let _ = sqlx::query(
+            "INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
+        ).bind(item_id.to_string()).bind(queue_id.to_string())
+         .bind(tid.to_string()).bind(i as i64).bind(&now)
+         .execute(pool).await;
+    }
+
+    let session_id = Uuid::new_v4();
+    let queue_json = serde_json::to_string(track_ids).unwrap_or_default();
+    sqlx::query(
+        "INSERT INTO playback_sessions (id, device_id, queue_id, queue_state, current_index, current_track_id, position_ms, playing, repeat_mode, shuffle, volume, source, resume_policy, restored, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(session_id.to_string())
+    .bind(Uuid::nil().to_string())
+    .bind(queue_id.to_string())
+    .bind(&queue_json)
+    .bind(current_index)
+    .bind(track_ids.first().map(|u| u.to_string()))
+    .bind(position_ms as i64)
+    .bind(0i64)
+    .bind("none")
+    .bind(0i64)
+    .bind(0.8f64)
+    .bind("cross-device")
+    .bind("manual")
+    .bind(0i64)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool).await?;
+
+    Ok(session_id)
+}
+
 fn row_to_link_device(row: &sqlx::sqlite::SqliteRow) -> michi_core::LinkDevice {
     michi_core::LinkDevice {
         device_id: Uuid::parse_str(row.get::<&str, _>("device_id")).unwrap_or(Uuid::nil()),
