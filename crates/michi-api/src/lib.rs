@@ -391,6 +391,11 @@ fn v1_link_routes() -> Router<AppState> {
             "/api/v1/diagnostics",
             get(routes::v1::diagnostics::diagnostics_handler),
         )
+        // Backup
+        .route(
+            "/api/v1/backup",
+            get(routes::v1::backup::backup_handler),
+        )
         // Playback
         .route(
             "/api/v1/playback/state",

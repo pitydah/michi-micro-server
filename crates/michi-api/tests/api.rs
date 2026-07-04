@@ -3803,3 +3803,31 @@ async fn test_v1_smart_playlist_invalid_rule() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn test_v1_backup_export() {
+    let (app, pool) = make_app().await;
+    seed_track(&pool, "/music/backup1.flac", "Backup One").await;
+    seed_track(&pool, "/music/backup2.flac", "Backup Two").await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/backup")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(body["version"], 1);
+    assert_eq!(body["tracks"].as_array().unwrap().len(), 2);
+    assert!(body["exported_at"].as_str().unwrap().len() > 0);
+    assert!(body["server_id"].as_str().unwrap().len() > 0);
+    assert!(body["server_name"].as_str().unwrap().len() > 0);
+    assert!(body["playlists"].is_array());
+    assert!(body["starred_tracks"].is_array());
+    assert!(body["play_history"].is_array());
+}

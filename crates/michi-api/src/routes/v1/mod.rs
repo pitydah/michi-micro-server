@@ -1,4 +1,5 @@
 pub mod artwork;
+pub mod backup;
 pub mod diagnostics;
 pub mod events;
 pub mod favorites;
