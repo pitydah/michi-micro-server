@@ -9,6 +9,8 @@ michi-core = { path = "../michi-core" }
 michi-db = { path = "../michi-db" }
 michi-streaming = { path = "../michi-streaming" }
 michi-config = { path = "../michi-config" }
+michi-scanner = { path = "../michi-scanner" }
+michi-metadata = { path = "../michi-metadata" }
 
 axum.workspace = true
 serde.workspace = true
@@ -18,3 +20,6 @@ tracing.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 sqlx.workspace = true
+rand = "0.8"
+infer.workspace = true
+tokio-util.workspace = true

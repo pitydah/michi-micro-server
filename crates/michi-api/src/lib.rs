@@ -286,6 +286,10 @@ fn v1_link_routes() -> Router<AppState> {
             get(routes::v1::library::library_stats_handler),
         )
         .route(
+            "/api/v1/library/health",
+            get(routes::v1::library::library_health_handler),
+        )
+        .route(
             "/api/v1/library/scan",
             post(routes::v1::library::library_scan_handler),
         )
