@@ -76,6 +76,8 @@ async fn seed_track(pool: &SqlitePool, path: &str, title: &str) -> Uuid {
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -363,6 +365,8 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -569,6 +573,8 @@ async fn test_stream_file_not_on_disk() {
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -1261,6 +1267,8 @@ async fn test_full_pipeline_scan_and_stream() {
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -1711,6 +1719,8 @@ async fn test_v1_stream_range_not_satisfiable() {
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -2762,6 +2772,8 @@ async fn test_v1_stream_and_download_range() {
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -3021,6 +3033,8 @@ async fn test_v1_import_preflight_already_present() {
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -3083,6 +3097,8 @@ async fn test_v1_import_preflight_conflict() {
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -3326,6 +3342,8 @@ async fn test_v1_import_preflight_exact_hash() {
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -3372,6 +3390,8 @@ async fn test_v1_import_preflight_quick_hash() {
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };

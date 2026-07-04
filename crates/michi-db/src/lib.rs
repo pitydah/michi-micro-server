@@ -322,7 +322,17 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 24 applied");
     }
 
-    info!("database schema at version 24");
+    if current < 25 {
+        info!("applying migration 25: replaygain on tracks");
+        migration_025(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (25, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 25 applied");
+    }
+
+    info!("database schema at version 25");
     Ok(())
 }
 
@@ -765,6 +775,18 @@ async fn migration_024(pool: &SqlitePool) -> Result<(), DbError> {
     Ok(())
 }
 
+async fn migration_025(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query("ALTER TABLE tracks ADD COLUMN replaygain_track_gain REAL")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE tracks ADD COLUMN replaygain_track_peak REAL")
+        .execute(pool)
+        .await
+        .ok();
+    Ok(())
+}
+
 async fn migration_015(pool: &SqlitePool) -> Result<(), DbError> {
     sqlx::query("ALTER TABLE tracks ADD COLUMN genre TEXT")
         .execute(pool)
@@ -1002,7 +1024,7 @@ pub async fn get_album_tracks(pool: &SqlitePool, album: &str) -> Result<Vec<Trac
     let rows = sqlx::query(
         "SELECT id, title, artist, album, album_artist, duration_ms, file_path, \
          format, sample_rate, bit_depth, channels, artwork_id, genre, year, \
-         track_number, disc_number, content_hash, starred, rating, starred_at, created_at, updated_at \
+         track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at \
           FROM tracks WHERE album = ? ORDER BY title ASC",
     )
     .bind(album)
@@ -1016,7 +1038,7 @@ pub async fn get_artist_tracks(pool: &SqlitePool, artist: &str) -> Result<Vec<Tr
     let rows = sqlx::query(
         "SELECT id, title, artist, album, album_artist, duration_ms, file_path, \
          format, sample_rate, bit_depth, channels, artwork_id, genre, year, \
-         track_number, disc_number, content_hash, starred, rating, starred_at, created_at, updated_at \
+         track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at \
           FROM tracks WHERE artist = ? ORDER BY album ASC, title ASC",
     )
     .bind(artist)
@@ -1313,6 +1335,8 @@ pub async fn get_playlist_tracks(
                 starred: false,
                 rating: 0,
                 starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
                 created_at: r
                     .get::<&str, _>("t_created_at")
                     .parse()
@@ -1386,7 +1410,7 @@ pub async fn find_tracks_by_content_hash(
     hash: &str,
 ) -> Result<Vec<Track>, DbError> {
     let rows = sqlx::query(
-        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, created_at, updated_at FROM tracks WHERE content_hash = ?",
+        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at FROM tracks WHERE content_hash = ?",
     )
     .bind(hash)
     .fetch_all(pool)
@@ -1432,7 +1456,7 @@ pub async fn get_starred_tracks(
     pool: &SqlitePool,
 ) -> Result<Vec<Track>, DbError> {
     let rows = sqlx::query(
-        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, created_at, updated_at FROM tracks WHERE starred = 1 ORDER BY starred_at DESC",
+        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at FROM tracks WHERE starred = 1 ORDER BY starred_at DESC",
     )
     .fetch_all(pool)
     .await?;
@@ -1450,7 +1474,7 @@ pub async fn upsert_tracks(pool: &SqlitePool, tracks: &[Track]) -> Result<usize,
 
 pub async fn list_tracks(pool: &SqlitePool) -> Result<Vec<Track>, DbError> {
     let rows = sqlx::query(
-        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, created_at, updated_at FROM tracks ORDER BY title ASC",
+        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at FROM tracks ORDER BY title ASC",
     )
     .fetch_all(pool)
     .await?;
@@ -1463,7 +1487,7 @@ pub async fn list_tracks(pool: &SqlitePool) -> Result<Vec<Track>, DbError> {
 pub async fn search_tracks(pool: &SqlitePool, q: &str) -> Result<Vec<Track>, DbError> {
     let pattern = format!("%{}%", q);
     let rows = sqlx::query(
-        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, created_at, updated_at FROM tracks WHERE title LIKE ? OR artist LIKE ? OR album LIKE ? OR album_artist LIKE ? OR format LIKE ? ORDER BY title ASC",
+        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at FROM tracks WHERE title LIKE ? OR artist LIKE ? OR album LIKE ? OR album_artist LIKE ? OR format LIKE ? ORDER BY title ASC",
     )
     .bind(&pattern)
     .bind(&pattern)
@@ -1484,7 +1508,7 @@ pub async fn list_tracks_paged(
     offset: i64,
 ) -> Result<Vec<Track>, DbError> {
     let rows = sqlx::query(
-        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, created_at, updated_at FROM tracks ORDER BY title ASC LIMIT ? OFFSET ?",
+        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at FROM tracks ORDER BY title ASC LIMIT ? OFFSET ?",
     )
     .bind(limit)
     .bind(offset)
@@ -1520,7 +1544,7 @@ pub async fn library_stats(pool: &SqlitePool) -> Result<LibraryStats, DbError> {
 pub async fn get_track(pool: &SqlitePool, id: &Uuid) -> Result<Option<Track>, DbError> {
     let id_str = id.to_string();
     let rows = sqlx::query(
-        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, created_at, updated_at FROM tracks WHERE id = ?",
+        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at FROM tracks WHERE id = ?",
     )
     .bind(&id_str)
     .fetch_all(pool)
@@ -1548,7 +1572,7 @@ pub async fn find_track_by_path(
     file_path: &str,
 ) -> Result<Option<Track>, DbError> {
     let rows = sqlx::query(
-        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, created_at, updated_at FROM tracks WHERE file_path = ?",
+        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at FROM tracks WHERE file_path = ?",
     )
     .bind(file_path)
     .fetch_all(pool)
@@ -1566,7 +1590,7 @@ pub async fn find_tracks_by_paths(
     }
     let placeholders: Vec<String> = (0..paths.len()).map(|_| "?".to_string()).collect();
     let sql = format!(
-        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, created_at, updated_at FROM tracks WHERE file_path IN ({})",
+        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at FROM tracks WHERE file_path IN ({})",
         placeholders.join(",")
     );
     let mut query = sqlx::query(&sql);
@@ -2364,6 +2388,8 @@ fn row_to_track(row: &sqlx::sqlite::SqliteRow) -> Track {
         starred: row.get::<i64, _>("starred") != 0,
         rating: row.get::<i64, _>("rating") as u8,
         starred_at: row.get("starred_at"),
+        replaygain_track_gain: row.get("replaygain_track_gain"),
+        replaygain_track_peak: row.get("replaygain_track_peak"),
     }
 }
 
@@ -2422,6 +2448,8 @@ fn row_to_play_history_with_track(row: &sqlx::sqlite::SqliteRow) -> (PlayHistory
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
         created_at: row
             .get::<&str, _>("created_at")
             .parse()
@@ -2492,6 +2520,8 @@ mod tests {
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

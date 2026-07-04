@@ -59,6 +59,8 @@ pub fn read_metadata(path: &Path) -> Result<AudioMetadata, MetadataError> {
         track_number,
         disc_number,
         has_artwork,
+        replaygain_gain,
+        replaygain_peak,
     ) = match tag {
         Some(tag) => {
             let title = tag.title().map(|s| s.to_string());
@@ -70,6 +72,20 @@ pub fn read_metadata(path: &Path) -> Result<AudioMetadata, MetadataError> {
             let track_number = tag.track();
             let disc_number = tag.disk();
             let has_artwork = !tag.pictures().is_empty();
+            // Read ReplayGain from tag items (TXXX frames in ID3, etc.)
+            let mut replaygain_gain = None;
+            let mut replaygain_peak = None;
+            for item in tag.items() {
+                let key = format!("{:?}", item.key()).to_uppercase();
+                if let Some(text) = item.value().text() {
+                    if key.contains("REPLAYGAIN_TRACK_GAIN") {
+                        replaygain_gain = text.parse::<f64>().ok();
+                    }
+                    if key.contains("REPLAYGAIN_TRACK_PEAK") {
+                        replaygain_peak = text.parse::<f64>().ok();
+                    }
+                }
+            }
 
             (
                 title,
@@ -81,11 +97,13 @@ pub fn read_metadata(path: &Path) -> Result<AudioMetadata, MetadataError> {
                 track_number,
                 disc_number,
                 has_artwork,
+                replaygain_gain,
+                replaygain_peak,
             )
         }
         None => {
             warn!("no tags found for {}", path.display());
-            (None, None, None, None, None, None, None, None, false)
+            (None, None, None, None, None, None, None, None, false, None, None)
         }
     };
 
@@ -111,6 +129,8 @@ pub fn read_metadata(path: &Path) -> Result<AudioMetadata, MetadataError> {
         channels,
         format,
         has_artwork,
+        replaygain_track_gain: replaygain_gain,
+        replaygain_track_peak: replaygain_peak,
     })
 }
 

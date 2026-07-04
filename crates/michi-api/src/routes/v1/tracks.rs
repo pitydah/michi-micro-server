@@ -53,6 +53,8 @@ pub fn track_to_safe_json(track: michi_core::Track) -> serde_json::Value {
         "starred": track.starred,
         "rating": track.rating,
         "starred_at": track.starred_at,
+        "replaygain_track_gain": track.replaygain_track_gain,
+        "replaygain_track_peak": track.replaygain_track_peak,
     })
 }
 

@@ -74,6 +74,8 @@ fn scan_directory_sync(library_root: &Path, path: &Path) -> Vec<Track> {
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };

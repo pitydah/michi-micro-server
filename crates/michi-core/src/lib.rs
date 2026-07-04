@@ -112,6 +112,8 @@ pub struct AudioMetadata {
     pub channels: Option<u8>,
     pub format: AudioFormat,
     pub has_artwork: bool,
+    pub replaygain_track_gain: Option<f64>,
+    pub replaygain_track_peak: Option<f64>,
 }
 
 impl Default for AudioMetadata {
@@ -131,6 +133,8 @@ impl Default for AudioMetadata {
             channels: None,
             format: AudioFormat::Unknown,
             has_artwork: false,
+            replaygain_track_gain: None,
+            replaygain_track_peak: None,
         }
     }
 }
@@ -157,6 +161,8 @@ pub struct Track {
     pub starred: bool,
     pub rating: u8,
     pub starred_at: Option<String>,
+    pub replaygain_track_gain: Option<f64>,
+    pub replaygain_track_peak: Option<f64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

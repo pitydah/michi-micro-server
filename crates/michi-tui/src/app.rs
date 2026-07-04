@@ -359,6 +359,8 @@ mod tests {
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }];
@@ -390,6 +392,8 @@ mod tests {
         starred: false,
         rating: 0,
         starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
