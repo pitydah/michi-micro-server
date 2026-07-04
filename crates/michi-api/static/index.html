@@ -49,6 +49,12 @@
             </div>
             <div class="nav-section">
                 <h3>Server</h3>
+                <button class="nav-item" data-section="playlists" onclick="showSection('playlists')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+                    </svg>
+                    Playlists
+                </button>
                 <button class="nav-item" data-section="michilink" onclick="showSection('michilink')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
@@ -156,6 +162,75 @@
             </div>
             <div class="link-panel">
                 <button class="btn btn-primary" onclick="testMichiLink()">Test Connection</button>
+            </div>
+        </section>
+
+        <!-- Playlists -->
+        <section class="section-page hidden" id="page-playlists">
+            <div class="page-header">
+                <h2>Playlists</h2>
+                <p>Manage your playlists</p>
+                <div class="page-tabs">
+                    <button class="tab-btn active" data-tab="browse" onclick="switchPlaylistTab('browse')">Browse</button>
+                    <button class="tab-btn" data-tab="smart" onclick="switchPlaylistTab('smart')">Smart</button>
+                    <button class="tab-btn" data-tab="backup" onclick="switchPlaylistTab('backup')">Backup</button>
+                </div>
+            </div>
+            <div class="tab-content active" id="playlist-tab-browse">
+                <div class="section">
+                    <div class="section-header"><h3>All Playlists</h3><span class="sub" id="playlist-count">--</span></div>
+                    <div id="playlists-list"></div>
+                </div>
+            </div>
+            <div class="tab-content hidden" id="playlist-tab-smart">
+                <div class="section">
+                    <div class="section-header"><h3>Create Smart Playlist</h3></div>
+                    <div class="smart-form">
+                        <div class="form-row">
+                            <label>Name</label>
+                            <input type="text" id="smart-name" placeholder="My Smart Playlist" class="form-input">
+                        </div>
+                        <div class="form-row">
+                            <label>Rule</label>
+                            <select id="smart-rule" class="form-input">
+                                <option value="most_played">Most Played</option>
+                                <option value="favorites">Favorites</option>
+                                <option value="newest">Newest</option>
+                                <option value="recently_played">Recently Played</option>
+                                <option value="unplayed">Unplayed</option>
+                                <option value="by_genre">By Genre</option>
+                                <option value="by_year">By Year</option>
+                                <option value="random">Random</option>
+                            </select>
+                        </div>
+                        <div class="form-row" id="smart-param-row" style="display:none">
+                            <label id="smart-param-label">Genre</label>
+                            <input type="text" id="smart-param" placeholder="" class="form-input">
+                        </div>
+                        <div class="form-row">
+                            <label>Limit</label>
+                            <input type="number" id="smart-limit" value="50" min="1" max="200" class="form-input" style="width:100px">
+                        </div>
+                        <button class="btn btn-primary" onclick="createSmartPlaylist()">Create</button>
+                    </div>
+                </div>
+                <div class="section">
+                    <div class="section-header"><h3>Recent Smart Playlists</h3></div>
+                    <div id="smart-playlists-list"></div>
+                </div>
+            </div>
+            <div class="tab-content hidden" id="playlist-tab-backup">
+                <div class="section">
+                    <div class="section-header"><h3>Backup / Export</h3></div>
+                    <div class="link-panel">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            <h3 style="margin:0">Download Backup</h3>
+                        </div>
+                        <p style="color:var(--text-muted);font-size:.85rem;margin-bottom:12px">Export all tracks, playlists, stars, and play history as a JSON file.</p>
+                        <button class="btn btn-primary" onclick="downloadBackup()">Download Backup</button>
+                    </div>
+                </div>
             </div>
         </section>
 

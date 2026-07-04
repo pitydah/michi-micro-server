@@ -508,3 +508,142 @@ function copyServerUrl() {
   document.execCommand('copy');
   showToast('URL copied!');
 }
+
+// ── Playlists ────────────────────────────────────────────────────
+async function loadPlaylists() {
+  try {
+    const raw = await MichiAPI.request('/api/v1/playlists');
+    const playlists = raw.playlists || [];
+    renderPlaylists(playlists);
+    const el = $('#playlist-count');
+    if (el) el.textContent = playlists.length + ' playlist(s)';
+
+    const smartList = $('#smart-playlists-list');
+    if (smartList) {
+      const smartOnes = playlists.filter(function (p) { return p.description && p.description.indexOf('Smart playlist') === 0; });
+      renderSmartList(smartOnes);
+    }
+  } catch (e) { console.warn('playlists failed:', e.message); }
+}
+
+function renderPlaylists(playlists) {
+  const container = $('#playlists-list');
+  if (!container) return;
+  if (!playlists || playlists.length === 0) {
+    renderEmpty(container, '📋', 'No playlists yet', 'Create a smart playlist to get started.');
+    return;
+  }
+  container.innerHTML = playlists.map(function (p) {
+    return '<div class="playlist-item">' +
+      '<div class="info"><div class="name">' + esc(p.name) + '</div>' +
+      (p.description ? '<div class="desc">' + esc(p.description) + '</div>' : '') +
+      '</div>' +
+      '<div class="meta">' + (p.track_count || 0) + ' tracks</div>' +
+      '</div>';
+  }).join('');
+}
+
+function renderSmartList(playlists) {
+  const container = $('#smart-playlists-list');
+  if (!container) return;
+  if (!playlists || playlists.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-dim);font-size:.82rem;padding:12px 0">No smart playlists created yet.</p>';
+    return;
+  }
+  container.innerHTML = playlists.map(function (p) {
+    return '<div class="playlist-item">' +
+      '<div class="info"><div class="name">' + esc(p.name) + '</div>' +
+      '<div class="desc">' + esc(p.description || '') + '</div></div>' +
+      '<div class="meta">' + (p.track_count || 0) + ' tracks</div>' +
+      '</div>';
+  }).join('');
+}
+
+function switchPlaylistTab(tab) {
+  $$('.tab-btn').forEach(function (b) { b.classList.remove('active'); });
+  var btn = $('.tab-btn[data-tab="' + tab + '"]');
+  if (btn) btn.classList.add('active');
+  $$('[id^="playlist-tab-"]').forEach(function (t) { t.classList.add('hidden'); });
+  var pane = $('#playlist-tab-' + tab);
+  if (pane) pane.classList.remove('hidden');
+
+  if (tab === 'browse') loadPlaylists();
+}
+
+// Show/hide param row based on rule
+document.addEventListener('DOMContentLoaded', function () {
+  var ruleSelect = $('#smart-rule');
+  if (ruleSelect) {
+    ruleSelect.addEventListener('change', function () {
+      var row = $('#smart-param-row');
+      var label = $('#smart-param-label');
+      var input = $('#smart-param');
+      if (!row || !label || !input) return;
+      var val = ruleSelect.value;
+      if (val === 'by_genre') {
+        row.style.display = 'flex';
+        label.textContent = 'Genre';
+        input.placeholder = 'e.g. Jazz';
+      } else if (val === 'by_year') {
+        row.style.display = 'flex';
+        label.textContent = 'Year';
+        input.placeholder = 'e.g. 2024';
+      } else {
+        row.style.display = 'none';
+      }
+    });
+  }
+});
+
+async function createSmartPlaylist() {
+  var name = $('#smart-name')?.value.trim();
+  var rule = $('#smart-rule')?.value;
+  var limit = parseInt($('#smart-limit')?.value || '50');
+  if (!name) { showToast('Please enter a name', true); return; }
+
+  var params = {};
+  if (rule === 'by_genre' || rule === 'by_year') {
+    var pval = $('#smart-param')?.value.trim();
+    if (!pval) { showToast('Please enter a value', true); return; }
+    params[rule === 'by_genre' ? 'genre' : 'year'] = rule === 'by_year' ? parseInt(pval) || 2024 : pval;
+  }
+  params.limit = limit;
+
+  try {
+    var resp = await MichiAPI.request('/api/v1/playlists/smart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, rule: rule, params: params }),
+    });
+    showToast('Smart playlist "' + name + '" created with ' + resp.tracks_added + ' tracks');
+    $('#smart-name').value = '';
+    loadPlaylists();
+    switchPlaylistTab('browse');
+  } catch (e) { showToast(e.message, true); }
+}
+
+// ── Backup ───────────────────────────────────────────────────────
+async function downloadBackup() {
+  try {
+    var data = await MichiAPI.request('/api/v1/backup', { timeout: 30000 });
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'michi-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('Backup downloaded!');
+  } catch (e) { showToast(e.message, true); }
+}
+
+// Extend init to load playlists when navigating to playlists page
+var _origShowSection = showSection;
+showSection = function (section) {
+  _origShowSection(section);
+  if (section === 'playlists') {
+    loadPlaylists();
+  }
+};
