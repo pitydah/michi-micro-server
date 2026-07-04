@@ -39,9 +39,15 @@ pub struct PairStartBody {
 }
 
 pub async fn link_pair_start(
+    headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<PairStartBody>,
 ) -> Result<Json<PairStartResponse>, (StatusCode, Json<serde_json::Value>)> {
+    // Log X-Michi-Device-Id header if present (Player sends this)
+    if let Some(device_id) = headers.get("X-Michi-Device-Id").and_then(|v| v.to_str().ok()) {
+        tracing::info!("pair/start from device: {}", device_id);
+    }
+
     let pairing_id = Uuid::new_v4();
     let code = michi_link::generate_pairing_code();
     let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
@@ -74,9 +80,14 @@ pub async fn link_pair_start(
 }
 
 pub async fn link_pair_confirm(
+    headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<PairConfirmRequest>,
 ) -> Result<Json<PairConfirmResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(device_id) = headers.get("X-Michi-Device-Id").and_then(|v| v.to_str().ok()) {
+        tracing::info!("pair/confirm from device: {}", device_id);
+    }
+
     let session = michi_db::get_pairing_session_by_code(&state.db, &body.code)
         .await
         .map_err(|e| v1_internal_error(&e.to_string()))?

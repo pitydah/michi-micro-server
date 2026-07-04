@@ -338,6 +338,10 @@ fn v1_link_routes() -> Router<AppState> {
             post(routes::v1::import::import_session_handler),
         )
         .route(
+            "/api/v1/import/session/create",
+            post(routes::v1::import::import_session_handler),
+        )
+        .route(
             "/api/v1/import/preflight",
             post(routes::v1::import::import_preflight_handler),
         )
@@ -347,6 +351,10 @@ fn v1_link_routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/import/commit/:session_id",
+            post(routes::v1::import::import_commit_handler),
+        )
+        .route(
+            "/api/v1/import/session/commit/:session_id",
             post(routes::v1::import::import_commit_handler),
         )
         .route(
@@ -445,6 +453,10 @@ fn v1_link_routes() -> Router<AppState> {
         )
         // Events
         .route("/api/v1/events", get(routes::v1::events::events_handler))
+        .route(
+            "/api/v1/events/sse",
+            get(routes::v1::events::events_sse_handler),
+        )
 }
 
 pub fn create_router(state: AppState) -> Router {

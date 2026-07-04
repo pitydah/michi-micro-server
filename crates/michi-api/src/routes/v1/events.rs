@@ -9,13 +9,11 @@ use tracing::info;
 
 use crate::AppState;
 
+// ── WebSocket endpoint ─────────────────────────────────────────
 pub async fn events_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    // Auth check: require Bearer token in the first message
-    // But since axum WebSocketUpgrade can't reject after upgrade,
-    // we'll validate on first text message
     ws.on_upgrade(move |socket| handle_events_socket(socket, state))
 }
 
@@ -24,7 +22,6 @@ async fn handle_events_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.tx.subscribe();
 
-    // First, require client to send auth token
     let auth_ok = if let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Text(text) => {
@@ -32,7 +29,6 @@ async fn handle_events_socket(socket: WebSocket, state: AppState) {
                 match parsed {
                     Ok(val) => {
                         if let Some(token) = val.get("token").and_then(|t| t.as_str()) {
-                            // Validate via token_store (link tokens) or auth_sessions (login tokens)
                             let link_valid = state
                                 .token_store
                                 .validate(token, michi_link::TokenType::Device)
@@ -107,4 +103,26 @@ async fn handle_events_socket(socket: WebSocket, state: AppState) {
         _ = recv_task => {}
     }
     info!("events websocket disconnected");
+}
+
+// ── SSE endpoint (for clients that prefer Server-Sent Events) ──
+pub async fn events_sse_handler(
+    State(state): State<AppState>,
+) -> axum::response::Sse<impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    use futures_util::StreamExt;
+    use axum::response::sse::Event;
+
+    let rx = state.tx.subscribe();
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx)
+        .filter(|msg| futures_util::future::ready(msg.is_ok()))
+        .map(|msg| {
+            let data = msg.unwrap();
+            Ok::<_, std::convert::Infallible>(Event::default().data(data))
+        });
+
+    axum::response::Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(30))
+            .text("keepalive"),
+    )
 }

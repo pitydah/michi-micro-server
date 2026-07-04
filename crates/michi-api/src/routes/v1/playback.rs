@@ -170,6 +170,14 @@ pub async fn playback_control_handler(
                 current.volume = 0.8;
             }
         }
+        "shuffle" => {
+            // Toggle shuffle — no state to persist in-memory yet
+            // Player expects ok response
+        }
+        "repeat" => {
+            // Player sends repeat mode — no state to persist yet
+            // Accept "none", "one", "all" but don't error
+        }
         _ => {
             return Err(v1_error(
                 StatusCode::BAD_REQUEST,
