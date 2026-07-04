@@ -323,6 +323,10 @@ fn v1_link_routes() -> Router<AppState> {
                 .put(routes::v1::playlists::update_playlist_handler)
                 .delete(routes::v1::playlists::delete_playlist_handler),
         )
+        .route(
+            "/api/v1/playlists/smart",
+            post(routes::v1::playlists::smart_playlist_handler),
+        )
         // Favorites / Star / Rating
         .route(
             "/api/v1/starred",

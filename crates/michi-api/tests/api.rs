@@ -3740,3 +3740,66 @@ async fn test_v1_playback_queue_survives_full_restart() {
         "diagnostics must report playback_restored status"
     );
 }
+
+#[tokio::test]
+async fn test_v1_smart_playlist_favorites() {
+    let (app, pool) = make_app().await;
+    let tid = seed_track(&pool, "/music/smart_fav.flac", "Smart Fav").await;
+
+    // Star the track
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/star/{tid}"))
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"starred": true}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playlists/smart")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"name": "My Favorites", "rule": "favorites"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(body["playlist"]["name"], "My Favorites");
+    assert_eq!(body["rule"], "favorites");
+    assert_eq!(body["tracks_added"], 1);
+}
+
+#[tokio::test]
+async fn test_v1_smart_playlist_invalid_rule() {
+    let (app, _pool) = make_app().await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playlists/smart")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"name": "Bad", "rule": "nonexistent"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
