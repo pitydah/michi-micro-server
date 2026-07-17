@@ -97,6 +97,14 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+.sidebar-logo img.sidebar-logo-img {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  object-fit: contain;
+  filter: drop-shadow(0 0 6px var(--primary-glow));
+}
+
 .sidebar-logo svg {
   width: 36px;
   height: 36px;
