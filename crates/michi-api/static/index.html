@@ -200,7 +200,7 @@
             <div class="hero">
                 <h2>Playlists</h2>
                 <p>Manage your playlists</p>
-                <div class="tabs">
+                <div class="tabs" style="margin-top:12px">
                     <button class="tab active" data-tab="browse" onclick="switchPlaylistTab('browse')">Browse</button>
                     <button class="tab" data-tab="smart" onclick="switchPlaylistTab('smart')">Smart</button>
                     <button class="tab" data-tab="backup" onclick="switchPlaylistTab('backup')">Backup</button>
@@ -215,14 +215,14 @@
             <div class="tab-content hidden" id="playlist-tab-smart">
                 <div class="section">
                     <div class="section-header"><h3>Create Smart Playlist</h3></div>
-                    <div class="smart-form">
-                        <div class="form-row">
-                            <label>Name</label>
-                            <input type="text" id="smart-name" placeholder="My Smart Playlist" class="form-input">
+                    <div class="panel">
+                        <div class="panel-row">
+                            <span class="panel-label">Name</span>
+                            <input type="text" id="smart-name" placeholder="My Smart Playlist" class="panel-input">
                         </div>
-                        <div class="form-row">
-                            <label>Rule</label>
-                            <select id="smart-rule" class="form-input">
+                        <div class="panel-row">
+                            <span class="panel-label">Rule</span>
+                            <select id="smart-rule" class="panel-input" style="max-width:250px">
                                 <option value="most_played">Most Played</option>
                                 <option value="favorites">Favorites</option>
                                 <option value="newest">Newest</option>
@@ -233,15 +233,18 @@
                                 <option value="random">Random</option>
                             </select>
                         </div>
-                        <div class="form-row" id="smart-param-row" style="display:none">
-                            <label id="smart-param-label">Genre</label>
-                            <input type="text" id="smart-param" placeholder="" class="form-input">
+                        <div class="panel-row" id="smart-param-row" style="display:none">
+                            <span class="panel-label" id="smart-param-label">Genre</span>
+                            <input type="text" id="smart-param" placeholder="" class="panel-input">
                         </div>
-                        <div class="form-row">
-                            <label>Limit</label>
-                            <input type="number" id="smart-limit" value="50" min="1" max="200" class="form-input" style="width:100px">
+                        <div class="panel-row">
+                            <span class="panel-label">Limit</span>
+                            <input type="number" id="smart-limit" value="50" min="1" max="200" class="panel-input" style="width:100px">
                         </div>
-                        <button class="btn btn-primary" onclick="createSmartPlaylist()">Create</button>
+                        <div class="panel-row">
+                            <span class="panel-label"></span>
+                            <button class="btn btn-primary" onclick="createSmartPlaylist()">Create</button>
+                        </div>
                     </div>
                 </div>
                 <div class="section">
@@ -252,13 +255,12 @@
             <div class="tab-content hidden" id="playlist-tab-backup">
                 <div class="section">
                     <div class="section-header"><h3>Backup / Export</h3></div>
-                    <div class="link-panel">
-                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                            <h3 style="margin:0">Download Backup</h3>
+                    <div class="panel">
+                        <div class="panel-row">
+                            <span class="panel-label"></span>
+                            <button class="btn btn-primary" onclick="downloadBackup()">Download Backup</button>
                         </div>
-                        <p style="color:var(--text-muted);font-size:.85rem;margin-bottom:12px">Export all tracks, playlists, stars, and play history as a JSON file.</p>
-                        <button class="btn btn-primary" onclick="downloadBackup()">Download Backup</button>
+                        <p style="color:var(--text-3);font-size:.78rem;margin-top:8px">Export all tracks, playlists, stars, and play history as a JSON file.</p>
                     </div>
                 </div>
             </div>
@@ -493,7 +495,10 @@
         <div class="np-info">
             <h4 id="np-title">Stopped</h4>
             <p id="np-artist">—</p>
-            <p style="font-size:.72rem;color:var(--text-dim)" id="np-format"></p>
+            <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+                <span class="badge disabled" id="np-format-badge" style="display:none">--</span>
+                <span class="badge disabled" id="np-source-badge" style="display:none">--</span>
+            </div>
         </div>
         <div class="np-progress">
             <div class="progress-bar"><div class="fill" id="np-progress-fill"></div></div>

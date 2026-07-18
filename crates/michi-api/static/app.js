@@ -555,8 +555,23 @@ function updateNowPlaying(t) {
   const artist = $('#np-artist');
   if (title) title.textContent = t.title || 'Unknown';
   if (artist) artist.textContent = (t.artist || 'Unknown') + (t.album ? ' — ' + t.album : '');
-  const fmt = $('#np-format');
-  if (fmt) fmt.textContent = t.format || '';
+  const fmt = $('#np-format-badge');
+  if (fmt) {
+    if (t.format) {
+      fmt.style.display = 'inline-block';
+      fmt.className = 'badge format';
+      fmt.setAttribute('data-format', (t.format || '').toLowerCase());
+      fmt.textContent = t.format;
+    } else {
+      fmt.style.display = 'none';
+    }
+  }
+  const src = $('#np-source-badge');
+  if (src) {
+    src.style.display = 'inline-block';
+    src.className = 'badge stable';
+    src.textContent = t.album ? 'Album' : 'Track';
+  }
   const dur = $('#np-duration');
   if (dur) dur.textContent = fmtDur(t.duration_ms);
 }
