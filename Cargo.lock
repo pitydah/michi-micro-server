@@ -1561,6 +1561,7 @@ dependencies = [
  "michi-config",
  "michi-core",
  "michi-db",
+ "michi-ingest",
  "michi-link",
  "michi-m3u",
  "michi-metadata",
@@ -1658,6 +1659,20 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "michi-ingest"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

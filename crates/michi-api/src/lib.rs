@@ -664,6 +664,23 @@ fn v1_link_routes() -> Router<AppState> {
             post(routes::v1::announce::announce_handler),
         )
         .route(
+            "/api/v1/sources",
+            get(routes::v1::sources::list_sources_handler)
+                .post(routes::v1::sources::add_source_handler),
+        )
+        .route(
+            "/api/v1/sources/:id",
+            delete(routes::v1::sources::delete_source_handler),
+        )
+        .route(
+            "/api/v1/sources/:source_id/episodes",
+            get(routes::v1::sources::get_episodes_handler),
+        )
+        .route(
+            "/api/v1/sources/episodes/:id",
+            put(routes::v1::sources::update_episode_handler),
+        )
+        .route(
             "/api/v1/shares",
             get(routes::v1::shares::list_shares_handler)
                 .post(routes::v1::shares::create_share_handler),

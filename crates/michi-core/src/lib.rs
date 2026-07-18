@@ -849,3 +849,28 @@ pub struct RoomGroup {
     pub chain_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamSource {
+    pub id: Uuid,
+    pub url: String,
+    pub stream_type: String,
+    pub name: Option<String>,
+    pub genre: Option<String>,
+    pub description: Option<String>,
+    pub logo_url: Option<String>,
+    pub codec: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodcastEpisodeDb {
+    pub id: Uuid,
+    pub source_id: Uuid,
+    pub title: String,
+    pub audio_url: String,
+    pub pub_date: Option<String>,
+    pub duration_secs: Option<u64>,
+    pub played: bool,
+    pub position_ms: u64,
+}

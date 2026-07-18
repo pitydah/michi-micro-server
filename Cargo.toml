@@ -19,6 +19,7 @@ members = [
     "crates/michi-link",
     "crates/michi-receivers",
     "crates/michi-security",
+    "crates/michi-ingest",
 ]
 
 [workspace.package]

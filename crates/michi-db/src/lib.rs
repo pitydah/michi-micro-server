@@ -383,7 +383,17 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 30 applied");
     }
 
-    info!("database schema at version 30");
+    if current < 31 {
+        info!("applying migration 31: stream sources");
+        migration_031(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (31, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 31 applied");
+    }
+
+    info!("database schema at version 31");
     Ok(())
 }
 
@@ -958,6 +968,42 @@ async fn migration_030(pool: &SqlitePool) -> Result<(), DbError> {
         .await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_pairing_qr_code ON pairing_qr_codes(qr_code)"
+    )
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn migration_031(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS stream_sources (
+            id TEXT PRIMARY KEY,
+            url TEXT NOT NULL,
+            stream_type TEXT NOT NULL DEFAULT 'unknown',
+            name TEXT,
+            genre TEXT,
+            description TEXT,
+            logo_url TEXT,
+            codec TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            last_checked TEXT,
+            created_at TEXT NOT NULL
+        )"
+    )
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS podcast_episodes (
+            id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL REFERENCES stream_sources(id),
+            title TEXT NOT NULL,
+            audio_url TEXT NOT NULL,
+            pub_date TEXT,
+            duration_secs INTEGER,
+            played INTEGER NOT NULL DEFAULT 0,
+            position_ms INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )"
     )
         .execute(pool)
         .await?;
@@ -3614,4 +3660,109 @@ pub async fn toggle_radio_favorite(
         .execute(pool)
         .await?;
     Ok(res.rows_affected() > 0)
+}
+
+// ── Stream Sources ───────────────────────────────────────────────
+
+pub async fn list_stream_sources(pool: &SqlitePool) -> Result<Vec<michi_core::StreamSource>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, url, stream_type, name, genre, description, logo_url, codec, enabled
+         FROM stream_sources ORDER BY name ASC"
+    )
+        .fetch_all(pool)
+        .await?;
+    let sources = rows.iter().map(|r| {
+        let id_str: &str = r.try_get("id").unwrap();
+        let url: &str = r.try_get("url").unwrap();
+        let st: &str = r.try_get("stream_type").unwrap();
+        let name: Option<&str> = r.try_get("name").ok();
+        let genre: Option<&str> = r.try_get("genre").ok();
+        let desc: Option<&str> = r.try_get("description").ok();
+        let logo: Option<&str> = r.try_get("logo_url").ok();
+        let codec: Option<&str> = r.try_get("codec").ok();
+        let enabled: i64 = r.try_get("enabled").unwrap();
+        michi_core::StreamSource {
+            id: Uuid::parse_str(id_str).unwrap(), url: url.to_string(), stream_type: st.to_string(),
+            name: name.map(|s| s.to_string()), genre: genre.map(|s| s.to_string()),
+            description: desc.map(|s| s.to_string()), logo_url: logo.map(|s| s.to_string()),
+            codec: codec.map(|s| s.to_string()), enabled: enabled != 0,
+        }
+    }).collect();
+    Ok(sources)
+}
+
+pub async fn add_stream_source(pool: &SqlitePool, source: &michi_core::StreamSource) -> Result<(), DbError> {
+    let id = Uuid::new_v4();
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO stream_sources (id, url, stream_type, name, genre, description, logo_url, codec, enabled, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+        .bind(id.to_string()).bind(&source.url).bind(&source.stream_type)
+        .bind(&source.name).bind(&source.genre).bind(&source.description)
+        .bind(&source.logo_url).bind(&source.codec).bind(source.enabled as i64)
+        .bind(&now)
+        .execute(pool).await?;
+    Ok(())
+}
+
+pub async fn delete_stream_source(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbError> {
+    let id_s = id.to_string();
+    sqlx::query("DELETE FROM podcast_episodes WHERE source_id = ?").bind(&id_s).execute(pool).await?;
+    let res = sqlx::query("DELETE FROM stream_sources WHERE id = ?").bind(&id_s).execute(pool).await?;
+    Ok(res.rows_affected() > 0)
+}
+
+pub async fn update_stream_source_enabled(pool: &SqlitePool, id: &Uuid, enabled: bool) -> Result<bool, DbError> {
+    let id_s = id.to_string();
+    let res = sqlx::query("UPDATE stream_sources SET enabled = ? WHERE id = ?")
+        .bind(enabled as i64).bind(&id_s).execute(pool).await?;
+    Ok(res.rows_affected() > 0)
+}
+
+// ── Podcast Episodes ─────────────────────────────────────────────
+
+pub async fn list_podcast_episodes(pool: &SqlitePool, source_id: &Uuid) -> Result<Vec<michi_core::PodcastEpisodeDb>, DbError> {
+    let sid = source_id.to_string();
+    let rows = sqlx::query(
+        "SELECT id, title, audio_url, pub_date, duration_secs, played, position_ms
+         FROM podcast_episodes WHERE source_id = ? ORDER BY pub_date DESC"
+    )
+        .bind(&sid).fetch_all(pool).await?;
+    let episodes = rows.iter().map(|r| {
+        let id_str: &str = r.try_get("id").unwrap();
+        let title: &str = r.try_get("title").unwrap();
+        let url_str: &str = r.try_get("audio_url").unwrap();
+        let pub_date_str: Option<&str> = r.try_get("pub_date").ok();
+        let dur: Option<i64> = r.try_get("duration_secs").ok();
+        let played: i64 = r.try_get("played").unwrap();
+        let pos: i64 = r.try_get("position_ms").unwrap();
+        michi_core::PodcastEpisodeDb {
+            id: Uuid::parse_str(id_str).unwrap(), source_id: *source_id,
+            title: title.to_string(), audio_url: url_str.to_string(),
+            pub_date: pub_date_str.map(|s| s.to_string()), duration_secs: dur.map(|d| d as u64),
+            played: played != 0, position_ms: pos as u64,
+        }
+    }).collect();
+    Ok(episodes)
+}
+
+pub async fn upsert_podcast_episode(pool: &SqlitePool, ep: &michi_core::PodcastEpisodeDb) -> Result<(), DbError> {
+    let id = Uuid::new_v4();
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO podcast_episodes (id, source_id, title, audio_url, pub_date, duration_secs, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(audio_url) DO NOTHING"
+    )
+        .bind(id.to_string()).bind(ep.source_id.to_string()).bind(&ep.title)
+        .bind(&ep.audio_url).bind(&ep.pub_date).bind(ep.duration_secs.map(|d| d as i64))
+        .bind(&now).execute(pool).await?;
+    Ok(())
+}
+
+pub async fn update_episode_progress(pool: &SqlitePool, id: &Uuid, position_ms: u64, played: bool) -> Result<(), DbError> {
+    let id_s = id.to_string();
+    sqlx::query("UPDATE podcast_episodes SET position_ms = ?, played = ? WHERE id = ?")
+        .bind(position_ms as i64).bind(played as i64).bind(&id_s).execute(pool).await?;
+    Ok(())
 }

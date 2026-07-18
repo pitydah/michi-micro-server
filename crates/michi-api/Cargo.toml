@@ -36,6 +36,7 @@ michi-rooms = { path = "../michi-rooms" }
 michi-link = { path = "../michi-link" }
 michi-receivers = { path = "../michi-receivers" }
 michi-security = { path = "../michi-security" }
+michi-ingest = { path = "../michi-ingest" }
 mdns-sd = "0.13"
 qrcode = { workspace = true }
 rand = "0.8"
