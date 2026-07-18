@@ -3,18 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Michi Micro Server - Control panel for your home music server">
+    <meta name="theme-color" content="#070A12">
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" type="image/svg+xml" href="/static/assets/michi-micro-server.svg">
     <link rel="icon" type="image/png" sizes="512x512" href="/static/assets/michi-micro-server.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css?v=3">
-    <title>Michi Server</title>
+    <title>Michi Micro Server</title>
 </head>
 <body>
-    <div class="toast" id="toast" role="alert" aria-live="polite"></div>
+    <div class="toast" id="toast" role="alert" aria-live="assertive"></div>
     <audio id="audio-player" preload="none"></audio>
 
     <!-- Sidebar -->
-    <aside class="sidebar">
+    <aside class="sidebar" role="navigation" aria-label="Main navigation">
         <div class="sidebar-header">
             <img src="/static/assets/michi-micro-server.svg" alt="Michi" class="sidebar-logo-img">
             <div class="sidebar-brand">
@@ -23,24 +28,24 @@
                 <span class="ver" id="sidebar-ver">--</span>
             </div>
         </div>
-        <nav class="sidebar-nav">
+        <nav class="sidebar-nav" aria-label="Sections">
             <div class="nav-section">
                 <h3>Main</h3>
-                <button class="nav-item active" data-section="dashboard" onclick="showSection('dashboard')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <button class="nav-item active" data-section="dashboard" onclick="showSection('dashboard')" aria-current="page">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="4" rx="1"/>
                         <rect x="3" y="14" width="4" height="7" rx="1"/><rect x="14" y="11" width="7" height="10" rx="1"/>
                     </svg>
                     Dashboard
                 </button>
                 <button class="nav-item" data-section="library" onclick="showSection('library')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
                     </svg>
                     Library
                 </button>
                 <button class="nav-item" data-section="scan" onclick="showSection('scan')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/>
                     </svg>
                     Scan
@@ -49,20 +54,20 @@
             <div class="nav-section">
                 <h3>Server</h3>
                 <button class="nav-item" data-section="playlists" onclick="showSection('playlists')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
                     </svg>
                     Playlists
                 </button>
                 <button class="nav-item" data-section="michilink" onclick="showSection('michilink')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
                         <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
                     </svg>
                     Michi Link <span class="badge beta">v1</span>
                 </button>
                 <button class="nav-item" data-section="status" onclick="showSection('status')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
                     </svg>
                     Status
@@ -71,23 +76,21 @@
             <div class="nav-section">
                 <h3>System</h3>
                 <button class="nav-item" data-section="settings" onclick="showSection('settings')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                     </svg>
                     Settings
                 </button>
                 <button class="nav-item" data-section="history" onclick="showSection('history')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
                     </svg>
                     History
                 </button>
                 <button class="nav-item" data-section="chains" onclick="showSection('chains')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <circle cx="6" cy="12" r="2" fill="currentColor" stroke="none"/>
-                        <path d="M10 8l6 4-6 4" fill="none"/>
-                        <path d="M16 8l6 4-6 4" fill="none"/>
-                        <path d="M10 12h12" fill="none"/>
+                        <path d="M10 8l6 4-6 4" fill="none"/><path d="M16 8l6 4-6 4" fill="none"/><path d="M10 12h12" fill="none"/>
                     </svg>
                     Chains
                 </button>
@@ -102,7 +105,6 @@
             <div class="row"><span class="label">Up</span><span class="value" id="sidebar-uptime">--</span></div>
             <div class="row"><span class="label">API</span><span class="value">v1</span></div>
             <div class="row"><span class="label">DB</span><span class="value" id="sidebar-db-status">--</span></div>
-        </div>
         </div>
     </aside>
 
@@ -482,9 +484,15 @@
     </main>
 
     <!-- Right panel: Now Playing -->
-    <aside class="now-playing">
+    <aside class="now-playing" role="complementary" aria-label="Now playing">
         <h3>Now Playing</h3>
-        <div class="np-cover" id="np-cover">🎵</div>
+        <div class="np-cover" id="np-cover">
+            <div class="np-cover-placeholder">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" width="64" height="64">
+                    <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
+                </svg>
+            </div>
+        </div>
         <div class="np-info">
             <h4 id="np-title">Stopped</h4>
             <p id="np-artist">—</p>

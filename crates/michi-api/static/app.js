@@ -117,19 +117,36 @@ function showToast(msg, isErr) {
   const el = $('#toast');
   if (!el) return;
   el.textContent = msg;
-  el.style.borderColor = isErr ? '#EF4444' : '#22C55E';
+  el.className = 'toast ' + (isErr ? 'toast-error' : 'toast-success');
   el.style.display = 'block';
-  setTimeout(() => { el.style.display = 'none'; }, 3000);
+  setTimeout(() => {
+    el.classList.add('toast-hiding');
+    setTimeout(() => { el.style.display = 'none'; el.classList.remove('toast-hiding'); }, 200);
+  }, 3000);
 }
 
 // ── Navigation ──────────────────────────────────────────────────
 function showSection(section) {
-  $$('.nav-item').forEach(n => n.classList.remove('active'));
+  $$('.nav-item').forEach(n => {
+    n.classList.remove('active');
+    n.removeAttribute('aria-current');
+  });
   const nav = $('.nav-item[data-section="' + section + '"]');
-  if (nav) nav.classList.add('active');
-  $$('.section-page').forEach(p => p.classList.add('hidden'));
+  if (nav) {
+    nav.classList.add('active');
+    nav.setAttribute('aria-current', 'page');
+  }
+  $$('.section-page').forEach(p => {
+    p.classList.add('hidden');
+    p.classList.remove('fade-in');
+  });
   const page = $('#page-' + section);
-  if (page) page.classList.remove('hidden');
+  if (page) {
+    page.classList.remove('hidden');
+    // Trigger reflow for animation
+    void page.offsetHeight;
+    page.classList.add('fade-in');
+  }
 }
 
 // ── Init ────────────────────────────────────────────────────────
@@ -368,7 +385,8 @@ function renderTracks(tracks, tableId) {
       '<td class="track-artist">' + esc(t.album || '—') + '</td>' +
       '<td><span class="badge format" data-format="' + esc(t.format || '').toLowerCase() + '">' + esc(t.format || '?') + '</span></td>' +
       '<td style="color:var(--text-dim)">' + fmtDur(t.duration_ms) + '</td>' +
-      '<td><button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();playTrack(' + realIdx + ')">Play</button></td>' +
+      '<td><button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();playTrack(' + realIdx + ')">Play</button>' +
+      '<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();addToQueue(' + realIdx + ')" style="margin-left:4px" aria-label="Add to queue">+Q</button></td>' +
       '</tr>';
   });
 
@@ -416,16 +434,11 @@ document.addEventListener('keydown', (e) => {
 
 // ── Scan ────────────────────────────────────────────────────────
 async function handleScan() {
-  const btn = $('#scan-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Scanning...'; }
   try {
     const r = await MichiAPI.scan();
     showToast('Scanned ' + r.scanned + ' tracks, saved ' + r.saved);
-    await Promise.all([loadStats(), loadTracks()]);
+    await Promise.all([loadDashboard(), loadTracks()]);
   } catch (e) { showToast(e.message, true); }
-  finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Scan'; }
-  }
 }
 
 // ── Playback ────────────────────────────────────────────────────
@@ -460,6 +473,31 @@ function playTrack(idx) {
     showToast('Could not play: ' + err.message, true);
   });
   updatePlayButtons();
+}
+
+function addToQueue(idx) {
+  const tracks = State.tracks;
+  if (!tracks || idx < 0 || idx >= tracks.length) return;
+  const t = tracks[idx];
+  State.queue.push(t);
+  renderQueue();
+  showToast('Added "' + (t.title || 'Unknown') + '" to queue');
+}
+
+function renderQueue() {
+  const container = $('#queue-content');
+  if (!container) return;
+  if (State.queue.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-dim);font-size:.78rem">Queue empty</p>';
+    return;
+  }
+  container.innerHTML = State.queue.map(function (t, i) {
+    return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:.75rem">' +
+      '<span style="color:var(--text-dim);min-width:16px">' + (i + 1) + '</span>' +
+      '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(t.title || 'Unknown') + '</span>' +
+      '<span style="color:var(--text-dim);font-size:.65rem">' + fmtDur(t.duration_ms) + '</span>' +
+      '</div>';
+  }).join('');
 }
 
 function playPause() {
