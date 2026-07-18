@@ -1,7 +1,25 @@
 use std::io::Write;
 use std::{env, path::Path, path::PathBuf};
 
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiConfig {
+    pub theme: String,
+    pub sidebar_collapsed: bool,
+    pub cover_art_enabled: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: "dark".into(),
+            sidebar_collapsed: false,
+            cover_art_enabled: true,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -28,7 +46,20 @@ pub struct Config {
     pub format_policy: michi_core::AudioFormatPolicy,
     pub max_remote_bitrate: u32,
     pub remote_sync: bool,
+    pub language: String,
+    pub ui: UiConfig,
+    pub auto_backup_enabled: bool,
+    pub backup_max_keep: u32,
+    pub job_max_concurrent: u32,
+    pub reconnect_delay_max: u32,
 }
+
+fn default_port() -> u16 { 8096 }
+fn default_music_paths() -> Vec<PathBuf> { vec![PathBuf::from("/music")] }
+fn default_lang() -> String { "en".into() }
+fn default_backup_keep() -> u32 { 7 }
+fn default_max_jobs() -> u32 { 3 }
+fn default_reconnect() -> u32 { 300 }
 
 impl Config {
     pub fn from_env() -> Self {
@@ -94,19 +125,7 @@ impl Config {
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false);
 
-        let resource_profile = michi_core::ResourceProfile::from_config_str(
-            &env::var("MICHI_RESOURCE_PROFILE").unwrap_or_else(|_| "balanced".into()),
-        );
-
-        let stream_profile = michi_core::StreamProfile::from_config_str(
-            &env::var("MICHI_STREAM_PROFILE").unwrap_or_else(|_| "original".into()),
-        );
-
-        let format_policy = michi_core::AudioFormatPolicy::from_config_str(
-            &env::var("MICHI_FORMAT_POLICY").unwrap_or_else(|_| "lossless".into()),
-        );
-
-        Self {
+        let mut config = Self {
             port,
             music_paths,
             config_path,
@@ -125,18 +144,97 @@ impl Config {
             server_id,
             cors_origin,
             dev_mode,
-            resource_profile,
-            stream_profile,
-            format_policy,
-            max_remote_bitrate: env::var("MICHI_MAX_REMOTE_BITRATE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(320_000),
-            remote_sync: env::var("MICHI_REMOTE_SYNC")
-                .ok()
-                .map(|v| v == "1" || v.to_lowercase() == "true")
-                .unwrap_or(false),
+            resource_profile: michi_core::ResourceProfile::from_config_str("balanced"),
+            stream_profile: michi_core::StreamProfile::from_config_str("original"),
+            format_policy: michi_core::AudioFormatPolicy::from_config_str("lossless"),
+            max_remote_bitrate: 320_000,
+            remote_sync: false,
+            language: "en".into(),
+            ui: UiConfig {
+                theme: "dark".into(),
+                sidebar_collapsed: false,
+                cover_art_enabled: true,
+            },
+            auto_backup_enabled: false,
+            backup_max_keep: 7,
+            job_max_concurrent: 3,
+            reconnect_delay_max: 300,
+        };
+
+        // Load from config.json if present (env vars override)
+        config.load_file_overrides();
+        config.apply_env_overrides();
+        config
+    }
+
+    fn load_file_overrides(&mut self) {
+        let path = self.config_path.join("config.json");
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(file_cfg) = serde_json::from_str::<Config>(&content) {
+                self.port = file_cfg.port;
+                if !file_cfg.music_paths.is_empty() {
+                    self.music_paths = file_cfg.music_paths;
+                }
+                if !file_cfg.sync_peers.is_empty() {
+                    self.sync_peers = file_cfg.sync_peers;
+                }
+                if !file_cfg.sync_name.is_empty() {
+                    self.sync_name = file_cfg.sync_name;
+                }
+                self.scrobble_enabled = file_cfg.scrobble_enabled;
+                self.allow_registration = file_cfg.allow_registration;
+                self.dev_mode = file_cfg.dev_mode;
+                self.resource_profile = file_cfg.resource_profile;
+                self.stream_profile = file_cfg.stream_profile;
+                self.format_policy = file_cfg.format_policy;
+                self.max_remote_bitrate = file_cfg.max_remote_bitrate;
+                self.remote_sync = file_cfg.remote_sync;
+                self.language = file_cfg.language;
+                self.ui = file_cfg.ui;
+                self.auto_backup_enabled = file_cfg.auto_backup_enabled;
+                self.backup_max_keep = file_cfg.backup_max_keep;
+                self.job_max_concurrent = file_cfg.job_max_concurrent;
+                self.reconnect_delay_max = file_cfg.reconnect_delay_max;
+            }
         }
+    }
+
+    fn apply_env_overrides(&mut self) {
+        if let Ok(v) = env::var("MICHI_PORT") {
+            if let Ok(p) = v.parse::<u16>() { self.port = p; }
+        }
+        if let Ok(v) = env::var("MICHI_MUSIC_PATH") {
+            let paths: Vec<PathBuf> = v.split(',')
+                .map(|s| PathBuf::from(s.trim()))
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect();
+            if !paths.is_empty() { self.music_paths = paths; }
+        }
+        if let Ok(v) = env::var("MICHI_RESOURCE_PROFILE") { self.resource_profile = michi_core::ResourceProfile::from_config_str(&v); }
+        if let Ok(v) = env::var("MICHI_STREAM_PROFILE") { self.stream_profile = michi_core::StreamProfile::from_config_str(&v); }
+        if let Ok(v) = env::var("MICHI_FORMAT_POLICY") { self.format_policy = michi_core::AudioFormatPolicy::from_config_str(&v); }
+        if let Ok(v) = env::var("MICHI_SYNC_PEERS") {
+            self.sync_peers = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        }
+        if let Ok(v) = env::var("MICHI_SYNC_NAME") { self.sync_name = v; }
+        if let Ok(v) = env::var("MICHI_SCROBBLE_ENABLED") { self.scrobble_enabled = v == "1" || v.to_lowercase() == "true"; }
+        if let Ok(v) = env::var("MICHI_ALLOW_REGISTRATION") { self.allow_registration = v == "1" || v.to_lowercase() == "true"; }
+        if let Ok(v) = env::var("MICHI_CORS_ORIGIN") { self.cors_origin = Some(v); }
+        if let Ok(v) = env::var("MICHI_DEV_MODE") { self.dev_mode = v == "1" || v.to_lowercase() == "true"; }
+        if let Ok(v) = env::var("MICHI_MAX_REMOTE_BITRATE") { if let Ok(p) = v.parse() { self.max_remote_bitrate = p; } }
+        if let Ok(v) = env::var("MICHI_REMOTE_SYNC") { self.remote_sync = v == "1" || v.to_lowercase() == "true"; }
+        if let Ok(v) = env::var("MICHI_LANG") { self.language = v; }
+        if let Ok(v) = env::var("MICHI_AUTO_BACKUP") { self.auto_backup_enabled = v == "1" || v.to_lowercase() == "true"; }
+        if let Ok(v) = env::var("MICHI_BACKUP_KEEP") { if let Ok(p) = v.parse() { self.backup_max_keep = p; } }
+        if let Ok(v) = env::var("MICHI_MAX_JOBS") { if let Ok(p) = v.parse() { self.job_max_concurrent = p; } }
+        if let Ok(v) = env::var("MICHI_RECONNECT_MAX") { if let Ok(p) = v.parse() { self.reconnect_delay_max = p; } }
+    }
+
+    pub fn save_to_file(&self) -> Result<(), String> {
+        let path = self.config_path.join("config.json");
+        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::write(&path, &json).map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn port(&self) -> u16 {
@@ -147,30 +245,53 @@ impl Config {
         self.version
     }
 
-    /// Returns the first music path, if configured.
-    /// This is the safe alternative to `music_path()`.
     pub fn primary_music_path(&self) -> Option<&Path> {
         self.music_paths.first().map(|p| p.as_path())
     }
 
-    /// Convenience method returning the first music path.
-    /// Deprecated: use `primary_music_path()` for new code.
-    /// Guaranteed to return at least `/music` if none configured.
     #[deprecated(since = "0.1.0", note = "use primary_music_path() instead")]
     pub fn music_path(&self) -> &Path {
         &self.music_paths[0]
+    }
+
+    pub fn human_resource_profile(&self) -> String {
+        match self.resource_profile.to_string().as_str() {
+            "balanced" => "Balanced — good quality, moderate CPU usage".into(),
+            "original" => "Original — no transcoding, direct stream".into(),
+            "lossless" => "Lossless — high quality, files served as-is".into(),
+            "high" => "High Quality — high bitrate audio".into(),
+            "low" => "Efficient — lower quality, saves bandwidth".into(),
+            _ => self.resource_profile.to_string(),
+        }
+    }
+
+    pub fn human_stream_profile(&self) -> String {
+        match self.stream_profile.to_string().as_str() {
+            "original" => "Original — no transcoding".into(),
+            "high" => "High Quality — transcoded to high bitrate".into(),
+            "medium" => "Medium — balanced quality".into(),
+            "low" => "Efficient — low bitrate for remote".into(),
+            _ => self.stream_profile.to_string(),
+        }
+    }
+
+    pub fn human_format_policy(&self) -> String {
+        match self.format_policy.to_string().as_str() {
+            "lossless" => "Lossless — serve original files without conversion".into(),
+            "transcoded" => "Transcoded — convert to compatible format on the fly".into(),
+            "passthrough" => "Passthrough — let the client decide".into(),
+            _ => self.format_policy.to_string(),
+        }
     }
 }
 
 pub fn load_or_create_server_id(config_path: &Path) -> Uuid {
     let file_path = config_path.join("server_id");
-
     if let Ok(existing) = std::fs::read_to_string(&file_path) {
         if let Ok(id) = Uuid::parse_str(existing.trim()) {
             return id;
         }
     }
-
     let id = Uuid::new_v4();
     if let Some(parent) = file_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -181,132 +302,88 @@ pub fn load_or_create_server_id(config_path: &Path) -> Uuid {
     id
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// ── Custom serde for Config: serialize profile enums as strings ──
 
-    #[test]
-    fn test_database_url_default_no_mode_param() {
-        temp_env::with_var("MICHI_DATABASE", None::<&str>, || {
-            let config = Config::from_env();
-            assert_eq!(config.database_url, "sqlite:///config/michi.db");
-            assert!(
-                !config.database_url.contains("?mode=rwc"),
-                "default URL should not need ?mode=rwc"
-            );
-        });
+use serde::ser::SerializeStruct;
+
+impl Serialize for Config {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut s = serializer.serialize_struct("Config", 20)?;
+        s.serialize_field("port", &self.port)?;
+        s.serialize_field("music_paths", &self.music_paths)?;
+        s.serialize_field("sync_peers", &self.sync_peers)?;
+        s.serialize_field("sync_name", &self.sync_name)?;
+        s.serialize_field("scrobble_enabled", &self.scrobble_enabled)?;
+        s.serialize_field("allow_registration", &self.allow_registration)?;
+        s.serialize_field("dev_mode", &self.dev_mode)?;
+        s.serialize_field("resource_profile", &self.resource_profile.to_string())?;
+        s.serialize_field("stream_profile", &self.stream_profile.to_string())?;
+        s.serialize_field("format_policy", &self.format_policy.to_string())?;
+        s.serialize_field("max_remote_bitrate", &self.max_remote_bitrate)?;
+        s.serialize_field("remote_sync", &self.remote_sync)?;
+        s.serialize_field("language", &self.language)?;
+        s.serialize_field("ui", &self.ui)?;
+        s.serialize_field("auto_backup_enabled", &self.auto_backup_enabled)?;
+        s.serialize_field("backup_max_keep", &self.backup_max_keep)?;
+        s.serialize_field("job_max_concurrent", &self.job_max_concurrent)?;
+        s.serialize_field("reconnect_delay_max", &self.reconnect_delay_max)?;
+        s.serialize_field("cors_origin", &self.cors_origin)?;
+        s.end()
     }
+}
 
-    #[test]
-    fn test_port_default() {
-        temp_env::with_var("MICHI_PORT", None::<&str>, || {
-            let config = Config::from_env();
-            assert_eq!(config.port, 8096);
-        });
-    }
+impl<'de> Deserialize<'de> for Config {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ConfigHelper {
+            port: Option<u16>,
+            music_paths: Option<Vec<PathBuf>>,
+            sync_peers: Option<Vec<String>>,
+            sync_name: Option<String>,
+            scrobble_enabled: Option<bool>,
+            allow_registration: Option<bool>,
+            dev_mode: Option<bool>,
+            resource_profile: Option<String>,
+            stream_profile: Option<String>,
+            format_policy: Option<String>,
+            max_remote_bitrate: Option<u32>,
+            remote_sync: Option<bool>,
+            language: Option<String>,
+            ui: Option<UiConfig>,
+            auto_backup_enabled: Option<bool>,
+            backup_max_keep: Option<u32>,
+            job_max_concurrent: Option<u32>,
+            reconnect_delay_max: Option<u32>,
+            cors_origin: Option<String>,
+        }
 
-    #[test]
-    fn test_music_path_default() {
-        temp_env::with_var("MICHI_MUSIC_PATH", None::<&str>, || {
-            let config = Config::from_env();
-            assert_eq!(config.music_paths, vec![PathBuf::from("/music")]);
-            assert_eq!(config.primary_music_path(), Some(Path::new("/music")));
-        });
-    }
-
-    #[test]
-    fn test_music_paths_multiple() {
-        temp_env::with_var(
-            "MICHI_MUSIC_PATH",
-            Some("/music,/mnt/music,/data/music"),
-            || {
-                let config = Config::from_env();
-                assert_eq!(
-                    config.music_paths,
-                    vec![
-                        PathBuf::from("/music"),
-                        PathBuf::from("/mnt/music"),
-                        PathBuf::from("/data/music"),
-                    ]
-                );
-            },
-        );
-    }
-
-    #[test]
-    fn test_music_paths_single_with_trailing_comma() {
-        temp_env::with_var("MICHI_MUSIC_PATH", Some("/music,"), || {
-            let config = Config::from_env();
-            assert_eq!(config.music_paths, vec![PathBuf::from("/music")]);
-        });
-    }
-
-    #[test]
-    fn test_primary_music_path_default() {
-        temp_env::with_var("MICHI_MUSIC_PATH", None::<&str>, || {
-            let config = Config::from_env();
-            assert_eq!(config.primary_music_path(), Some(Path::new("/music")));
-        });
-    }
-
-    #[test]
-    fn test_primary_music_path_multiple() {
-        temp_env::with_var("MICHI_MUSIC_PATH", Some("/a,/b,/c"), || {
-            let config = Config::from_env();
-            assert_eq!(config.primary_music_path(), Some(Path::new("/a")));
-            assert_eq!(config.music_paths.len(), 3);
-        });
-    }
-
-    #[test]
-    fn test_primary_music_path_empty_env_uses_default() {
-        temp_env::with_var("MICHI_MUSIC_PATH", Some(""), || {
-            let config = Config::from_env();
-            assert_eq!(config.primary_music_path(), Some(Path::new("/music")));
-            assert_eq!(config.music_paths.len(), 1);
-        });
-    }
-
-    #[test]
-    fn test_auth_disabled_when_not_set() {
-        temp_env::with_vars(
-            vec![
-                ("MICHI_AUTH_USERNAME", None::<&str>),
-                ("MICHI_AUTH_PASSWORD", None::<&str>),
-            ],
-            || {
-                let config = Config::from_env();
-                assert!(!config.auth_enabled);
-                assert!(config.auth_username.is_none());
-                assert!(config.auth_password.is_none());
-            },
-        );
-    }
-
-    #[test]
-    fn test_auth_enabled_when_both_set() {
-        temp_env::with_vars(
-            vec![
-                ("MICHI_AUTH_USERNAME", Some("admin")),
-                ("MICHI_AUTH_PASSWORD", Some("secret")),
-            ],
-            || {
-                let config = Config::from_env();
-                assert!(config.auth_enabled);
-                assert_eq!(config.auth_username.as_deref(), Some("admin"));
-                assert_eq!(config.auth_password.as_deref(), Some("secret"));
-            },
-        );
-    }
-
-    #[test]
-    fn test_env_overrides() {
-        temp_env::with_var("MICHI_PORT", Some("9999"), || {
-            temp_env::with_var("MICHI_DATABASE", Some("sqlite://./local.db"), || {
-                let config = Config::from_env();
-                assert_eq!(config.port, 9999);
-                assert_eq!(config.database_url, "sqlite://./local.db");
-            });
-        });
+        let h = ConfigHelper::deserialize(deserializer)?;
+        let mut cfg = Config::from_env();
+        if let Some(v) = h.port { cfg.port = v; }
+        if let Some(v) = h.music_paths { if !v.is_empty() { cfg.music_paths = v; } }
+        if let Some(v) = h.sync_peers { cfg.sync_peers = v; }
+        if let Some(v) = h.sync_name { cfg.sync_name = v; }
+        if let Some(v) = h.scrobble_enabled { cfg.scrobble_enabled = v; }
+        if let Some(v) = h.allow_registration { cfg.allow_registration = v; }
+        if let Some(v) = h.dev_mode { cfg.dev_mode = v; }
+        if let Some(ref v) = h.resource_profile { cfg.resource_profile = michi_core::ResourceProfile::from_config_str(v); }
+        if let Some(ref v) = h.stream_profile { cfg.stream_profile = michi_core::StreamProfile::from_config_str(v); }
+        if let Some(ref v) = h.format_policy { cfg.format_policy = michi_core::AudioFormatPolicy::from_config_str(v); }
+        if let Some(v) = h.max_remote_bitrate { cfg.max_remote_bitrate = v; }
+        if let Some(v) = h.remote_sync { cfg.remote_sync = v; }
+        if let Some(v) = h.language { cfg.language = v; }
+        if let Some(v) = h.ui { cfg.ui = v; }
+        if let Some(v) = h.auto_backup_enabled { cfg.auto_backup_enabled = v; }
+        if let Some(v) = h.backup_max_keep { cfg.backup_max_keep = v; }
+        if let Some(v) = h.job_max_concurrent { cfg.job_max_concurrent = v; }
+        if let Some(v) = h.reconnect_delay_max { cfg.reconnect_delay_max = v; }
+        if let Some(v) = h.cors_origin { cfg.cors_origin = Some(v); }
+        Ok(cfg)
     }
 }

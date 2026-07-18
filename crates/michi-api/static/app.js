@@ -49,16 +49,22 @@ const MichiAPI = {
 var _i18n = {};
 var _currentLang = localStorage.getItem('michi_lang') || navigator.language.split('-')[0] || 'en';
 
-function t(key) {
+function t(key, vars) {
   var val = _i18n[key];
-  return val !== undefined && val !== null ? val : key;
+  if (val === undefined || val === null) return key;
+  if (vars) {
+    for (var k in vars) {
+      val = val.replace('{' + k + '}', vars[k]);
+    }
+  }
+  return val;
 }
 
 async function loadI18n(lang) {
   _currentLang = lang || _currentLang;
   localStorage.setItem('michi_lang', _currentLang);
   try {
-    var resp = await fetch('/static/i18n/' + _currentLang + '.json');
+    var resp = await fetch('/static/i18n/' + _currentLang);
     if (resp.ok) {
       _i18n = await resp.json();
     } else {
@@ -90,7 +96,7 @@ function setLanguage(lang) {
   loadI18n(lang).then(function () {
     var sel = $('#lang-select');
     if (sel) sel.value = lang;
-    showToast('Language: ' + lang.toUpperCase());
+    showToast(t('toast.language_set', {lang: lang.toUpperCase()}));
   });
 }
 
@@ -174,6 +180,32 @@ function showToast(msg, isErr) {
   }, 3000);
 }
 
+// ── Modal ────────────────────────────────────────────────────────
+var _modalCallback = null;
+
+function showModal(title, message, confirmText, callback) {
+  var overlay = $('#modal-overlay');
+  var titleEl = $('#modal-title');
+  var msgEl = $('#modal-message');
+  var btn = $('#modal-confirm-btn');
+  if (!overlay) return;
+  titleEl.textContent = title;
+  msgEl.textContent = message;
+  btn.textContent = confirmText || t('common.confirm');
+  _modalCallback = callback;
+  overlay.classList.remove('hidden');
+}
+
+function closeModal() {
+  var overlay = $('#modal-overlay');
+  if (overlay) overlay.classList.add('hidden');
+  _modalCallback = null;
+}
+
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') closeModal();
+});
+
 // ── Navigation ──────────────────────────────────────────────────
 function showSection(section) {
   $$('.nav-item').forEach(n => {
@@ -254,7 +286,7 @@ function renderStatusPage() {
   if (!container) return;
   const s = State.status;
   if (!s) {
-    container.innerHTML = '<div class="empty-state"><p style="color:var(--error)">Could not load server status</p></div>';
+    container.innerHTML = '<div class="empty-state"><p style="color:var(--error)">' + t('error.could_not_load_status') + '</p></div>';
     return;
   }
   container.innerHTML =
@@ -352,7 +384,7 @@ function renderDashboard() {
   if (!cd) return;
 
   if (!d) {
-    cd.innerHTML = '<div class="empty-state"><div class="icon">📊</div><p><strong>Could not load dashboard</strong></p><p style="font-size:.78rem;margin-top:4px">Server may be starting up.</p></div>';
+    cd.innerHTML = '<div class="empty-state"><div class="icon">📊</div><p><strong>' + t('error.could_not_load_dashboard') + '</strong></p><p style="font-size:.78rem;margin-top:4px">' + t('common.retry') + '.</p></div>';
     return;
   }
 
@@ -474,7 +506,7 @@ async function handleSearch() {
     } else {
       $('#search-input').style.borderColor = '';
     }
-    showToast('Found ' + State.tracks.length + ' results');
+    showToast(t('toast.found_results', {n: State.tracks.length}));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -486,7 +518,7 @@ document.addEventListener('keydown', (e) => {
 async function handleScan() {
   try {
     const r = await MichiAPI.scan();
-    showToast('Scanned ' + r.scanned + ' tracks, saved ' + r.saved);
+    showToast(t('toast.scanned', {n: r.scanned, s: r.saved}));
     await Promise.all([loadDashboard(), loadTracks()]);
   } catch (e) { showToast(e.message, true); }
 }
@@ -503,7 +535,7 @@ function getAudio() {
     State.audio.ontimeupdate = updatePlaybackProgress;
     State.audio.onended = onTrackEnd;
     State.audio.onerror = function () {
-      showToast('Playback error: ' + (State.audio?.error?.message || 'unknown'), true);
+      showToast(t('error.playback_error', {msg: State.audio?.error?.message || 'unknown'}), true);
     };
   }
   return State.audio;
@@ -520,7 +552,7 @@ function playTrack(idx) {
   const audio = getAudio();
   audio.src = MichiAPI.streamUrl(t.id);
   audio.play().catch(function (err) {
-    showToast('Could not play: ' + err.message, true);
+    showToast(t('error.could_not_play', {msg: err.message}), true);
   });
   updatePlayButtons();
 }
@@ -531,7 +563,7 @@ function addToQueue(idx) {
   const t = tracks[idx];
   State.queue.push(t);
   renderQueue();
-  showToast('Added "' + (t.title || 'Unknown') + '" to queue');
+  showToast(t('toast.added_to_queue', {title: t.title || 'Unknown'}));
 }
 
 function renderQueue() {
@@ -565,7 +597,7 @@ function playPause() {
 }
 
 function onTrackEnd() {
-  showToast('Track ended');
+  showToast(t('toast.track_ended'));
 }
 
 function updatePlaybackProgress() {
@@ -647,7 +679,7 @@ function testMichiLink() {
   loadStatus();
   loadServerInfo();
   loadEcosystemDevices();
-  showToast('Michi Link tested!');
+  showToast(t('common.ok'));
 }
 
 // ── Ecosystem ────────────────────────────────────────────────────
@@ -658,7 +690,7 @@ async function loadEcosystemDevices() {
     var container = $('#ecosystem-devices');
     if (!container) return;
     if (devices.length === 0) {
-      container.innerHTML = '<p style="color:var(--text-dim);font-size:.78rem;padding:8px 0">No devices connected yet. Use QR pairing above to connect.</p>';
+      container.innerHTML = '<p style="color:var(--text-dim);font-size:.78rem;padding:8px 0">' + t('empty.no_devices') + '.</p>';
       return;
     }
     var typeIcons = { mobile: '📱', desktop: '💻', player: '🎵', receiver: '📡', server: '🖥️', default: '📱' };
@@ -732,7 +764,7 @@ function pollQRStatus() {
       clearInterval(_qrTimer);
       var el = $('#qr-countdown');
       if (el) el.textContent = 'Expired';
-      showToast('QR code expired. Generate a new one.', true);
+      showToast(t('error.qr_expired'), true);
       resetQR();
       return;
     }
@@ -756,7 +788,7 @@ function copyServerUrl() {
   if (!inp) return;
   inp.select();
   document.execCommand('copy');
-  showToast('URL copied!');
+  showToast(t('toast.copied'));
 }
 
 // ── Playlists ────────────────────────────────────────────────────
@@ -780,7 +812,7 @@ function renderPlaylists(playlists) {
   const container = $('#playlists-list');
   if (!container) return;
   if (!playlists || playlists.length === 0) {
-    renderEmpty(container, '📋', 'No playlists yet', 'Create a smart playlist to get started.');
+    renderEmpty(container, '📋', t('empty.no_playlists'), '');
     return;
   }
   container.innerHTML = playlists.map(function (p) {
@@ -797,7 +829,7 @@ function renderSmartList(playlists) {
   const container = $('#smart-playlists-list');
   if (!container) return;
   if (!playlists || playlists.length === 0) {
-    container.innerHTML = '<p style="color:var(--text-dim);font-size:.82rem;padding:12px 0">No smart playlists created yet.</p>';
+    container.innerHTML = '<p style="color:var(--text-dim);font-size:.82rem;padding:12px 0">' + t('empty.no_playlists') + '</p>';
     return;
   }
   container.innerHTML = playlists.map(function (p) {
@@ -849,12 +881,12 @@ async function createSmartPlaylist() {
   var name = $('#smart-name')?.value.trim();
   var rule = $('#smart-rule')?.value;
   var limit = parseInt($('#smart-limit')?.value || '50');
-  if (!name) { showToast('Please enter a name', true); return; }
+  if (!name) { showToast(t('error.please_enter_name'), true); return; }
 
   var params = {};
   if (rule === 'by_genre' || rule === 'by_year') {
     var pval = $('#smart-param')?.value.trim();
-    if (!pval) { showToast('Please enter a value', true); return; }
+    if (!pval) { showToast(t('error.please_enter_value'), true); return; }
     params[rule === 'by_genre' ? 'genre' : 'year'] = rule === 'by_year' ? parseInt(pval) || 2024 : pval;
   }
   params.limit = limit;
@@ -865,7 +897,7 @@ async function createSmartPlaylist() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: name, rule: rule, params: params }),
     });
-    showToast('Smart playlist "' + name + '" created with ' + resp.tracks_added + ' tracks');
+    showToast(t('toast.created'));
     $('#smart-name').value = '';
     loadPlaylists();
     switchPlaylistTab('browse');
@@ -885,7 +917,7 @@ async function downloadBackup() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    showToast('Backup downloaded!');
+    showToast(t('toast.backup_downloaded'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -920,7 +952,7 @@ function renderHistory(list) {
   if (!container) return;
   const entries = list?.history || [];
   if (entries.length === 0) {
-    renderEmpty(container, '🕐', 'No play history', 'Play some tracks to see them here.');
+    renderEmpty(container, '🕐', t('empty.no_history'), '');
     return;
   }
   let html = '<table><thead><tr><th>#</th><th>Title</th><th>Artist</th><th>Album</th><th>Played At</th></tr></thead><tbody>';
@@ -969,7 +1001,7 @@ async function exportHistory() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    showToast('History exported!');
+    showToast(t('toast.saved'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -979,7 +1011,7 @@ async function clearHistory() {
     await MichiAPI.request('/api/v1/history', { method: 'DELETE' });
     _historyOffset = 0;
     loadHistory();
-    showToast('History cleared');
+    showToast(t('toast.deleted'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -991,7 +1023,7 @@ async function loadRoomGroups() {
     var container = $('#room-groups-list');
     if (!container) return;
     if (groups.length === 0) {
-      container.innerHTML = '<div class="empty-state"><p><strong>No room groups</strong></p><p style="font-size:.78rem;margin-top:4px">Create a group to enable multi-room audio.</p></div>';
+      container.innerHTML = '<div class="empty-state"><p><strong>' + t('empty.no_groups') + '</strong></p></div>';
       return;
     }
     container.innerHTML = groups.map(function (g) {
@@ -1018,7 +1050,7 @@ async function createRoomGroup() {
   var name = $('#rg-name')?.value.trim();
   var mode = $('#rg-mode')?.value;
   var recvs = $('#rg-receivers')?.value.trim();
-  if (!name) { showToast('Enter a group name', true); return; }
+  if (!name) { showToast(t('error.please_enter_name'), true); return; }
   var ids = recvs ? recvs.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [];
   try {
     await MichiAPI.request('/api/v1/rooms/groups', {
@@ -1029,7 +1061,7 @@ async function createRoomGroup() {
     $('#rg-name').value = '';
     $('#rg-receivers').value = '';
     loadRoomGroups();
-    showToast('Room group created');
+    showToast(t('toast.created'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1037,7 +1069,7 @@ async function activateRoomGroup(id) {
   try {
     var resp = await MichiAPI.request('/api/v1/rooms/groups/' + id + '/activate', { method: 'POST' });
     loadRoomGroups();
-    showToast('Group activated (' + (resp.group?.mode || 'party') + ' mode)');
+    showToast(t('toast.activated'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1045,7 +1077,7 @@ async function deactivateRoomGroup(id) {
   try {
     await MichiAPI.request('/api/v1/rooms/groups/' + id + '/deactivate', { method: 'POST' });
     loadRoomGroups();
-    showToast('Group deactivated');
+    showToast(t('toast.deactivated'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1053,7 +1085,7 @@ async function deleteRoomGroup(id) {
   try {
     await MichiAPI.request('/api/v1/rooms/groups/' + id, { method: 'DELETE' });
     loadRoomGroups();
-    showToast('Group deleted');
+    showToast(t('toast.deleted'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1067,7 +1099,7 @@ async function loadSources() {
     if (count) count.textContent = sources.length + ' source(s)';
     if (!container) return;
     if (sources.length === 0) {
-      container.innerHTML = '<div class="empty-state"><div class="icon">📡</div><p><strong>No sources yet</strong></p><p style="font-size:.78rem;margin-top:4px">Add a radio stream, podcast RSS or audio URL above.</p></div>';
+      container.innerHTML = '<div class="empty-state"><p><strong>' + t('empty.no_sources') + '</strong></p></div>';
       return;
     }
     container.innerHTML = sources.map(function (s) {
@@ -1093,7 +1125,7 @@ async function loadSources() {
 
 async function addSource() {
   var url = $('#source-url-input')?.value.trim();
-  if (!url) { showToast('Enter a URL', true); return; }
+  if (!url) { showToast(t('error.please_enter_url'), true); return; }
   try {
     var resp = await MichiAPI.request('/api/v1/sources', {
       method: 'POST',
@@ -1105,7 +1137,7 @@ async function addSource() {
     var el = $('#source-add-result');
     if (el) el.innerHTML = '<span style="color:var(--green)">✓ Added: ' + esc(resp.source?.name || resp.source?.stream_type || 'source') + '</span>';
     loadSources();
-    showToast('Source added');
+    showToast(t('toast.created'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1113,7 +1145,7 @@ async function deleteSource(id) {
   try {
     await MichiAPI.request('/api/v1/sources/' + id, { method: 'DELETE' });
     loadSources();
-    showToast('Source deleted');
+    showToast(t('toast.deleted'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1121,7 +1153,7 @@ function playSource(id) {
   var audio = getAudio();
   audio.src = '/api/v1/stream/proxy/' + id;
   audio.play().catch(function (err) {
-    showToast('Could not play: ' + err.message, true);
+    showToast(t('error.could_not_play', {msg: err.message}), true);
   });
   State.currentTrack = { title: 'Radio Stream', artist: 'Broadcast', id: id, duration_ms: 0 };
   updateNowPlaying(State.currentTrack);
@@ -1143,7 +1175,7 @@ async function showEpisodes(sourceId, sourceName) {
     var container = $('#episodes-list');
     if (!container) return;
     if (eps.length === 0) {
-      container.innerHTML = '<p style="color:var(--text-dim);font-size:.82rem;padding:12px 0">No episodes found.</p>';
+      container.innerHTML = '<p style="color:var(--text-dim);font-size:.82rem;padding:12px 0">' + t('empty.no_episodes') + '</p>';
       return;
     }
     container.innerHTML = eps.map(function (ep) {
@@ -1162,7 +1194,7 @@ function playEpisode(episodeId) {
   var audio = getAudio();
   audio.src = '/api/v1/stream/proxy/episode/' + episodeId;
   audio.play().catch(function (err) {
-    showToast('Could not play: ' + err.message, true);
+    showToast(t('error.could_not_play', {msg: err.message}), true);
   });
   State.currentTrack = { title: 'Podcast Episode', artist: 'Podcast', id: episodeId, duration_ms: 0 };
   updateNowPlaying(State.currentTrack);
@@ -1250,7 +1282,7 @@ async function saveSetting(key, value) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    showToast(key + ' updated to ' + value);
+    showToast(t('toast.updated'));
     loadSettings();
   } catch (e) { showToast(e.message, true); }
 }
@@ -1264,7 +1296,7 @@ async function loadCurrentState() {
     }
   } catch (e) {
     var el = $('#handoff-current-state');
-    if (el) el.textContent = 'Could not load state: ' + e.message;
+    if (el) el.textContent = t('error.could_not_load_status') + ': ' + e.message;
   }
 }
 
@@ -1272,7 +1304,7 @@ async function loadCurrentState() {
 async function uploadFile() {
   var input = $('#settings-file-input');
   if (!input || !input.files || !input.files[0]) {
-    showToast('Select a file first', true);
+    showToast(t('error.please_select_file'), true);
     return;
   }
   var file = input.files[0];
@@ -1297,7 +1329,7 @@ async function uploadFile() {
       if (wrap) wrap.classList.remove('hidden');
       if (fill) fill.style.width = '100%';
       if (text) text.textContent = 'Uploaded: ' + resp.hash.slice(0, 16) + '... (' + resp.size_bytes + ' bytes)';
-      showToast('File uploaded: ' + resp.status);
+      showToast(t('toast.saved'));
       input.value = '';
     } catch (err) {
       showToast(err.message, true);
@@ -1310,7 +1342,7 @@ async function uploadFile() {
 async function syncPlaylist() {
   var name = $('#sync-playlist-name')?.value.trim();
   var tracksText = $('#sync-playlist-tracks')?.value.trim();
-  if (!name) { showToast('Enter a playlist name', true); return; }
+  if (!name) { showToast(t('error.please_enter_name'), true); return; }
   var tracks = tracksText ? tracksText.split('\n').map(function (l) { return l.trim(); }).filter(Boolean) : [];
   try {
     var resp = await MichiAPI.request('/api/v1/sync/playlist', {
@@ -1320,10 +1352,10 @@ async function syncPlaylist() {
     });
     var el = $('#sync-playlist-result');
     if (el) {
-      el.innerHTML = '<span style="color:var(--online)">✓ Created: ' + resp.playlist.name +
+      el.innerHTML = '<span style="color:var(--online)">✓ ' + t('toast.created') + ': ' + resp.playlist.name +
         ' (' + resp.tracks_added + ' tracks, ' + resp.tracks_missing.length + ' missing)</span>';
     }
-    showToast('Playlist synced');
+    showToast(t('toast.playlist_synced'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1332,7 +1364,7 @@ async function transferHandoff() {
   var trackId = $('#handoff-track-id')?.value.trim();
   var position = parseInt($('#handoff-position')?.value || '0');
   var playing = $('#handoff-playing')?.checked;
-  if (!trackId) { showToast('Enter a track ID', true); return; }
+  if (!trackId) { showToast(t('error.please_enter_track_id'), true); return; }
   try {
     var resp = await MichiAPI.request('/api/v1/player/handoff', {
       method: 'POST',
@@ -1348,7 +1380,7 @@ async function transferHandoff() {
       el.innerHTML = '<span style="color:var(--online)">✓ Handoff accepted at ' + resp.position_ms + 'ms</span>';
     }
     loadCurrentState();
-    showToast('Handoff transferred');
+    showToast(t('toast.handoff_transferred'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1360,7 +1392,7 @@ async function discoverDevices() {
     if (el) {
       var r = resp.receivers || [];
       if (r.length === 0) {
-        el.innerHTML = '<span style="color:var(--text-dim)">No receivers found</span>';
+        el.innerHTML = '<span style="color:var(--text-dim)">' + t('empty.no_receivers') + '</span>';
       } else {
         el.innerHTML = r.map(function (rec) {
           return '<div style="padding:6px 0;border-bottom:1px solid var(--border-subtle);font-size:.78rem">' +
@@ -1376,7 +1408,7 @@ async function discoverDevices() {
 async function createGroup() {
   var name = $('#group-name')?.value.trim();
   var receivers = $('#group-receivers')?.value.trim();
-  if (!name) { showToast('Enter a group name', true); return; }
+  if (!name) { showToast(t('error.please_enter_name'), true); return; }
   var ids = receivers ? receivers.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [];
   try {
     var resp = await MichiAPI.request('/api/v1/receivers/groups', {
@@ -1390,14 +1422,14 @@ async function createGroup() {
     }
     $('#group-name').value = '';
     $('#group-receivers').value = '';
-    showToast('Group created');
+    showToast(t('toast.created'));
   } catch (e) { showToast(e.message, true); }
 }
 
 // Webhook
 async function setWebhook() {
   var url = $('#webhook-url')?.value.trim();
-  if (!url) { showToast('Enter a webhook URL', true); return; }
+  if (!url) { showToast(t('error.please_enter_url'), true); return; }
   try {
     await MichiAPI.request('/api/v1/webhook', {
       method: 'POST',
@@ -1406,7 +1438,7 @@ async function setWebhook() {
     });
     var el = $('#webhook-status');
     if (el) el.innerHTML = '<span style="color:var(--online)">✓ Webhook set</span>';
-    showToast('Webhook configured');
+    showToast(t('toast.webhook_configured'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1415,7 +1447,7 @@ async function testWebhook() {
     await MichiAPI.request('/api/v1/webhook/test', { method: 'POST', timeout: 10000 });
     var el = $('#webhook-status');
     if (el) el.innerHTML = '<span style="color:var(--online)">✓ Webhook fired</span>';
-    showToast('Webhook tested');
+    showToast(t('toast.webhook_tested'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1425,7 +1457,7 @@ async function deleteWebhook() {
     var el = $('#webhook-status');
     if (el) el.innerHTML = '<span style="color:var(--text-dim)">Webhook cleared</span>';
     $('#webhook-url').value = '';
-    showToast('Webhook removed');
+    showToast(t('toast.webhook_removed'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1441,7 +1473,7 @@ async function createSnapshot() {
         (s.stats?.albums || 0) + ' albums, ' +
         (s.stats?.artists || 0) + ' artists</span>';
     }
-    showToast('Snapshot created');
+    showToast(t('toast.snapshot_created'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1468,7 +1500,7 @@ async function loadChains() {
     var container = $('#chains-list');
     if (!container) return;
     if (chains.length === 0) {
-      container.innerHTML = '<div class="empty-state"><p><strong>No chains yet</strong></p><p style="font-size:.78rem;margin-top:4px">Create a chain to route audio to receivers.</p></div>';
+      container.innerHTML = '<div class="empty-state"><p><strong>' + t('empty.no_chains') + '</strong></p></div>';
       return;
     }
     container.innerHTML = chains.map(function (c) {
@@ -1494,7 +1526,7 @@ function hideCreateChain() {
 
 async function createChain() {
   var name = $('#new-chain-name')?.value.trim();
-  if (!name) { showToast('Enter a chain name', true); return; }
+  if (!name) { showToast(t('error.please_enter_name'), true); return; }
   try {
     await MichiAPI.request('/api/v1/chains', {
       method: 'POST',
@@ -1504,7 +1536,7 @@ async function createChain() {
     $('#new-chain-name').value = '';
     hideCreateChain();
     loadChains();
-    showToast('Chain created');
+    showToast(t('toast.created'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1545,7 +1577,7 @@ function renderChainLinks(links) {
   var container = $('#chain-links');
   if (!container) return;
   if (links.length === 0) {
-    container.innerHTML = '<p style="color:var(--text-dim);font-size:.82rem;padding:12px 0">No links. Add a receiver below.</p>';
+    container.innerHTML = '<p style="color:var(--text-dim);font-size:.82rem;padding:12px 0">' + t('empty.no_links') + '</p>';
     return;
   }
   container.innerHTML = links.map(function (l, i) {
@@ -1594,7 +1626,7 @@ async function addLink() {
   if (!_currentChainId) return;
   var sel = $('#chain-add-receiver');
   var recvId = sel?.value;
-  if (!recvId) { showToast('Select a receiver', true); return; }
+  if (!recvId) { showToast(t('error.please_select_receiver'), true); return; }
   try {
     await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/links', {
       method: 'POST',
@@ -1602,7 +1634,7 @@ async function addLink() {
       body: JSON.stringify({ receiver_id: recvId }),
     });
     openChain(_currentChainId);
-    showToast('Link added');
+    showToast(t('toast.created'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1610,7 +1642,7 @@ async function removeLink(linkId, chainId) {
   try {
     await MichiAPI.request('/api/v1/chains/' + chainId + '/links/' + linkId, { method: 'DELETE' });
     openChain(_currentChainId);
-    showToast('Link removed');
+    showToast(t('toast.deleted'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1665,7 +1697,7 @@ async function setChainTrack() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ track_id: trackId }),
     });
-    showToast('Track set');
+    showToast(t('toast.updated'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1673,15 +1705,15 @@ async function playChain() {
   if (!_currentChainId) return;
   try {
     await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/play', { method: 'POST' });
-    showToast('Chain playing');
-  } catch (e) { showToast(e.message, true); }
+        showToast(t('toast.activated'));
+      } catch (e) { showToast(t('error.could_not_play', {msg: e.message}), true); }
 }
 
 async function stopChain() {
   if (!_currentChainId) return;
   try {
     await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/stop', { method: 'POST' });
-    showToast('Chain stopped');
+    showToast(t('toast.deactivated'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1697,5 +1729,18 @@ async function setChainVolume(val) {
     });
   } catch (e) { /* silent */ }
 }
+
+// ── Keyboard shortcuts ─────────────────────────────────────────
+document.addEventListener('keydown', function (e) {
+  if (e.ctrlKey && e.key === 'k') {
+    e.preventDefault();
+    var si = $('#search-input');
+    if (si) { si.focus(); si.select(); }
+  }
+  if (e.key === ' ' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+    e.preventDefault();
+    playPause();
+  }
+});
 
 

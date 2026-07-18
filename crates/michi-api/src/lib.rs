@@ -1353,15 +1353,7 @@ pub fn create_router(state: AppState) -> Router {
             "/static/assets/michi-micro-server.png",
             get(static_files::favicon_png),
         )
-        .route("/static/i18n/en.json", get(static_files::i18n_en))
-        .route("/static/i18n/es.json", get(static_files::i18n_es))
-        .route("/static/i18n/pt.json", get(static_files::i18n_pt))
-        .route("/static/i18n/de.json", get(static_files::i18n_de))
-        .route("/static/i18n/fr.json", get(static_files::i18n_fr))
-        .route("/static/i18n/it.json", get(static_files::i18n_it))
-        .route("/static/i18n/ru.json", get(static_files::i18n_ru))
-        .route("/static/i18n/zh.json", get(static_files::i18n_zh))
-        .route("/static/i18n/ja.json", get(static_files::i18n_ja))
+        .route("/static/i18n/:lang", get(static_files::i18n_handler))
         .route("/manifest.json", get(pwa::manifest_json))
         .route("/sw.js", get(pwa::sw_js))
         .route("/api/shared/:code", get(library::shared_playlist_handler))

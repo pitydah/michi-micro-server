@@ -1,4 +1,9 @@
-use axum::response::{IntoResponse, Response};
+use axum::{
+    extract::Path,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 
 const CSS: &str = include_str!("../static/styles.css");
 const JS: &str = include_str!("../static/app.js");
@@ -54,74 +59,24 @@ pub async fn favicon_png() -> impl IntoResponse {
         .unwrap()
 }
 
-pub async fn i18n_en() -> impl IntoResponse {
-    Response::builder()
+pub async fn i18n_handler(
+    Path(lang): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let data = match lang.as_str() {
+        "en" => I18N_EN,
+        "es" => I18N_ES,
+        "pt" => I18N_PT,
+        "de" => I18N_DE,
+        "fr" => I18N_FR,
+        "it" => I18N_IT,
+        "ru" => I18N_RU,
+        "zh" => I18N_ZH,
+        "ja" => I18N_JA,
+        _ => I18N_EN,
+    };
+    Ok(Response::builder()
         .header("content-type", "application/json; charset=utf-8")
         .header("cache-control", "public, max-age=3600")
-        .body(axum::body::Body::from(I18N_EN))
-        .unwrap()
-}
-
-pub async fn i18n_es() -> impl IntoResponse {
-    Response::builder()
-        .header("content-type", "application/json; charset=utf-8")
-        .header("cache-control", "public, max-age=3600")
-        .body(axum::body::Body::from(I18N_ES))
-        .unwrap()
-}
-
-pub async fn i18n_pt() -> impl IntoResponse {
-    Response::builder()
-        .header("content-type", "application/json; charset=utf-8")
-        .header("cache-control", "public, max-age=3600")
-        .body(axum::body::Body::from(I18N_PT))
-        .unwrap()
-}
-
-pub async fn i18n_de() -> impl IntoResponse {
-    Response::builder()
-        .header("content-type", "application/json; charset=utf-8")
-        .header("cache-control", "public, max-age=3600")
-        .body(axum::body::Body::from(I18N_DE))
-        .unwrap()
-}
-
-pub async fn i18n_fr() -> impl IntoResponse {
-    Response::builder()
-        .header("content-type", "application/json; charset=utf-8")
-        .header("cache-control", "public, max-age=3600")
-        .body(axum::body::Body::from(I18N_FR))
-        .unwrap()
-}
-
-pub async fn i18n_it() -> impl IntoResponse {
-    Response::builder()
-        .header("content-type", "application/json; charset=utf-8")
-        .header("cache-control", "public, max-age=3600")
-        .body(axum::body::Body::from(I18N_IT))
-        .unwrap()
-}
-
-pub async fn i18n_ru() -> impl IntoResponse {
-    Response::builder()
-        .header("content-type", "application/json; charset=utf-8")
-        .header("cache-control", "public, max-age=3600")
-        .body(axum::body::Body::from(I18N_RU))
-        .unwrap()
-}
-
-pub async fn i18n_zh() -> impl IntoResponse {
-    Response::builder()
-        .header("content-type", "application/json; charset=utf-8")
-        .header("cache-control", "public, max-age=3600")
-        .body(axum::body::Body::from(I18N_ZH))
-        .unwrap()
-}
-
-pub async fn i18n_ja() -> impl IntoResponse {
-    Response::builder()
-        .header("content-type", "application/json; charset=utf-8")
-        .header("cache-control", "public, max-age=3600")
-        .body(axum::body::Body::from(I18N_JA))
-        .unwrap()
+        .body(axum::body::Body::from(data))
+        .unwrap())
 }
