@@ -155,45 +155,42 @@
         <!-- Scan -->
         <section class="section-page hidden" id="page-scan">
             <div class="hero"><h2>Library Scan</h2><p>Manage music scanning</p></div>
-            <div class="link-panel" id="scan-panel">
-                <div class="scan-progress">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>
-                    <div>
-                        <h3 style="margin-bottom:4px">Scan library</h3>
-                        <p style="color:var(--text-muted);font-size:.82rem">Scan configured music paths for new and updated tracks.</p>
-                    </div>
+            <div class="panel">
+                <div class="panel-header">Scan Control</div>
+                <div class="panel-row">
+                    <span class="panel-label"></span>
+                    <button class="btn btn-primary" onclick="handleScan()">Start Scan</button>
                 </div>
-                <button class="btn btn-primary" onclick="handleScan()">Start Scan</button>
             </div>
-            <div class="link-panel">
-                <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                    <h3 style="margin:0">Music Paths</h3>
-                </div>
-                <p style="color:var(--text-muted);font-size:.85rem" id="scan-paths">--</p>
+            <div class="panel">
+                <div class="panel-header">Music Paths</div>
+                <p style="color:var(--text-3);font-size:.82rem" id="scan-paths">--</p>
             </div>
         </section>
 
         <!-- Michi Link -->
         <section class="section-page hidden" id="page-michilink">
             <div class="hero"><h2>Michi Link <span class="badge beta">v1</span></h2><p>Native integration contract</p></div>
-            <div class="link-panel">
-                <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-                    <h3 style="margin:0">Connection</h3>
+            <div class="panel">
+                <div class="panel-header">Connection</div>
+                <div class="panel-row">
+                    <span class="panel-label">Server URL</span>
+                    <div class="copy-field" style="flex:1;max-width:360px"><input id="server-url-input" value="http://localhost:8096" readonly><button class="btn btn-sm btn-ghost" onclick="copyServerUrl()">Copy</button></div>
                 </div>
-                <div class="copy-field"><input id="server-url-input" value="http://localhost:8096" readonly><button class="btn btn-sm btn-ghost" onclick="copyServerUrl()">Copy</button></div>
-                <div style="display:flex;justify-content:space-between;margin-bottom:4px;font-size:.78rem"><span style="color:var(--text-dim)">Server ID</span><span style="font-family:var(--font-mono);font-size:.72rem" id="server-info-id">--</span></div>
-                <div style="display:flex;justify-content:space-between;font-size:.78rem"><span style="color:var(--text-dim)">API Version</span><span>v1</span></div>
+                <div class="panel-row">
+                    <span class="panel-label">Server ID</span>
+                    <span class="panel-mono" id="server-info-id" style="flex:1">--</span>
+                </div>
+                <div class="panel-row">
+                    <span class="panel-label">API Version</span>
+                    <span style="color:var(--text-2)">v1</span>
+                </div>
             </div>
-            <div class="link-panel">
-                <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
-                    <h3 style="margin:0">Features</h3>
-                </div>
+            <div class="panel">
+                <div class="panel-header">Features</div>
                 <div class="feature-grid" id="features-grid"></div>
             </div>
-            <div class="link-panel">
+            <div class="panel">
                 <button class="btn btn-primary" onclick="testMichiLink()">Test Connection</button>
             </div>
         </section>
@@ -203,10 +200,10 @@
             <div class="hero">
                 <h2>Playlists</h2>
                 <p>Manage your playlists</p>
-                <div class="page-tabs">
-                    <button class="tab-btn active" data-tab="browse" onclick="switchPlaylistTab('browse')">Browse</button>
-                    <button class="tab-btn" data-tab="smart" onclick="switchPlaylistTab('smart')">Smart</button>
-                    <button class="tab-btn" data-tab="backup" onclick="switchPlaylistTab('backup')">Backup</button>
+                <div class="tabs">
+                    <button class="tab active" data-tab="browse" onclick="switchPlaylistTab('browse')">Browse</button>
+                    <button class="tab" data-tab="smart" onclick="switchPlaylistTab('smart')">Smart</button>
+                    <button class="tab" data-tab="backup" onclick="switchPlaylistTab('backup')">Backup</button>
                 </div>
             </div>
             <div class="tab-content active" id="playlist-tab-browse">
@@ -270,141 +267,141 @@
         <!-- Settings -->
         <section class="section-page hidden" id="page-settings">
             <div class="hero"><h2>Settings</h2><p>Configure sync, handoff, receivers, webhooks and backups</p></div>
-            <div class="settings-nav">
-                <button class="settings-tab active" data-stab="sync" onclick="switchSettingsTab('sync')">Sync</button>
-                <button class="settings-tab" data-stab="handoff" onclick="switchSettingsTab('handoff')">Handoff</button>
-                <button class="settings-tab" data-stab="receivers" onclick="switchSettingsTab('receivers')">Receivers</button>
-                <button class="settings-tab" data-stab="webhook" onclick="switchSettingsTab('webhook')">Webhook</button>
-                <button class="settings-tab" data-stab="backup" onclick="switchSettingsTab('backup')">Backup</button>
+            <div class="tabs">
+                <button class="tab active" data-stab="sync" onclick="switchSettingsTab('sync')">Sync</button>
+                <button class="tab" data-stab="handoff" onclick="switchSettingsTab('handoff')">Handoff</button>
+                <button class="tab" data-stab="receivers" onclick="switchSettingsTab('receivers')">Receivers</button>
+                <button class="tab" data-stab="webhook" onclick="switchSettingsTab('webhook')">Webhook</button>
+                <button class="tab" data-stab="backup" onclick="switchSettingsTab('backup')">Backup</button>
             </div>
 
             <!-- Sync -->
             <div class="stab-content active" id="stab-sync">
-                <div class="settings-card">
-                    <div class="settings-card-header">Upload File</div>
-                    <div class="settings-row">
-                        <span class="settings-label">File</span>
-                        <input type="file" id="settings-file-input" class="settings-input">
+                <div class="panel">
+                    <div class="panel-header">Upload File</div>
+                    <div class="panel-row">
+                        <span class="panel-label">File</span>
+                        <input type="file" id="settings-file-input" class="panel-input">
                     </div>
-                    <div class="settings-row">
-                        <span class="settings-label"></span>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
                         <button class="btn btn-primary btn-sm" onclick="uploadFile()">Upload</button>
                     </div>
                     <div id="upload-progress-wrap" class="settings-progress-wrap hidden">
-                        <div class="settings-progress"><div class="settings-progress-fill" id="upload-progress-fill"></div></div>
+                        <div class="progress-bar"><div class="fill" id="upload-progress-fill"></div></div>
                         <span class="settings-progress-text" id="upload-progress-text"></span>
                     </div>
                 </div>
-                <div class="settings-card">
-                    <div class="settings-card-header">Sync Playlist</div>
-                    <div class="settings-row">
-                        <span class="settings-label">Name</span>
-                        <input type="text" id="sync-playlist-name" class="settings-input" placeholder="Playlist name">
+                <div class="panel">
+                    <div class="panel-header">Sync Playlist</div>
+                    <div class="panel-row">
+                        <span class="panel-label">Name</span>
+                        <input type="text" id="sync-playlist-name" class="panel-input" placeholder="Playlist name">
                     </div>
-                    <div class="settings-row">
-                        <span class="settings-label">Track IDs</span>
-                        <textarea id="sync-playlist-tracks" class="settings-input settings-textarea" placeholder="One UUID per line" rows="3"></textarea>
+                    <div class="panel-row">
+                        <span class="panel-label">Track IDs</span>
+                        <textarea id="sync-playlist-tracks" class="panel-input" placeholder="One UUID per line" rows="3" style="resize:vertical;min-height:60px;font-family:var(--font-mono);font-size:.72rem"></textarea>
                     </div>
-                    <div class="settings-row">
-                        <span class="settings-label"></span>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
                         <button class="btn btn-primary btn-sm" onclick="syncPlaylist()">Sync</button>
                     </div>
-                    <div id="sync-playlist-result" class="settings-result"></div>
+                    <div id="sync-playlist-result" class="panel-result"></div>
                 </div>
             </div>
 
             <!-- Handoff -->
             <div class="stab-content hidden" id="stab-handoff">
-                <div class="settings-card">
-                    <div class="settings-card-header">Transfer Playback</div>
-                    <div class="settings-row">
-                        <span class="settings-label">Track ID</span>
-                        <input type="text" id="handoff-track-id" class="settings-input" placeholder="UUID">
+                <div class="panel">
+                    <div class="panel-header">Transfer Playback</div>
+                    <div class="panel-row">
+                        <span class="panel-label">Track ID</span>
+                        <input type="text" id="handoff-track-id" class="panel-input" placeholder="UUID">
                     </div>
-                    <div class="settings-row">
-                        <span class="settings-label">Position (ms)</span>
-                        <input type="number" id="handoff-position" class="settings-input" value="0" style="width:120px">
+                    <div class="panel-row">
+                        <span class="panel-label">Position (ms)</span>
+                        <input type="number" id="handoff-position" class="panel-input" value="0" style="width:120px">
                     </div>
-                    <div class="settings-row">
-                        <span class="settings-label">Playing</span>
-                        <input type="checkbox" id="handoff-playing" checked>
+                    <div class="panel-row">
+                        <span class="panel-label">Playing</span>
+                        <input type="checkbox" id="handoff-playing" checked style="accent-color:var(--primary);width:18px;height:18px">
                     </div>
-                    <div class="settings-row">
-                        <span class="settings-label"></span>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
                         <button class="btn btn-primary btn-sm" onclick="transferHandoff()">Transfer to Server</button>
                     </div>
-                    <div id="handoff-result" class="settings-result"></div>
+                    <div id="handoff-result" class="panel-result"></div>
                 </div>
-                <div class="settings-card">
-                    <div class="settings-card-header">Current State</div>
-                    <div id="handoff-current-state" class="settings-mono">--</div>
+                <div class="panel">
+                    <div class="panel-header">Current State</div>
+                    <div id="handoff-current-state" class="panel-mono">--</div>
                 </div>
             </div>
 
             <!-- Receivers -->
             <div class="stab-content hidden" id="stab-receivers">
-                <div class="settings-card">
-                    <div class="settings-card-header">Discovery</div>
-                    <div class="settings-row">
-                        <span class="settings-label"></span>
+                <div class="panel">
+                    <div class="panel-header">Discovery</div>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
                         <button class="btn btn-primary btn-sm" onclick="discoverDevices()">Scan Network</button>
                     </div>
-                    <div id="discover-result" class="settings-result"></div>
+                    <div id="discover-result" class="panel-result"></div>
                 </div>
-                <div class="settings-card">
-                    <div class="settings-card-header">Receiver Groups</div>
-                    <div class="settings-row">
-                        <span class="settings-label">Name</span>
-                        <input type="text" id="group-name" class="settings-input" placeholder="Living Room">
+                <div class="panel">
+                    <div class="panel-header">Receiver Groups</div>
+                    <div class="panel-row">
+                        <span class="panel-label">Name</span>
+                        <input type="text" id="group-name" class="panel-input" placeholder="Living Room">
                     </div>
-                    <div class="settings-row">
-                        <span class="settings-label">Receivers</span>
-                        <input type="text" id="group-receivers" class="settings-input" placeholder="comma-separated IDs">
+                    <div class="panel-row">
+                        <span class="panel-label">Receivers</span>
+                        <input type="text" id="group-receivers" class="panel-input" placeholder="comma-separated IDs">
                     </div>
-                    <div class="settings-row">
-                        <span class="settings-label"></span>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
                         <button class="btn btn-primary btn-sm" onclick="createGroup()">Create Group</button>
                     </div>
-                    <div id="groups-list" class="settings-result"></div>
+                    <div id="groups-list" class="panel-result"></div>
                 </div>
             </div>
 
             <!-- Webhook -->
             <div class="stab-content hidden" id="stab-webhook">
-                <div class="settings-card">
-                    <div class="settings-card-header">Webhook Configuration</div>
-                    <div class="settings-row">
-                        <span class="settings-label">URL</span>
-                        <input type="url" id="webhook-url" class="settings-input" placeholder="https://example.com/hook">
+                <div class="panel">
+                    <div class="panel-header">Webhook Configuration</div>
+                    <div class="panel-row">
+                        <span class="panel-label">URL</span>
+                        <input type="url" id="webhook-url" class="panel-input" placeholder="https://example.com/hook">
                     </div>
-                    <div class="settings-row">
-                        <span class="settings-label"></span>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
                         <button class="btn btn-primary btn-sm" onclick="setWebhook()">Set</button>
                         <button class="btn btn-ghost btn-sm" onclick="testWebhook()">Test</button>
                         <button class="btn btn-ghost btn-sm" onclick="deleteWebhook()">Clear</button>
                     </div>
-                    <div id="webhook-status" class="settings-result"></div>
+                    <div id="webhook-status" class="panel-result"></div>
                 </div>
             </div>
 
             <!-- Backup -->
             <div class="stab-content hidden" id="stab-backup">
-                <div class="settings-card">
-                    <div class="settings-card-header">Snapshot</div>
-                    <div class="settings-row">
-                        <span class="settings-label"></span>
+                <div class="panel">
+                    <div class="panel-header">Snapshot</div>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
                         <button class="btn btn-primary btn-sm" onclick="createSnapshot()">Create Snapshot</button>
                         <button class="btn btn-ghost btn-sm" onclick="downloadBackup()">Download Backup</button>
                     </div>
-                    <div id="snapshot-result" class="settings-result"></div>
+                    <div id="snapshot-result" class="panel-result"></div>
                 </div>
-                <div class="settings-card">
-                    <div class="settings-card-header">Integrity Check</div>
-                    <div class="settings-row">
-                        <span class="settings-label"></span>
+                <div class="panel">
+                    <div class="panel-header">Integrity Check</div>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
                         <button class="btn btn-primary btn-sm" onclick="verifyIntegrity()">Verify Files</button>
                     </div>
-                    <div id="integrity-result" class="settings-result"></div>
+                    <div id="integrity-result" class="panel-result"></div>
                 </div>
             </div>
         </section>
@@ -441,12 +438,12 @@
                     <button class="btn btn-primary btn-sm" onclick="showCreateChain()">+ New Chain</button>
                 </div>
                 <div id="chain-create-form" class="chain-create-form hidden">
-                    <div class="settings-row">
-                        <span class="settings-label">Name</span>
-                        <input type="text" id="new-chain-name" class="settings-input" placeholder="Living Room">
+                    <div class="panel-row">
+                        <span class="panel-label">Name</span>
+                        <input type="text" id="new-chain-name" class="panel-input" placeholder="Living Room">
                     </div>
-                    <div class="settings-row">
-                        <span class="settings-label"></span>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
                         <button class="btn btn-primary btn-sm" onclick="createChain()">Create</button>
                         <button class="btn btn-ghost btn-sm" onclick="hideCreateChain()">Cancel</button>
                     </div>
@@ -468,14 +465,14 @@
                     </span>
                 </div>
                 <div class="chain-track">
-                    <span class="settings-label">Track</span>
-                    <input type="text" id="chain-track-id" class="settings-input" placeholder="Track ID (UUID)" style="max-width:300px">
+                    <span class="panel-label">Track</span>
+                    <input type="text" id="chain-track-id" class="panel-input" placeholder="Track ID (UUID)" style="max-width:300px">
                     <button class="btn btn-sm btn-ghost" onclick="setChainTrack()">Set</button>
                 </div>
                 <div class="chain-links" id="chain-links"></div>
                 <div class="chain-add-link">
-                    <span class="settings-label">Add Receiver</span>
-                    <select id="chain-add-receiver" class="settings-input" style="max-width:250px"></select>
+                    <span class="panel-label">Add Receiver</span>
+                    <select id="chain-add-receiver" class="panel-input" style="max-width:250px"></select>
                     <button class="btn btn-sm btn-primary" onclick="addLink()">+</button>
                 </div>
             </div>

@@ -320,13 +320,13 @@ function renderDashboard() {
   function val(v, fallback) { return v !== null && v !== undefined && v !== 0 ? v : fallback; }
 
   cd.innerHTML =
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><div class="card-value">' + val(lib.tracks, 'N/D') + '</div><div class="card-label">Tracks</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h18"/><rect x="3" y="8" width="18" height="12" rx="2"/></svg></div><div class="card-value">' + val(lib.albums, 'N/D') + '</div><div class="card-label">Albums</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + val(lib.artists, 'N/D') + '</div><div class="card-label">Artists</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="card-value">' + fmtDur(lib.total_duration_ms) + '</div><div class="card-label">Duration</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg></div><div class="card-value">' + (play.has_current ? (play.title || 'Playing') : '--') + '</div><div class="card-label">Now Playing ' + (play.has_current ? '<span class="badge stable">' + (play.state || 'playing') + '</span>' : '<span class="badge disabled">stopped</span>') + '</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + val(health.missing_files, 0) + '</div><div class="card-label">Missing Files ' + (health.is_healthy ? '<span class="badge stable">OK</span>' : '<span class="badge error">issues</span>') + '</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><div class="card-value">' + val(eco.receivers_online, 0) + '</div><div class="card-label">Receivers ' + (eco.receivers_online > 0 ? '<span class="badge stable">Online</span>' : '<span class="badge disabled">offline</span>') + '</div></div>';
+    '<div class="card" style="animation-delay:0ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><div class="card-value">' + val(lib.tracks, 'N/D') + '</div><div class="card-label">Tracks</div></div>' +
+    '<div class="card" style="animation-delay:40ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h18"/><rect x="3" y="8" width="18" height="12" rx="2"/></svg></div><div class="card-value">' + val(lib.albums, 'N/D') + '</div><div class="card-label">Albums</div></div>' +
+    '<div class="card" style="animation-delay:80ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + val(lib.artists, 'N/D') + '</div><div class="card-label">Artists</div></div>' +
+    '<div class="card" style="animation-delay:120ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="card-value">' + fmtDur(lib.total_duration_ms) + '</div><div class="card-label">Duration</div></div>' +
+    '<div class="card" style="animation-delay:160ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg></div><div class="card-value">' + (play.has_current ? (play.title || 'Playing') : '--') + '</div><div class="card-label">Now Playing ' + (play.has_current ? '<span class="badge stable">' + (play.state || 'playing') + '</span>' : '<span class="badge disabled">stopped</span>') + '</div></div>' +
+    '<div class="card" style="animation-delay:200ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + val(health.missing_files, 0) + '</div><div class="card-label">Missing Files ' + (health.is_healthy ? '<span class="badge stable">OK</span>' : '<span class="badge error">issues</span>') + '</div></div>' +
+    '<div class="card" style="animation-delay:240ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><div class="card-value">' + val(eco.receivers_online, 0) + '</div><div class="card-label">Receivers ' + (eco.receivers_online > 0 ? '<span class="badge stable">Online</span>' : '<span class="badge disabled">offline</span>') + '</div></div>';
 
   // Update meta
   var meta = $('#dashboard-meta');
@@ -644,8 +644,8 @@ function renderSmartList(playlists) {
 }
 
 function switchPlaylistTab(tab) {
-  $$('.tab-btn').forEach(function (b) { b.classList.remove('active'); });
-  var btn = $('.tab-btn[data-tab="' + tab + '"]');
+  $$('.tab[data-tab]').forEach(function (b) { b.classList.remove('active'); });
+  var btn = $('.tab[data-tab="' + tab + '"]');
   if (btn) btn.classList.add('active');
   $$('[id^="playlist-tab-"]').forEach(function (t) { t.classList.add('hidden'); });
   var pane = $('#playlist-tab-' + tab);
@@ -839,8 +839,8 @@ showSection = function (section) {
 
 // ── Settings ─────────────────────────────────────────────────────
 function switchSettingsTab(tab) {
-  $$('.settings-tab').forEach(function (b) { b.classList.remove('active'); });
-  var btn = $('.settings-tab[data-stab="' + tab + '"]');
+  $$('.tab[data-stab]').forEach(function (b) { b.classList.remove('active'); });
+  var btn = $('.tab[data-stab="' + tab + '"]');
   if (btn) btn.classList.add('active');
   $$('[id^="stab-"]').forEach(function (t) { t.classList.add('hidden'); });
   var pane = $('#stab-' + tab);

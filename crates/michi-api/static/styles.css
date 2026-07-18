@@ -530,6 +530,7 @@ body {
   position: relative;
   overflow: hidden;
   isolation: isolate;
+  animation: fadeInUp .3s ease backwards;
 }
 .card::before {
   content: '';
