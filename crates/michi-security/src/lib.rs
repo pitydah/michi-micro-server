@@ -7,7 +7,7 @@ pub mod idempotency;
 use axum::{
     body::Body,
     extract::State,
-    http::{HeaderMap, Request, StatusCode},
+    http::{Request, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -21,7 +21,7 @@ use std::{num::NonZeroU32, sync::Arc};
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::warn;
 
-pub use idempotency::IdempotencyStore;
+use idempotency::IdempotencyStore;
 
 /// Rate limiter state shared across requests
 pub type SharedRateLimiter = Arc<

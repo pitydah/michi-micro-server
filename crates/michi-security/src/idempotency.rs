@@ -23,6 +23,12 @@ pub struct IdempotencyStore {
     store: Arc<Mutex<HashMap<String, IdempotencyEntry>>>,
 }
 
+impl Default for IdempotencyStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IdempotencyStore {
     /// Create a new empty store.
     pub fn new() -> Self {
