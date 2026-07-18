@@ -6,8 +6,8 @@ pub mod idempotency;
 
 use axum::{
     body::Body,
-    extract::{ConnectInfo, State},
-    http::{HeaderMap, Request, StatusCode},
+    extract::{ConnectInfo, Request, State},
+    http::{HeaderMap, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -168,6 +168,33 @@ pub async fn security_headers_middleware(req: Request<Body>, next: Next) -> Resp
 
 pub async fn health_check_handler() -> &'static str {
     "OK"
+}
+
+/// Middleware that enforces Content-Type: application/json for POST/PUT/PATCH.
+pub async fn content_type_middleware(
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, (StatusCode, String)> {
+    let method = req.method().clone();
+    if method == axum::http::Method::POST
+        || method == axum::http::Method::PUT
+        || method == axum::http::Method::PATCH
+    {
+        let has_json = req
+            .headers()
+            .get("Content-Type")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.starts_with("application/json"))
+            .unwrap_or(false);
+
+        if !has_json {
+            return Err((
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Content-Type must be application/json".into(),
+            ));
+        }
+    }
+    Ok(next.run(req).await)
 }
 
 #[cfg(test)]

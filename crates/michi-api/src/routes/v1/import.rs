@@ -93,15 +93,15 @@ fn is_allowed_extension(filename: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn get_staging_dir(music_paths: &[std::path::PathBuf]) -> std::path::PathBuf {
+fn get_staging_dir(music_paths: &[std::path::PathBuf], cache_path: &std::path::Path) -> std::path::PathBuf {
     music_paths
         .first()
         .map(|p| p.join(".import"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/michi-import"))
+        .unwrap_or_else(|| cache_path.join("import_staging"))
 }
 
-fn get_session_dir(music_paths: &[std::path::PathBuf], session_id: &Uuid) -> std::path::PathBuf {
-    get_staging_dir(music_paths).join(session_id.to_string())
+fn get_session_dir(music_paths: &[std::path::PathBuf], cache_path: &std::path::Path, session_id: &Uuid) -> std::path::PathBuf {
+    get_staging_dir(music_paths, cache_path).join(session_id.to_string())
 }
 
 async fn cleanup_session_dir(path: &std::path::Path) {
@@ -277,7 +277,7 @@ pub async fn import_upload_handler(
     }
 
     let safe_name = sanitize_filename(&body.filename);
-    let import_dir = get_session_dir(&state.config.music_paths, &session_id);
+    let import_dir = get_session_dir(&state.config.music_paths, &state.config.cache_path, &session_id);
     tokio::fs::create_dir_all(&import_dir).await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -581,7 +581,7 @@ pub async fn import_commit_handler(
         .await
         .ok();
 
-    let staging_dir = get_session_dir(&state.config.music_paths, &session_id);
+    let staging_dir = get_session_dir(&state.config.music_paths, &state.config.cache_path, &session_id);
     let final_dir = state
         .config
         .music_paths
@@ -701,7 +701,7 @@ pub async fn import_rollback_handler(
     Path(session_id): Path<Uuid>,
 ) -> Json<serde_json::Value> {
     IMPORT_SESSIONS.write().await.remove(&session_id);
-    let staging_dir = get_session_dir(&state.config.music_paths, &session_id);
+    let staging_dir = get_session_dir(&state.config.music_paths, &state.config.cache_path, &session_id);
     cleanup_session_dir(&staging_dir).await;
     michi_db::set_import_session_status(&state.db, &session_id, &ImportState::RolledBack, None)
         .await
@@ -714,6 +714,7 @@ pub async fn import_rollback_handler(
 
 pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool) {
     let music_paths = config.music_paths.clone();
+    let cache_path = config.cache_path.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
@@ -722,12 +723,12 @@ pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool)
             if let Ok(expired) = michi_db::list_expired_import_sessions(&db, &cutoff).await {
                 for sid in expired {
                     michi_db::expire_import_session(&db, &sid).await.ok();
-                    let dir = get_session_dir(&music_paths, &sid);
+                    let dir = get_session_dir(&music_paths, &cache_path, &sid);
                     cleanup_session_dir(&dir).await;
                 }
             }
             // Also clean old staging dirs with no DB record
-            let staging = get_staging_dir(&music_paths);
+            let staging = get_staging_dir(&music_paths, &cache_path);
             if staging.exists() {
                 if let Ok(mut entries) = tokio::fs::read_dir(&staging).await {
                     while let Ok(Some(entry)) = entries.next_entry().await {

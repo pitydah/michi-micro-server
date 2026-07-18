@@ -1002,6 +1002,7 @@ async fn test_add_track_to_playlist() {
             Request::builder()
                 .uri(format!("/api/playlists/{}/tracks/{}", pl.id, track_id))
                 .method("POST")
+                .header("Content-Type", "application/json")
                 .body(Body::empty())
                 .unwrap(),
         )

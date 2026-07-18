@@ -943,6 +943,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(players::players_router())
         .merge(transcode::transcode_router())
         .merge(v1_link_routes())
+        .layer(middleware::from_fn(michi_security::content_type_middleware))
         .layer(TraceLayer::new_for_http())
         .layer(CompressionLayer::new())
         .layer(cors_layer(&state))
@@ -953,12 +954,14 @@ fn cors_layer(state: &AppState) -> CorsLayer {
     if state.config.dev_mode {
         return CorsLayer::permissive();
     }
+    let methods = [axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT, axum::http::Method::DELETE];
+    let headers = [axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION];
     if let Some(ref origin) = state.config.cors_origin {
         match origin.parse::<axum::http::HeaderValue>() {
             Ok(header_origin) => CorsLayer::new()
                 .allow_origin(tower_http::cors::AllowOrigin::exact(header_origin))
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
+                .allow_methods(methods)
+                .allow_headers(headers),
             Err(_) => {
                 tracing::warn!("invalid MICHI_CORS_ORIGIN value, using restrictive CORS");
                 CorsLayer::new()
