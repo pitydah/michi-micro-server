@@ -173,8 +173,11 @@ function renderStatus() {
   if (suptime) {
     const h = Math.floor((s.uptime_seconds || 0) / 3600);
     const m = Math.floor(((s.uptime_seconds || 0) % 3600) / 60);
-    suptime.textContent = (h || m) ? h + 'h ' + m + 'm' : 'Just started';
+    suptime.textContent = (h || m) ? h + 'h ' + m + 'm' : '<1m';
   }
+
+  const db = $('#sidebar-db-status');
+  if (db) db.textContent = s.database === 'ok' ? 'OK' : 'ERR';
 }
 
 function renderStatusPage() {
@@ -277,7 +280,12 @@ async function loadDashboard() {
 function renderDashboard() {
   const d = State.dashboard;
   const cd = $('#dashboard-cards');
-  if (!cd || !d) return;
+  if (!cd) return;
+
+  if (!d) {
+    cd.innerHTML = '<div class="empty-state"><div class="icon">📊</div><p><strong>Could not load dashboard</strong></p><p style="font-size:.78rem;margin-top:4px">Server may be starting up.</p></div>';
+    return;
+  }
 
   const lib = d.library || {};
   const health = d.health || {};
@@ -290,18 +298,25 @@ function renderDashboard() {
     return h + 'h';
   }
 
-  function badge(ok, label) {
-    return '<span class="badge ' + (ok ? 'stable' : 'disabled') + '">' + label + '</span>';
-  }
+  function val(v, fallback) { return v !== null && v !== undefined && v !== 0 ? v : fallback; }
 
   cd.innerHTML =
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><div class="card-value">' + esc(lib.tracks ?? '--') + '</div><div class="card-label">Tracks</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h18"/><rect x="3" y="8" width="18" height="12" rx="2"/></svg></div><div class="card-value">' + esc(lib.albums ?? '--') + '</div><div class="card-label">Albums</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + esc(lib.artists ?? '--') + '</div><div class="card-label">Artists</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><div class="card-value">' + val(lib.tracks, 'N/D') + '</div><div class="card-label">Tracks</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h18"/><rect x="3" y="8" width="18" height="12" rx="2"/></svg></div><div class="card-value">' + val(lib.albums, 'N/D') + '</div><div class="card-label">Albums</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + val(lib.artists, 'N/D') + '</div><div class="card-label">Artists</div></div>' +
     '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="card-value">' + fmtDur(lib.total_duration_ms) + '</div><div class="card-label">Duration</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg></div><div class="card-value">' + (play.has_current ? play.title || 'Playing' : '--') + '</div><div class="card-label">Now Playing ' + badge(play.has_current, play.state || 'stopped') + '</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + esc(health.missing_files ?? 0) + '</div><div class="card-label">Missing Files ' + badge(health.is_healthy, 'OK') + '</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><div class="card-value">' + esc(eco.receivers_online ?? 0) + '</div><div class="card-label">Receivers ' + badge(eco.receivers_online > 0, 'Online') + '</div></div>';
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg></div><div class="card-value">' + (play.has_current ? (play.title || 'Playing') : '--') + '</div><div class="card-label">Now Playing ' + (play.has_current ? '<span class="badge stable">' + (play.state || 'playing') + '</span>' : '<span class="badge disabled">stopped</span>') + '</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + val(health.missing_files, 0) + '</div><div class="card-label">Missing Files ' + (health.is_healthy ? '<span class="badge stable">OK</span>' : '<span class="badge error">issues</span>') + '</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><div class="card-value">' + val(eco.receivers_online, 0) + '</div><div class="card-label">Receivers ' + (eco.receivers_online > 0 ? '<span class="badge stable">Online</span>' : '<span class="badge disabled">offline</span>') + '</div></div>';
+
+  // Update meta
+  var meta = $('#dashboard-meta');
+  if (meta) {
+    var status = State.status;
+    meta.textContent = 'Server ' + (status?.status === 'ok' ? '● Online' : '● Offline') +
+      ' · v' + (State.serverInfo?.version || '?') +
+      (lib.tracks ? ' · ' + lib.tracks + ' tracks' : '');
+  }
 }
 
 // ── Tracks / Library ────────────────────────────────────────────
@@ -317,11 +332,11 @@ async function loadTracks() {
 
 function updateTracksCount() {
   const el1 = $('#tracks-count');
-  const el2 = $('#library-count');
+  const el2 = $('#library-meta');
   const total = State.stats?.tracks ?? State.allTracks.length;
   const text = 'Showing ' + Math.min(State.tracks.length, 50) + ' of ' + total + ' tracks';
   if (el1) el1.textContent = text;
-  if (el2) el2.textContent = text;
+  if (el2) el2.textContent = total + ' tracks · ' + (State.stats?.albums || '?') + ' albums · ' + (State.stats?.artists || '?') + ' artists';
 }
 
 function renderTracks(tracks, tableId) {
@@ -382,7 +397,8 @@ async function handleSearch() {
     renderTracks(State.tracks, 'library-table');
     updateTracksCount();
     $('#tracks-count').textContent = State.tracks.length + ' results';
-    $('#library-count').textContent = State.tracks.length + ' results';
+    var lm = $('#library-meta');
+    if (lm) lm.textContent = State.tracks.length + ' results';
     if (isAdvancedQuery(q)) {
       $('#search-input').style.borderColor = 'var(--accent)';
     } else {

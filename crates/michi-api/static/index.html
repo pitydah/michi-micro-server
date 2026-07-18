@@ -6,7 +6,7 @@
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" type="image/svg+xml" href="/static/assets/michi-micro-server.svg">
     <link rel="icon" type="image/png" sizes="512x512" href="/static/assets/michi-micro-server.png">
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v=2">
     <title>Michi Server</title>
 </head>
 <body>
@@ -93,14 +93,15 @@
             </div>
         </nav>
         <div class="sidebar-footer">
-            <div class="server-status-row">
+            <div class="row">
                 <span class="server-status-dot" id="server-status-dot"></span>
-                <span class="server-label" id="server-status-label">Loading...</span>
+                <span class="value" id="server-status-label" style="text-align:left">Loading...</span>
             </div>
-            <div class="sidebar-meta">
-                <span><span class="label">ID</span><span class="value" id="sidebar-server-id">--</span></span>
-                <span><span class="label">Up</span><span class="value" id="sidebar-uptime">--</span></span>
-            </div>
+            <div class="row"><span class="label">ID</span><span class="value" id="sidebar-server-id">--</span></div>
+            <div class="row"><span class="label">Up</span><span class="value" id="sidebar-uptime">--</span></div>
+            <div class="row"><span class="label">API</span><span class="value">v1</span></div>
+            <div class="row"><span class="label">DB</span><span class="value" id="sidebar-db-status">--</span></div>
+        </div>
         </div>
     </aside>
 
@@ -124,7 +125,11 @@
 
         <!-- Dashboard -->
         <section class="section-page" id="page-dashboard">
-            <div class="page-header"><h2>Dashboard</h2><p>Server control center</p></div>
+            <div class="page-hero">
+                <h2>Dashboard</h2>
+                <p>Server control center</p>
+                <div class="hero-meta" id="dashboard-meta"></div>
+            </div>
             <div class="card-grid" id="dashboard-cards"></div>
             <div class="section">
                 <div class="section-header"><h3>Recent Tracks</h3><span class="sub" id="tracks-count">--</span></div>
@@ -134,9 +139,12 @@
 
         <!-- Library -->
         <section class="section-page hidden" id="page-library">
-            <div class="page-header"><h2>Library</h2><p>Browse your music collection</p></div>
+            <div class="page-hero">
+                <h2>Library</h2>
+                <p>Browse your music collection</p>
+                <div class="hero-meta" id="library-meta"></div>
+            </div>
             <div class="section">
-                <div class="section-header"><h3>All Tracks</h3><span class="sub" id="library-count">--</span></div>
                 <div class="table-wrap" id="library-table"></div>
             </div>
         </section>
@@ -512,6 +520,6 @@
         <div class="waveform"><span></span><span></span><span></span><span></span><span></span></div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=2"></script>
 </body>
 </html>
