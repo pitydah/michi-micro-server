@@ -118,8 +118,9 @@ impl AppState {
         });
         // Start library watcher
         let watch_paths = config.music_paths.clone();
+        let watch_db = db.clone();
         tokio::spawn(async move {
-            let watcher = michi_scanner::watcher::LibraryWatcher::new(watch_paths);
+            let watcher = michi_scanner::watcher::LibraryWatcher::new(watch_paths, watch_db);
             watcher.start().await;
         });
         // Spawn receiver heartbeat monitor
@@ -131,17 +132,18 @@ impl AppState {
                 let reg = rm.registry().await;
                 let reg_read = reg.read().await;
                 let now = chrono::Utc::now();
-                for entry in reg_read.list() {
-                    if let Some(last) = entry.last_seen {
+                let entries: Vec<_> = reg_read.list().iter().map(|e| {
+                    (e.receiver_id.clone(), e.last_seen, e.active_session_id.clone())
+                }).collect();
+                drop(reg_read);
+                for (recv_id, last_seen, _active_session) in entries {
+                    if let Some(last) = last_seen {
                         if (now - last).num_seconds() > 180 {
-                            let recv_id = entry.receiver_id.clone();
-                            drop(reg_read);
                             let mut reg_write = reg.write().await;
                             if let Some(e) = reg_write.get_mut(&recv_id) {
                                 e.active_session_id = None;
                                 tracing::warn!("receiver {} marked offline", recv_id);
                             }
-                            return;
                         }
                     }
                 }

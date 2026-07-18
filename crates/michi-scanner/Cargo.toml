@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 michi-core = { path = "../michi-core" }
 michi-metadata = { path = "../michi-metadata" }
+michi-db = { path = "../michi-db" }
+sqlx.workspace = true
 
 tracing.workspace = true
 chrono.workspace = true

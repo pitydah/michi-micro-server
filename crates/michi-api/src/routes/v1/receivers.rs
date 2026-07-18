@@ -484,16 +484,25 @@ pub async fn activate_room_group_handler(
             michi_core::RoomMode::Relax => 40,
             michi_core::RoomMode::Custom => 60,
         });
-        let reg = state.receiver_manager.registry().await;
-        let reg_read = reg.read().await;
-        if let Some(entry) = reg_read.get(recv_id) {
+        // Apply maximum safe volume per receiver
+        let capped_vol = {
+            let reg_a = state.receiver_manager.registry().await;
+            let reg_read_a = reg_a.read().await;
+            let max_safe = reg_read_a.get(recv_id).and_then(|e| e.maximum_safe_volume);
+            std::mem::drop(reg_read_a);
+            std::mem::drop(reg_a);
+            max_safe.map(|max| vol.min(max)).unwrap_or(vol)
+        };
+        let reg_b = state.receiver_manager.registry().await;
+        let reg_read_b = reg_b.read().await;
+        if let Some(entry) = reg_read_b.get(recv_id) {
             if entry.paired && entry.active_session_id.is_none() {
                 let _ = state
                     .receiver_manager
-                    .start_session(recv_id, &id.to_string(), "pcm", 48000, 24, 2, 0, 200, vol)
+                    .start_session(recv_id, &id.to_string(), "pcm", 48000, 24, 2, 0, 200, capped_vol)
                     .await;
             }
-            let _ = state.receiver_manager.set_volume(recv_id, vol).await;
+            let _ = state.receiver_manager.set_volume(recv_id, capped_vol).await;
         }
     }
 

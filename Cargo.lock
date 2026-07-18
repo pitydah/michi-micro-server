@@ -2032,7 +2032,9 @@ version = "0.2.0"
 dependencies = [
  "chrono",
  "michi-core",
+ "michi-db",
  "michi-metadata",
+ "sqlx",
  "tempfile",
  "tokio",
  "tracing",

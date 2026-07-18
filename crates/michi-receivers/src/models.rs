@@ -93,6 +93,7 @@ pub struct ReceiverRegistryEntry {
     pub max_sample_rate: u32,
     pub max_bit_depth: u32,
     pub supported_codecs: Vec<String>,
+    pub maximum_safe_volume: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]

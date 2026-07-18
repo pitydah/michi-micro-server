@@ -93,6 +93,7 @@ impl ReceiverSessionManager {
             max_sample_rate: max_sr,
             max_bit_depth: max_bd,
             supported_codecs: codecs,
+            maximum_safe_volume: Some(100),
         };
 
         self.registry.write().await.add(entry);
