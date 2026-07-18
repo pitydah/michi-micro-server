@@ -1,4 +1,4 @@
-ARG RUST_VERSION=1.83
+ARG RUST_VERSION=1.86
 ARG DEBIAN_VERSION=bookworm-slim
 
 # Builder stage

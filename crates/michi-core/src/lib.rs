@@ -417,19 +417,23 @@ impl ImportState {
             Self::Expired => "expired",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Self {
+impl FromStr for ImportState {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "created" => Self::Created,
-            "uploading" => Self::Uploading,
-            "uploaded" => Self::Uploaded,
-            "verifying" => Self::Verifying,
-            "committing" => Self::Committing,
-            "committed" => Self::Committed,
-            "failed" => Self::Failed,
-            "rolled_back" => Self::RolledBack,
-            "expired" => Self::Expired,
-            _ => Self::Created,
+            "created" => Ok(Self::Created),
+            "uploading" => Ok(Self::Uploading),
+            "uploaded" => Ok(Self::Uploaded),
+            "verifying" => Ok(Self::Verifying),
+            "committing" => Ok(Self::Committing),
+            "committed" => Ok(Self::Committed),
+            "failed" => Ok(Self::Failed),
+            "rolled_back" => Ok(Self::RolledBack),
+            "expired" => Ok(Self::Expired),
+            _ => Ok(Self::Created),
         }
     }
 }

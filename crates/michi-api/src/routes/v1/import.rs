@@ -356,8 +356,8 @@ pub async fn import_upload_handler(
             starred: false,
             rating: 0,
             starred_at: None,
-        replaygain_track_gain: None,
-        replaygain_track_peak: None,
+            replaygain_track_gain: None,
+            replaygain_track_peak: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

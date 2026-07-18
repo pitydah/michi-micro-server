@@ -24,9 +24,13 @@ fn v1_error(
 pub async fn starred_tracks_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let tracks = michi_db::get_starred_tracks(&state.db)
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    let tracks = michi_db::get_starred_tracks(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     let safe_tracks: Vec<serde_json::Value> = tracks
         .into_iter()
@@ -60,13 +64,31 @@ pub async fn star_track_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let exists = michi_db::get_track(&state.db, &id)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?
-        .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "TRACK_NOT_FOUND", &format!("track not found: {}", id)))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "TRACK_NOT_FOUND",
+                &format!("track not found: {}", id),
+            )
+        })?;
 
     let _ = exists;
     michi_db::star_track(&state.db, &id, body.starred)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -86,14 +108,32 @@ pub async fn rate_track_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let exists = michi_db::get_track(&state.db, &id)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?
-        .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "TRACK_NOT_FOUND", &format!("track not found: {}", id)))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "TRACK_NOT_FOUND",
+                &format!("track not found: {}", id),
+            )
+        })?;
 
     let _ = exists;
     let rating = body.rating.min(5);
     michi_db::rate_track(&state.db, &id, rating)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",

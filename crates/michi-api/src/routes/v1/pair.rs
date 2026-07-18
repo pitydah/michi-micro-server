@@ -44,7 +44,10 @@ pub async fn link_pair_start(
     Json(body): Json<PairStartBody>,
 ) -> Result<Json<PairStartResponse>, (StatusCode, Json<serde_json::Value>)> {
     // Log X-Michi-Device-Id header if present (Player sends this)
-    if let Some(device_id) = headers.get("X-Michi-Device-Id").and_then(|v| v.to_str().ok()) {
+    if let Some(device_id) = headers
+        .get("X-Michi-Device-Id")
+        .and_then(|v| v.to_str().ok())
+    {
         tracing::info!("pair/start from device: {}", device_id);
     }
 
@@ -84,7 +87,10 @@ pub async fn link_pair_confirm(
     State(state): State<AppState>,
     Json(body): Json<PairConfirmRequest>,
 ) -> Result<Json<PairConfirmResponse>, (StatusCode, Json<serde_json::Value>)> {
-    if let Some(device_id) = headers.get("X-Michi-Device-Id").and_then(|v| v.to_str().ok()) {
+    if let Some(device_id) = headers
+        .get("X-Michi-Device-Id")
+        .and_then(|v| v.to_str().ok())
+    {
         tracing::info!("pair/confirm from device: {}", device_id);
     }
 

@@ -93,6 +93,7 @@ impl ReceiverClient {
     }
 
     /// POST /api/v1/receiver/session/start
+    #[allow(clippy::too_many_arguments)]
     pub async fn session_start(
         &self,
         session_id: &str,

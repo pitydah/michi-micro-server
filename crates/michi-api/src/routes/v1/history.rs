@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -43,17 +44,22 @@ pub async fn history_handler(
     let limit = query.limit.unwrap_or(50).min(200);
     let offset = query.offset.unwrap_or(0);
 
-    let rows: Vec<(String, String, String, Option<String>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT h.track_id, h.played_at, COALESCE(t.title, 'Unknown'), t.artist, t.album
+    let rows: Vec<(String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT h.track_id, h.played_at, COALESCE(t.title, 'Unknown'), t.artist, t.album
              FROM play_history h LEFT JOIN tracks t ON h.track_id = t.id
-             ORDER BY h.played_at DESC LIMIT ? OFFSET ?"
+             ORDER BY h.played_at DESC LIMIT ? OFFSET ?",
+    )
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
         )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    })?;
 
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM play_history")
         .fetch_one(&state.db)
@@ -85,25 +91,36 @@ pub async fn history_stats_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM play_history")
-        .fetch_one(&state.db).await.unwrap_or(0);
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
 
-    let unique_tracks: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT track_id) FROM play_history")
-        .fetch_one(&state.db).await.unwrap_or(0);
+    let unique_tracks: i64 =
+        sqlx::query_scalar("SELECT COUNT(DISTINCT track_id) FROM play_history")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
 
     let today: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM play_history WHERE played_at >= datetime('now', '-1 day')"
+        "SELECT COUNT(*) FROM play_history WHERE played_at >= datetime('now', '-1 day')",
     )
-        .fetch_one(&state.db).await.unwrap_or(0);
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
 
     let this_week: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM play_history WHERE played_at >= datetime('now', '-7 days')"
+        "SELECT COUNT(*) FROM play_history WHERE played_at >= datetime('now', '-7 days')",
     )
-        .fetch_one(&state.db).await.unwrap_or(0);
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
 
     let this_month: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM play_history WHERE played_at >= datetime('now', '-30 days')"
+        "SELECT COUNT(*) FROM play_history WHERE played_at >= datetime('now', '-30 days')",
     )
-        .fetch_one(&state.db).await.unwrap_or(0);
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
 
     Ok(Json(serde_json::json!({
         "total": total,
@@ -120,7 +137,13 @@ pub async fn clear_history_handler(
     sqlx::query("DELETE FROM play_history")
         .execute(&state.db)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     Ok(Json(serde_json::json!({ "status": "cleared" })))
 }
@@ -132,17 +155,22 @@ pub struct ExportQuery {
 
 pub async fn history_export_handler(
     State(state): State<AppState>,
-    Query(query): Query<ExportQuery>,
+    Query(_query): Query<ExportQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let rows: Vec<(String, String, String, Option<String>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT h.track_id, h.played_at, COALESCE(t.title, 'Unknown'), t.artist, t.album
+    let rows: Vec<(String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT h.track_id, h.played_at, COALESCE(t.title, 'Unknown'), t.artist, t.album
              FROM play_history h LEFT JOIN tracks t ON h.track_id = t.id
-             ORDER BY h.played_at DESC LIMIT 10000"
+             ORDER BY h.played_at DESC LIMIT 10000",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
         )
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    })?;
 
     let entries: Vec<serde_json::Value> = rows
         .into_iter()

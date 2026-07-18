@@ -75,7 +75,11 @@ pub async fn library_health_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let stats = michi_db::library_stats(&state.db).await.map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string())
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
     })?;
 
     let total_playlists = michi_db::list_playlists(&state.db, None)
@@ -84,38 +88,64 @@ pub async fn library_health_handler(
         .len() as i64;
 
     // Count tracks with missing metadata
-    let with_title: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE title IS NOT NULL AND title != ''")
-        .fetch_one(&state.db).await.unwrap_or(0);
-    let with_artist: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE artist IS NOT NULL AND artist != ''")
-        .fetch_one(&state.db).await.unwrap_or(0);
-    let with_album: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE album IS NOT NULL AND album != ''")
-        .fetch_one(&state.db).await.unwrap_or(0);
+    let with_title: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE title IS NOT NULL AND title != ''")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
+    let with_artist: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE artist IS NOT NULL AND artist != ''")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
+    let with_album: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE album IS NOT NULL AND album != ''")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
     let without_meta: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM tracks WHERE (title IS NULL OR title = '') AND (artist IS NULL OR artist = '')"
     ).fetch_one(&state.db).await.unwrap_or(0);
-    let with_artwork: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE artwork_id IS NOT NULL")
-        .fetch_one(&state.db).await.unwrap_or(0);
-    let total_duration_ms: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(duration_ms), 0) FROM tracks")
-        .fetch_one(&state.db).await.unwrap_or(0);
+    let with_artwork: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE artwork_id IS NOT NULL")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
+    let total_duration_ms: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(duration_ms), 0) FROM tracks")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
 
     // New: genre/year/format coverage
-    let with_genre: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE genre IS NOT NULL AND genre != ''")
-        .fetch_one(&state.db).await.unwrap_or(0);
+    let with_genre: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE genre IS NOT NULL AND genre != ''")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
     let without_genre = stats.tracks - with_genre;
 
     let with_year: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE year IS NOT NULL")
-        .fetch_one(&state.db).await.unwrap_or(0);
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
     let without_year = stats.tracks - with_year;
 
     let lossless_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM tracks WHERE format IN ('FLAC', 'ALAC', 'WAV', 'AIFF', 'DSF', 'DFF')"
+        "SELECT COUNT(*) FROM tracks WHERE format IN ('FLAC', 'ALAC', 'WAV', 'AIFF', 'DSF', 'DFF')",
     )
-        .fetch_one(&state.db).await.unwrap_or(0);
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
     let lossy_count = stats.tracks - lossless_count;
 
     // Missing files on disk (simplified: count tracks with file_path)
-    let with_file: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE file_path IS NOT NULL AND file_path != ''")
-        .fetch_one(&state.db).await.unwrap_or(0);
+    let _with_file: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tracks WHERE file_path IS NOT NULL AND file_path != ''",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
 
     Ok(Json(serde_json::json!({
         "total_tracks": stats.tracks,

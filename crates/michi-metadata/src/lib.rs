@@ -103,7 +103,9 @@ pub fn read_metadata(path: &Path) -> Result<AudioMetadata, MetadataError> {
         }
         None => {
             warn!("no tags found for {}", path.display());
-            (None, None, None, None, None, None, None, None, false, None, None)
+            (
+                None, None, None, None, None, None, None, None, false, None, None,
+            )
         }
     };
 

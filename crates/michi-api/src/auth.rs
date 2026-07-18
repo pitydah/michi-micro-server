@@ -23,12 +23,14 @@ use crate::AppState;
 const SESSION_DURATION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Extract a Bearer token from the Authorization header
+#[allow(dead_code)]
 pub fn extract_bearer_token(request: &Request) -> Option<String> {
     let auth_header = request.headers().get("Authorization")?.to_str().ok()?;
     auth_header.strip_prefix("Bearer ").map(|s| s.to_string())
 }
 
 /// Resolve the device_id from a request using either link tokens or auth sessions
+#[allow(dead_code)]
 pub async fn resolve_device_id(state: &AppState, request: &Request) -> Option<Uuid> {
     let token = extract_bearer_token(request)?;
     // Try link token (v1 pairing)

@@ -4,7 +4,6 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -91,7 +90,11 @@ pub async fn sync_group_handler(
             "position_ms": body.position_ms,
             "playing": body.playing,
         }))),
-        None => Err(v1_error(StatusCode::NOT_FOUND, "GROUP_NOT_FOUND", &format!("group {} not found", group_id))),
+        None => Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "GROUP_NOT_FOUND",
+            &format!("group {} not found", group_id),
+        )),
     }
 }
 
@@ -112,7 +115,7 @@ pub async fn receivers_handler(
                 "device_type": e.device_type,
                 "host": e.base_url,
                 "paired": e.paired,
-                "online": !e.active_session_id.is_some() && e.last_seen.map(|ls| {
+                "online": e.active_session_id.is_none() && e.last_seen.map(|ls| {
                     (chrono::Utc::now() - ls).num_seconds() < 180
                 }).unwrap_or(false),
                 "capabilities": e.capabilities,
@@ -270,7 +273,11 @@ pub async fn discover_mdns_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     match discover_mdns_receivers().await {
         Ok(receivers) => Ok(Json(serde_json::json!({ "receivers": receivers }))),
-        Err(e) => Err(v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DISCOVERY_FAILED", &e)),
+        Err(e) => Err(v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DISCOVERY_FAILED",
+            &e,
+        )),
     }
 }
 
@@ -280,7 +287,9 @@ async fn discover_mdns_receivers() -> Result<Vec<serde_json::Value>, String> {
 
     let daemon = ServiceDaemon::new().map_err(|e| format!("mDNS daemon: {}", e))?;
     let service_type = "_michi-receiver._tcp.local.";
-    let receiver = daemon.browse(service_type).map_err(|e| format!("mDNS browse: {}", e))?;
+    let receiver = daemon
+        .browse(service_type)
+        .map_err(|e| format!("mDNS browse: {}", e))?;
 
     let mut discovered = Vec::new();
     let timeout = tokio::time::timeout(Duration::from_secs(3), async {

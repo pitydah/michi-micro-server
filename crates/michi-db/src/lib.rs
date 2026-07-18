@@ -4,8 +4,8 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use michi_core::{
     AlbumSummary, ArtistSummary, AudioFormat, ChainLink, ChainLinkCreate, ChainLinkUpdate,
-    LibraryStats, PlayHistory, PlaybackChain, PlaybackChainCreate, PlaybackChainUpdate,
-    Playlist, PlaylistCreate, PlaylistTrack, Track, TrackUpdate,
+    LibraryStats, PlayHistory, PlaybackChain, PlaybackChainCreate, PlaybackChainUpdate, Playlist,
+    PlaylistCreate, PlaylistTrack, Track, TrackUpdate,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -810,10 +810,10 @@ async fn migration_026(pool: &SqlitePool) -> Result<(), DbError> {
             repeat_mode TEXT NOT NULL DEFAULT 'none',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
-        )"
+        )",
     )
-        .execute(pool)
-        .await?;
+    .execute(pool)
+    .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS chain_links (
@@ -824,10 +824,10 @@ async fn migration_026(pool: &SqlitePool) -> Result<(), DbError> {
             volume INTEGER NOT NULL DEFAULT 80,
             muted INTEGER NOT NULL DEFAULT 0,
             delay_ms INTEGER NOT NULL DEFAULT 0
-        )"
+        )",
     )
-        .execute(pool)
-        .await?;
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
@@ -1157,8 +1157,12 @@ pub async fn get_chain(pool: &SqlitePool, id: &Uuid) -> Result<Option<PlaybackCh
         playing: playing != 0,
         shuffle: shuffle != 0,
         repeat_mode: repeat_mode.to_string(),
-        created_at: DateTime::parse_from_rfc3339(created_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
-        updated_at: DateTime::parse_from_rfc3339(updated_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
+        created_at: DateTime::parse_from_rfc3339(created_str)
+            .map(|d| d.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now()),
+        updated_at: DateTime::parse_from_rfc3339(updated_str)
+            .map(|d| d.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now()),
     }))
 }
 
@@ -1170,28 +1174,35 @@ pub async fn list_chains(pool: &SqlitePool) -> Result<Vec<PlaybackChain>, DbErro
         .fetch_all(pool)
         .await?;
 
-    let chains = rows.iter().map(|r| {
-        let id_str: &str = r.try_get("id").unwrap();
-        let name: &str = r.try_get("name").unwrap();
-        let track_id_str: Option<&str> = r.try_get("track_id").ok();
-        let pos: i64 = r.try_get("position_ms").unwrap();
-        let playing: i64 = r.try_get("playing").unwrap();
-        let shuffle_val: i64 = r.try_get("shuffle").unwrap();
-        let repeat_mode: &str = r.try_get("repeat_mode").unwrap();
-        let created_str: &str = r.try_get("created_at").unwrap();
-        let updated_str: &str = r.try_get("updated_at").unwrap();
-        PlaybackChain {
-            id: Uuid::parse_str(id_str).unwrap(),
-            name: name.to_string(),
-            track_id: track_id_str.and_then(|s| Uuid::parse_str(s).ok()),
-            position_ms: pos as u64,
-            playing: playing != 0,
-            shuffle: shuffle_val != 0,
-            repeat_mode: repeat_mode.to_string(),
-            created_at: DateTime::parse_from_rfc3339(created_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
-            updated_at: DateTime::parse_from_rfc3339(updated_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
-        }
-    }).collect();
+    let chains = rows
+        .iter()
+        .map(|r| {
+            let id_str: &str = r.try_get("id").unwrap();
+            let name: &str = r.try_get("name").unwrap();
+            let track_id_str: Option<&str> = r.try_get("track_id").ok();
+            let pos: i64 = r.try_get("position_ms").unwrap();
+            let playing: i64 = r.try_get("playing").unwrap();
+            let shuffle_val: i64 = r.try_get("shuffle").unwrap();
+            let repeat_mode: &str = r.try_get("repeat_mode").unwrap();
+            let created_str: &str = r.try_get("created_at").unwrap();
+            let updated_str: &str = r.try_get("updated_at").unwrap();
+            PlaybackChain {
+                id: Uuid::parse_str(id_str).unwrap(),
+                name: name.to_string(),
+                track_id: track_id_str.and_then(|s| Uuid::parse_str(s).ok()),
+                position_ms: pos as u64,
+                playing: playing != 0,
+                shuffle: shuffle_val != 0,
+                repeat_mode: repeat_mode.to_string(),
+                created_at: DateTime::parse_from_rfc3339(created_str)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                updated_at: DateTime::parse_from_rfc3339(updated_str)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            }
+        })
+        .collect();
     Ok(chains)
 }
 
@@ -1256,10 +1267,12 @@ pub async fn delete_chain(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbError>
     // Delete links first
     sqlx::query("DELETE FROM chain_links WHERE chain_id = ?")
         .bind(&id_str)
-        .execute(pool).await?;
+        .execute(pool)
+        .await?;
     let res = sqlx::query("DELETE FROM playback_chains WHERE id = ?")
         .bind(&id_str)
-        .execute(pool).await?;
+        .execute(pool)
+        .await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -1273,27 +1286,29 @@ pub async fn add_chain_link(
     let id = Uuid::new_v4();
     let cid = chain_id.to_string();
 
-    let max_pos: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position), -1) FROM chain_links WHERE chain_id = ?")
-        .bind(&cid)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(-1);
+    let max_pos: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(position), -1) FROM chain_links WHERE chain_id = ?",
+    )
+    .bind(&cid)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(-1);
 
     let volume = input.volume.unwrap_or(80);
     let delay = input.delay_ms.unwrap_or(0);
 
     sqlx::query(
         "INSERT INTO chain_links (id, chain_id, position, receiver_id, volume, muted, delay_ms)
-         VALUES (?, ?, ?, ?, ?, 0, ?)"
+         VALUES (?, ?, ?, ?, ?, 0, ?)",
     )
-        .bind(id.to_string())
-        .bind(&cid)
-        .bind(max_pos + 1)
-        .bind(&input.receiver_id)
-        .bind(volume)
-        .bind(delay)
-        .execute(pool)
-        .await?;
+    .bind(id.to_string())
+    .bind(&cid)
+    .bind(max_pos + 1)
+    .bind(&input.receiver_id)
+    .bind(volume)
+    .bind(delay)
+    .execute(pool)
+    .await?;
 
     Ok(ChainLink {
         id,
@@ -1314,31 +1329,34 @@ pub async fn get_chain_links(
     let cid = chain_id.to_string();
     let rows = sqlx::query(
         "SELECT id, chain_id, position, receiver_id, volume, muted, delay_ms
-         FROM chain_links WHERE chain_id = ? ORDER BY position ASC"
+         FROM chain_links WHERE chain_id = ? ORDER BY position ASC",
     )
-        .bind(&cid)
-        .fetch_all(pool)
-        .await?;
+    .bind(&cid)
+    .fetch_all(pool)
+    .await?;
 
-    let links = rows.iter().map(|r| {
-        let id_str: &str = r.try_get("id").unwrap();
-        let cid_str: &str = r.try_get("chain_id").unwrap();
-        let pos: i64 = r.try_get("position").unwrap();
-        let recv_id: &str = r.try_get("receiver_id").unwrap();
-        let vol: i64 = r.try_get("volume").unwrap();
-        let muted: i64 = r.try_get("muted").unwrap();
-        let delay: i64 = r.try_get("delay_ms").unwrap();
-        ChainLink {
-            id: Uuid::parse_str(id_str).unwrap(),
-            chain_id: Uuid::parse_str(cid_str).unwrap(),
-            position: pos,
-            receiver_id: recv_id.to_string(),
-            receiver_name: None,
-            volume: vol,
-            muted: muted != 0,
-            delay_ms: delay,
-        }
-    }).collect();
+    let links = rows
+        .iter()
+        .map(|r| {
+            let id_str: &str = r.try_get("id").unwrap();
+            let cid_str: &str = r.try_get("chain_id").unwrap();
+            let pos: i64 = r.try_get("position").unwrap();
+            let recv_id: &str = r.try_get("receiver_id").unwrap();
+            let vol: i64 = r.try_get("volume").unwrap();
+            let muted: i64 = r.try_get("muted").unwrap();
+            let delay: i64 = r.try_get("delay_ms").unwrap();
+            ChainLink {
+                id: Uuid::parse_str(id_str).unwrap(),
+                chain_id: Uuid::parse_str(cid_str).unwrap(),
+                position: pos,
+                receiver_id: recv_id.to_string(),
+                receiver_name: None,
+                volume: vol,
+                muted: muted != 0,
+                delay_ms: delay,
+            }
+        })
+        .collect();
     Ok(links)
 }
 
@@ -1390,7 +1408,8 @@ pub async fn delete_chain_link(pool: &SqlitePool, link_id: &Uuid) -> Result<bool
     let lid = link_id.to_string();
     let res = sqlx::query("DELETE FROM chain_links WHERE id = ?")
         .bind(&lid)
-        .execute(pool).await?;
+        .execute(pool)
+        .await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -1712,8 +1731,8 @@ pub async fn get_playlist_tracks(
                 starred: false,
                 rating: 0,
                 starred_at: None,
-        replaygain_track_gain: None,
-        replaygain_track_peak: None,
+                replaygain_track_gain: None,
+                replaygain_track_peak: None,
                 created_at: r
                     .get::<&str, _>("t_created_at")
                     .parse()
@@ -1815,11 +1834,7 @@ pub async fn star_track(
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn rate_track(
-    pool: &SqlitePool,
-    track_id: &Uuid,
-    rating: u8,
-) -> Result<bool, DbError> {
+pub async fn rate_track(pool: &SqlitePool, track_id: &Uuid, rating: u8) -> Result<bool, DbError> {
     let rating = rating.min(5);
     let result = sqlx::query("UPDATE tracks SET rating = ? WHERE id = ?")
         .bind(rating as i64)
@@ -1829,9 +1844,7 @@ pub async fn rate_track(
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn get_starred_tracks(
-    pool: &SqlitePool,
-) -> Result<Vec<Track>, DbError> {
+pub async fn get_starred_tracks(pool: &SqlitePool) -> Result<Vec<Track>, DbError> {
     let rows = sqlx::query(
         "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at FROM tracks WHERE starred = 1 ORDER BY starred_at DESC",
     )
@@ -1879,10 +1892,7 @@ pub async fn search_tracks(pool: &SqlitePool, q: &str) -> Result<Vec<Track>, DbE
     Ok(tracks)
 }
 
-pub async fn search_tracks_advanced(
-    pool: &SqlitePool,
-    query: &str,
-) -> Result<Vec<Track>, DbError> {
+pub async fn search_tracks_advanced(pool: &SqlitePool, query: &str) -> Result<Vec<Track>, DbError> {
     let mut sql = String::from(
         "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at FROM tracks WHERE 1=1"
     );
@@ -1956,10 +1966,18 @@ pub async fn search_tracks_advanced(
     }
 
     if !fulltext_parts.is_empty() {
-        let like_clauses: Vec<String> = fulltext_parts.iter().map(|p| {
-            params.push(p.clone());
-            format!("(title LIKE ?{} OR artist LIKE ?{} OR album LIKE ?{})", params.len(), params.len(), params.len())
-        }).collect();
+        let like_clauses: Vec<String> = fulltext_parts
+            .iter()
+            .map(|p| {
+                params.push(p.clone());
+                format!(
+                    "(title LIKE ?{} OR artist LIKE ?{} OR album LIKE ?{})",
+                    params.len(),
+                    params.len(),
+                    params.len()
+                )
+            })
+            .collect();
         sql.push_str(" AND (");
         sql.push_str(&like_clauses.join(" AND "));
         sql.push(')');
@@ -2697,8 +2715,12 @@ pub async fn save_queue_state(
     let now = Utc::now().to_rfc3339();
 
     sqlx::query("INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
-        .bind(queue_id.to_string()).bind(name).bind(&now).bind(&now)
-        .execute(pool).await?;
+        .bind(queue_id.to_string())
+        .bind(name)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await?;
 
     for (i, tid) in track_ids.iter().enumerate() {
         let item_id = Uuid::new_v4();
@@ -2992,11 +3014,11 @@ mod tests {
             track_number: None,
             disc_number: None,
             content_hash: None,
-        starred: false,
-        rating: 0,
-        starred_at: None,
-        replaygain_track_gain: None,
-        replaygain_track_peak: None,
+            starred: false,
+            rating: 0,
+            starred_at: None,
+            replaygain_track_gain: None,
+            replaygain_track_peak: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

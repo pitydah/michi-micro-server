@@ -168,7 +168,9 @@ pub async fn smart_playlist_handler(
         ));
     }
 
-    let limit = body.params.as_ref()
+    let limit = body
+        .params
+        .as_ref()
         .and_then(|p| p.get("limit").and_then(|v| v.as_u64()))
         .unwrap_or(50)
         .min(200) as usize;
@@ -193,14 +195,12 @@ pub async fn smart_playlist_handler(
             }
             result
         }
-        "favorites" => {
-            michi_db::get_starred_tracks(&state.db)
-                .await
-                .unwrap_or_default()
-        }
+        "favorites" => michi_db::get_starred_tracks(&state.db)
+            .await
+            .unwrap_or_default(),
         "newest" => {
             let mut t = michi_db::list_tracks(&state.db).await.unwrap_or_default();
-            t.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            t.sort_by_key(|t| std::cmp::Reverse(t.created_at));
             t.truncate(limit);
             t
         }
@@ -225,15 +225,14 @@ pub async fn smart_playlist_handler(
         }
         "unplayed" => {
             let all = michi_db::list_tracks(&state.db).await.unwrap_or_default();
-            let played_ids: std::collections::HashSet<Uuid> = sqlx::query_as::<_, (String,)>(
-                "SELECT DISTINCT track_id FROM play_history"
-            )
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(id,)| Uuid::parse_str(&id).ok())
-            .collect();
+            let played_ids: std::collections::HashSet<Uuid> =
+                sqlx::query_as::<_, (String,)>("SELECT DISTINCT track_id FROM play_history")
+                    .fetch_all(&state.db)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|(id,)| Uuid::parse_str(&id).ok())
+                    .collect();
 
             all.into_iter()
                 .filter(|t| !played_ids.contains(&t.id))
@@ -241,7 +240,9 @@ pub async fn smart_playlist_handler(
                 .collect()
         }
         "by_genre" => {
-            let genre = body.params.as_ref()
+            let genre = body
+                .params
+                .as_ref()
                 .and_then(|p| p.get("genre").and_then(|v| v.as_str()))
                 .unwrap_or("");
             let all = michi_db::list_tracks(&state.db).await.unwrap_or_default();
@@ -251,7 +252,9 @@ pub async fn smart_playlist_handler(
                 .collect()
         }
         "by_year" => {
-            let year = body.params.as_ref()
+            let year = body
+                .params
+                .as_ref()
                 .and_then(|p| p.get("year").and_then(|v| v.as_i64()))
                 .unwrap_or(2020) as i32;
             let all = michi_db::list_tracks(&state.db).await.unwrap_or_default();
@@ -263,7 +266,9 @@ pub async fn smart_playlist_handler(
         "random" => {
             let all = michi_db::list_tracks(&state.db).await.unwrap_or_default();
             use rand::seq::SliceRandom;
-            all.choose_multiple(&mut rand::thread_rng(), limit).cloned().collect()
+            all.choose_multiple(&mut rand::thread_rng(), limit)
+                .cloned()
+                .collect()
         }
         _ => {
             return Err(v1_error(
@@ -305,7 +310,7 @@ pub async fn smart_playlist_handler(
 }
 
 use axum::http::header;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 
 pub async fn export_playlist_m3u_handler(
     State(state): State<AppState>,
@@ -356,11 +361,10 @@ pub async fn export_playlist_m3u_handler(
         .header(header::CONTENT_TYPE, "audio/x-mpegurl")
         .header(
             header::CONTENT_DISPOSITION,
-            &format!("attachment; filename=\"{}\"", filename),
+            format!("attachment; filename=\"{}\"", filename),
         )
         .body(Body::from(m3u))
         .unwrap();
 
     Ok(response)
 }
-

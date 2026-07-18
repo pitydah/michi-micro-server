@@ -1,3 +1,4 @@
+#![allow(unused_variables, clippy::needless_borrows_for_generic_args, clippy::len_zero)]
 use std::path::{Path, PathBuf};
 
 use axum::{
@@ -3338,7 +3339,9 @@ async fn test_v1_import_preflight_exact_hash() {
         year: None,
         track_number: None,
         disc_number: None,
-        content_hash: Some("aaabbbcccdddeeefff000111222333444555666777888999000aaabbbcccddd".into()),
+        content_hash: Some(
+            "aaabbbcccdddeeefff000111222333444555666777888999000aaabbbcccddd".into(),
+        ),
         starred: false,
         rating: 0,
         starred_at: None,
@@ -3754,9 +3757,7 @@ async fn test_v1_smart_playlist_favorites() {
                 .uri(format!("/api/v1/star/{tid}"))
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({"starred": true}).to_string(),
-                ))
+                .body(Body::from(serde_json::json!({"starred": true}).to_string()))
                 .unwrap(),
         )
         .await
@@ -3824,9 +3825,9 @@ async fn test_v1_backup_export() {
     let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
     assert_eq!(body["version"], 1);
     assert_eq!(body["tracks"].as_array().unwrap().len(), 2);
-    assert!(body["exported_at"].as_str().unwrap().len() > 0);
-    assert!(body["server_id"].as_str().unwrap().len() > 0);
-    assert!(body["server_name"].as_str().unwrap().len() > 0);
+    assert!(!body["exported_at"].as_str().unwrap().is_empty());
+    assert!(!body["server_id"].as_str().unwrap().is_empty());
+    assert!(!body["server_name"].as_str().unwrap().is_empty());
     assert!(body["playlists"].is_array());
     assert!(body["starred_tracks"].is_array());
     assert!(body["play_history"].is_array());

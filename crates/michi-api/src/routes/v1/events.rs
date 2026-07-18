@@ -108,9 +108,11 @@ async fn handle_events_socket(socket: WebSocket, state: AppState) {
 // ── SSE endpoint (for clients that prefer Server-Sent Events) ──
 pub async fn events_sse_handler(
     State(state): State<AppState>,
-) -> axum::response::Sse<impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
-    use futures_util::StreamExt;
+) -> axum::response::Sse<
+    impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
     use axum::response::sse::Event;
+    use futures_util::StreamExt;
 
     let rx = state.tx.subscribe();
     let stream = tokio_stream::wrappers::BroadcastStream::new(rx)

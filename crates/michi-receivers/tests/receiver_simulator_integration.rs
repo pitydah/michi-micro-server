@@ -23,6 +23,7 @@ fn sim_url_hifi() -> String {
 }
 
 /// Helper: attempt to discover and pair with a receiver
+#[allow(dead_code)]
 async fn try_pair(base_url: &str) -> Result<String, String> {
     let mgr = ReceiverSessionManager::new();
     mgr.discover_and_pair(base_url, "test-suite").await

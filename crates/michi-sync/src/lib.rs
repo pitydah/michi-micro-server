@@ -1,23 +1,27 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{SqlitePool, FromRow};
-use tokio::fs::{self, File};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tracing::{info, warn, error};
-use utoipa::ToSchema;
-use uuid::Uuid;
+use sqlx::{FromRow, SqlitePool};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
+use tracing::{info, warn};
+use utoipa::ToSchema;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum SyncMessage {
     #[serde(rename = "identify")]
-    Identify { name: String, version: String, device_type: DeviceType },
+    Identify {
+        name: String,
+        version: String,
+        device_type: DeviceType,
+    },
     #[serde(rename = "state")]
     State {
         track_id: Option<Uuid>,
@@ -29,7 +33,10 @@ pub enum SyncMessage {
         queue_position: Option<u32>,
     },
     #[serde(rename = "handoff_request")]
-    HandoffRequest { from_device: String, to_device: String },
+    HandoffRequest {
+        from_device: String,
+        to_device: String,
+    },
     #[serde(rename = "handoff_accept")]
     HandoffAccept { session_data: SessionData },
     #[serde(rename = "ping")]
@@ -168,15 +175,24 @@ impl SyncMessage {
     }
 
     pub fn identify(name: String, version: String, device_type: DeviceType) -> Self {
-        SyncMessage::Identify { name, version, device_type }
+        SyncMessage::Identify {
+            name,
+            version,
+            device_type,
+        }
     }
 
     pub fn handoff_request(from: String, to: String) -> Self {
-        SyncMessage::HandoffRequest { from_device: from, to_device: to }
+        SyncMessage::HandoffRequest {
+            from_device: from,
+            to_device: to,
+        }
     }
 
     pub fn handoff_accept(session: SessionData) -> Self {
-        SyncMessage::HandoffAccept { session_data: session }
+        SyncMessage::HandoffAccept {
+            session_data: session,
+        }
     }
 }
 
@@ -240,10 +256,7 @@ impl SyncManager {
         Ok(file_id)
     }
 
-    pub async fn upload_chunk(
-        &self,
-        chunk: UploadChunk,
-    ) -> Result<UploadProgress, SyncError> {
+    pub async fn upload_chunk(&self, chunk: UploadChunk) -> Result<UploadProgress, SyncError> {
         let file_path = self.upload_dir.join(chunk.file_id.to_string());
 
         // Track total_chunks from the first chunk
@@ -332,17 +345,26 @@ impl SyncManager {
         Ok(())
     }
 
-    pub async fn get_upload_progress(&self, file_id: &Uuid) -> Result<Option<UploadProgress>, SyncError> {
+    pub async fn get_upload_progress(
+        &self,
+        file_id: &Uuid,
+    ) -> Result<Option<UploadProgress>, SyncError> {
         let meta = self.uploads.read().await.get(file_id).cloned();
         Ok(meta.map(|m| {
             let file_path = self.upload_dir.join(file_id.to_string());
             let uploaded_chunks = if file_path.exists() {
                 // Estimate from file size
-                (std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0) as f64 / self.chunk_size as f64).ceil() as u32
+                (std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0) as f64
+                    / self.chunk_size as f64)
+                    .ceil() as u32
             } else {
                 0
             };
-            let total = if m.total_chunks > 0 { m.total_chunks } else { 1 };
+            let total = if m.total_chunks > 0 {
+                m.total_chunks
+            } else {
+                1
+            };
             UploadProgress {
                 file_id: *file_id,
                 uploaded_chunks,
@@ -353,9 +375,12 @@ impl SyncManager {
         }))
     }
 
-    pub async fn check_file_exists(&self, file_hash: &str) -> Result<Option<SyncedFile>, SyncError> {
+    pub async fn check_file_exists(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<SyncedFile>, SyncError> {
         let file = sqlx::query_as::<_, SyncedFile>(
-            "SELECT * FROM synced_files WHERE file_hash = ? AND checksum_verified = TRUE"
+            "SELECT * FROM synced_files WHERE file_hash = ? AND checksum_verified = TRUE",
         )
         .bind(file_hash)
         .fetch_optional(&self.db_pool)
@@ -395,7 +420,7 @@ impl SyncManager {
     pub async fn get_playback_state(&self) -> Result<PlaybackState, SyncError> {
         let row = sqlx::query_as::<_, (String, String, bool, f64, String)>(
             "SELECT current_track_id, position_ms, playing, volume, updated_at
-             FROM playback_sessions ORDER BY updated_at DESC LIMIT 1"
+             FROM playback_sessions ORDER BY updated_at DESC LIMIT 1",
         )
         .fetch_optional(&self.db_pool)
         .await?;
@@ -432,7 +457,11 @@ impl SyncManager {
         Ok(())
     }
 
-    pub async fn initiate_handoff(&self, from_device: String, to_device: String) -> Result<SessionData, SyncError> {
+    pub async fn initiate_handoff(
+        &self,
+        from_device: String,
+        to_device: String,
+    ) -> Result<SessionData, SyncError> {
         let current = self.get_playback_state().await?;
         let session = SessionData {
             track_id: current.track_id,

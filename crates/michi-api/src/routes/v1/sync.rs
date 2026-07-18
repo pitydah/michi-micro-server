@@ -37,7 +37,11 @@ pub async fn sync_upload_init_handler(
     Json(body): Json<UploadInitBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     // Check if file already exists by hash
-    if let Ok(Some(existing)) = state.sync_manager.check_file_exists(&body.expected_hash).await {
+    if let Ok(Some(existing)) = state
+        .sync_manager
+        .check_file_exists(&body.expected_hash)
+        .await
+    {
         return Ok(Json(serde_json::json!({
             "status": "exists",
             "file_id": existing.id,
@@ -146,18 +150,41 @@ pub async fn sync_upload_file_handler(
 
     let data = base64::engine::general_purpose::STANDARD
         .decode(&body.data_base64)
-        .map_err(|e| v1_error(StatusCode::BAD_REQUEST, "BASE64_DECODE_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::BAD_REQUEST,
+                "BASE64_DECODE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     let file_id = uuid::Uuid::new_v4();
-    let server_path = state.config.cache_path.join("uploads").join(file_id.to_string());
+    let server_path = state
+        .config
+        .cache_path
+        .join("uploads")
+        .join(file_id.to_string());
     let _ = std::fs::create_dir_all(server_path.parent().unwrap());
 
-    tokio::fs::write(&server_path, &data)
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE_ERROR", &e.to_string()))?;
+    tokio::fs::write(&server_path, &data).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "WRITE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
-    let hash = state.sync_manager.calculate_file_hash(&server_path).await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "HASH_ERROR", &e.to_string()))?;
+    let hash = state
+        .sync_manager
+        .calculate_file_hash(&server_path)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "HASH_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     // Check dedup
     if let Ok(Some(existing)) = state.sync_manager.check_file_exists(&hash).await {
@@ -170,16 +197,24 @@ pub async fn sync_upload_file_handler(
         })));
     }
 
-    let file_id = state.sync_manager.register_uploaded_file(
-        body.filename,
-        body.original_path,
-        server_path.to_string_lossy().to_string(),
-        hash.clone(),
-        data.len() as i64,
-        body.uploaded_by,
-    ).await.map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "REGISTER_ERROR", &e.to_string())
-    })?;
+    let file_id = state
+        .sync_manager
+        .register_uploaded_file(
+            body.filename,
+            body.original_path,
+            server_path.to_string_lossy().to_string(),
+            hash.clone(),
+            data.len() as i64,
+            body.uploaded_by,
+        )
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "REGISTER_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     Ok(Json(serde_json::json!({
         "status": "uploaded",

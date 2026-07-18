@@ -99,6 +99,7 @@ impl ReceiverSessionManager {
         Ok(device_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_session(
         &self,
         receiver_id: &str,

@@ -48,13 +48,15 @@ pub async fn backup_handler(
         )
     })?;
 
-    let playlists = michi_db::list_playlists(&state.db, None).await.map_err(|e| {
-        v1_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "DATABASE_ERROR",
-            &e.to_string(),
-        )
-    })?;
+    let playlists = michi_db::list_playlists(&state.db, None)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     let starred_tracks = michi_db::get_starred_tracks(&state.db).await.map_err(|e| {
         v1_error(
@@ -64,17 +66,18 @@ pub async fn backup_handler(
         )
     })?;
 
-    let play_history_rows: Vec<(String, String)> =
-        sqlx::query_as("SELECT track_id, played_at FROM play_history ORDER BY played_at DESC LIMIT 10000")
-            .fetch_all(&state.db)
-            .await
-            .map_err(|e| {
-                v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "DATABASE_ERROR",
-                    &e.to_string(),
-                )
-            })?;
+    let play_history_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT track_id, played_at FROM play_history ORDER BY played_at DESC LIMIT 10000",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     let play_history: Vec<PlayHistoryEntry> = play_history_rows
         .into_iter()
@@ -117,17 +120,37 @@ pub async fn snapshot_handler(
     let track_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks")
         .fetch_one(&state.db)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
-    let album_count: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT album) FROM tracks WHERE album IS NOT NULL")
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    let album_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(DISTINCT album) FROM tracks WHERE album IS NOT NULL")
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
 
-    let artist_count: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT artist) FROM tracks WHERE artist IS NOT NULL")
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    let artist_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(DISTINCT artist) FROM tracks WHERE artist IS NOT NULL")
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
 
     let snapshot = serde_json::json!({
         "exported_at": chrono::Utc::now().to_rfc3339(),
@@ -149,7 +172,9 @@ pub async fn snapshot_handler(
 pub async fn last_snapshot_handler() -> Json<serde_json::Value> {
     let snap = LAST_SNAPSHOT.read().await;
     match snap.as_ref() {
-        Some(s) => Json(serde_json::json!({ "snapshot": serde_json::from_str::<serde_json::Value>(s).unwrap_or_default() })),
+        Some(s) => Json(
+            serde_json::json!({ "snapshot": serde_json::from_str::<serde_json::Value>(s).unwrap_or_default() }),
+        ),
         None => Json(serde_json::json!({ "snapshot": null })),
     }
 }
@@ -248,14 +273,18 @@ pub async fn verify_integrity_handler(
 
     let mut verified = 0u64;
     let mut missing = 0u64;
-    let mut corrupt = 0u64;
+    let corrupt = 0u64;
     let mut errors: Vec<String> = Vec::new();
 
     for track in &tracks {
         let path = std::path::Path::new(&track.file_path);
         if !path.exists() {
             missing += 1;
-            errors.push(format!("missing: {} ({})", track.title.as_deref().unwrap_or("?"), track.file_path));
+            errors.push(format!(
+                "missing: {} ({})",
+                track.title.as_deref().unwrap_or("?"),
+                track.file_path
+            ));
             continue;
         }
         verified += 1;
@@ -292,7 +321,12 @@ pub fn spawn_integrity_cron(db: sqlx::SqlitePool) {
                     tracing::warn!("integrity: missing file: {}", track.file_path);
                 }
             }
-            tracing::info!("integrity check: {}/{} files ok, {} missing", tracks.len() - missing as usize, tracks.len(), missing);
+            tracing::info!(
+                "integrity check: {}/{} files ok, {} missing",
+                tracks.len() - missing as usize,
+                tracks.len(),
+                missing
+            );
         }
     });
 }

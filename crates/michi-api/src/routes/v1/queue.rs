@@ -326,7 +326,13 @@ pub async fn queue_save_handler(
         body.position_ms,
     )
     .await
-    .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     Ok(Json(serde_json::json!({
         "status": "saved",
@@ -340,12 +346,21 @@ pub async fn queue_saved_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let session = michi_db::get_latest_playback_session(&state.db)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     match session {
         Some(s) => {
             let queue_items = if let Some(qid) = s.queue_id {
-                michi_db::get_queue_items(&state.db, &qid).await.ok().unwrap_or_default()
+                michi_db::get_queue_items(&state.db, &qid)
+                    .await
+                    .ok()
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             };

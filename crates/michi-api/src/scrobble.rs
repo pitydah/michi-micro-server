@@ -92,7 +92,7 @@ pub async fn record_play_handler(
             let db = state.db.clone();
             let token = token.clone();
             let track_id = input.track_id;
-            let played_at = now.timestamp() as i64;
+            let played_at = now.timestamp();
 
             tokio::spawn(async move {
                 submit_lastfm(&db, &token, &track_id, played_at).await;
@@ -221,12 +221,7 @@ async fn submit_listenbrainz(
     }
 }
 
-async fn submit_lastfm(
-    db: &sqlx::SqlitePool,
-    token: &str,
-    track_id: &Uuid,
-    listened_at: i64,
-) {
+async fn submit_lastfm(db: &sqlx::SqlitePool, token: &str, track_id: &Uuid, listened_at: i64) {
     let track = match michi_db::get_track(db, track_id).await {
         Ok(Some(t)) => t,
         _ => return,

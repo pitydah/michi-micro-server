@@ -199,9 +199,7 @@ async fn get_song(
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
     check_auth(&query)?;
     let id_str = query.u.as_deref().unwrap_or("");
-    let id = Uuid::parse_str(id_str).map_err(|_| {
-        json_err(errors::NOT_FOUND, "invalid song id")
-    })?;
+    let id = Uuid::parse_str(id_str).map_err(|_| json_err(errors::NOT_FOUND, "invalid song id"))?;
 
     let track = michi_db::get_track(&state.db, &id)
         .await
@@ -269,8 +267,7 @@ async fn stream(
 ) -> Result<Response, (StatusCode, Json<SubsonicResponse>)> {
     check_auth(&query)?;
     let id_str = query.u.as_deref().unwrap_or("");
-    let id = Uuid::parse_str(id_str)
-        .map_err(|_| json_err(errors::NOT_FOUND, "invalid id"))?;
+    let id = Uuid::parse_str(id_str).map_err(|_| json_err(errors::NOT_FOUND, "invalid id"))?;
 
     let track = michi_db::get_track(&state.db, &id)
         .await
@@ -303,8 +300,7 @@ async fn download(
 ) -> Result<Response, (StatusCode, Json<SubsonicResponse>)> {
     check_auth(&query)?;
     let id_str = query.u.as_deref().unwrap_or("");
-    let id = Uuid::parse_str(id_str)
-        .map_err(|_| json_err(errors::NOT_FOUND, "invalid id"))?;
+    let id = Uuid::parse_str(id_str).map_err(|_| json_err(errors::NOT_FOUND, "invalid id"))?;
 
     let track = michi_db::get_track(&state.db, &id)
         .await
@@ -325,7 +321,10 @@ async fn download(
 
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename))
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", filename),
+        )
         .header(header::CONTENT_LENGTH, file_size.to_string())
         .body(axum::body::Body::from_stream(stream))
         .unwrap())
@@ -336,8 +335,7 @@ async fn get_cover_art(
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Response, (StatusCode, Json<SubsonicResponse>)> {
     let id_str = query.u.as_deref().unwrap_or("");
-    let id = Uuid::parse_str(id_str)
-        .map_err(|_| json_err(errors::NOT_FOUND, "invalid id"))?;
+    let id = Uuid::parse_str(id_str).map_err(|_| json_err(errors::NOT_FOUND, "invalid id"))?;
 
     // Try to find the track and extract artwork
     let track = match michi_db::get_track(&state.db, &id).await {
@@ -350,11 +348,10 @@ async fn get_cover_art(
 
     if artwork_path.exists() {
         let data = tokio::fs::read(&artwork_path).await.unwrap_or_default();
-        let mime = infer::get(&data).map(|t| t.mime_type()).unwrap_or("image/jpeg");
-        return Ok((
-            [(header::CONTENT_TYPE, mime)],
-            data,
-        ).into_response());
+        let mime = infer::get(&data)
+            .map(|t| t.mime_type())
+            .unwrap_or("image/jpeg");
+        return Ok(([(header::CONTENT_TYPE, mime)], data).into_response());
     }
 
     // Try to extract from file
@@ -364,7 +361,11 @@ async fn get_cover_art(
     } else {
         match state.music_paths.iter().find_map(|p| {
             let full = p.join(file_path);
-            if full.exists() { Some(full) } else { None }
+            if full.exists() {
+                Some(full)
+            } else {
+                None
+            }
         }) {
             Some(p) => p,
             None => return Err(json_err(errors::NOT_FOUND, "no artwork found")),
@@ -374,11 +375,10 @@ async fn get_cover_art(
     if let Ok(data) = michi_metadata::extract_artwork(&path) {
         let _ = tokio::fs::create_dir_all(&cache_path).await;
         let _ = tokio::fs::write(&artwork_path, &data).await;
-        let mime = infer::get(&data).map(|t| t.mime_type()).unwrap_or("image/jpeg");
-        return Ok((
-            [(header::CONTENT_TYPE, mime)],
-            data,
-        ).into_response());
+        let mime = infer::get(&data)
+            .map(|t| t.mime_type())
+            .unwrap_or("image/jpeg");
+        return Ok(([(header::CONTENT_TYPE, mime)], data).into_response());
     }
 
     Err(json_err(errors::NOT_FOUND, "no artwork found"))
@@ -428,8 +428,8 @@ async fn get_playlist(
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
     check_auth(&query)?;
     let id_str = query.u.as_deref().unwrap_or("");
-    let id = Uuid::parse_str(id_str)
-        .map_err(|_| json_err(errors::NOT_FOUND, "invalid playlist id"))?;
+    let id =
+        Uuid::parse_str(id_str).map_err(|_| json_err(errors::NOT_FOUND, "invalid playlist id"))?;
 
     let playlist = michi_db::get_playlist(&state.db, &id)
         .await
@@ -469,17 +469,9 @@ async fn scrobble(
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
     check_auth(&query)?;
     let id_str = query.u.as_deref().unwrap_or("");
-    let id = Uuid::parse_str(id_str)
-        .map_err(|_| json_err(errors::NOT_FOUND, "invalid id"))?;
+    let id = Uuid::parse_str(id_str).map_err(|_| json_err(errors::NOT_FOUND, "invalid id"))?;
 
-    let _ = michi_db::record_play(
-        &state.db,
-        &id,
-        None,
-        &chrono::Utc::now(),
-        None,
-    )
-    .await;
+    let _ = michi_db::record_play(&state.db, &id, None, &chrono::Utc::now(), None).await;
 
     Ok(json_ok(None))
 }
@@ -545,7 +537,9 @@ async fn get_random_songs(
         })
         .collect();
 
-    Ok(json_ok(Some(json!({ "randomSongs": { "song": selected } }))))
+    Ok(json_ok(Some(
+        json!({ "randomSongs": { "song": selected } }),
+    )))
 }
 
 async fn get_now_playing(

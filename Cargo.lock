@@ -1568,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "michi-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "michi-core",
@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "michi-opensubsonic"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "chrono",
@@ -1711,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "michi-rooms"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1802,7 +1802,7 @@ dependencies = [
 
 [[package]]
 name = "michi-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",

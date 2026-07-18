@@ -308,7 +308,10 @@ fn v1_link_routes() -> Router<AppState> {
         .route("/api/v1/tracks", get(routes::v1::tracks::tracks_handler))
         .route("/api/v1/tracks/:id", get(routes::v1::tracks::track_handler))
         .route("/api/v1/search", get(routes::v1::tracks::search_handler))
-        .route("/api/v1/search/advanced", get(routes::v1::search::search_advanced_handler))
+        .route(
+            "/api/v1/search/advanced",
+            get(routes::v1::search::search_advanced_handler),
+        )
         // Stream
         .route(
             "/api/v1/stream/:id",
@@ -473,10 +476,7 @@ fn v1_link_routes() -> Router<AppState> {
             get(routes::v1::diagnostics::diagnostics_handler),
         )
         // Backup
-        .route(
-            "/api/v1/backup",
-            get(routes::v1::backup::backup_handler),
-        )
+        .route("/api/v1/backup", get(routes::v1::backup::backup_handler))
         .route(
             "/api/v1/home/dashboard",
             get(routes::v1::dashboard::dashboard_handler),
@@ -707,8 +707,14 @@ pub fn create_router(state: AppState) -> Router {
         .route("/static/styles.css", get(static_files::styles_css))
         .route("/static/app.js", get(static_files::app_js))
         .route("/static/assets/michi-logo.svg", get(static_files::logo_svg))
-        .route("/static/assets/michi-micro-server.svg", get(static_files::favicon_svg))
-        .route("/static/assets/michi-micro-server.png", get(static_files::favicon_png))
+        .route(
+            "/static/assets/michi-micro-server.svg",
+            get(static_files::favicon_svg),
+        )
+        .route(
+            "/static/assets/michi-micro-server.png",
+            get(static_files::favicon_png),
+        )
         .route("/manifest.json", get(pwa::manifest_json))
         .route("/sw.js", get(pwa::sw_js))
         .route("/api/shared/:code", get(library::shared_playlist_handler))

@@ -109,7 +109,10 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                 // Peer will detect liveness via TCP keepalive.
                             }
                             michi_sync::SyncMessage::Pong => {}
-                            michi_sync::SyncMessage::HandoffRequest { from_device, to_device } => {
+                            michi_sync::SyncMessage::HandoffRequest {
+                                from_device,
+                                to_device,
+                            } => {
                                 info!(
                                     "sync: handoff request from {} to {}",
                                     from_device, to_device
@@ -154,7 +157,10 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                 let _ = state_clone.sync_tx.send(accept);
                             }
                             michi_sync::SyncMessage::HandoffAccept { session_data } => {
-                                info!("sync: handoff accepted at position {}", session_data.position_ms);
+                                info!(
+                                    "sync: handoff accepted at position {}",
+                                    session_data.position_ms
+                                );
                             }
                         }
                     }

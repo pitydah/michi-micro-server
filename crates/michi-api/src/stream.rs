@@ -262,6 +262,7 @@ pub async fn stream_handler(
     }
 }
 
+#[allow(dead_code)]
 pub async fn hls_segment_handler(
     State(state): State<AppState>,
     Path((id, segment)): Path<(String, String)>,

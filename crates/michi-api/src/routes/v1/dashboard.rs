@@ -1,21 +1,9 @@
+#![allow(clippy::type_complexity)]
 use axum::{extract::State, http::StatusCode, Json};
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::AppState;
-
-fn v1_error(
-    status: StatusCode,
-    code: &str,
-    message: &str,
-) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        status,
-        Json(serde_json::json!({
-            "error": { "code": code, "message": message, "details": {} }
-        })),
-    )
-}
 
 #[derive(Serialize)]
 pub struct RecentPlay {
@@ -77,38 +65,66 @@ pub async fn dashboard_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let tracks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks")
-        .fetch_one(&state.db).await.unwrap_or(0);
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
 
-    let albums: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT album) FROM tracks WHERE album IS NOT NULL AND album != ''")
-        .fetch_one(&state.db).await.unwrap_or(0);
+    let albums: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT album) FROM tracks WHERE album IS NOT NULL AND album != ''",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
 
-    let artists: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT artist) FROM tracks WHERE artist IS NOT NULL AND artist != ''")
-        .fetch_one(&state.db).await.unwrap_or(0);
+    let artists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT artist) FROM tracks WHERE artist IS NOT NULL AND artist != ''",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
 
-    let genres: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT genre) FROM tracks WHERE genre IS NOT NULL AND genre != ''")
-        .fetch_one(&state.db).await.unwrap_or(0);
+    let genres: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT genre) FROM tracks WHERE genre IS NOT NULL AND genre != ''",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
 
-    let total_duration_ms: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(duration_ms), 0) FROM tracks")
-        .fetch_one(&state.db).await.unwrap_or(0);
+    let total_duration_ms: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(duration_ms), 0) FROM tracks")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
 
-    let missing_files: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE file_path IS NULL OR file_path = ''")
-        .fetch_one(&state.db).await.unwrap_or(0);
+    let missing_files: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE file_path IS NULL OR file_path = ''")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
 
-    let without_genre: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE genre IS NULL OR genre = ''")
-        .fetch_one(&state.db).await.unwrap_or(0);
+    let without_genre: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE genre IS NULL OR genre = ''")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
 
     let without_year: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE year IS NULL")
-        .fetch_one(&state.db).await.unwrap_or(0);
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
 
-    let without_cover: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE artwork_id IS NULL")
-        .fetch_one(&state.db).await.unwrap_or(0);
+    let without_cover: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE artwork_id IS NULL")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
 
     // Recent plays
     let recent_rows: Vec<(String, String, String, Option<String>, Option<String>)> =
         sqlx::query_as(
             "SELECT h.track_id, h.played_at, COALESCE(t.title, 'Unknown'), t.artist, t.album
              FROM play_history h LEFT JOIN tracks t ON h.track_id = t.id
-             ORDER BY h.played_at DESC LIMIT 10"
+             ORDER BY h.played_at DESC LIMIT 10",
         )
         .fetch_all(&state.db)
         .await
@@ -135,7 +151,12 @@ pub async fn dashboard_handler(
         title: None,
         artist: None,
         album: None,
-        state: if playback_state.playing { "playing" } else { "paused" }.to_string(),
+        state: if playback_state.playing {
+            "playing"
+        } else {
+            "paused"
+        }
+        .to_string(),
         position_ms: playback_state.position_ms,
         volume: playback_state.volume,
     };
@@ -155,7 +176,11 @@ pub async fn dashboard_handler(
     let uploads_in_progress = 0; // simplified
 
     let library = LibraryStats {
-        tracks, albums, artists, genres, total_duration_ms,
+        tracks,
+        albums,
+        artists,
+        genres,
+        total_duration_ms,
     };
 
     let health = HealthInfo {

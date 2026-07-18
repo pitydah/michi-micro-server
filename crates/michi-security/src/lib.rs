@@ -1,5 +1,5 @@
 //! Michi Security Layer
-//! 
+//!
 //! Provides rate limiting, input validation, and security middleware for the Michi API.
 
 use axum::{
@@ -12,11 +12,7 @@ use axum::{
 use governor::{
     clock::{self, DefaultClock},
     middleware::NoOpMiddleware,
-    state::{
-        direct::NotKeyed,
-        InMemoryState,
-        RateLimiter,
-    },
+    state::{direct::NotKeyed, InMemoryState, RateLimiter},
     Quota,
 };
 use std::{num::NonZeroU32, sync::Arc};
@@ -24,7 +20,14 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tracing::warn;
 
 /// Rate limiter state shared across requests
-pub type SharedRateLimiter = Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware<<DefaultClock as clock::Clock>::Instant>>>;
+pub type SharedRateLimiter = Arc<
+    RateLimiter<
+        NotKeyed,
+        InMemoryState,
+        DefaultClock,
+        NoOpMiddleware<<DefaultClock as clock::Clock>::Instant>,
+    >,
+>;
 
 /// Security configuration
 #[derive(Debug, Clone)]
@@ -62,7 +65,7 @@ impl SecurityState {
         let quota = Quota::per_second(NonZeroU32::new(config.rate_limit_rps).unwrap())
             .allow_burst(NonZeroU32::new(config.rate_limit_burst).unwrap());
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
-        
+
         Self {
             config,
             rate_limiter,
@@ -76,11 +79,11 @@ pub async fn rate_limit_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if let Err(_) = state.rate_limiter.check() {
+    if state.rate_limiter.check().is_err() {
         warn!("Rate limit exceeded for request to {}", req.uri().path());
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
-    
+
     Ok(next.run(req).await)
 }
 
@@ -90,24 +93,18 @@ pub fn body_size_limit_layer(size: usize) -> RequestBodyLimitLayer {
 }
 
 /// Security headers middleware
-pub async fn security_headers_middleware(
-    req: Request<Body>,
-    next: Next,
-) -> Response {
+pub async fn security_headers_middleware(req: Request<Body>, next: Next) -> Response {
     let mut response = next.run(req).await;
-    
-    response.headers_mut().insert(
-        "X-Content-Type-Options",
-        "nosniff".parse().unwrap(),
-    );
-    response.headers_mut().insert(
-        "X-Frame-Options",
-        "DENY".parse().unwrap(),
-    );
-    response.headers_mut().insert(
-        "X-XSS-Protection",
-        "1; mode=block".parse().unwrap(),
-    );
+
+    response
+        .headers_mut()
+        .insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+    response
+        .headers_mut()
+        .insert("X-Frame-Options", "DENY".parse().unwrap());
+    response
+        .headers_mut()
+        .insert("X-XSS-Protection", "1; mode=block".parse().unwrap());
     response.headers_mut().insert(
         "Referrer-Policy",
         "strict-origin-when-cross-origin".parse().unwrap(),
@@ -116,7 +113,7 @@ pub async fn security_headers_middleware(
         "Permissions-Policy",
         "geolocation=(), microphone=(), camera=()".parse().unwrap(),
     );
-    
+
     response
 }
 
@@ -128,7 +125,7 @@ pub async fn health_check_handler() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_default_config() {
         let config = SecurityConfig::default();
@@ -136,7 +133,7 @@ mod tests {
         assert_eq!(config.rate_limit_burst, 20);
         assert_eq!(config.max_body_size, 10 * 1024 * 1024);
     }
-    
+
     #[test]
     fn test_security_state_creation() {
         let config = SecurityConfig::default();
