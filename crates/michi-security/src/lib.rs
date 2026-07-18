@@ -10,16 +10,21 @@ use axum::{
     response::Response,
 };
 use governor::{
-    Quota, RateLimiter,
-    clock::DefaultClock,
-    state::{memory::InMemoryState, NotKeyed},
+    clock::{self, DefaultClock},
+    middleware::NoOpMiddleware,
+    state::{
+        direct::NotKeyed,
+        InMemoryState,
+        RateLimiter,
+    },
+    Quota,
 };
 use std::{num::NonZeroU32, sync::Arc};
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::warn;
 
 /// Rate limiter state shared across requests
-pub type SharedRateLimiter = Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>;
+pub type SharedRateLimiter = Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware<<DefaultClock as clock::Clock>::Instant>>>;
 
 /// Security configuration
 #[derive(Debug, Clone)]
@@ -66,10 +71,10 @@ impl SecurityState {
 }
 
 /// Rate limiting middleware
-pub async fn rate_limit_middleware<B>(
+pub async fn rate_limit_middleware(
     State(state): State<SecurityState>,
-    req: Request<B>,
-    next: Next<B>,
+    req: Request<Body>,
+    next: Next,
 ) -> Result<Response, StatusCode> {
     if let Err(_) = state.rate_limiter.check() {
         warn!("Rate limit exceeded for request to {}", req.uri().path());
@@ -85,9 +90,9 @@ pub fn body_size_limit_layer(size: usize) -> RequestBodyLimitLayer {
 }
 
 /// Security headers middleware
-pub async fn security_headers_middleware<B>(
-    mut req: Request<B>,
-    next: Next<B>,
+pub async fn security_headers_middleware(
+    req: Request<Body>,
+    next: Next,
 ) -> Response {
     let mut response = next.run(req).await;
     
