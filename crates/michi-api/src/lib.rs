@@ -377,6 +377,10 @@ fn v1_link_routes() -> Router<AppState> {
             get(routes::v1::sync::sync_upload_status_handler),
         )
         .route(
+            "/api/v1/sync/upload/file",
+            post(routes::v1::sync::sync_upload_file_handler),
+        )
+        .route(
             "/api/v1/sync/playlist",
             post(routes::v1::sync::sync_playlist_handler),
         )
@@ -436,6 +440,10 @@ fn v1_link_routes() -> Router<AppState> {
             get(routes::v1::backup::get_webhook_handler)
                 .post(routes::v1::backup::set_webhook_handler)
                 .delete(routes::v1::backup::delete_webhook_handler),
+        )
+        .route(
+            "/api/v1/webhook/test",
+            post(routes::v1::backup::test_webhook_handler),
         )
         .route(
             "/api/v1/health/verify",

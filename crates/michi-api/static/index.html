@@ -67,6 +67,15 @@
                     Status
                 </button>
             </div>
+            <div class="nav-section">
+                <h3>System</h3>
+                <button class="nav-item" data-section="settings" onclick="showSection('settings')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                    </svg>
+                    Settings
+                </button>
+            </div>
         </nav>
         <div class="sidebar-footer">
             <div class="server-status-row">
@@ -228,6 +237,148 @@
                         <p style="color:var(--text-muted);font-size:.85rem;margin-bottom:12px">Export all tracks, playlists, stars, and play history as a JSON file.</p>
                         <button class="btn btn-primary" onclick="downloadBackup()">Download Backup</button>
                     </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Settings -->
+        <section class="section-page hidden" id="page-settings">
+            <div class="page-header"><h2>Settings</h2><p>Configure sync, handoff, receivers, webhooks and backups</p></div>
+            <div class="settings-nav">
+                <button class="settings-tab active" data-stab="sync" onclick="switchSettingsTab('sync')">Sync</button>
+                <button class="settings-tab" data-stab="handoff" onclick="switchSettingsTab('handoff')">Handoff</button>
+                <button class="settings-tab" data-stab="receivers" onclick="switchSettingsTab('receivers')">Receivers</button>
+                <button class="settings-tab" data-stab="webhook" onclick="switchSettingsTab('webhook')">Webhook</button>
+                <button class="settings-tab" data-stab="backup" onclick="switchSettingsTab('backup')">Backup</button>
+            </div>
+
+            <!-- Sync -->
+            <div class="stab-content active" id="stab-sync">
+                <div class="settings-card">
+                    <div class="settings-card-header">Upload File</div>
+                    <div class="settings-row">
+                        <span class="settings-label">File</span>
+                        <input type="file" id="settings-file-input" class="settings-input">
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label"></span>
+                        <button class="btn btn-primary btn-sm" onclick="uploadFile()">Upload</button>
+                    </div>
+                    <div id="upload-progress-wrap" class="settings-progress-wrap hidden">
+                        <div class="settings-progress"><div class="settings-progress-fill" id="upload-progress-fill"></div></div>
+                        <span class="settings-progress-text" id="upload-progress-text"></span>
+                    </div>
+                </div>
+                <div class="settings-card">
+                    <div class="settings-card-header">Sync Playlist</div>
+                    <div class="settings-row">
+                        <span class="settings-label">Name</span>
+                        <input type="text" id="sync-playlist-name" class="settings-input" placeholder="Playlist name">
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label">Track IDs</span>
+                        <textarea id="sync-playlist-tracks" class="settings-input settings-textarea" placeholder="One UUID per line" rows="3"></textarea>
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label"></span>
+                        <button class="btn btn-primary btn-sm" onclick="syncPlaylist()">Sync</button>
+                    </div>
+                    <div id="sync-playlist-result" class="settings-result"></div>
+                </div>
+            </div>
+
+            <!-- Handoff -->
+            <div class="stab-content hidden" id="stab-handoff">
+                <div class="settings-card">
+                    <div class="settings-card-header">Transfer Playback</div>
+                    <div class="settings-row">
+                        <span class="settings-label">Track ID</span>
+                        <input type="text" id="handoff-track-id" class="settings-input" placeholder="UUID">
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label">Position (ms)</span>
+                        <input type="number" id="handoff-position" class="settings-input" value="0" style="width:120px">
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label">Playing</span>
+                        <input type="checkbox" id="handoff-playing" checked>
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label"></span>
+                        <button class="btn btn-primary btn-sm" onclick="transferHandoff()">Transfer to Server</button>
+                    </div>
+                    <div id="handoff-result" class="settings-result"></div>
+                </div>
+                <div class="settings-card">
+                    <div class="settings-card-header">Current State</div>
+                    <div id="handoff-current-state" class="settings-mono">--</div>
+                </div>
+            </div>
+
+            <!-- Receivers -->
+            <div class="stab-content hidden" id="stab-receivers">
+                <div class="settings-card">
+                    <div class="settings-card-header">Discovery</div>
+                    <div class="settings-row">
+                        <span class="settings-label"></span>
+                        <button class="btn btn-primary btn-sm" onclick="discoverDevices()">Scan Network</button>
+                    </div>
+                    <div id="discover-result" class="settings-result"></div>
+                </div>
+                <div class="settings-card">
+                    <div class="settings-card-header">Receiver Groups</div>
+                    <div class="settings-row">
+                        <span class="settings-label">Name</span>
+                        <input type="text" id="group-name" class="settings-input" placeholder="Living Room">
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label">Receivers</span>
+                        <input type="text" id="group-receivers" class="settings-input" placeholder="comma-separated IDs">
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label"></span>
+                        <button class="btn btn-primary btn-sm" onclick="createGroup()">Create Group</button>
+                    </div>
+                    <div id="groups-list" class="settings-result"></div>
+                </div>
+            </div>
+
+            <!-- Webhook -->
+            <div class="stab-content hidden" id="stab-webhook">
+                <div class="settings-card">
+                    <div class="settings-card-header">Webhook Configuration</div>
+                    <div class="settings-row">
+                        <span class="settings-label">URL</span>
+                        <input type="url" id="webhook-url" class="settings-input" placeholder="https://example.com/hook">
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label"></span>
+                        <button class="btn btn-primary btn-sm" onclick="setWebhook()">Set</button>
+                        <button class="btn btn-ghost btn-sm" onclick="testWebhook()">Test</button>
+                        <button class="btn btn-ghost btn-sm" onclick="deleteWebhook()">Clear</button>
+                    </div>
+                    <div id="webhook-status" class="settings-result"></div>
+                </div>
+            </div>
+
+            <!-- Backup -->
+            <div class="stab-content hidden" id="stab-backup">
+                <div class="settings-card">
+                    <div class="settings-card-header">Snapshot</div>
+                    <div class="settings-row">
+                        <span class="settings-label"></span>
+                        <button class="btn btn-primary btn-sm" onclick="createSnapshot()">Create Snapshot</button>
+                        <button class="btn btn-ghost btn-sm" onclick="downloadBackup()">Download Backup</button>
+                    </div>
+                    <div id="snapshot-result" class="settings-result"></div>
+                </div>
+                <div class="settings-card">
+                    <div class="settings-card-header">Integrity Check</div>
+                    <div class="settings-row">
+                        <span class="settings-label"></span>
+                        <button class="btn btn-primary btn-sm" onclick="verifyIntegrity()">Verify Files</button>
+                    </div>
+                    <div id="integrity-result" class="settings-result"></div>
                 </div>
             </div>
         </section>

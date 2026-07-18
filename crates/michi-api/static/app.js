@@ -646,4 +646,220 @@ showSection = function (section) {
   if (section === 'playlists') {
     loadPlaylists();
   }
+  if (section === 'settings') {
+    loadCurrentState();
+  }
 };
+
+// ── Settings ─────────────────────────────────────────────────────
+function switchSettingsTab(tab) {
+  $$('.settings-tab').forEach(function (b) { b.classList.remove('active'); });
+  var btn = $('.settings-tab[data-stab="' + tab + '"]');
+  if (btn) btn.classList.add('active');
+  $$('[id^="stab-"]').forEach(function (t) { t.classList.add('hidden'); });
+  var pane = $('#stab-' + tab);
+  if (pane) pane.classList.remove('hidden');
+}
+
+async function loadCurrentState() {
+  try {
+    var data = await MichiAPI.request('/api/v1/playback/state');
+    var el = $('#handoff-current-state');
+    if (el) {
+      el.textContent = JSON.stringify(data, null, 2);
+    }
+  } catch (e) {
+    var el = $('#handoff-current-state');
+    if (el) el.textContent = 'Could not load state: ' + e.message;
+  }
+}
+
+// Upload
+async function uploadFile() {
+  var input = $('#settings-file-input');
+  if (!input || !input.files || !input.files[0]) {
+    showToast('Select a file first', true);
+    return;
+  }
+  var file = input.files[0];
+  var reader = new FileReader();
+  reader.onload = async function (e) {
+    var base64 = e.target.result.split(',')[1];
+    try {
+      var resp = await MichiAPI.request('/api/v1/sync/upload/file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: file.name,
+          original_path: file.name,
+          uploaded_by: 'webui',
+          data_base64: base64,
+        }),
+        timeout: 60000,
+      });
+      var wrap = $('#upload-progress-wrap');
+      var fill = $('#upload-progress-fill');
+      var text = $('#upload-progress-text');
+      if (wrap) wrap.classList.remove('hidden');
+      if (fill) fill.style.width = '100%';
+      if (text) text.textContent = 'Uploaded: ' + resp.hash.slice(0, 16) + '... (' + resp.size_bytes + ' bytes)';
+      showToast('File uploaded: ' + resp.status);
+      input.value = '';
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+// Playlist sync
+async function syncPlaylist() {
+  var name = $('#sync-playlist-name')?.value.trim();
+  var tracksText = $('#sync-playlist-tracks')?.value.trim();
+  if (!name) { showToast('Enter a playlist name', true); return; }
+  var tracks = tracksText ? tracksText.split('\n').map(function (l) { return l.trim(); }).filter(Boolean) : [];
+  try {
+    var resp = await MichiAPI.request('/api/v1/sync/playlist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, tracks: tracks }),
+    });
+    var el = $('#sync-playlist-result');
+    if (el) {
+      el.innerHTML = '<span style="color:var(--online)">✓ Created: ' + resp.playlist.name +
+        ' (' + resp.tracks_added + ' tracks, ' + resp.tracks_missing.length + ' missing)</span>';
+    }
+    showToast('Playlist synced');
+  } catch (e) { showToast(e.message, true); }
+}
+
+// Handoff
+async function transferHandoff() {
+  var trackId = $('#handoff-track-id')?.value.trim();
+  var position = parseInt($('#handoff-position')?.value || '0');
+  var playing = $('#handoff-playing')?.checked;
+  if (!trackId) { showToast('Enter a track ID', true); return; }
+  try {
+    var resp = await MichiAPI.request('/api/v1/player/handoff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        track_id: trackId,
+        position_ms: position,
+        playing: playing,
+      }),
+    });
+    var el = $('#handoff-result');
+    if (el) {
+      el.innerHTML = '<span style="color:var(--online)">✓ Handoff accepted at ' + resp.position_ms + 'ms</span>';
+    }
+    loadCurrentState();
+    showToast('Handoff transferred');
+  } catch (e) { showToast(e.message, true); }
+}
+
+// Receivers
+async function discoverDevices() {
+  try {
+    var resp = await MichiAPI.request('/api/v1/devices/discover', { method: 'POST', timeout: 10000 });
+    var el = $('#discover-result');
+    if (el) {
+      var r = resp.receivers || [];
+      if (r.length === 0) {
+        el.innerHTML = '<span style="color:var(--text-dim)">No receivers found</span>';
+      } else {
+        el.innerHTML = r.map(function (rec) {
+          return '<div style="padding:6px 0;border-bottom:1px solid var(--border-subtle);font-size:.78rem">' +
+            '<span style="color:var(--text)">' + esc(rec.name || 'Unknown') + '</span> ' +
+            '<span style="color:var(--text-dim);font-family:var(--font-mono);font-size:.7rem">' + esc(rec.host || '') + '</span>' +
+            '</div>';
+        }).join('');
+      }
+    }
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function createGroup() {
+  var name = $('#group-name')?.value.trim();
+  var receivers = $('#group-receivers')?.value.trim();
+  if (!name) { showToast('Enter a group name', true); return; }
+  var ids = receivers ? receivers.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [];
+  try {
+    var resp = await MichiAPI.request('/api/v1/receivers/groups', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, receiver_ids: ids }),
+    });
+    var el = $('#groups-list');
+    if (el) {
+      el.innerHTML = '<span style="color:var(--online)">✓ Group "' + resp.group.name + '" created</span>';
+    }
+    $('#group-name').value = '';
+    $('#group-receivers').value = '';
+    showToast('Group created');
+  } catch (e) { showToast(e.message, true); }
+}
+
+// Webhook
+async function setWebhook() {
+  var url = $('#webhook-url')?.value.trim();
+  if (!url) { showToast('Enter a webhook URL', true); return; }
+  try {
+    await MichiAPI.request('/api/v1/webhook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url }),
+    });
+    var el = $('#webhook-status');
+    if (el) el.innerHTML = '<span style="color:var(--online)">✓ Webhook set</span>';
+    showToast('Webhook configured');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function testWebhook() {
+  try {
+    await MichiAPI.request('/api/v1/webhook/test', { method: 'POST', timeout: 10000 });
+    var el = $('#webhook-status');
+    if (el) el.innerHTML = '<span style="color:var(--online)">✓ Webhook fired</span>';
+    showToast('Webhook tested');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function deleteWebhook() {
+  try {
+    await MichiAPI.request('/api/v1/webhook', { method: 'DELETE' });
+    var el = $('#webhook-status');
+    if (el) el.innerHTML = '<span style="color:var(--text-dim)">Webhook cleared</span>';
+    $('#webhook-url').value = '';
+    showToast('Webhook removed');
+  } catch (e) { showToast(e.message, true); }
+}
+
+// Backup
+async function createSnapshot() {
+  try {
+    var resp = await MichiAPI.request('/api/v1/backup/snapshot', { method: 'POST' });
+    var el = $('#snapshot-result');
+    if (el) {
+      var s = resp.snapshot || {};
+      el.innerHTML = '<span style="color:var(--online)">✓ Snapshot: ' +
+        (s.stats?.tracks || 0) + ' tracks, ' +
+        (s.stats?.albums || 0) + ' albums, ' +
+        (s.stats?.artists || 0) + ' artists</span>';
+    }
+    showToast('Snapshot created');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function verifyIntegrity() {
+  try {
+    var resp = await MichiAPI.request('/api/v1/health/verify', { timeout: 30000 });
+    var el = $('#integrity-result');
+    if (el) {
+      var ok = resp.status === 'ok';
+      el.innerHTML = '<span style="color:' + (ok ? 'var(--online)' : 'var(--error)') + '">' +
+        (ok ? '✓ All OK' : '⚠ Issues found') + ' — ' +
+        resp.verified + ' verified, ' + resp.missing + ' missing, ' + resp.corrupt + ' corrupt</span>';
+    }
+  } catch (e) { showToast(e.message, true); }
+}

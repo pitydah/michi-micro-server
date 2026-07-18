@@ -189,6 +189,23 @@ pub async fn delete_webhook_handler() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "webhook_deleted" }))
 }
 
+pub async fn test_webhook_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let url = WEBHOOK_URL.read().await.clone();
+    match url {
+        Some(_) => {
+            fire_sync_webhook(&state).await;
+            Ok(Json(serde_json::json!({ "status": "webhook_fired" })))
+        }
+        None => Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "NO_WEBHOOK_CONFIGURED",
+            "set a webhook URL first",
+        )),
+    }
+}
+
 /// Called after sync completes to fire the webhook
 pub async fn fire_sync_webhook(state: &AppState) {
     let url = WEBHOOK_URL.read().await.clone();

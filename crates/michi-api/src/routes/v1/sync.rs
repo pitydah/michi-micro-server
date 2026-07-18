@@ -128,6 +128,67 @@ pub async fn sync_upload_status_handler(
     }
 }
 
+// ── Simple file upload (single POST, base64) ─────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct UploadFileBody {
+    pub filename: String,
+    pub original_path: String,
+    pub uploaded_by: String,
+    pub data_base64: String,
+}
+
+pub async fn sync_upload_file_handler(
+    State(state): State<AppState>,
+    Json(body): Json<UploadFileBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    use base64::Engine;
+
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&body.data_base64)
+        .map_err(|e| v1_error(StatusCode::BAD_REQUEST, "BASE64_DECODE_ERROR", &e.to_string()))?;
+
+    let file_id = uuid::Uuid::new_v4();
+    let server_path = state.config.cache_path.join("uploads").join(file_id.to_string());
+    let _ = std::fs::create_dir_all(server_path.parent().unwrap());
+
+    tokio::fs::write(&server_path, &data)
+        .await
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE_ERROR", &e.to_string()))?;
+
+    let hash = state.sync_manager.calculate_file_hash(&server_path).await
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "HASH_ERROR", &e.to_string()))?;
+
+    // Check dedup
+    if let Ok(Some(existing)) = state.sync_manager.check_file_exists(&hash).await {
+        let _ = tokio::fs::remove_file(&server_path).await;
+        return Ok(Json(serde_json::json!({
+            "status": "exists",
+            "file_id": existing.id,
+            "filename": existing.filename,
+            "hash": hash,
+        })));
+    }
+
+    let file_id = state.sync_manager.register_uploaded_file(
+        body.filename,
+        body.original_path,
+        server_path.to_string_lossy().to_string(),
+        hash.clone(),
+        data.len() as i64,
+        body.uploaded_by,
+    ).await.map_err(|e| {
+        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "REGISTER_ERROR", &e.to_string())
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "uploaded",
+        "file_id": file_id,
+        "hash": hash,
+        "size_bytes": data.len(),
+    })))
+}
+
 // ── Playlist sync endpoint ───────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
