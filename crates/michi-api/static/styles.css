@@ -1289,3 +1289,156 @@ select.form-input {
   .card-grid { grid-template-columns: repeat(2, 1fr); }
   .search-wrap { max-width: 100%; }
 }
+
+/* ── Chains page ─────────────────────────────────────────────── */
+.chain-create-form {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 16px 20px;
+  margin-bottom: 16px;
+}
+
+.chain-create-form.hidden { display: none; }
+
+.chain-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: all .15s;
+}
+
+.chain-item:hover {
+  background: var(--panel-hover);
+  border-color: var(--text-dim);
+}
+
+.chain-item .info { flex: 1; min-width: 0; }
+.chain-item .info .name { font-weight: 600; font-size: .85rem; }
+.chain-item .info .meta { font-size: .72rem; color: var(--text-dim); margin-top: 2px; }
+.chain-item .status { font-size: .7rem; font-family: var(--font-mono); }
+
+.chain-detail { margin-top: 20px; animation: fadeInUp .2s ease; }
+.chain-detail.hidden { display: none; }
+
+.chain-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.chain-detail-header h3 { font-size: 1.1rem; font-weight: 700; margin: 0; }
+
+.chain-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.chain-master-volume {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: .78rem;
+  color: var(--text-muted);
+}
+
+.chain-master-volume input[type="range"] {
+  width: 120px;
+  accent-color: var(--primary);
+}
+
+.chain-track {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.chain-link-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 18px;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  transition: all .15s;
+  cursor: grab;
+}
+
+.chain-link-card:hover { border-color: var(--primary); }
+.chain-link-card.dragging { opacity: .5; }
+
+.chain-link-card .drag-handle {
+  cursor: grab;
+  color: var(--text-dim);
+  font-size: 1rem;
+  user-select: none;
+}
+
+.chain-link-card .link-info { flex: 1; min-width: 0; }
+.chain-link-card .link-info .name { font-weight: 600; font-size: .82rem; }
+.chain-link-card .link-info .detail { font-size: .7rem; color: var(--text-dim); }
+
+.chain-link-card .link-volume {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: .75rem;
+  color: var(--text-dim);
+}
+
+.chain-link-card .link-volume input[type="range"] {
+  width: 80px;
+  accent-color: var(--accent);
+}
+
+.chain-link-card .link-delay {
+  font-size: .72rem;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+
+.chain-link-card .link-mute {
+  font-size: .8rem;
+  cursor: pointer;
+  opacity: .6;
+  transition: opacity .15s;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+}
+
+.chain-link-card .link-mute:hover { opacity: 1; }
+.chain-link-card .link-mute.muted { opacity: 1; color: var(--error); }
+.chain-link-card .link-remove { color: var(--error); cursor: pointer; font-size: .8rem; opacity: .6; border: none; background: none; }
+.chain-link-card .link-remove:hover { opacity: 1; }
+
+.chain-add-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+}
+
+.chain-arrow {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: .7rem;
+  padding: 2px 0;
+}

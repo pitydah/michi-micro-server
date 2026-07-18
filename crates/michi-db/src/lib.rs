@@ -3,8 +3,9 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use michi_core::{
-    AlbumSummary, ArtistSummary, AudioFormat, LibraryStats, PlayHistory, Playlist, PlaylistCreate,
-    PlaylistTrack, Track, TrackUpdate,
+    AlbumSummary, ArtistSummary, AudioFormat, ChainLink, ChainLinkCreate, ChainLinkUpdate,
+    LibraryStats, PlayHistory, PlaybackChain, PlaybackChainCreate, PlaybackChainUpdate,
+    Playlist, PlaylistCreate, PlaylistTrack, Track, TrackUpdate,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -332,7 +333,17 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 25 applied");
     }
 
-    info!("database schema at version 25");
+    if current < 26 {
+        info!("applying migration 26: playback chains");
+        migration_026(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (26, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 26 applied");
+    }
+
+    info!("database schema at version 26");
     Ok(())
 }
 
@@ -787,6 +798,40 @@ async fn migration_025(pool: &SqlitePool) -> Result<(), DbError> {
     Ok(())
 }
 
+async fn migration_026(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS playback_chains (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            track_id TEXT REFERENCES tracks(id),
+            position_ms INTEGER NOT NULL DEFAULT 0,
+            playing INTEGER NOT NULL DEFAULT 0,
+            shuffle INTEGER NOT NULL DEFAULT 0,
+            repeat_mode TEXT NOT NULL DEFAULT 'none',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )"
+    )
+        .execute(pool)
+        .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS chain_links (
+            id TEXT PRIMARY KEY,
+            chain_id TEXT NOT NULL REFERENCES playback_chains(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL,
+            receiver_id TEXT NOT NULL,
+            volume INTEGER NOT NULL DEFAULT 80,
+            muted INTEGER NOT NULL DEFAULT 0,
+            delay_ms INTEGER NOT NULL DEFAULT 0
+        )"
+    )
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
 async fn migration_015(pool: &SqlitePool) -> Result<(), DbError> {
     sqlx::query("ALTER TABLE tracks ADD COLUMN genre TEXT")
         .execute(pool)
@@ -1046,6 +1091,334 @@ pub async fn get_artist_tracks(pool: &SqlitePool, artist: &str) -> Result<Vec<Tr
     .await?;
 
     Ok(rows.iter().map(row_to_track).collect())
+}
+
+// ── Playback Chains ──────────────────────────────────────────────
+
+pub async fn create_chain(
+    pool: &SqlitePool,
+    input: &PlaybackChainCreate,
+) -> Result<PlaybackChain, DbError> {
+    let id = Uuid::new_v4();
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO playback_chains (id, name, position_ms, playing, shuffle, repeat_mode, created_at, updated_at)
+         VALUES (?, ?, 0, 0, 0, 'none', ?, ?)"
+    )
+        .bind(id.to_string())
+        .bind(&input.name)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+
+    Ok(PlaybackChain {
+        id,
+        name: input.name.clone(),
+        track_id: None,
+        position_ms: 0,
+        playing: false,
+        shuffle: false,
+        repeat_mode: "none".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    })
+}
+
+pub async fn get_chain(pool: &SqlitePool, id: &Uuid) -> Result<Option<PlaybackChain>, DbError> {
+    let id_str = id.to_string();
+    let rows = sqlx::query(
+        "SELECT id, name, track_id, position_ms, playing, shuffle, repeat_mode, created_at, updated_at
+         FROM playback_chains WHERE id = ?"
+    )
+        .bind(&id_str)
+        .fetch_all(pool)
+        .await?;
+
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let r = &rows[0];
+    let id_str: &str = r.try_get("id")?;
+    let name: &str = r.try_get("name")?;
+    let track_id_str: Option<&str> = r.try_get("track_id").ok();
+    let pos: i64 = r.try_get("position_ms")?;
+    let playing: i64 = r.try_get("playing")?;
+    let shuffle: i64 = r.try_get("shuffle")?;
+    let repeat_mode: &str = r.try_get("repeat_mode")?;
+    let created_str: &str = r.try_get("created_at")?;
+    let updated_str: &str = r.try_get("updated_at")?;
+
+    Ok(Some(PlaybackChain {
+        id: Uuid::parse_str(id_str).unwrap(),
+        name: name.to_string(),
+        track_id: track_id_str.and_then(|s| Uuid::parse_str(s).ok()),
+        position_ms: pos as u64,
+        playing: playing != 0,
+        shuffle: shuffle != 0,
+        repeat_mode: repeat_mode.to_string(),
+        created_at: DateTime::parse_from_rfc3339(created_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
+        updated_at: DateTime::parse_from_rfc3339(updated_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
+    }))
+}
+
+pub async fn list_chains(pool: &SqlitePool) -> Result<Vec<PlaybackChain>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, name, track_id, position_ms, playing, shuffle, repeat_mode, created_at, updated_at
+         FROM playback_chains ORDER BY created_at DESC"
+    )
+        .fetch_all(pool)
+        .await?;
+
+    let chains = rows.iter().map(|r| {
+        let id_str: &str = r.try_get("id").unwrap();
+        let name: &str = r.try_get("name").unwrap();
+        let track_id_str: Option<&str> = r.try_get("track_id").ok();
+        let pos: i64 = r.try_get("position_ms").unwrap();
+        let playing: i64 = r.try_get("playing").unwrap();
+        let shuffle_val: i64 = r.try_get("shuffle").unwrap();
+        let repeat_mode: &str = r.try_get("repeat_mode").unwrap();
+        let created_str: &str = r.try_get("created_at").unwrap();
+        let updated_str: &str = r.try_get("updated_at").unwrap();
+        PlaybackChain {
+            id: Uuid::parse_str(id_str).unwrap(),
+            name: name.to_string(),
+            track_id: track_id_str.and_then(|s| Uuid::parse_str(s).ok()),
+            position_ms: pos as u64,
+            playing: playing != 0,
+            shuffle: shuffle_val != 0,
+            repeat_mode: repeat_mode.to_string(),
+            created_at: DateTime::parse_from_rfc3339(created_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
+            updated_at: DateTime::parse_from_rfc3339(updated_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
+        }
+    }).collect();
+    Ok(chains)
+}
+
+pub async fn update_chain(
+    pool: &SqlitePool,
+    id: &Uuid,
+    input: &PlaybackChainUpdate,
+) -> Result<bool, DbError> {
+    let now = Utc::now().to_rfc3339();
+    let mut sets = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+
+    if let Some(ref name) = input.name {
+        params.push(name.clone());
+        sets.push(format!("name = ?{}", params.len()));
+    }
+    if let Some(pos) = input.position_ms {
+        params.push(pos.to_string());
+        sets.push(format!("position_ms = ?{}", params.len()));
+    }
+    if let Some(playing) = input.playing {
+        params.push((playing as i64).to_string());
+        sets.push(format!("playing = ?{}", params.len()));
+    }
+    if let Some(shuffle) = input.shuffle {
+        params.push((shuffle as i64).to_string());
+        sets.push(format!("shuffle = ?{}", params.len()));
+    }
+    if let Some(ref mode) = input.repeat_mode {
+        params.push(mode.clone());
+        sets.push(format!("repeat_mode = ?{}", params.len()));
+    }
+
+    if sets.is_empty() {
+        return Ok(false);
+    }
+
+    params.push(now);
+    sets.push(format!("updated_at = ?{}", params.len()));
+    params.push(id.to_string());
+
+    let sql = format!(
+        "UPDATE playback_chains SET {} WHERE id = ?{}",
+        sets.join(", "),
+        params.len()
+    );
+
+    let mut q = sqlx::query(&sql);
+    for p in &params {
+        q = q.bind(p);
+    }
+    q.execute(pool).await?;
+    Ok(true)
+}
+
+pub async fn delete_chain(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbError> {
+    let id_str = id.to_string();
+    // Delete links first
+    sqlx::query("DELETE FROM chain_links WHERE chain_id = ?")
+        .bind(&id_str)
+        .execute(pool).await?;
+    let res = sqlx::query("DELETE FROM playback_chains WHERE id = ?")
+        .bind(&id_str)
+        .execute(pool).await?;
+    Ok(res.rows_affected() > 0)
+}
+
+// ── Chain Links ──────────────────────────────────────────────────
+
+pub async fn add_chain_link(
+    pool: &SqlitePool,
+    chain_id: &Uuid,
+    input: &ChainLinkCreate,
+) -> Result<ChainLink, DbError> {
+    let id = Uuid::new_v4();
+    let cid = chain_id.to_string();
+
+    let max_pos: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position), -1) FROM chain_links WHERE chain_id = ?")
+        .bind(&cid)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(-1);
+
+    let volume = input.volume.unwrap_or(80);
+    let delay = input.delay_ms.unwrap_or(0);
+
+    sqlx::query(
+        "INSERT INTO chain_links (id, chain_id, position, receiver_id, volume, muted, delay_ms)
+         VALUES (?, ?, ?, ?, ?, 0, ?)"
+    )
+        .bind(id.to_string())
+        .bind(&cid)
+        .bind(max_pos + 1)
+        .bind(&input.receiver_id)
+        .bind(volume)
+        .bind(delay)
+        .execute(pool)
+        .await?;
+
+    Ok(ChainLink {
+        id,
+        chain_id: *chain_id,
+        position: max_pos + 1,
+        receiver_id: input.receiver_id.clone(),
+        receiver_name: None,
+        volume,
+        muted: false,
+        delay_ms: delay,
+    })
+}
+
+pub async fn get_chain_links(
+    pool: &SqlitePool,
+    chain_id: &Uuid,
+) -> Result<Vec<ChainLink>, DbError> {
+    let cid = chain_id.to_string();
+    let rows = sqlx::query(
+        "SELECT id, chain_id, position, receiver_id, volume, muted, delay_ms
+         FROM chain_links WHERE chain_id = ? ORDER BY position ASC"
+    )
+        .bind(&cid)
+        .fetch_all(pool)
+        .await?;
+
+    let links = rows.iter().map(|r| {
+        let id_str: &str = r.try_get("id").unwrap();
+        let cid_str: &str = r.try_get("chain_id").unwrap();
+        let pos: i64 = r.try_get("position").unwrap();
+        let recv_id: &str = r.try_get("receiver_id").unwrap();
+        let vol: i64 = r.try_get("volume").unwrap();
+        let muted: i64 = r.try_get("muted").unwrap();
+        let delay: i64 = r.try_get("delay_ms").unwrap();
+        ChainLink {
+            id: Uuid::parse_str(id_str).unwrap(),
+            chain_id: Uuid::parse_str(cid_str).unwrap(),
+            position: pos,
+            receiver_id: recv_id.to_string(),
+            receiver_name: None,
+            volume: vol,
+            muted: muted != 0,
+            delay_ms: delay,
+        }
+    }).collect();
+    Ok(links)
+}
+
+pub async fn update_chain_link(
+    pool: &SqlitePool,
+    link_id: &Uuid,
+    input: &ChainLinkUpdate,
+) -> Result<bool, DbError> {
+    let lid = link_id.to_string();
+    let mut sets = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+
+    if let Some(v) = input.volume {
+        params.push(v.to_string());
+        sets.push(format!("volume = ?{}", params.len()));
+    }
+    if let Some(m) = input.muted {
+        params.push((m as i64).to_string());
+        sets.push(format!("muted = ?{}", params.len()));
+    }
+    if let Some(d) = input.delay_ms {
+        params.push(d.to_string());
+        sets.push(format!("delay_ms = ?{}", params.len()));
+    }
+    if let Some(p) = input.position {
+        params.push(p.to_string());
+        sets.push(format!("position = ?{}", params.len()));
+    }
+
+    if sets.is_empty() {
+        return Ok(false);
+    }
+
+    params.push(lid);
+    let sql = format!(
+        "UPDATE chain_links SET {} WHERE id = ?{}",
+        sets.join(", "),
+        params.len()
+    );
+    let mut q = sqlx::query(&sql);
+    for p in &params {
+        q = q.bind(p);
+    }
+    q.execute(pool).await?;
+    Ok(true)
+}
+
+pub async fn delete_chain_link(pool: &SqlitePool, link_id: &Uuid) -> Result<bool, DbError> {
+    let lid = link_id.to_string();
+    let res = sqlx::query("DELETE FROM chain_links WHERE id = ?")
+        .bind(&lid)
+        .execute(pool).await?;
+    Ok(res.rows_affected() > 0)
+}
+
+pub async fn reorder_chain_links(
+    pool: &SqlitePool,
+    chain_id: &Uuid,
+    link_ids: &[Uuid],
+) -> Result<(), DbError> {
+    let cid = chain_id.to_string();
+    for (i, link_id) in link_ids.iter().enumerate() {
+        sqlx::query("UPDATE chain_links SET position = ? WHERE id = ? AND chain_id = ?")
+            .bind(i as i64)
+            .bind(link_id.to_string())
+            .bind(&cid)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn get_chain_with_links(
+    pool: &SqlitePool,
+    id: &Uuid,
+) -> Result<Option<(PlaybackChain, Vec<ChainLink>)>, DbError> {
+    let chain = get_chain(pool, id).await?;
+    match chain {
+        Some(c) => {
+            let links = get_chain_links(pool, id).await?;
+            Ok(Some((c, links)))
+        }
+        None => Ok(None),
+    }
 }
 
 pub async fn create_playlist(

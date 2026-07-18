@@ -343,6 +343,43 @@ fn v1_link_routes() -> Router<AppState> {
             "/api/v1/playlists/smart",
             post(routes::v1::playlists::smart_playlist_handler),
         )
+        // Chains
+        .route(
+            "/api/v1/chains",
+            get(routes::v1::chains::list_chains_handler)
+                .post(routes::v1::chains::create_chain_handler),
+        )
+        .route(
+            "/api/v1/chains/:id",
+            get(routes::v1::chains::get_chain_handler)
+                .put(routes::v1::chains::update_chain_handler)
+                .delete(routes::v1::chains::delete_chain_handler),
+        )
+        .route(
+            "/api/v1/chains/:id/links",
+            post(routes::v1::chains::add_link_handler),
+        )
+        .route(
+            "/api/v1/chains/:chain_id/links/:link_id",
+            put(routes::v1::chains::update_link_handler)
+                .delete(routes::v1::chains::delete_link_handler),
+        )
+        .route(
+            "/api/v1/chains/:id/links/reorder",
+            post(routes::v1::chains::reorder_links_handler),
+        )
+        .route(
+            "/api/v1/chains/:id/play",
+            post(routes::v1::chains::play_chain_handler),
+        )
+        .route(
+            "/api/v1/chains/:id/stop",
+            post(routes::v1::chains::stop_chain_handler),
+        )
+        .route(
+            "/api/v1/chains/:id/volume",
+            post(routes::v1::chains::chain_volume_handler),
+        )
         // Favorites / Star / Rating
         .route(
             "/api/v1/starred",

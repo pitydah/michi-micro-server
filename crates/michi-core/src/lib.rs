@@ -599,3 +599,57 @@ mod tests {
         assert!(u.duration_ms.is_none());
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PlaybackChain {
+    pub id: Uuid,
+    pub name: String,
+    pub track_id: Option<Uuid>,
+    pub position_ms: u64,
+    pub playing: bool,
+    pub shuffle: bool,
+    pub repeat_mode: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChainLink {
+    pub id: Uuid,
+    pub chain_id: Uuid,
+    pub position: i64,
+    pub receiver_id: String,
+    pub receiver_name: Option<String>,
+    pub volume: i64,
+    pub muted: bool,
+    pub delay_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackChainCreate {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackChainUpdate {
+    pub name: Option<String>,
+    pub position_ms: Option<u64>,
+    pub playing: Option<bool>,
+    pub shuffle: Option<bool>,
+    pub repeat_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainLinkCreate {
+    pub receiver_id: String,
+    pub volume: Option<i64>,
+    pub delay_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainLinkUpdate {
+    pub volume: Option<i64>,
+    pub muted: Option<bool>,
+    pub delay_ms: Option<i64>,
+    pub position: Option<i64>,
+}

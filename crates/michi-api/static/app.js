@@ -763,6 +763,10 @@ showSection = function (section) {
     _historyOffset = 0;
     loadHistory();
   }
+  if (section === 'chains') {
+    _currentChainId = null;
+    loadChains();
+  }
 };
 
 // ── Settings ─────────────────────────────────────────────────────
@@ -977,3 +981,245 @@ async function verifyIntegrity() {
     }
   } catch (e) { showToast(e.message, true); }
 }
+
+// ── Chains ───────────────────────────────────────────────────────
+var _currentChainId = null;
+
+async function loadChains() {
+  try {
+    var raw = await MichiAPI.request('/api/v1/chains');
+    var chains = raw.chains || [];
+    var container = $('#chains-list');
+    if (!container) return;
+    if (chains.length === 0) {
+      container.innerHTML = '<div class="empty-state"><p><strong>No chains yet</strong></p><p style="font-size:.78rem;margin-top:4px">Create a chain to route audio to receivers.</p></div>';
+      return;
+    }
+    container.innerHTML = chains.map(function (c) {
+      var playing = c.playing ? '▶' : '⏹';
+      var trackInfo = c.track_id ? c.track_id.slice(0, 8) + '..' : 'no track';
+      return '<div class="chain-item" onclick="openChain(\'' + c.id + '\')">' +
+        '<div class="info"><div class="name">' + esc(c.name) + '</div>' +
+        '<div class="meta">' + trackInfo + ' — ' + c.position_ms + 'ms</div></div>' +
+        '<div class="status">' + playing + '</div></div>';
+    }).join('');
+  } catch (e) { console.warn('chains failed:', e.message); }
+}
+
+function showCreateChain() {
+  var el = $('#chain-create-form');
+  if (el) el.classList.remove('hidden');
+}
+
+function hideCreateChain() {
+  var el = $('#chain-create-form');
+  if (el) el.classList.add('hidden');
+}
+
+async function createChain() {
+  var name = $('#new-chain-name')?.value.trim();
+  if (!name) { showToast('Enter a chain name', true); return; }
+  try {
+    await MichiAPI.request('/api/v1/chains', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name }),
+    });
+    $('#new-chain-name').value = '';
+    hideCreateChain();
+    loadChains();
+    showToast('Chain created');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function openChain(id) {
+  _currentChainId = id;
+  try {
+    var raw = await MichiAPI.request('/api/v1/chains/' + id);
+    var chain = raw.chain || {};
+    var links = raw.links || [];
+
+    $('#chain-detail').classList.remove('hidden');
+    $('#chain-detail-name').textContent = chain.name;
+    $('#chain-track-id').value = chain.track_id || '';
+    $('#chain-master-vol').value = 80;
+    $('#chain-master-vol-label').textContent = '80';
+
+    renderChainLinks(links);
+
+    var recvResp = await MichiAPI.request('/api/v1/receivers');
+    var recvs = recvResp.receivers || [];
+    var sel = $('#chain-add-receiver');
+    if (sel) {
+      sel.innerHTML = '<option value="">-- select --</option>' +
+        recvs.map(function (r) {
+          return '<option value="' + esc(r.id) + '">' + esc(r.name || r.id) + '</option>';
+        }).join('');
+    }
+  } catch (e) { showToast(e.message, true); }
+}
+
+function closeChainDetail() {
+  _currentChainId = null;
+  $('#chain-detail').classList.add('hidden');
+  loadChains();
+}
+
+function renderChainLinks(links) {
+  var container = $('#chain-links');
+  if (!container) return;
+  if (links.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-dim);font-size:.82rem;padding:12px 0">No links. Add a receiver below.</p>';
+    return;
+  }
+  container.innerHTML = links.map(function (l, i) {
+    var arrow = i > 0 ? '<div class="chain-arrow">↓</div>' : '';
+    return arrow +
+      '<div class="chain-link-card" data-link-id="' + l.id + '" draggable="true" ' +
+      'ondragstart="dragLink(event)" ondrop="dropLink(event)" ondragover="allowDrop(event)">' +
+      '<span class="drag-handle" onmousedown="event.preventDefault()">⠿</span>' +
+      '<div class="link-info">' +
+      '<div class="name">' + esc(l.receiver_name || l.receiver_id) + '</div>' +
+      '<div class="detail">Delay: ' + l.delay_ms + 'ms</div></div>' +
+      '<div class="link-volume">' +
+      '<input type="range" min="0" max="100" value="' + l.volume + '" ' +
+      'oninput="updateLinkVolume(\'' + l.id + '\', this.value)" ' +
+      'onchange="saveLinkVolume(\'' + l.id + '\', \'' + l.chain_id + '\', this.value)">' +
+      '<span>' + l.volume + '</span></div>' +
+      '<button class="link-mute' + (l.muted ? ' muted' : '') + '" ' +
+      'onclick="toggleLinkMute(\'' + l.id + '\', \'' + l.chain_id + '\', ' + l.muted + ')">' +
+      (l.muted ? '🔇' : '🔊') + '</button>' +
+      '<button class="link-remove" onclick="removeLink(\'' + l.id + '\', \'' + l.chain_id + '\')">✕</button>' +
+      '</div>';
+  }).join('');
+}
+
+var _dragLinkId = null;
+function dragLink(ev) {
+  _dragLinkId = ev.target.closest('.chain-link-card')?.dataset?.linkId;
+  ev.dataTransfer.effectAllowed = 'move';
+}
+function allowDrop(ev) { ev.preventDefault(); }
+function dropLink(ev) {
+  ev.preventDefault();
+  var target = ev.target.closest('.chain-link-card');
+  if (!target || !_dragLinkId) return;
+  var cards = Array.from(document.querySelectorAll('#chain-links .chain-link-card'));
+  var ids = cards.map(function (c) { return c.dataset.linkId; });
+  var fromIdx = ids.indexOf(_dragLinkId);
+  var toIdx = ids.indexOf(target.dataset.linkId);
+  if (fromIdx < 0 || toIdx < 0) return;
+  ids.splice(toIdx, 0, ids.splice(fromIdx, 1)[0]);
+  reorderLinks(ids);
+  _dragLinkId = null;
+}
+
+async function addLink() {
+  if (!_currentChainId) return;
+  var sel = $('#chain-add-receiver');
+  var recvId = sel?.value;
+  if (!recvId) { showToast('Select a receiver', true); return; }
+  try {
+    await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/links', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ receiver_id: recvId }),
+    });
+    openChain(_currentChainId);
+    showToast('Link added');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function removeLink(linkId, chainId) {
+  try {
+    await MichiAPI.request('/api/v1/chains/' + chainId + '/links/' + linkId, { method: 'DELETE' });
+    openChain(_currentChainId);
+    showToast('Link removed');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function reorderLinks(ids) {
+  try {
+    await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/links/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ link_ids: ids }),
+    });
+    openChain(_currentChainId);
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function updateLinkVolume(linkId, val) {
+  var cards = document.querySelectorAll('.chain-link-card');
+  cards.forEach(function (c) {
+    if (c.dataset.linkId === linkId) {
+      var span = c.querySelector('.link-volume span');
+      if (span) span.textContent = val;
+    }
+  });
+}
+
+async function saveLinkVolume(linkId, chainId, val) {
+  try {
+    await MichiAPI.request('/api/v1/chains/' + chainId + '/links/' + linkId, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ volume: parseInt(val) }),
+    });
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function toggleLinkMute(linkId, chainId, currentMuted) {
+  try {
+    await MichiAPI.request('/api/v1/chains/' + chainId + '/links/' + linkId, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ muted: !currentMuted }),
+    });
+    openChain(_currentChainId);
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function setChainTrack() {
+  if (!_currentChainId) return;
+  var trackId = $('#chain-track-id')?.value.trim();
+  try {
+    await MichiAPI.request('/api/v1/chains/' + _currentChainId, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ track_id: trackId }),
+    });
+    showToast('Track set');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function playChain() {
+  if (!_currentChainId) return;
+  try {
+    await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/play', { method: 'POST' });
+    showToast('Chain playing');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function stopChain() {
+  if (!_currentChainId) return;
+  try {
+    await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/stop', { method: 'POST' });
+    showToast('Chain stopped');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function setChainVolume(val) {
+  var label = $('#chain-master-vol-label');
+  if (label) label.textContent = val;
+  if (!_currentChainId) return;
+  try {
+    await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/volume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ volume: parseInt(val) }),
+    });
+  } catch (e) { /* silent */ }
+}
+
+

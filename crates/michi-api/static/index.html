@@ -81,6 +81,12 @@
                     </svg>
                     History
                 </button>
+                <button class="nav-item" data-section="chains" onclick="showSection('chains')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                    </svg>
+                    Chains
+                </button>
             </div>
         </nav>
         <div class="sidebar-footer">
@@ -409,6 +415,55 @@
                 <div id="history-stats" class="history-stats"></div>
                 <div class="table-wrap" id="history-table"></div>
                 <div id="history-pagination" class="history-pagination"></div>
+            </div>
+        </section>
+
+        <!-- Chains -->
+        <section class="section-page hidden" id="page-chains">
+            <div class="page-header"><h2>Playback Chains</h2><p>Route audio to multiple receivers</p></div>
+            <div class="section">
+                <div class="section-header">
+                    <h3>Chains</h3>
+                    <button class="btn btn-primary btn-sm" onclick="showCreateChain()">+ New Chain</button>
+                </div>
+                <div id="chain-create-form" class="chain-create-form hidden">
+                    <div class="settings-row">
+                        <span class="settings-label">Name</span>
+                        <input type="text" id="new-chain-name" class="settings-input" placeholder="Living Room">
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label"></span>
+                        <button class="btn btn-primary btn-sm" onclick="createChain()">Create</button>
+                        <button class="btn btn-ghost btn-sm" onclick="hideCreateChain()">Cancel</button>
+                    </div>
+                </div>
+                <div id="chains-list"></div>
+            </div>
+            <div id="chain-detail" class="chain-detail hidden">
+                <div class="chain-detail-header">
+                    <button class="btn btn-ghost btn-sm" onclick="closeChainDetail()">← Back</button>
+                    <h3 id="chain-detail-name"></h3>
+                </div>
+                <div class="chain-detail-actions">
+                    <button class="btn btn-primary btn-sm" id="chain-play-btn" onclick="playChain()">▶ Play</button>
+                    <button class="btn btn-ghost btn-sm" id="chain-stop-btn" onclick="stopChain()">■ Stop</button>
+                    <span class="chain-master-volume">
+                        <label>Vol:</label>
+                        <input type="range" min="0" max="100" value="80" id="chain-master-vol" oninput="setChainVolume(this.value)">
+                        <span id="chain-master-vol-label">80</span>
+                    </span>
+                </div>
+                <div class="chain-track">
+                    <span class="settings-label">Track</span>
+                    <input type="text" id="chain-track-id" class="settings-input" placeholder="Track ID (UUID)" style="max-width:300px">
+                    <button class="btn btn-sm btn-ghost" onclick="setChainTrack()">Set</button>
+                </div>
+                <div class="chain-links" id="chain-links"></div>
+                <div class="chain-add-link">
+                    <span class="settings-label">Add Receiver</span>
+                    <select id="chain-add-receiver" class="settings-input" style="max-width:250px"></select>
+                    <button class="btn btn-sm btn-primary" onclick="addLink()">+</button>
+                </div>
             </div>
         </section>
 
