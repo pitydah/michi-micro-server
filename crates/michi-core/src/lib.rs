@@ -633,6 +633,7 @@ pub struct PlaybackChainCreate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaybackChainUpdate {
     pub name: Option<String>,
+    pub track_id: Option<Uuid>,
     pub position_ms: Option<u64>,
     pub playing: Option<bool>,
     pub shuffle: Option<bool>,

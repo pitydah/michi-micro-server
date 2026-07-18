@@ -188,6 +188,7 @@ pub async fn play_chain_handler(
 
     let update = michi_core::PlaybackChainUpdate {
         name: None,
+        track_id: None,
         position_ms: Some(chain.position_ms),
         playing: Some(true),
         shuffle: None,
@@ -222,6 +223,7 @@ pub async fn stop_chain_handler(
 
     let update = michi_core::PlaybackChainUpdate {
         name: None,
+        track_id: None,
         position_ms: None,
         playing: Some(false),
         shuffle: None,

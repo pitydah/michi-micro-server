@@ -1224,6 +1224,10 @@ pub async fn update_chain(
         params.push(mode.clone());
         sets.push(format!("repeat_mode = ?{}", params.len()));
     }
+    if let Some(track_id) = input.track_id {
+        params.push(track_id.to_string());
+        sets.push(format!("track_id = ?{}", params.len()));
+    }
 
     if sets.is_empty() {
         return Ok(false);

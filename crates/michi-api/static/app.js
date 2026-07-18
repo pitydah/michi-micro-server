@@ -38,6 +38,7 @@ const MichiAPI = {
     return this.request(url);
   },
   search(q) { return this.request('/api/v1/search?q=' + encodeURIComponent(q)); },
+  searchAdvanced(q) { return this.request('/api/v1/search/advanced?q=' + encodeURIComponent(q)); },
   scan() { return this.request('/api/library/scan', { method: 'POST' }); },
   dashboard() { return this.request('/api/v1/home/dashboard'); },
   playlists() { return this.request('/api/v1/playlists'); },
@@ -359,6 +360,10 @@ function renderTracks(tracks, tableId) {
 }
 
 // ── Search ──────────────────────────────────────────────────────
+function isAdvancedQuery(q) {
+  return /(artist|album|genre|format|year|rating):/.test(q);
+}
+
 async function handleSearch() {
   const q = $('#search-input')?.value.trim();
   if (!q) {
@@ -369,13 +374,20 @@ async function handleSearch() {
     return;
   }
   try {
-    const raw = await MichiAPI.search(q);
+    const raw = isAdvancedQuery(q)
+      ? await MichiAPI.searchAdvanced(q)
+      : await MichiAPI.search(q);
     State.tracks = raw.tracks || [];
     renderTracks(State.tracks, 'tracks-table');
     renderTracks(State.tracks, 'library-table');
     updateTracksCount();
     $('#tracks-count').textContent = State.tracks.length + ' results';
     $('#library-count').textContent = State.tracks.length + ' results';
+    if (isAdvancedQuery(q)) {
+      $('#search-input').style.borderColor = 'var(--accent)';
+    } else {
+      $('#search-input').style.borderColor = '';
+    }
     showToast('Found ' + State.tracks.length + ' results');
   } catch (e) { showToast(e.message, true); }
 }

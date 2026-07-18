@@ -91,11 +91,8 @@ pub async fn dashboard_handler(
     let total_duration_ms: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(duration_ms), 0) FROM tracks")
         .fetch_one(&state.db).await.unwrap_or(0);
 
-    let missing_files: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE file_path IS NOT NULL")
-        .fetch_one(&state.db).await
-        .map(|count: i64| -> i64 {
-            count // simplified; real check would verify disk presence
-        }).unwrap_or(0);
+    let missing_files: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE file_path IS NULL OR file_path = ''")
+        .fetch_one(&state.db).await.unwrap_or(0);
 
     let without_genre: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE genre IS NULL OR genre = ''")
         .fetch_one(&state.db).await.unwrap_or(0);
