@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use futures_util::Stream;
-use michi_core::{AudioFormat, Track};
+use michi_core::{AudioFormat, StreamProfile, Track};
 use michi_db::DbError;
 use thiserror::Error;
 
@@ -343,6 +343,50 @@ pub async fn read_hls_playlist(cache_path: &Path, track_id: &str) -> Result<Stri
 pub fn hls_segment_path(cache_path: &Path, track_id: &str, segment: &str) -> PathBuf {
     // segment can be "seg_00001.ts" or a full filename
     hls_output_dir(cache_path, track_id).join(segment)
+}
+
+pub struct StreamDecision {
+    pub transcode: bool,
+    pub codec: &'static str,
+    pub sample_rate: u32,
+    pub bit_depth: u32,
+    pub bitrate: Option<u32>,
+}
+
+impl StreamDecision {
+    pub fn needs_transcode(&self) -> bool {
+        self.transcode
+    }
+}
+
+pub fn select_stream_profile(
+    profile: StreamProfile,
+    track_format: &AudioFormat,
+    original_sample_rate: Option<u32>,
+    original_bit_depth: Option<u32>,
+    max_transcodes: usize,
+    active_transcodes: usize,
+) -> StreamDecision {
+    if active_transcodes >= max_transcodes && profile.needs_transcode() {
+        return StreamDecision {
+            transcode: false,
+            codec: "original",
+            sample_rate: original_sample_rate.unwrap_or(44100),
+            bit_depth: original_bit_depth.unwrap_or(16),
+            bitrate: None,
+        };
+    }
+
+    let sr = profile.target_sample_rate(original_sample_rate.unwrap_or(44100));
+    let bd = profile.target_bit_depth(original_bit_depth.unwrap_or(16));
+
+    StreamDecision {
+        transcode: profile.needs_transcode(),
+        codec: profile.target_codec(),
+        sample_rate: sr,
+        bit_depth: bd,
+        bitrate: profile.bitrate(),
+    }
 }
 
 #[cfg(test)]

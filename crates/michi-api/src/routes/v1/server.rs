@@ -116,5 +116,6 @@ pub async fn status_handler(State(state): State<AppState>) -> Json<serde_json::V
         "server_id": state.server_id(),
         "uptime_seconds": uptime,
         "resource_profile": state.config.resource_profile.to_string(),
+        "stream_profile": state.config.stream_profile.to_string(),
     }))
 }

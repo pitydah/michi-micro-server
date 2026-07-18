@@ -24,6 +24,7 @@ pub struct Config {
     pub cors_origin: Option<String>,
     pub dev_mode: bool,
     pub resource_profile: michi_core::ResourceProfile,
+    pub stream_profile: michi_core::StreamProfile,
 }
 
 impl Config {
@@ -94,6 +95,10 @@ impl Config {
             &env::var("MICHI_RESOURCE_PROFILE").unwrap_or_else(|_| "balanced".into()),
         );
 
+        let stream_profile = michi_core::StreamProfile::from_config_str(
+            &env::var("MICHI_STREAM_PROFILE").unwrap_or_else(|_| "original".into()),
+        );
+
         Self {
             port,
             music_paths,
@@ -114,6 +119,7 @@ impl Config {
             cors_origin,
             dev_mode,
             resource_profile,
+            stream_profile,
         }
     }
 

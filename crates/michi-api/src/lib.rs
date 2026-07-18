@@ -633,6 +633,18 @@ fn v1_link_routes() -> Router<AppState> {
             "/api/v1/player/handoff",
             post(routes::v1::playback::handoff_handler),
         )
+        .route(
+            "/api/v1/sessions/active",
+            get(routes::v1::sessions::active_streams_handler),
+        )
+        .route(
+            "/api/v1/library/duplicates",
+            get(routes::v1::duplicates::duplicates_handler),
+        )
+        .route(
+            "/api/v1/player/announce",
+            post(routes::v1::announce::announce_handler),
+        )
         // Queue
         .route("/api/v1/queue", get(routes::v1::queue::queue_handler))
         .route(

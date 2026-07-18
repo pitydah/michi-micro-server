@@ -743,3 +743,76 @@ pub struct DeviceCapabilities {
     pub supports_websocket: bool,
     pub updated_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum StreamProfile {
+    Original,
+    LosslessCompatible,
+    OpusMobile96,
+    OpusMobile160,
+    Mp3Compatibility192,
+    Mp3Compatibility320,
+    Downsample2448,
+    Custom,
+}
+impl StreamProfile {
+    pub fn from_config_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "original" => Self::Original,
+            "lossless" => Self::LosslessCompatible,
+            "opus96" => Self::OpusMobile96,
+            "opus160" => Self::OpusMobile160,
+            "mp3192" => Self::Mp3Compatibility192,
+            "mp3320" => Self::Mp3Compatibility320,
+            "downsample" => Self::Downsample2448,
+            _ => Self::Original,
+        }
+    }
+    pub fn needs_transcode(&self) -> bool {
+        !matches!(self, Self::Original | Self::LosslessCompatible)
+    }
+    pub fn target_codec(&self) -> &'static str {
+        match self {
+            Self::Original | Self::LosslessCompatible => "original",
+            Self::OpusMobile96 | Self::OpusMobile160 => "opus",
+            Self::Mp3Compatibility192 | Self::Mp3Compatibility320 => "mp3",
+            Self::Downsample2448 => "pcm",
+            Self::Custom => "original",
+        }
+    }
+    pub fn bitrate(&self) -> Option<u32> {
+        match self {
+            Self::OpusMobile96 => Some(96000),
+            Self::OpusMobile160 => Some(160000),
+            Self::Mp3Compatibility192 => Some(192000),
+            Self::Mp3Compatibility320 => Some(320000),
+            _ => None,
+        }
+    }
+    pub fn target_sample_rate(&self, original: u32) -> u32 {
+        match self {
+            Self::Downsample2448 => original.min(48000),
+            _ => original,
+        }
+    }
+    pub fn target_bit_depth(&self, original: u32) -> u32 {
+        match self {
+            Self::Downsample2448 => original.min(24),
+            _ => original,
+        }
+    }
+}
+impl std::fmt::Display for StreamProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Original => write!(f, "original"),
+            Self::LosslessCompatible => write!(f, "lossless"),
+            Self::OpusMobile96 => write!(f, "opus96"),
+            Self::OpusMobile160 => write!(f, "opus160"),
+            Self::Mp3Compatibility192 => write!(f, "mp3192"),
+            Self::Mp3Compatibility320 => write!(f, "mp3320"),
+            Self::Downsample2448 => write!(f, "downsample"),
+            Self::Custom => write!(f, "custom"),
+        }
+    }
+}
