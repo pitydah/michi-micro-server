@@ -6,7 +6,7 @@
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" type="image/svg+xml" href="/static/assets/michi-micro-server.svg">
     <link rel="icon" type="image/png" sizes="512x512" href="/static/assets/michi-micro-server.png">
-    <link rel="stylesheet" href="/static/styles.css?v=2">
+    <link rel="stylesheet" href="/static/styles.css?v=3">
     <title>Michi Server</title>
 </head>
 <body>
@@ -15,9 +15,9 @@
 
     <!-- Sidebar -->
     <aside class="sidebar">
-        <div class="sidebar-logo">
+        <div class="sidebar-header">
             <img src="/static/assets/michi-micro-server.svg" alt="Michi" class="sidebar-logo-img">
-            <div class="brand">
+            <div class="sidebar-brand">
                 <h1>Michi</h1>
                 <span class="sub">Micro Server</span>
                 <span class="ver" id="sidebar-ver">--</span>
@@ -126,7 +126,7 @@
 
         <!-- Dashboard -->
         <section class="section-page" id="page-dashboard">
-            <div class="page-hero">
+            <div class="hero">
                 <h2>Dashboard</h2>
                 <p>Server control center</p>
                 <div class="hero-meta" id="dashboard-meta"></div>
@@ -140,7 +140,7 @@
 
         <!-- Library -->
         <section class="section-page hidden" id="page-library">
-            <div class="page-hero">
+            <div class="hero">
                 <h2>Library</h2>
                 <p>Browse your music collection</p>
                 <div class="hero-meta" id="library-meta"></div>
@@ -152,7 +152,7 @@
 
         <!-- Scan -->
         <section class="section-page hidden" id="page-scan">
-            <div class="page-header"><h2>Library Scan</h2><p>Manage music scanning</p></div>
+            <div class="hero"><h2>Library Scan</h2><p>Manage music scanning</p></div>
             <div class="link-panel" id="scan-panel">
                 <div class="scan-progress">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>
@@ -174,7 +174,7 @@
 
         <!-- Michi Link -->
         <section class="section-page hidden" id="page-michilink">
-            <div class="page-header"><h2>Michi Link <span class="badge beta">v1</span></h2><p>Native integration contract</p></div>
+            <div class="hero"><h2>Michi Link <span class="badge beta">v1</span></h2><p>Native integration contract</p></div>
             <div class="link-panel">
                 <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
@@ -198,7 +198,7 @@
 
         <!-- Playlists -->
         <section class="section-page hidden" id="page-playlists">
-            <div class="page-header">
+            <div class="hero">
                 <h2>Playlists</h2>
                 <p>Manage your playlists</p>
                 <div class="page-tabs">
@@ -267,7 +267,7 @@
 
         <!-- Settings -->
         <section class="section-page hidden" id="page-settings">
-            <div class="page-header"><h2>Settings</h2><p>Configure sync, handoff, receivers, webhooks and backups</p></div>
+            <div class="hero"><h2>Settings</h2><p>Configure sync, handoff, receivers, webhooks and backups</p></div>
             <div class="settings-nav">
                 <button class="settings-tab active" data-stab="sync" onclick="switchSettingsTab('sync')">Sync</button>
                 <button class="settings-tab" data-stab="handoff" onclick="switchSettingsTab('handoff')">Handoff</button>
@@ -409,13 +409,13 @@
 
         <!-- Status -->
         <section class="section-page hidden" id="page-status">
-            <div class="page-header"><h2>Server Status</h2><p>Health and information</p></div>
+            <div class="hero"><h2>Server Status</h2><p>Health and information</p></div>
             <div class="status-grid" id="status-content"></div>
         </section>
 
         <!-- History -->
         <section class="section-page hidden" id="page-history">
-            <div class="page-header"><h2>Play History</h2><p>Recently played tracks</p></div>
+            <div class="hero"><h2>Play History</h2><p>Recently played tracks</p></div>
             <div class="section">
                 <div class="section-header">
                     <h3>History</h3>
@@ -432,7 +432,7 @@
 
         <!-- Chains -->
         <section class="section-page hidden" id="page-chains">
-            <div class="page-header"><h2>Playback Chains</h2><p>Route audio to multiple receivers</p></div>
+            <div class="hero"><h2>Playback Chains</h2><p>Route audio to multiple receivers</p></div>
             <div class="section">
                 <div class="section-header">
                     <h3>Chains</h3>
@@ -521,6 +521,6 @@
         <div class="waveform"><span></span><span></span><span></span><span></span><span></span></div>
     </div>
 
-    <script src="/static/app.js?v=2"></script>
+    <script src="/static/app.js?v=3"></script>
 </body>
 </html>
