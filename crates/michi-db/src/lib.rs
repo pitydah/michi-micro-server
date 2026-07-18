@@ -413,7 +413,27 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 33 applied");
     }
 
-    info!("database schema at version 33");
+    if current < 34 {
+        info!("applying migration 34: audit log");
+        migration_034(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (34, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 34 applied");
+    }
+
+    if current < 35 {
+        info!("applying migration 35: change journal");
+        migration_035(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (35, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 35 applied");
+    }
+
+    info!("database schema at version 35");
     Ok(())
 }
 
@@ -1056,6 +1076,44 @@ async fn migration_033(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL,
             started_at TEXT,
             finished_at TEXT
+        )"
+    )
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn migration_034(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS audit_log (
+            id TEXT PRIMARY KEY,
+            action TEXT NOT NULL,
+            entity_type TEXT,
+            entity_id TEXT,
+            details_json TEXT,
+            ip_prefix TEXT,
+            created_at TEXT NOT NULL
+        )"
+    )
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC)"
+    )
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn migration_035(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS change_journal (
+            id TEXT PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            diff_json TEXT,
+            created_at TEXT NOT NULL
         )"
     )
         .execute(pool)

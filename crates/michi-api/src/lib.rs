@@ -39,6 +39,7 @@ mod transcode;
 mod ws;
 
 pub mod routes;
+pub use routes::v1::audit::record_audit;
 
 use openapi::ApiDoc;
 
@@ -624,6 +625,10 @@ fn v1_link_routes() -> Router<AppState> {
             get(routes::v1::backup::last_snapshot_handler),
         )
         .route(
+            "/api/v1/backup/bundle",
+            get(routes::v1::backup::backup_bundle_handler),
+        )
+        .route(
             "/api/v1/webhook",
             get(routes::v1::backup::get_webhook_handler)
                 .post(routes::v1::backup::set_webhook_handler)
@@ -640,6 +645,56 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/health/mounts",
             get(routes::v1::backup::mount_health_handler),
+        )
+        .route(
+            "/api/v1/health/storage",
+            get(routes::v1::storage::storage_health_handler),
+        )
+        .route(
+            "/api/v1/config/validate",
+            get(routes::v1::validate::config_validate_handler),
+        )
+        .route(
+            "/api/v1/audit/log",
+            get(routes::v1::audit::audit_log_handler),
+        )
+        // Module management
+        .route(
+            "/api/v1/modules",
+            get(routes::v1::modules::modules_handler),
+        )
+        .route(
+            "/api/v1/modules/:name",
+            post(routes::v1::modules::toggle_module_handler),
+        )
+        // Self-test
+        .route(
+            "/api/v1/health/self-test",
+            get(routes::v1::modules::self_test_handler),
+        )
+        // Capabilities
+        .route(
+            "/api/v1/capabilities",
+            get(routes::v1::modules::capabilities_handler),
+        )
+        // Change Journal
+        .route(
+            "/api/v1/changes",
+            get(routes::v1::modules::change_journal_handler),
+        )
+        // Policy
+        .route(
+            "/api/v1/policy",
+            get(routes::v1::modules::policy_handler),
+        )
+        .route(
+            "/api/v1/policy/lan",
+            post(routes::v1::modules::lan_policy_handler),
+        )
+        // Handoff
+        .route(
+            "/api/v1/stream/handoff/offer",
+            post(routes::v1::modules::handoff_handler),
         )
         .route("/health/live", get(routes::v1::server::health_live_handler))
         .route(

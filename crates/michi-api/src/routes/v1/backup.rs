@@ -1,6 +1,8 @@
 use axum::{
+    body::Body,
     extract::State,
     http::{header, StatusCode},
+    response::Response,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -351,6 +353,105 @@ pub async fn mount_health_handler(
             serde_json::json!({"path": p, "state": s, "last_checked": lc, "last_online": lo, "error": err})
         }).collect::<Vec<_>>(),
     })))
+}
+
+pub async fn backup_bundle_handler(
+    State(state): State<AppState>,
+) -> Result<Response<Body>, (StatusCode, Json<serde_json::Value>)> {
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
+    let bundle_path = std::env::temp_dir().join(format!("michi-backup-{}.tar.gz", timestamp));
+    let temp_dir = std::env::temp_dir().join(format!("michi-bundle-{}", timestamp));
+
+    std::fs::create_dir_all(&temp_dir).map_err(|e| {
+        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "TEMP_DIR", &e.to_string())
+    })?;
+
+    let settings = serde_json::json!({
+        "version": 2,
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "server_id": state.server_id(),
+        "config_port": state.config.port(),
+    });
+    std::fs::write(
+        temp_dir.join("manifest.json"),
+        serde_json::to_string_pretty(&settings).map_err(|e| {
+            v1_error(StatusCode::INTERNAL_SERVER_ERROR, "SERIALIZE", &e.to_string())
+        })?
+    ).map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
+
+    let config_json = serde_json::json!({
+        "port": state.config.port(),
+        "database_url": state.config.database_url,
+        "config_path": state.config.config_path.display().to_string(),
+        "cache_path": state.config.cache_path.display().to_string(),
+    });
+    std::fs::write(
+        temp_dir.join("config.json"),
+        serde_json::to_string_pretty(&config_json).map_err(|e| {
+            v1_error(StatusCode::INTERNAL_SERVER_ERROR, "SERIALIZE", &e.to_string())
+        })?
+    ).map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
+
+    let mut checksums = serde_json::Map::new();
+    for entry in std::fs::read_dir(&temp_dir).map_err(|e| {
+        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ_DIR", &e.to_string())
+    })? {
+        let entry = entry.map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "ENTRY", &e.to_string()))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let data = std::fs::read(entry.path()).map_err(|e| {
+            v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ", &e.to_string())
+        })?;
+        let hash = blake3::hash(&data);
+        checksums.insert(name, serde_json::Value::String(hash.to_hex().to_string()));
+    }
+    std::fs::write(
+        temp_dir.join("checksums.json"),
+        serde_json::to_string_pretty(&checksums).unwrap()
+    ).map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE_CHECKSUMS", &e.to_string()))?;
+
+    let file = std::fs::File::create(&bundle_path).map_err(|e| {
+        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "CREATE", &e.to_string())
+    })?;
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::best());
+    let mut tar = tar::Builder::new(encoder);
+
+    for entry in std::fs::read_dir(&temp_dir).map_err(|e| {
+        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ_DIR", &e.to_string())
+    })? {
+        let entry = entry.map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "ENTRY", &e.to_string()))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let data = std::fs::read(entry.path()).map_err(|e| {
+            v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ", &e.to_string())
+        })?;
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_size(data.len() as u64);
+        header.set_cksum();
+        tar.append_data(&mut header, &name, std::io::Cursor::new(&data))
+            .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "TAR", &e.to_string()))?;
+    }
+
+    let encoder = tar.into_inner().map_err(|e| {
+        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "TAR_FINISH", &e.to_string())
+    })?;
+    encoder.finish().map_err(|e| {
+        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "GZ_FINISH", &e.to_string())
+    })?;
+
+    let bundle_data = std::fs::read(&bundle_path).map_err(|e| {
+        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ", &e.to_string())
+    })?;
+
+    let _ = std::fs::remove_file(&bundle_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    let filename = format!("michi-backup-{}.tar.gz", timestamp);
+    Response::builder()
+        .header("Content-Type", "application/gzip")
+        .header("Content-Disposition", format!("attachment; filename=\"{}\"", filename))
+        .body(Body::from(bundle_data))
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "RESPONSE", &e.to_string()))
 }
 
 /// Spawns a background integrity check every 24h

@@ -146,11 +146,25 @@ async fn main() -> Result<()> {
         info!("MICHI_MQTT_HOST not set, Home Assistant integration disabled");
     }
 
+    use tokio::signal;
+
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!("listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            signal::ctrl_c().await.ok();
+            info!("shutdown signal received, draining...");
+            // Perform checkpoint WAL
+            let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                .execute(&state.db).await;
+            // Close WebSocket connections would go here
+            // Cancel background tasks
+            info!("database checkpoint complete, shutting down");
+        })
+        .await?;
 
     Ok(())
 }

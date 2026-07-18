@@ -26,6 +26,8 @@ pub struct Config {
     pub resource_profile: michi_core::ResourceProfile,
     pub stream_profile: michi_core::StreamProfile,
     pub format_policy: michi_core::AudioFormatPolicy,
+    pub max_remote_bitrate: u32,
+    pub remote_sync: bool,
 }
 
 impl Config {
@@ -126,6 +128,14 @@ impl Config {
             resource_profile,
             stream_profile,
             format_policy,
+            max_remote_bitrate: env::var("MICHI_MAX_REMOTE_BITRATE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(320_000),
+            remote_sync: env::var("MICHI_REMOTE_SYNC")
+                .ok()
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false),
         }
     }
 
