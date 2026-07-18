@@ -328,14 +328,110 @@ pub async fn qr_svg_handler(
     let payload_str = serde_json::to_string(&payload)
         .map_err(|_| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "JSON_ERROR", "serialization failed"))?;
 
-    // Generate QR code as SVG
+    // Generate QR code
     let code = qrcode::QrCode::new(payload_str.as_bytes())
         .map_err(|_| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "QR_ERROR", "QR generation failed"))?;
-    let svg = code.render()
-        .min_dimensions(300, 300)
-        .dark_color(qrcode::render::svg::Color("#8B5CF6"))
-        .light_color(qrcode::render::svg::Color("transparent"))
-        .build();
+
+    // Build QR SVG with premium styling
+    let modules = code.to_vec();
+    let size = code.width();
+    let cell_size = 5.0;
+    let qr_dim = size as f64 * cell_size;
+    let padding = 40.0;
+    let canvas = qr_dim + padding * 2.0;
+    let corner_radius = 6.0;
+    let center = padding + qr_dim / 2.0;
+    let logo_size = qr_dim * 0.28;
+
+    let mut svg = String::with_capacity(16000);
+    svg.push_str(&format!(
+        r#"<?xml version="1.0" standalone="yes"?><svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="{c}" height="{c}" viewBox="0 0 {c} {c}">"#,
+        c = canvas as u32
+    ));
+
+    // Background with rounded rect
+    svg.push_str(&format!(
+        r##"<rect x="0" y="0" width="{c}" height="{c}" rx="24" fill="#0D1120"/>"##,
+        c = canvas as u32
+    ));
+
+    // White QR background with rounded rect
+    svg.push_str(&format!(
+        r##"<rect x="{p}" y="{p}" width="{d}" height="{d}" rx="{cr}" fill="#ffffff"/>"##,
+        p = padding, d = qr_dim, cr = 12.0
+    ));
+
+    // Draw QR modules as circles with gradient
+    svg.push_str(r#"<defs><linearGradient id="qrGrad" x1="0%" y1="0%" x2="100%" y2="100%">"#);
+    svg.push_str(r##"<stop offset="0%" stop-color="#8B5CF6"/>"##);
+    svg.push_str(r##"<stop offset="100%" stop-color="#6D4AFF"/>"##);
+    svg.push_str("</linearGradient></defs>");
+
+    let radius = (cell_size - 0.4) / 2.0;
+    for y in 0..size {
+        for x in 0..size {
+            if modules[y * size + x] {
+                let cx = padding + x as f64 * cell_size + cell_size / 2.0;
+                let cy = padding + y as f64 * cell_size + cell_size / 2.0;
+                svg.push_str(&format!(
+                    r##"<circle cx="{cx}" cy="{cy}" r="{r}" fill="url(#qrGrad)"/>"##,
+                    cx = cx, cy = cy, r = radius
+                ));
+            }
+        }
+    }
+
+    // Corners: Finder patterns with rounded squares and inner circles
+    let finder_positions = [(0, 0), (size - 7, 0), (0, size - 7)];
+    for &(fx, fy) in &finder_positions {
+        let fx = padding + fx as f64 * cell_size;
+        let fy = padding + fy as f64 * cell_size;
+        let f_size = 7.0 * cell_size;
+        // Outer
+        svg.push_str(&format!(
+            r##"<rect x="{x}" y="{y}" width="{s}" height="{s}" rx="{cr}" fill="url(#qrGrad)"/>"##,
+            x = fx, y = fy, s = f_size, cr = corner_radius
+        ));
+        // Inner
+        svg.push_str(&format!(
+            r##"<rect x="{x}" y="{y}" width="{s}" height="{s}" rx="{cr}" fill="#ffffff"/>"##,
+            x = fx + cell_size, y = fy + cell_size, s = 5.0 * cell_size, cr = corner_radius - 1.0
+        ));
+        // Core
+        svg.push_str(&format!(
+            r##"<rect x="{x}" y="{y}" width="{s}" height="{s}" rx="3" fill="url(#qrGrad)"/>"##,
+            x = fx + 2.0 * cell_size, y = fy + 2.0 * cell_size, s = 3.0 * cell_size
+        ));
+    }
+
+    // Logo circle background (white circle with subtle border)
+    let white = "#ffffff";
+    let dark = "#0D1120";
+    svg.push_str(&format!(
+        r##"<circle cx="{cx}" cy="{cy}" r="{r}" fill="{w}" stroke="url(#qrGrad)" stroke-width="3"/>"##,
+        cx = center, cy = center, r = logo_size / 2.0 + 6.0, w = white
+    ));
+
+    // Logo: Michi cat silhouette
+    let logo_scale = logo_size / 100.0;
+    svg.push_str(&format!(
+        r##"<g transform="translate({cx}, {cy}) scale({s})">
+        <polygon points="-30,-35 -15,-55 0,-35" fill="url(#qrGrad)"/>
+        <polygon points="30,-35 15,-55 0,-35" fill="url(#qrGrad)"/>
+        <circle cx="0" cy="-10" r="25" fill="url(#qrGrad)"/>
+        <ellipse cx="-10" cy="-14" rx="5" ry="6" fill="{w}"/>
+        <ellipse cx="10" cy="-14" rx="5" ry="6" fill="{w}"/>
+        <ellipse cx="-10" cy="-14" rx="2.5" ry="4" fill="{d}"/>
+        <ellipse cx="10" cy="-14" rx="2.5" ry="4" fill="{d}"/>
+        <polygon points="0,-7 -3,-3 3,-3" fill="{w}" opacity="0.8"/>
+        <path d="M-6,-1 Q0,3 6,-1" fill="none" stroke="{w}" stroke-width="1.2" opacity="0.7"/>
+        <path d="M-20,5 Q-25,30 -15,45 L15,45 Q25,30 20,5" fill="url(#qrGrad)"/>
+        <path d="M-18,30 Q-40,20 -35,0 Q-32,-6 -28,-2" fill="none" stroke="url(#qrGrad)" stroke-width="5" stroke-linecap="round"/>
+      </g>"##,
+        cx = 0, cy = 0, s = logo_scale, w = white, d = dark
+    ));
+
+    svg.push_str("</svg>");
 
     Ok((
         [(header::CONTENT_TYPE, "image/svg+xml")],
