@@ -57,7 +57,11 @@ pub struct ImportSessionState {
     pub seen_hashes: Vec<String>,
 }
 
-lazy_static::lazy_static! {
+use lazy_static::lazy_static;
+
+const MAX_IMPORT_SESSIONS: usize = 100;
+
+lazy_static! {
     static ref IMPORT_SESSIONS: Arc<RwLock<HashMap<Uuid, ImportSessionState>>> =
         Arc::new(RwLock::new(HashMap::new()));
 }
@@ -161,6 +165,13 @@ pub async fn import_session_handler(
 
     {
         let mut sessions = IMPORT_SESSIONS.write().await;
+        if sessions.len() >= MAX_IMPORT_SESSIONS {
+            return Err(v1_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "TOO_MANY_SESSIONS",
+                "Too many active import sessions. Complete or cancel existing sessions first.",
+            ));
+        }
         sessions.insert(
             session_id,
             ImportSessionState {

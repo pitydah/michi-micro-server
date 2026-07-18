@@ -1,4 +1,8 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{
+    extract::State,
+    http::{header, StatusCode},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -38,8 +42,37 @@ struct PlayHistoryEntry {
 }
 
 pub async fn backup_handler(
+    headers: axum::http::HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // Verify authentication
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+
+    if let Some(ref token) = token {
+        if state
+            .token_store
+            .validate(token, michi_link::TokenType::Device)
+            .await
+            .is_err()
+        {
+            return Err(v1_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "Invalid or expired token",
+            ));
+        }
+    } else if state.config.auth_enabled {
+        return Err(v1_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Authentication required",
+        ));
+    }
+
     let tracks = michi_db::list_tracks(&state.db).await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,

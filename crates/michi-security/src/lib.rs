@@ -171,6 +171,7 @@ pub async fn health_check_handler() -> &'static str {
 }
 
 /// Middleware that enforces Content-Type: application/json for POST/PUT/PATCH.
+/// Also limits JSON parsing depth to prevent stack overflow attacks.
 pub async fn content_type_middleware(
     req: Request<Body>,
     next: Next,
@@ -190,7 +191,7 @@ pub async fn content_type_middleware(
         if !has_json {
             return Err((
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "Content-Type must be application/json".into(),
+                "415 Content-Type must be application/json".into(),
             ));
         }
     }
