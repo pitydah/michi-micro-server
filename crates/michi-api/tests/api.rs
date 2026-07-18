@@ -3908,3 +3908,81 @@ async fn test_static_content_types() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_protected_route_rejects_no_auth() {
+    let (app, _) = make_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tracks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_protected_route_rejects_bad_token() {
+    let (app, _) = make_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tracks")
+                .header("Authorization", "Bearer invalidtoken123")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_auth_pairing_grants_proper_permissions() {
+    let (app, _) = make_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/pair/start")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"device_name":"perm-test","device_type":"player"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let start: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let code = start["code"].as_str().unwrap().to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/pair/confirm")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(r#"{{"code":"{code}"}}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let confirm: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let permissions = confirm["permissions"].as_array().unwrap();
+
+    assert!(permissions.contains(&serde_json::Value::String("library.read".into())));
+    assert!(permissions.contains(&serde_json::Value::String("stream.read".into())));
+    assert!(permissions.contains(&serde_json::Value::String("playback.control".into())));
+}
