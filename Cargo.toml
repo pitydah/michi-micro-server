@@ -58,3 +58,5 @@ nonzero_ext = "0.3"
 opentelemetry = "0.26"
 opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
 tracing-opentelemetry = "0.27"
+# mDNS discovery
+mdns-sd = "0.13"

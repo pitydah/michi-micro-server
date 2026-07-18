@@ -10,6 +10,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use michi_config::Config;
 use michi_sync::PlaybackState;
+use michi_sync::SyncManager;
 use sqlx::SqlitePool;
 use tokio::sync::{broadcast, RwLock};
 use tokio_tungstenite::tungstenite::Message;
@@ -55,6 +56,7 @@ pub struct AppState {
     pub transcode_profiles: Arc<RwLock<Vec<crate::transcode::TranscodeProfile>>>,
     pub token_store: michi_link::TokenStore,
     pub receiver_manager: michi_receivers::ReceiverSessionManager,
+    pub sync_manager: SyncManager,
 }
 
 impl AppState {
@@ -70,8 +72,12 @@ impl AppState {
         michi_link::spawn_token_cleanup(token_store.clone());
         let playback_state = Arc::new(RwLock::new(PlaybackState::default()));
         let receiver_manager = michi_receivers::ReceiverSessionManager::new();
+        let upload_dir = config.cache_path.join("uploads");
+        let _ = std::fs::create_dir_all(&upload_dir);
+        let sync_manager = michi_sync::SyncManager::new(db.clone(), upload_dir);
         routes::v1::import::spawn_import_cleanup(&config, db.clone());
         routes::v1::playback::auto_restore_playback_state(db.clone(), playback_state.clone());
+        routes::v1::backup::spawn_integrity_cron(db.clone());
         // Spawn receiver heartbeat monitor
         let rm = receiver_manager.clone();
         tokio::spawn(async move {
@@ -106,6 +112,7 @@ impl AppState {
             transcode_profiles: Arc::new(RwLock::new(crate::transcode::default_profiles())),
             token_store,
             receiver_manager,
+            sync_manager,
         }
     }
 
@@ -357,6 +364,22 @@ fn v1_link_routes() -> Router<AppState> {
             "/api/v1/sync/state",
             post(routes::v1::sync::sync_state_handler),
         )
+        .route(
+            "/api/v1/sync/upload/init",
+            post(routes::v1::sync::sync_upload_init_handler),
+        )
+        .route(
+            "/api/v1/sync/upload/:file_id/chunk",
+            post(routes::v1::sync::sync_upload_chunk_handler),
+        )
+        .route(
+            "/api/v1/sync/upload/:file_id/status",
+            get(routes::v1::sync::sync_upload_status_handler),
+        )
+        .route(
+            "/api/v1/sync/playlist",
+            post(routes::v1::sync::sync_playlist_handler),
+        )
         // Import
         .route(
             "/api/v1/import/session",
@@ -400,6 +423,24 @@ fn v1_link_routes() -> Router<AppState> {
             "/api/v1/backup",
             get(routes::v1::backup::backup_handler),
         )
+        .route(
+            "/api/v1/backup/snapshot",
+            post(routes::v1::backup::snapshot_handler),
+        )
+        .route(
+            "/api/v1/backup/snapshot/last",
+            get(routes::v1::backup::last_snapshot_handler),
+        )
+        .route(
+            "/api/v1/webhook",
+            get(routes::v1::backup::get_webhook_handler)
+                .post(routes::v1::backup::set_webhook_handler)
+                .delete(routes::v1::backup::delete_webhook_handler),
+        )
+        .route(
+            "/api/v1/health/verify",
+            get(routes::v1::backup::verify_integrity_handler),
+        )
         // Playback
         .route(
             "/api/v1/playback/state",
@@ -420,6 +461,10 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/playback/session/restore",
             post(routes::v1::playback::playback_session_restore_handler),
+        )
+        .route(
+            "/api/v1/player/handoff",
+            post(routes::v1::playback::handoff_handler),
         )
         // Queue
         .route("/api/v1/queue", get(routes::v1::queue::queue_handler))
@@ -479,6 +524,19 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/receivers/:id/heartbeat",
             post(routes::v1::receivers::receiver_heartbeat_handler),
+        )
+        .route(
+            "/api/v1/devices/discover",
+            post(routes::v1::receivers::discover_mdns_handler),
+        )
+        .route(
+            "/api/v1/receivers/groups",
+            get(routes::v1::receivers::list_groups_handler)
+                .post(routes::v1::receivers::create_group_handler),
+        )
+        .route(
+            "/api/v1/receivers/groups/:group_id/sync",
+            post(routes::v1::receivers::sync_group_handler),
         )
         // Rooms
         .route(

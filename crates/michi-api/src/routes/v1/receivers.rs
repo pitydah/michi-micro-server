@@ -3,7 +3,10 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use crate::AppState;
 
@@ -19,6 +22,80 @@ fn v1_error(
         })),
     )
 }
+
+// ── Speaker group management ─────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeakerGroup {
+    pub id: String,
+    pub name: String,
+    pub receiver_ids: Vec<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+lazy_static::lazy_static! {
+    static ref SPEAKER_GROUPS: Arc<RwLock<Vec<SpeakerGroup>>> = Arc::new(RwLock::new(Vec::new()));
+}
+
+pub async fn list_groups_handler() -> Json<serde_json::Value> {
+    let groups = SPEAKER_GROUPS.read().await;
+    Json(serde_json::json!({ "groups": groups.clone() }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateGroupBody {
+    pub name: String,
+    pub receiver_ids: Vec<String>,
+}
+
+pub async fn create_group_handler(
+    Json(body): Json<CreateGroupBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if body.name.trim().is_empty() {
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "group name is required",
+        ));
+    }
+    let mut groups = SPEAKER_GROUPS.write().await;
+    let group = SpeakerGroup {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: body.name,
+        receiver_ids: body.receiver_ids,
+        created_at: chrono::Utc::now(),
+    };
+    groups.push(group.clone());
+    Ok(Json(serde_json::json!({ "group": group })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SyncGroupBody {
+    pub track_id: String,
+    pub position_ms: u64,
+    pub playing: bool,
+}
+
+pub async fn sync_group_handler(
+    Path(group_id): Path<String>,
+    Json(body): Json<SyncGroupBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let groups = SPEAKER_GROUPS.read().await;
+    let group = groups.iter().find(|g| g.id == group_id).cloned();
+    match group {
+        Some(g) => Ok(Json(serde_json::json!({
+            "status": "sync_initiated",
+            "group": g.name,
+            "receivers": g.receiver_ids,
+            "track_id": body.track_id,
+            "position_ms": body.position_ms,
+            "playing": body.playing,
+        }))),
+        None => Err(v1_error(StatusCode::NOT_FOUND, "GROUP_NOT_FOUND", &format!("group {} not found", group_id))),
+    }
+}
+
+// ── Existing receivers CRUD ─────────────────────────────────────
 
 pub async fn receivers_handler(
     State(state): State<AppState>,
@@ -187,4 +264,48 @@ pub async fn receiver_heartbeat_handler(
         )),
         Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "HEARTBEAT_FAILED", &e)),
     }
+}
+
+pub async fn discover_mdns_handler(
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match discover_mdns_receivers().await {
+        Ok(receivers) => Ok(Json(serde_json::json!({ "receivers": receivers }))),
+        Err(e) => Err(v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DISCOVERY_FAILED", &e)),
+    }
+}
+
+async fn discover_mdns_receivers() -> Result<Vec<serde_json::Value>, String> {
+    use mdns_sd::{ServiceDaemon, ServiceEvent};
+    use std::time::Duration;
+
+    let daemon = ServiceDaemon::new().map_err(|e| format!("mDNS daemon: {}", e))?;
+    let service_type = "_michi-receiver._tcp.local.";
+    let receiver = daemon.browse(service_type).map_err(|e| format!("mDNS browse: {}", e))?;
+
+    let mut discovered = Vec::new();
+    let timeout = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(event) = receiver.recv_async().await {
+                match event {
+                    ServiceEvent::ServiceResolved(info) => {
+                        let host = info.get_hostname();
+                        let port = info.get_port();
+                        let addr = format!("http://{}:{}", host.trim_end_matches('.'), port);
+                        discovered.push(serde_json::json!({
+                            "name": info.get_fullname(),
+                            "host": addr,
+                            "port": port,
+                            "addresses": info.get_addresses().iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                        }));
+                    }
+                    ServiceEvent::ServiceRemoved(_, _) => {}
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let _ = timeout.await;
+    let _ = daemon.shutdown();
+    Ok(discovered)
 }

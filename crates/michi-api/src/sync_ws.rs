@@ -109,11 +109,52 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                 // Peer will detect liveness via TCP keepalive.
                             }
                             michi_sync::SyncMessage::Pong => {}
-                            michi_sync::SyncMessage::HandoffRequest { .. } => {
-                                info!("sync: handoff request received (not yet implemented)");
+                            michi_sync::SyncMessage::HandoffRequest { from_device, to_device } => {
+                                info!(
+                                    "sync: handoff request from {} to {}",
+                                    from_device, to_device
+                                );
+                                let session = state_clone
+                                    .sync_manager
+                                    .initiate_handoff(from_device.clone(), to_device.clone())
+                                    .await
+                                    .unwrap_or_else(|_| michi_sync::SessionData {
+                                        track_id: None,
+                                        position_ms: 0,
+                                        playing: false,
+                                        volume: 0.8,
+                                        playlist_id: None,
+                                        queue_position: None,
+                                        transferred_at: chrono::Utc::now(),
+                                    });
+
+                                // Update local playback state with received position
+                                if let Some(tid) = session.track_id {
+                                    let new_state = michi_sync::PlaybackState {
+                                        track_id: Some(tid),
+                                        position_ms: session.position_ms,
+                                        playing: session.playing,
+                                        volume: session.volume,
+                                        updated_at: chrono::Utc::now(),
+                                        playlist_id: session.playlist_id,
+                                        queue_position: session.queue_position,
+                                        device_id: Some("server".into()),
+                                    };
+                                    {
+                                        let mut current = state_clone.playback_state.write().await;
+                                        *current = new_state;
+                                    }
+                                    info!(
+                                        "handoff: takeover track={} at position={}",
+                                        tid, session.position_ms
+                                    );
+                                }
+
+                                let accept = michi_sync::SyncMessage::handoff_accept(session);
+                                let _ = state_clone.sync_tx.send(accept);
                             }
-                            michi_sync::SyncMessage::HandoffAccept { .. } => {
-                                info!("sync: handoff accept received (not yet implemented)");
+                            michi_sync::SyncMessage::HandoffAccept { session_data } => {
+                                info!("sync: handoff accepted at position {}", session_data.position_ms);
                             }
                         }
                     }

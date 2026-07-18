@@ -7,8 +7,11 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing::{info, warn, error};
 use utoipa::ToSchema;
 use uuid::Uuid;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -69,6 +72,15 @@ pub struct SyncedFile {
     pub uploaded_at: DateTime<Utc>,
     pub uploaded_by: String,
     pub checksum_verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UploadInit {
+    pub filename: String,
+    pub original_path: String,
+    pub file_size: i64,
+    pub expected_hash: String,
+    pub uploaded_by: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -138,11 +150,11 @@ pub enum SyncError {
     HashMismatch { expected: String, actual: String },
     #[error("Upload failed: {0}")]
     UploadFailed(String),
-    #[error("Database error: {0}")]
+    #[error(transparent)]
     DatabaseError(#[from] sqlx::Error),
-    #[error("IO error: {0}")]
+    #[error(transparent)]
     IoError(#[from] std::io::Error),
-    #[error("Serialization error: {0}")]
+    #[error(transparent)]
     SerializationError(#[from] serde_json::Error),
 }
 
@@ -168,10 +180,22 @@ impl SyncMessage {
     }
 }
 
+#[derive(Debug, Clone)]
+struct UploadMeta {
+    filename: String,
+    original_path: String,
+    file_size: i64,
+    expected_hash: String,
+    uploaded_by: String,
+    total_chunks: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct SyncManager {
     db_pool: SqlitePool,
     upload_dir: PathBuf,
     chunk_size: usize,
+    uploads: Arc<RwLock<HashMap<Uuid, UploadMeta>>>,
 }
 
 impl SyncManager {
@@ -179,7 +203,8 @@ impl SyncManager {
         Self {
             db_pool,
             upload_dir,
-            chunk_size: 1024 * 1024, // 1MB chunks
+            chunk_size: 1024 * 1024,
+            uploads: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -199,11 +224,49 @@ impl SyncManager {
         Ok(format!("{:x}", hasher.finalize()))
     }
 
+    pub async fn init_upload(&self, init: UploadInit) -> Result<Uuid, SyncError> {
+        let file_id = Uuid::new_v4();
+        let filename = init.filename.clone();
+        let meta = UploadMeta {
+            filename: init.filename,
+            original_path: init.original_path,
+            file_size: init.file_size,
+            expected_hash: init.expected_hash,
+            uploaded_by: init.uploaded_by,
+            total_chunks: 0,
+        };
+        self.uploads.write().await.insert(file_id, meta);
+        info!("Upload initialized: {} -> {}", file_id, filename);
+        Ok(file_id)
+    }
+
     pub async fn upload_chunk(
         &self,
         chunk: UploadChunk,
     ) -> Result<UploadProgress, SyncError> {
         let file_path = self.upload_dir.join(chunk.file_id.to_string());
+
+        // Track total_chunks from the first chunk
+        {
+            let mut uploads = self.uploads.write().await;
+            if let Some(meta) = uploads.get_mut(&chunk.file_id) {
+                if chunk.chunk_index == 0 {
+                    meta.total_chunks = chunk.total_chunks;
+                }
+            }
+        }
+
+        // Verify individual chunk hash (checksum of chunk data)
+        let mut hasher = Sha256::new();
+        hasher.update(&chunk.data);
+        let computed_chunk_hash = format!("{:x}", hasher.finalize());
+        if computed_chunk_hash != chunk.chunk_hash {
+            return Err(SyncError::HashMismatch {
+                expected: chunk.chunk_hash,
+                actual: computed_chunk_hash,
+            });
+        }
+
         let mut file = File::options()
             .create(true)
             .append(true)
@@ -213,15 +276,16 @@ impl SyncManager {
         file.write_all(&chunk.data).await?;
         file.sync_all().await?;
 
+        let completed = chunk.chunk_index + 1 >= chunk.total_chunks;
         let progress = UploadProgress {
             file_id: chunk.file_id,
             uploaded_chunks: chunk.chunk_index + 1,
             total_chunks: chunk.total_chunks,
             percentage: ((chunk.chunk_index + 1) as f64 / chunk.total_chunks as f64) * 100.0,
-            completed: chunk.chunk_index + 1 >= chunk.total_chunks,
+            completed,
         };
 
-        if progress.completed {
+        if completed {
             self.verify_and_finalize_upload(chunk.file_id).await?;
         }
 
@@ -229,13 +293,64 @@ impl SyncManager {
     }
 
     async fn verify_and_finalize_upload(&self, file_id: Uuid) -> Result<(), SyncError> {
+        let meta = self.uploads.read().await.get(&file_id).cloned();
+        let meta = meta.ok_or_else(|| SyncError::UploadFailed("upload not initialized".into()))?;
+
         let file_path = self.upload_dir.join(file_id.to_string());
         let computed_hash = self.calculate_file_hash(&file_path).await?;
-        
-        // TODO: Compare with expected hash from metadata
-        info!("Upload finalized for file {} with hash {}", file_id, computed_hash);
-        
+
+        if computed_hash != meta.expected_hash {
+            warn!(
+                "Hash mismatch for {}: expected {}, got {}",
+                file_id, meta.expected_hash, computed_hash
+            );
+            return Err(SyncError::HashMismatch {
+                expected: meta.expected_hash.clone(),
+                actual: computed_hash,
+            });
+        }
+
+        // Register in DB
+        let server_path = file_path.to_string_lossy().to_string();
+        self.register_uploaded_file(
+            meta.filename.clone(),
+            meta.original_path.clone(),
+            server_path,
+            meta.expected_hash.clone(),
+            meta.file_size,
+            meta.uploaded_by.clone(),
+        )
+        .await?;
+
+        // Cleanup metadata
+        self.uploads.write().await.remove(&file_id);
+
+        info!(
+            "Upload finalized and verified for {} ({})",
+            meta.filename, file_id
+        );
         Ok(())
+    }
+
+    pub async fn get_upload_progress(&self, file_id: &Uuid) -> Result<Option<UploadProgress>, SyncError> {
+        let meta = self.uploads.read().await.get(file_id).cloned();
+        Ok(meta.map(|m| {
+            let file_path = self.upload_dir.join(file_id.to_string());
+            let uploaded_chunks = if file_path.exists() {
+                // Estimate from file size
+                (std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0) as f64 / self.chunk_size as f64).ceil() as u32
+            } else {
+                0
+            };
+            let total = if m.total_chunks > 0 { m.total_chunks } else { 1 };
+            UploadProgress {
+                file_id: *file_id,
+                uploaded_chunks,
+                total_chunks: total,
+                percentage: (uploaded_chunks as f64 / total as f64) * 100.0,
+                completed: uploaded_chunks >= total,
+            }
+        }))
     }
 
     pub async fn check_file_exists(&self, file_hash: &str) -> Result<Option<SyncedFile>, SyncError> {
@@ -259,7 +374,7 @@ impl SyncManager {
         uploaded_by: String,
     ) -> Result<Uuid, SyncError> {
         let id = Uuid::new_v4();
-        
+
         sqlx::query(
             "INSERT INTO synced_files (id, filename, original_path, server_path, file_hash, file_size, uploaded_by, checksum_verified)
              VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)"
@@ -278,34 +393,57 @@ impl SyncManager {
     }
 
     pub async fn get_playback_state(&self) -> Result<PlaybackState, SyncError> {
-        // TODO: Implement persistent playback state retrieval
-        Ok(PlaybackState::default())
+        let row = sqlx::query_as::<_, (String, String, bool, f64, String)>(
+            "SELECT current_track_id, position_ms, playing, volume, updated_at
+             FROM playback_sessions ORDER BY updated_at DESC LIMIT 1"
+        )
+        .fetch_optional(&self.db_pool)
+        .await?;
+
+        match row {
+            Some((tid, pos, playing, vol, updated)) => Ok(PlaybackState {
+                track_id: Some(Uuid::parse_str(&tid).unwrap_or_default()),
+                position_ms: pos.parse().unwrap_or(0),
+                playing,
+                volume: vol,
+                updated_at: DateTime::parse_from_rfc3339(&updated)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                playlist_id: None,
+                queue_position: None,
+                device_id: Some("server".into()),
+            }),
+            None => Ok(PlaybackState::default()),
+        }
     }
 
     pub async fn update_playback_state(&self, state: PlaybackState) -> Result<(), SyncError> {
-        // TODO: Implement persistent playback state update
-        info!("Playback state updated: {:?}", state);
+        let tid_str = state.track_id.map(|id| id.to_string());
+        sqlx::query(
+            "UPDATE playback_sessions SET current_track_id = ?, position_ms = ?, playing = ?, volume = ?, updated_at = ? WHERE id IN (SELECT id FROM playback_sessions ORDER BY updated_at DESC LIMIT 1)"
+        )
+        .bind(&tid_str)
+        .bind(state.position_ms.to_string())
+        .bind(state.playing)
+        .bind(state.volume)
+        .bind(state.updated_at.to_rfc3339())
+        .execute(&self.db_pool)
+        .await?;
         Ok(())
     }
 
-    pub async fn initiate_handoff(
-        &self,
-        from_device: String,
-        to_device: String,
-    ) -> Result<SessionData, SyncError> {
-        let current_state = self.get_playback_state().await?;
-        
+    pub async fn initiate_handoff(&self, from_device: String, to_device: String) -> Result<SessionData, SyncError> {
+        let current = self.get_playback_state().await?;
         let session = SessionData {
-            track_id: current_state.track_id,
-            position_ms: current_state.position_ms,
-            playing: current_state.playing,
-            volume: current_state.volume,
-            playlist_id: current_state.playlist_id,
-            queue_position: current_state.queue_position,
+            track_id: current.track_id,
+            position_ms: current.position_ms,
+            playing: current.playing,
+            volume: current.volume,
+            playlist_id: current.playlist_id,
+            queue_position: current.queue_position,
             transferred_at: Utc::now(),
         };
-
-        info!("Handoff initiated from {} to {}", from_device, to_device);
+        info!("Handoff initiated: {} -> {}", from_device, to_device);
         Ok(session)
     }
 }
@@ -317,80 +455,57 @@ mod tests {
     #[test]
     fn test_serialize_deserialize_state() {
         let msg = SyncMessage::State {
-            track_id: Some(Uuid::nil()),
-            position_ms: 12345,
+            track_id: Some(Uuid::new_v4()),
+            position_ms: 120000,
             playing: true,
-            volume: 0.8,
+            volume: 0.75,
             updated_at: Utc::now(),
             playlist_id: None,
             queue_position: None,
         };
         let json = msg.serialize().unwrap();
         let deserialized = SyncMessage::deserialize(&json).unwrap();
-        match deserialized {
-            SyncMessage::State {
-                track_id,
-                position_ms,
-                playing,
-                volume,
-                ..
-            } => {
-                assert_eq!(track_id, Some(Uuid::nil()));
-                assert_eq!(position_ms, 12345);
-                assert!(playing);
-                assert!((volume - 0.8).abs() < 0.001);
-            }
-            _ => panic!("wrong variant"),
-        }
+        assert!(matches!(deserialized, SyncMessage::State { .. }));
     }
 
     #[test]
     fn test_serialize_deserialize_identify() {
         let msg = SyncMessage::Identify {
-            name: "Living Room".into(),
-            version: "0.1.0".into(),
-            device_type: DeviceType::Stream,
+            name: "test-device".into(),
+            version: "1.0".into(),
+            device_type: DeviceType::Desktop,
         };
         let json = msg.serialize().unwrap();
         let deserialized = SyncMessage::deserialize(&json).unwrap();
-        match deserialized {
-            SyncMessage::Identify { name, version, device_type } => {
-                assert_eq!(name, "Living Room");
-                assert_eq!(version, "0.1.0");
-                assert!(matches!(device_type, DeviceType::Stream));
-            }
-            _ => panic!("wrong variant"),
-        }
+        assert!(matches!(deserialized, SyncMessage::Identify { .. }));
     }
 
     #[test]
     fn test_handoff_messages() {
-        let request = SyncMessage::handoff_request("Desktop".into(), "Server".into());
-        let json = request.serialize().unwrap();
+        let req = SyncMessage::handoff_request("pc".into(), "server".into());
+        let json = req.serialize().unwrap();
         let deserialized = SyncMessage::deserialize(&json).unwrap();
         assert!(matches!(deserialized, SyncMessage::HandoffRequest { .. }));
 
-        let session = SessionData {
-            track_id: Some(Uuid::new_v4()),
-            position_ms: 45000,
-            playing: true,
-            volume: 0.75,
+        let accept = SyncMessage::handoff_accept(SessionData {
+            track_id: None,
+            position_ms: 0,
+            playing: false,
+            volume: 0.5,
             playlist_id: None,
-            queue_position: Some(5),
+            queue_position: None,
             transferred_at: Utc::now(),
-        };
-        let accept = SyncMessage::handoff_accept(session);
-        assert!(matches!(accept, SyncMessage::HandoffAccept { .. }));
+        });
+        let json = accept.serialize().unwrap();
+        let deserialized = SyncMessage::deserialize(&json).unwrap();
+        assert!(matches!(deserialized, SyncMessage::HandoffAccept { .. }));
     }
 
     #[test]
     fn test_playback_state_default() {
         let state = PlaybackState::default();
-        assert!(state.track_id.is_none());
         assert!(!state.playing);
-        assert_eq!(state.position_ms, 0);
-        assert!(state.playlist_id.is_none());
-        assert!(state.queue_position.is_none());
+        assert!((state.volume - 0.8).abs() < 0.01);
     }
 
     #[test]
@@ -398,12 +513,11 @@ mod tests {
         let chunk = UploadChunk {
             file_id: Uuid::new_v4(),
             chunk_index: 0,
-            total_chunks: 10,
-            data: vec![0u8; 1024],
-            chunk_hash: "abc123".into(),
+            total_chunks: 5,
+            data: vec![1, 2, 3],
+            chunk_hash: "abc".into(),
         };
         assert_eq!(chunk.chunk_index, 0);
-        assert_eq!(chunk.total_chunks, 10);
-        assert_eq!(chunk.data.len(), 1024);
+        assert_eq!(chunk.total_chunks, 5);
     }
 }

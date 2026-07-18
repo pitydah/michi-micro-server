@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use uuid::Uuid;
@@ -424,4 +425,52 @@ pub fn auto_restore_playback_state(
             }
         }
     });
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HandoffBody {
+    pub track_id: Uuid,
+    pub position_ms: u64,
+    pub playing: bool,
+    pub volume: Option<f64>,
+    pub playlist_id: Option<Uuid>,
+    pub queue_position: Option<u32>,
+    pub from_device: Option<String>,
+}
+
+pub async fn handoff_handler(
+    State(state): State<AppState>,
+    Json(body): Json<HandoffBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let new_state = michi_sync::PlaybackState {
+        track_id: Some(body.track_id),
+        position_ms: body.position_ms,
+        playing: body.playing,
+        volume: body.volume.unwrap_or(0.8),
+        updated_at: Utc::now(),
+        playlist_id: body.playlist_id,
+        queue_position: body.queue_position,
+        device_id: Some("server".into()),
+    };
+
+    {
+        let mut current = state.playback_state.write().await;
+        *current = new_state.clone();
+    }
+
+    let from = body.from_device.unwrap_or_else(|| "unknown".into());
+    let handoff_msg = michi_sync::SyncMessage::handoff_request(from.clone(), "server".into());
+    let _ = state.sync_tx.send(handoff_msg);
+
+    info!(
+        "handoff: track={} position={}ms from={}",
+        body.track_id, body.position_ms, from
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "handoff_accepted",
+        "track_id": body.track_id,
+        "position_ms": body.position_ms,
+        "playing": body.playing,
+    })))
 }
