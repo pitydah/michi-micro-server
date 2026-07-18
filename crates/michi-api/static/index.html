@@ -288,6 +288,7 @@
                 <button class="tab active" data-stab="sync" onclick="switchSettingsTab('sync')">Sync</button>
                 <button class="tab" data-stab="handoff" onclick="switchSettingsTab('handoff')">Handoff</button>
                 <button class="tab" data-stab="receivers" onclick="switchSettingsTab('receivers')">Receivers</button>
+                <button class="tab" data-stab="roomgroups" onclick="switchSettingsTab('roomgroups')">Rooms</button>
                 <button class="tab" data-stab="webhook" onclick="switchSettingsTab('webhook')">Webhook</button>
                 <button class="tab" data-stab="backup" onclick="switchSettingsTab('backup')">Backup</button>
             </div>
@@ -419,6 +420,36 @@
                         <button class="btn btn-primary btn-sm" onclick="verifyIntegrity()">Verify Files</button>
                     </div>
                     <div id="integrity-result" class="panel-result"></div>
+                </div>
+            </div>
+            <!-- Room Groups -->
+            <div class="stab-content hidden" id="stab-roomgroups">
+                <div class="panel">
+                    <div class="panel-header">Create Room Group</div>
+                    <div class="panel-row">
+                        <span class="panel-label">Name</span>
+                        <input type="text" id="rg-name" class="panel-input" placeholder="Living Room">
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Mode</span>
+                        <select id="rg-mode" class="panel-input" style="max-width:200px">
+                            <option value="party">🔥 Party</option>
+                            <option value="relax">🌙 Relax</option>
+                            <option value="custom">⚙ Custom</option>
+                        </select>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Receivers</span>
+                        <input type="text" id="rg-receivers" class="panel-input" placeholder="comma-separated IDs">
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
+                        <button class="btn btn-primary btn-sm" onclick="createRoomGroup()">Create</button>
+                    </div>
+                </div>
+                <div class="section">
+                    <div class="section-header"><h3>Active Groups</h3></div>
+                    <div id="room-groups-list"></div>
                 </div>
             </div>
         </section>

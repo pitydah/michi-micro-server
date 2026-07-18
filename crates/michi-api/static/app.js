@@ -907,6 +907,80 @@ async function clearHistory() {
   } catch (e) { showToast(e.message, true); }
 }
 
+// ── Room Groups ──────────────────────────────────────────────────
+async function loadRoomGroups() {
+  try {
+    var raw = await MichiAPI.request('/api/v1/rooms/groups');
+    var groups = raw.groups || [];
+    var container = $('#room-groups-list');
+    if (!container) return;
+    if (groups.length === 0) {
+      container.innerHTML = '<div class="empty-state"><p><strong>No room groups</strong></p><p style="font-size:.78rem;margin-top:4px">Create a group to enable multi-room audio.</p></div>';
+      return;
+    }
+    container.innerHTML = groups.map(function (g) {
+      var modeIcons = { party: '🔥', relax: '🌙', custom: '⚙' };
+      var icon = modeIcons[g.mode] || '📡';
+      var status = g.active
+        ? '<span class="badge stable">Active</span>'
+        : '<span class="badge disabled">Inactive</span>';
+      return '<div class="chain-item" style="cursor:default">' +
+        '<div style="font-size:1.2rem">' + icon + '</div>' +
+        '<div class="info"><div class="name">' + esc(g.name) + ' ' + status + '</div>' +
+        '<div class="meta">' + g.receiver_ids.length + ' receivers · Mode: ' + g.mode + '</div></div>' +
+        '<div style="display:flex;gap:4px">' +
+        (g.active
+          ? '<button class="btn btn-sm btn-ghost" onclick="deactivateRoomGroup(\'' + g.id + '\')">Stop</button>'
+          : '<button class="btn btn-sm btn-primary" onclick="activateRoomGroup(\'' + g.id + '\')">Play</button>') +
+        '<button class="btn btn-sm btn-ghost" onclick="deleteRoomGroup(\'' + g.id + '\')">✕</button>' +
+        '</div></div>';
+    }).join('');
+  } catch (e) { console.warn('room groups:', e.message); }
+}
+
+async function createRoomGroup() {
+  var name = $('#rg-name')?.value.trim();
+  var mode = $('#rg-mode')?.value;
+  var recvs = $('#rg-receivers')?.value.trim();
+  if (!name) { showToast('Enter a group name', true); return; }
+  var ids = recvs ? recvs.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [];
+  try {
+    await MichiAPI.request('/api/v1/rooms/groups', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, mode: mode, receiver_ids: ids }),
+    });
+    $('#rg-name').value = '';
+    $('#rg-receivers').value = '';
+    loadRoomGroups();
+    showToast('Room group created');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function activateRoomGroup(id) {
+  try {
+    var resp = await MichiAPI.request('/api/v1/rooms/groups/' + id + '/activate', { method: 'POST' });
+    loadRoomGroups();
+    showToast('Group activated (' + (resp.group?.mode || 'party') + ' mode)');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function deactivateRoomGroup(id) {
+  try {
+    await MichiAPI.request('/api/v1/rooms/groups/' + id + '/deactivate', { method: 'POST' });
+    loadRoomGroups();
+    showToast('Group deactivated');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function deleteRoomGroup(id) {
+  try {
+    await MichiAPI.request('/api/v1/rooms/groups/' + id, { method: 'DELETE' });
+    loadRoomGroups();
+    showToast('Group deleted');
+  } catch (e) { showToast(e.message, true); }
+}
+
 // Extend init to load playlists when navigating to playlists page
 var _origShowSection = showSection;
 showSection = function (section) {
@@ -916,6 +990,7 @@ showSection = function (section) {
   }
   if (section === 'settings') {
     loadCurrentState();
+    setTimeout(loadRoomGroups, 100);
   }
   if (section === 'history') {
     _historyOffset = 0;

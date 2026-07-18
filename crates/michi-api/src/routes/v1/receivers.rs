@@ -4,8 +4,10 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::AppState;
 
@@ -291,20 +293,23 @@ async fn discover_mdns_receivers() -> Result<Vec<serde_json::Value>, String> {
         .browse(service_type)
         .map_err(|e| format!("mDNS browse: {}", e))?;
 
-    let mut discovered = Vec::new();
-    let timeout = tokio::time::timeout(Duration::from_secs(3), async {
+    let result: Vec<serde_json::Value> = Vec::new();
+    let discovered = std::sync::Mutex::new(result);
+    let _ = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if let Ok(event) = receiver.recv_async().await {
                 match event {
                     ServiceEvent::ServiceResolved(info) => {
-                        let host = info.get_hostname();
+                        let host = info.get_hostname().to_string();
                         let port = info.get_port();
+                        let fullname = info.get_fullname().to_string();
+                        let addresses: Vec<String> = info.get_addresses().iter().map(|a| a.to_string()).collect();
                         let addr = format!("http://{}:{}", host.trim_end_matches('.'), port);
-                        discovered.push(serde_json::json!({
-                            "name": info.get_fullname(),
+                        discovered.lock().unwrap().push(serde_json::json!({
+                            "name": fullname,
                             "host": addr,
                             "port": port,
-                            "addresses": info.get_addresses().iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                            "addresses": addresses,
                         }));
                     }
                     ServiceEvent::ServiceRemoved(_, _) => {}
@@ -312,9 +317,203 @@ async fn discover_mdns_receivers() -> Result<Vec<serde_json::Value>, String> {
                 }
             }
         }
-    });
+    }).await;
 
-    let _ = timeout.await;
     let _ = daemon.shutdown();
-    Ok(discovered)
+    Ok(discovered.into_inner().unwrap())
+}
+
+// ── Room Groups ──────────────────────────────────────────────────
+
+lazy_static::lazy_static! {
+    static ref ROOM_GROUPS: Arc<RwLock<Vec<michi_core::RoomGroup>>> = Arc::new(RwLock::new(Vec::new()));
+}
+
+pub async fn list_room_groups_handler() -> Json<serde_json::Value> {
+    let groups = ROOM_GROUPS.read().await;
+    Json(serde_json::json!({ "groups": groups.clone() }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateRoomGroupBody {
+    pub name: String,
+    pub mode: Option<String>,
+    pub receiver_ids: Vec<String>,
+}
+
+pub async fn create_room_group_handler(
+    Json(body): Json<CreateRoomGroupBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if body.name.trim().is_empty() {
+        return Err(v1_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", "name is required"));
+    }
+    let mode = michi_core::RoomMode::from_str(body.mode.as_deref().unwrap_or("party"));
+    let default_vol = match mode {
+        michi_core::RoomMode::Party => 80,
+        michi_core::RoomMode::Relax => 40,
+        michi_core::RoomMode::Custom => 60,
+    };
+    let volumes: HashMap<String, u32> = body.receiver_ids.iter().map(|id| (id.clone(), default_vol)).collect();
+
+    let group = michi_core::RoomGroup {
+        id: Uuid::new_v4(),
+        name: body.name.trim().to_string(),
+        mode,
+        receiver_ids: body.receiver_ids,
+        volumes,
+        active: false,
+        chain_id: None,
+        created_at: chrono::Utc::now(),
+    };
+    ROOM_GROUPS.write().await.push(group.clone());
+    Ok(Json(serde_json::json!({ "group": group })))
+}
+
+pub async fn get_room_group_handler(
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let groups = ROOM_GROUPS.read().await;
+    let group = groups.iter().find(|g| g.id == id).cloned();
+    match group {
+        Some(g) => Ok(Json(serde_json::json!({ "group": g }))),
+        None => Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateRoomGroupBody {
+    pub name: Option<String>,
+    pub mode: Option<String>,
+    pub receiver_ids: Option<Vec<String>>,
+}
+
+pub async fn update_room_group_handler(
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateRoomGroupBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let mut groups = ROOM_GROUPS.write().await;
+    let group = groups.iter_mut().find(|g| g.id == id);
+    match group {
+        Some(g) => {
+            if let Some(name) = body.name { g.name = name; }
+            if let Some(mode_str) = body.mode {
+                let new_mode = michi_core::RoomMode::from_str(&mode_str);
+                g.mode = new_mode;
+            }
+            if let Some(ids) = body.receiver_ids { g.receiver_ids = ids; }
+            Ok(Json(serde_json::json!({ "group": g.clone() })))
+        }
+        None => Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found")),
+    }
+}
+
+pub async fn delete_room_group_handler(
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let mut groups = ROOM_GROUPS.write().await;
+    let len_before = groups.len();
+    groups.retain(|g| g.id != id);
+    if groups.len() == len_before {
+        return Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found"));
+    }
+    Ok(Json(serde_json::json!({ "status": "deleted" })))
+}
+
+pub async fn activate_room_group_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let (recv_ids, vols, mode, group_clone, was_active) = {
+        let mut groups = ROOM_GROUPS.write().await;
+        let group = groups.iter_mut().find(|g| g.id == id);
+        match group {
+            Some(g) => {
+                if g.active {
+                    return Ok(Json(serde_json::json!({ "status": "already_active", "group": g.clone() })));
+                }
+                g.active = true;
+                (g.receiver_ids.clone(), g.volumes.clone(), g.mode, g.clone(), false)
+            }
+            None => return Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found")),
+        }
+    };
+
+    for recv_id in &recv_ids {
+        let vol = vols.get(recv_id).copied().unwrap_or(match mode {
+            michi_core::RoomMode::Party => 80,
+            michi_core::RoomMode::Relax => 40,
+            michi_core::RoomMode::Custom => 60,
+        });
+        let reg = state.receiver_manager.registry().await;
+        let reg_read = reg.read().await;
+        if let Some(entry) = reg_read.get(recv_id) {
+            if entry.paired && entry.active_session_id.is_none() {
+                let _ = state.receiver_manager
+                    .start_session(recv_id, &id.to_string(), "pcm", 48000, 24, 2, 0, 200, vol)
+                    .await;
+            }
+            let _ = state.receiver_manager.set_volume(recv_id, vol).await;
+        }
+    }
+
+    Ok(Json(serde_json::json!({ "status": "activated", "group": group_clone })))
+}
+
+pub async fn deactivate_room_group_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let mut groups = ROOM_GROUPS.write().await;
+    let group = groups.iter_mut().find(|g| g.id == id);
+    match group {
+        Some(g) => {
+            if !g.active {
+                return Ok(Json(serde_json::json!({ "status": "already_inactive" })));
+            }
+            let recv_ids = g.receiver_ids.clone();
+            g.active = false;
+            drop(groups);
+
+            for recv_id in &recv_ids {
+                let reg = state.receiver_manager.registry().await;
+                let reg_read = reg.read().await;
+                if let Some(entry) = reg_read.get(recv_id) {
+                    if entry.active_session_id.is_some() {
+                        let _ = state.receiver_manager.stop_session(recv_id).await;
+                    }
+                }
+            }
+            Ok(Json(serde_json::json!({ "status": "deactivated" })))
+        }
+        None => Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetRoomModeBody {
+    pub mode: String,
+}
+
+pub async fn set_room_mode_handler(
+    Path(id): Path<Uuid>,
+    Json(body): Json<SetRoomModeBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let new_mode = michi_core::RoomMode::from_str(&body.mode);
+    let mut groups = ROOM_GROUPS.write().await;
+    let group = groups.iter_mut().find(|g| g.id == id);
+    match group {
+        Some(g) => {
+            g.mode = new_mode;
+            let default_vol = match g.mode {
+                michi_core::RoomMode::Party => 80,
+                michi_core::RoomMode::Relax => 40,
+                michi_core::RoomMode::Custom => 60,
+            };
+            for (_, vol) in g.volumes.iter_mut() {
+                *vol = default_vol;
+            }
+            Ok(Json(serde_json::json!({ "status": "mode_updated", "group": g.clone() })))
+        }
+        None => Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found")),
+    }
 }

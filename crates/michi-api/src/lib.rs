@@ -753,6 +753,30 @@ fn v1_link_routes() -> Router<AppState> {
             "/api/v1/rooms/:id/play",
             post(routes::v1::rooms::room_play_handler),
         )
+        // Room Groups (Dynamic Multi-Room)
+        .route(
+            "/api/v1/rooms/groups",
+            get(routes::v1::receivers::list_room_groups_handler)
+                .post(routes::v1::receivers::create_room_group_handler),
+        )
+        .route(
+            "/api/v1/rooms/groups/:id",
+            get(routes::v1::receivers::get_room_group_handler)
+                .put(routes::v1::receivers::update_room_group_handler)
+                .delete(routes::v1::receivers::delete_room_group_handler),
+        )
+        .route(
+            "/api/v1/rooms/groups/:id/activate",
+            post(routes::v1::receivers::activate_room_group_handler),
+        )
+        .route(
+            "/api/v1/rooms/groups/:id/deactivate",
+            post(routes::v1::receivers::deactivate_room_group_handler),
+        )
+        .route(
+            "/api/v1/rooms/groups/:id/mode",
+            post(routes::v1::receivers::set_room_mode_handler),
+        )
         // Events
         .route("/api/v1/events", get(routes::v1::events::events_handler))
         .route(
