@@ -58,6 +58,8 @@ acme-lib = "0.13"
 governor = "0.7"
 validator = { version = "0.19", features = ["derive"] }
 nonzero_ext = "0.3"
+# Concurrent data structures
+dashmap = "6"
 # Observability
 opentelemetry = "0.26"
 opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }

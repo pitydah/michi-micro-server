@@ -36,15 +36,15 @@ impl TokenStore {
         }
     }
 
-    pub async fn store(&self, token: &str, token_type: TokenType, device_id: uuid::Uuid) {
-        let hash = hash_token(token);
-        let entry = TokenEntry {
-            device_id,
-            token_type,
-            expires_at: chrono::Utc::now() + chrono::Duration::days(90),
-        };
-        self.by_hash.write().await.insert(hash, entry);
-    }
+pub async fn store(&self, token: &str, token_type: TokenType, device_id: uuid::Uuid) {
+    let hash = hash_token(token);
+    let entry = TokenEntry {
+        device_id,
+        token_type,
+        expires_at: chrono::Utc::now() + chrono::Duration::days(7),
+    };
+    self.by_hash.write().await.insert(hash, entry);
+}
 
     pub async fn validate(
         &self,

@@ -48,6 +48,38 @@ pub async fn link_pair_start(
     State(state): State<AppState>,
     Json(body): Json<PairStartBody>,
 ) -> Result<Json<PairStartResponse>, (StatusCode, Json<serde_json::Value>)> {
+    // Rate limit por IP: 10 intentos/minuto en pair/start
+    let client_ip = headers
+        .get("X-Forwarded-For")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| headers.get("X-Real-IP").and_then(|v| v.to_str().ok()))
+        .unwrap_or("unknown")
+        .to_string();
+
+    {
+        let now = std::time::Instant::now();
+        let mut entry = state
+            .security_state
+            .pairing_attempts
+            .entry(format!("start:{}", client_ip))
+            .or_insert((0u32, now));
+        let (count, last_reset) = entry.value();
+        let elapsed = now.duration_since(*last_reset);
+
+        if elapsed.as_secs() > 60 {
+            *entry = (1, now);
+        } else if *count >= 10 {
+            tracing::warn!("Pair/start rate limit exceeded for IP: {}", client_ip);
+            return Err(v1_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "RATE_LIMITED",
+                "Too many pairing requests. Please wait.",
+            ));
+        } else {
+            entry.value_mut().0 += 1;
+        }
+    }
+
     // Log X-Michi-Device-Id header if present (Player sends this)
     if let Some(device_id) = headers
         .get("X-Michi-Device-Id")
@@ -92,6 +124,41 @@ pub async fn link_pair_confirm(
     State(state): State<AppState>,
     Json(body): Json<PairConfirmRequest>,
 ) -> Result<Json<PairConfirmResponse>, (StatusCode, Json<serde_json::Value>)> {
+    // Rate limit por IP: 5 intentos/minuto
+    let client_ip = headers
+        .get("X-Forwarded-For")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            headers
+                .get("X-Real-IP")
+                .and_then(|v| v.to_str().ok())
+        })
+        .unwrap_or("unknown")
+        .to_string();
+
+    {
+        let now = std::time::Instant::now();
+        let mut entry = state
+            .security_state
+            .pairing_attempts
+            .entry(client_ip.clone())
+            .or_insert((0u32, now));
+        let (count, last_reset) = entry.value();
+        let elapsed = now.duration_since(*last_reset);
+
+        if elapsed.as_secs() > 60 {
+            *entry = (1, now);
+        } else if *count >= 5 {
+            tracing::warn!("Pairing rate limit exceeded for IP: {}", client_ip);
+            return Err(v1_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "RATE_LIMITED",
+                "Too many pairing attempts. Please wait 60 seconds.",
+            ));
+        } else {
+            entry.value_mut().0 += 1;
+        }
+    }
     if let Some(device_id) = headers
         .get("X-Michi-Device-Id")
         .and_then(|v| v.to_str().ok())
@@ -208,6 +275,12 @@ pub async fn link_token_refresh(
 
     let new_device_token = generate_device_token();
     let new_refresh_token = generate_device_token();
+
+    // Revocar token anterior antes de emitir nuevo (rotación)
+    state
+        .token_store
+        .revoke(&body.refresh_token)
+        .await;
 
     state
         .token_store
