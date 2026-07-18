@@ -3144,9 +3144,6 @@ fn parse_format(s: &str) -> AudioFormat {
         "aac" => AudioFormat::Aac,
         "m4a" => AudioFormat::M4a,
         "wav" => AudioFormat::Wav,
-        "aiff" => AudioFormat::Aiff,
-        "dsf" => AudioFormat::Dsf,
-        "dff" => AudioFormat::Dff,
         _ => AudioFormat::Unknown,
     }
 }

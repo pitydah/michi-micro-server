@@ -79,7 +79,7 @@ pub struct TokenPair {
 
 pub fn generate_pairing_code() -> String {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
     let code: String = (0..6)
         .map(|_| {
             let idx = rng.gen_range(0..36);
@@ -94,5 +94,8 @@ pub fn generate_pairing_code() -> String {
 }
 
 pub fn generate_device_token() -> String {
-    Uuid::new_v4().to_string()
+    use rand::Rng;
+    let mut rng = rand::rngs::OsRng;
+    let token: [u8; 32] = rng.gen();
+    hex::encode(token)
 }

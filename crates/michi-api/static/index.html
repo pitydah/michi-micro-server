@@ -318,28 +318,127 @@
 
         <!-- Settings -->
         <section class="section-page hidden" id="page-settings">
-            <div class="hero"><h2>Settings</h2><p>Configure sync, handoff, receivers, webhooks and backups</p></div>
+            <div class="hero"><h2>Settings</h2><p>Configure all aspects of your Michi Micro Server</p></div>
             <div class="tabs">
-                <button class="tab active" data-stab="sync" onclick="switchSettingsTab('sync')">Sync</button>
+                <button class="tab active" data-stab="general" onclick="switchSettingsTab('general')">General</button>
+                <button class="tab" data-stab="library" onclick="switchSettingsTab('library')">Library</button>
+                <button class="tab" data-stab="streaming" onclick="switchSettingsTab('streaming')">Streaming</button>
+                <button class="tab" data-stab="audio" onclick="switchSettingsTab('audio')">Audio</button>
+                <button class="tab" data-stab="sync" onclick="switchSettingsTab('sync')">Sync</button>
                 <button class="tab" data-stab="handoff" onclick="switchSettingsTab('handoff')">Handoff</button>
+                <button class="tab" data-stab="network" onclick="switchSettingsTab('network')">Network</button>
                 <button class="tab" data-stab="receivers" onclick="switchSettingsTab('receivers')">Receivers</button>
-                <button class="tab" data-stab="roomgroups" onclick="switchSettingsTab('roomgroups')">Rooms</button>
                 <button class="tab" data-stab="webhook" onclick="switchSettingsTab('webhook')">Webhook</button>
                 <button class="tab" data-stab="backup" onclick="switchSettingsTab('backup')">Backup</button>
             </div>
 
+            <!-- General -->
+            <div class="stab-content active" id="stab-general">
+                <div class="panel">
+                    <div class="panel-header">Server</div>
+                    <div class="panel-row"><span class="panel-label">Port</span><span class="panel-mono" style="flex:1" id="settings-port">--</span></div>
+                    <div class="panel-row"><span class="panel-label">Version</span><span class="panel-mono" style="flex:1" id="settings-version">--</span></div>
+                    <div class="panel-row"><span class="panel-label">FFmpeg</span><span id="settings-ffmpeg" style="flex:1">--</span></div>
+                </div>
+                <div class="panel">
+                    <div class="panel-header">Resource Profile</div>
+                    <div class="panel-row">
+                        <span class="panel-label">Profile</span>
+                        <select id="settings-resource-profile" class="panel-input" style="max-width:200px" onchange="saveSetting('resource_profile', this.value)">
+                            <option value="eco">🌱 Eco</option>
+                            <option value="balanced">⚖️ Balanced</option>
+                            <option value="performance">🚀 Performance</option>
+                        </select>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Scan</span>
+                        <span class="panel-mono" id="settings-scan-concurrency">--</span>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Transcodes</span>
+                        <span class="panel-mono" id="settings-max-transcodes">--</span>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">DB Pool</span>
+                        <span class="panel-mono" id="settings-db-pool">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Library -->
+            <div class="stab-content hidden" id="stab-library">
+                <div class="panel">
+                    <div class="panel-header">Music Paths</div>
+                    <div id="settings-music-paths" class="panel-mono">--</div>
+                </div>
+                <div class="panel">
+                    <div class="panel-header">Scan</div>
+                    <div class="panel-row"><span class="panel-label">Watcher</span><span id="settings-watcher-status" class="badge stable">Active</span></div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="handleScan()">Start Scan Now</button></div>
+                </div>
+                <div class="panel">
+                    <div class="panel-header">Supported Formats</div>
+                    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+                        <span class="badge format" data-format="flac">FLAC</span>
+                        <span class="badge format" data-format="wav">WAV</span>
+                        <span class="badge format" data-format="mp3">MP3</span>
+                        <span class="badge format" data-format="aac">AAC</span>
+                        <span class="badge format" data-format="ogg">OGG</span>
+                        <span class="badge format" data-format="opus">OPUS</span>
+                        <span class="badge format" data-format="m4a">M4A</span>
+                        <span class="badge disabled" style="text-decoration:line-through">AIFF</span>
+                        <span class="badge disabled" style="text-decoration:line-through">DSF</span>
+                        <span class="badge disabled" style="text-decoration:line-through">DFF</span>
+                    </div>
+                    <p style="color:var(--text-dim);font-size:.72rem;margin-top:8px">AIFF, DSF and DFF are excluded. Use Michi Big Server for those formats.</p>
+                </div>
+            </div>
+
+            <!-- Streaming -->
+            <div class="stab-content hidden" id="stab-streaming">
+                <div class="panel">
+                    <div class="panel-header">Stream Configuration</div>
+                    <div class="panel-row">
+                        <span class="panel-label">Profile</span>
+                        <select id="settings-stream-profile" class="panel-input" style="max-width:200px" onchange="saveSetting('stream_profile', this.value)">
+                            <option value="original">🎵 Original</option>
+                            <option value="lossless">💎 Lossless</option>
+                            <option value="opus96">🎧 Opus 96k</option>
+                            <option value="opus160">🎧 Opus 160k</option>
+                            <option value="mp3192">🎧 MP3 192k</option>
+                            <option value="mp3320">🎧 MP3 320k</option>
+                        </select>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Format Policy</span>
+                        <select id="settings-format-policy" class="panel-input" style="max-width:200px" onchange="saveSetting('format_policy', this.value)">
+                            <option value="lossless">💎 Lossless (max FLAC/WAV)</option>
+                            <option value="standard">📦 Standard only</option>
+                            <option value="direct">🔗 Direct play only</option>
+                        </select>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">FFmpeg</span>
+                        <span id="settings-ffmpeg-avail" class="badge stable">Available</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Audio -->
+            <div class="stab-content hidden" id="stab-audio">
+                <div class="panel">
+                    <div class="panel-header">Audio Settings</div>
+                    <div class="panel-row"><span class="panel-label">Scrobbling</span><span id="settings-scrobble" class="badge disabled">Disabled</span></div>
+                    <div class="panel-row"><span class="panel-label">Sync Name</span><span class="panel-mono" id="settings-sync-name" style="flex:1">--</span></div>
+                </div>
+            </div>
+
             <!-- Sync -->
-            <div class="stab-content active" id="stab-sync">
+            <div class="stab-content hidden" id="stab-sync">
                 <div class="panel">
                     <div class="panel-header">Upload File</div>
-                    <div class="panel-row">
-                        <span class="panel-label">File</span>
-                        <input type="file" id="settings-file-input" class="panel-input">
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label"></span>
-                        <button class="btn btn-primary btn-sm" onclick="uploadFile()">Upload</button>
-                    </div>
+                    <div class="panel-row"><span class="panel-label">File</span><input type="file" id="settings-file-input" class="panel-input"></div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="uploadFile()">Upload</button></div>
                     <div id="upload-progress-wrap" class="settings-progress-wrap hidden">
                         <div class="progress-bar"><div class="fill" id="upload-progress-fill"></div></div>
                         <span class="settings-progress-text" id="upload-progress-text"></span>
@@ -347,18 +446,9 @@
                 </div>
                 <div class="panel">
                     <div class="panel-header">Sync Playlist</div>
-                    <div class="panel-row">
-                        <span class="panel-label">Name</span>
-                        <input type="text" id="sync-playlist-name" class="panel-input" placeholder="Playlist name">
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Track IDs</span>
-                        <textarea id="sync-playlist-tracks" class="panel-input" placeholder="One UUID per line" rows="3" style="resize:vertical;min-height:60px;font-family:var(--font-mono);font-size:.72rem"></textarea>
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label"></span>
-                        <button class="btn btn-primary btn-sm" onclick="syncPlaylist()">Sync</button>
-                    </div>
+                    <div class="panel-row"><span class="panel-label">Name</span><input type="text" id="sync-playlist-name" class="panel-input" placeholder="Playlist name"></div>
+                    <div class="panel-row"><span class="panel-label">Track IDs</span><textarea id="sync-playlist-tracks" class="panel-input" placeholder="One UUID per line" rows="3" style="resize:vertical;min-height:60px;font-family:var(--font-mono);font-size:.72rem"></textarea></div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="syncPlaylist()">Sync</button></div>
                     <div id="sync-playlist-result" class="panel-result"></div>
                 </div>
             </div>
@@ -367,22 +457,10 @@
             <div class="stab-content hidden" id="stab-handoff">
                 <div class="panel">
                     <div class="panel-header">Transfer Playback</div>
-                    <div class="panel-row">
-                        <span class="panel-label">Track ID</span>
-                        <input type="text" id="handoff-track-id" class="panel-input" placeholder="UUID">
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Position (ms)</span>
-                        <input type="number" id="handoff-position" class="panel-input" value="0" style="width:120px">
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Playing</span>
-                        <input type="checkbox" id="handoff-playing" checked style="accent-color:var(--primary);width:18px;height:18px">
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label"></span>
-                        <button class="btn btn-primary btn-sm" onclick="transferHandoff()">Transfer to Server</button>
-                    </div>
+                    <div class="panel-row"><span class="panel-label">Track ID</span><input type="text" id="handoff-track-id" class="panel-input" placeholder="UUID"></div>
+                    <div class="panel-row"><span class="panel-label">Position</span><input type="number" id="handoff-position" class="panel-input" value="0" style="width:120px"></div>
+                    <div class="panel-row"><span class="panel-label">Playing</span><input type="checkbox" id="handoff-playing" checked style="accent-color:var(--primary);width:18px;height:18px"></div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="transferHandoff()">Transfer to Server</button></div>
                     <div id="handoff-result" class="panel-result"></div>
                 </div>
                 <div class="panel">
@@ -391,31 +469,34 @@
                 </div>
             </div>
 
+            <!-- Network -->
+            <div class="stab-content hidden" id="stab-network">
+                <div class="panel">
+                    <div class="panel-header">Network</div>
+                    <div class="panel-row"><span class="panel-label">CORS Origin</span><span class="panel-mono" id="settings-cors" style="flex:1">--</span></div>
+                    <div class="panel-row"><span class="panel-label">Sync Peers</span><span class="panel-mono" id="settings-sync-peers" style="flex:1">--</span></div>
+                    <div class="panel-row"><span class="panel-label">Auth</span><span id="settings-auth" class="badge disabled">Disabled</span></div>
+                    <div class="panel-row"><span class="panel-label">Dev Mode</span><span id="settings-dev-mode" class="badge disabled">Off</span></div>
+                </div>
+            </div>
+
             <!-- Receivers -->
             <div class="stab-content hidden" id="stab-receivers">
                 <div class="panel">
                     <div class="panel-header">Discovery</div>
-                    <div class="panel-row">
-                        <span class="panel-label"></span>
-                        <button class="btn btn-primary btn-sm" onclick="discoverDevices()">Scan Network</button>
-                    </div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="discoverDevices()">Scan Network</button></div>
                     <div id="discover-result" class="panel-result"></div>
                 </div>
                 <div class="panel">
                     <div class="panel-header">Receiver Groups</div>
-                    <div class="panel-row">
-                        <span class="panel-label">Name</span>
-                        <input type="text" id="group-name" class="panel-input" placeholder="Living Room">
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Receivers</span>
-                        <input type="text" id="group-receivers" class="panel-input" placeholder="comma-separated IDs">
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label"></span>
-                        <button class="btn btn-primary btn-sm" onclick="createGroup()">Create Group</button>
-                    </div>
+                    <div class="panel-row"><span class="panel-label">Name</span><input type="text" id="group-name" class="panel-input" placeholder="Living Room"></div>
+                    <div class="panel-row"><span class="panel-label">Receivers</span><input type="text" id="group-receivers" class="panel-input" placeholder="comma-separated IDs"></div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="createGroup()">Create Group</button></div>
                     <div id="groups-list" class="panel-result"></div>
+                </div>
+                <div class="section">
+                    <div class="section-header"><h3>Room Groups</h3></div>
+                    <div id="room-groups-list"></div>
                 </div>
             </div>
 
@@ -423,16 +504,8 @@
             <div class="stab-content hidden" id="stab-webhook">
                 <div class="panel">
                     <div class="panel-header">Webhook Configuration</div>
-                    <div class="panel-row">
-                        <span class="panel-label">URL</span>
-                        <input type="url" id="webhook-url" class="panel-input" placeholder="https://example.com/hook">
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label"></span>
-                        <button class="btn btn-primary btn-sm" onclick="setWebhook()">Set</button>
-                        <button class="btn btn-ghost btn-sm" onclick="testWebhook()">Test</button>
-                        <button class="btn btn-ghost btn-sm" onclick="deleteWebhook()">Clear</button>
-                    </div>
+                    <div class="panel-row"><span class="panel-label">URL</span><input type="url" id="webhook-url" class="panel-input" placeholder="https://example.com/hook"></div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="setWebhook()">Set</button><button class="btn btn-ghost btn-sm" onclick="testWebhook()">Test</button><button class="btn btn-ghost btn-sm" onclick="deleteWebhook()">Clear</button></div>
                     <div id="webhook-status" class="panel-result"></div>
                 </div>
             </div>
@@ -441,52 +514,16 @@
             <div class="stab-content hidden" id="stab-backup">
                 <div class="panel">
                     <div class="panel-header">Snapshot</div>
-                    <div class="panel-row">
-                        <span class="panel-label"></span>
-                        <button class="btn btn-primary btn-sm" onclick="createSnapshot()">Create Snapshot</button>
-                        <button class="btn btn-ghost btn-sm" onclick="downloadBackup()">Download Backup</button>
-                    </div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="createSnapshot()">Create Snapshot</button><button class="btn btn-ghost btn-sm" onclick="downloadBackup()">Download Backup</button></div>
                     <div id="snapshot-result" class="panel-result"></div>
                 </div>
                 <div class="panel">
                     <div class="panel-header">Integrity Check</div>
-                    <div class="panel-row">
-                        <span class="panel-label"></span>
-                        <button class="btn btn-primary btn-sm" onclick="verifyIntegrity()">Verify Files</button>
-                    </div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="verifyIntegrity()">Verify Files</button></div>
                     <div id="integrity-result" class="panel-result"></div>
                 </div>
             </div>
-            <!-- Room Groups -->
-            <div class="stab-content hidden" id="stab-roomgroups">
-                <div class="panel">
-                    <div class="panel-header">Create Room Group</div>
-                    <div class="panel-row">
-                        <span class="panel-label">Name</span>
-                        <input type="text" id="rg-name" class="panel-input" placeholder="Living Room">
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Mode</span>
-                        <select id="rg-mode" class="panel-input" style="max-width:200px">
-                            <option value="party">🔥 Party</option>
-                            <option value="relax">🌙 Relax</option>
-                            <option value="custom">⚙ Custom</option>
-                        </select>
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Receivers</span>
-                        <input type="text" id="rg-receivers" class="panel-input" placeholder="comma-separated IDs">
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label"></span>
-                        <button class="btn btn-primary btn-sm" onclick="createRoomGroup()">Create</button>
-                    </div>
-                </div>
-                <div class="section">
-                    <div class="section-header"><h3>Active Groups</h3></div>
-                    <div id="room-groups-list"></div>
-                </div>
-            </div>
+        </section>
         </section>
 
         <!-- Status -->

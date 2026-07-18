@@ -1109,6 +1109,7 @@ showSection = function (section) {
   }
   if (section === 'settings') {
     loadCurrentState();
+    loadSettings();
     setTimeout(loadRoomGroups, 100);
   }
   if (section === 'history') {
@@ -1132,6 +1133,47 @@ function switchSettingsTab(tab) {
   $$('[id^="stab-"]').forEach(function (t) { t.classList.add('hidden'); });
   var pane = $('#stab-' + tab);
   if (pane) pane.classList.remove('hidden');
+}
+
+async function loadSettings() {
+  try {
+    var s = await MichiAPI.request('/api/v1/settings');
+    if (!$('#settings-port')) return;
+    $('#settings-port').textContent = s.port;
+    $('#settings-version').textContent = s.version || State.serverInfo?.version || '?';
+    $('#settings-ffmpeg').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
+    $('#settings-ffmpeg-avail').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
+    $('#settings-resource-profile').value = s.resource_profile;
+    $('#settings-stream-profile').value = s.stream_profile;
+    $('#settings-format-policy').value = s.format_policy;
+    $('#settings-music-paths').textContent = (s.music_paths || []).join('\n') || 'No paths configured';
+    $('#settings-sync-name').textContent = s.sync_name || '--';
+    $('#settings-cors').textContent = s.cors_origin || 'Restrictive (default)';
+    $('#settings-sync-peers').textContent = (s.sync_peers || []).join(', ') || 'None';
+    $('#settings-auth').innerHTML = s.auth_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
+    $('#settings-dev-mode').innerHTML = s.dev_mode ? '<span class="badge stable">On</span>' : '<span class="badge disabled">Off</span>';
+    $('#settings-scrobble').innerHTML = s.scrobble_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
+    // Profile details
+    var profileMap = { eco: { scan: 1, tc: 0, db: 4 }, balanced: { scan: 2, tc: 2, db: 8 }, performance: { scan: 4, tc: 4, db: 16 } };
+    var p = profileMap[s.resource_profile] || profileMap.balanced;
+    $('#settings-scan-concurrency').textContent = p.scan + ' worker(s)';
+    $('#settings-max-transcodes').textContent = p.tc + ' simultaneous';
+    $('#settings-db-pool').textContent = p.db + ' connections';
+  } catch (e) { console.warn('settings:', e.message); }
+}
+
+async function saveSetting(key, value) {
+  var body = {};
+  body[key] = value;
+  try {
+    await MichiAPI.request('/api/v1/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    showToast(key + ' updated to ' + value);
+    loadSettings();
+  } catch (e) { showToast(e.message, true); }
 }
 
 async function loadCurrentState() {

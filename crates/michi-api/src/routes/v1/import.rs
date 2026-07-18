@@ -26,7 +26,7 @@ fn v1_error(
 const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 const MAX_SESSION_SIZE: u64 = 1024 * 1024 * 1024;
 const ALLOWED_AUDIO_EXTS: &[&str] = &[
-    "mp3", "flac", "ogg", "opus", "aac", "m4a", "wav", "aiff", "dsf", "dff",
+    "mp3", "flac", "ogg", "opus", "aac", "m4a", "wav",
 ];
 
 #[derive(Debug, Deserialize)]

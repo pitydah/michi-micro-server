@@ -402,10 +402,10 @@ mod tests {
         assert_eq!(mime_type_for_ext("m4a"), "audio/mp4");
         assert_eq!(mime_type_for_ext("aac"), "audio/aac");
         assert_eq!(mime_type_for_ext("wav"), "audio/wav");
-        assert_eq!(mime_type_for_ext("aiff"), "audio/aiff");
-        assert_eq!(mime_type_for_ext("aif"), "audio/aiff");
-        assert_eq!(mime_type_for_ext("dsf"), "audio/dsf");
-        assert_eq!(mime_type_for_ext("dff"), "audio/dff");
+        assert_eq!(mime_type_for_ext("aiff"), "application/octet-stream");
+        assert_eq!(mime_type_for_ext("aif"), "application/octet-stream");
+        assert_eq!(mime_type_for_ext("dsf"), "application/octet-stream");
+        assert_eq!(mime_type_for_ext("dff"), "application/octet-stream");
         assert_eq!(mime_type_for_ext("txt"), "application/octet-stream");
     }
 

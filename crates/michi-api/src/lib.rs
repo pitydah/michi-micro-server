@@ -72,6 +72,15 @@ impl AppState {
             auth::spawn_session_cleanup(auth_sessions.clone());
         }
         let token_store = michi_link::TokenStore::new();
+        // Cargar tokens de dispositivos desde BD para persistencia entre reinicios
+        let db_for_tokens = db.clone();
+        let ts = token_store.clone();
+        tokio::spawn(async move {
+            match michi_link::load_tokens_from_db(&ts, &db_for_tokens).await {
+                Ok(n) => tracing::info!("loaded {} device tokens from DB", n),
+                Err(e) => tracing::warn!("failed to load device tokens from DB: {}", e),
+            }
+        });
         michi_link::spawn_token_cleanup(token_store.clone());
         let playback_state = Arc::new(RwLock::new(PlaybackState::default()));
         let receiver_manager = michi_receivers::ReceiverSessionManager::new();
@@ -663,6 +672,11 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/player/announce",
             post(routes::v1::announce::announce_handler),
+        )
+        .route(
+            "/api/v1/settings",
+            get(routes::v1::settings::get_settings_handler)
+                .put(routes::v1::settings::update_settings_handler),
         )
         .route(
             "/api/v1/setup/status",

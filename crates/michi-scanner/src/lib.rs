@@ -9,7 +9,7 @@ use tracing::{info, warn};
 pub mod watcher;
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "ogg", "opus", "aac", "m4a", "wav", "aiff", "aif", "dsf", "dff",
+    "mp3", "flac", "ogg", "opus", "aac", "m4a", "wav",
 ];
 
 fn is_audio_file(path: &Path) -> bool {
@@ -168,10 +168,11 @@ mod tests {
         assert!(is_audio_file(Path::new("song.mp3")));
         assert!(is_audio_file(Path::new("song.flac")));
         assert!(is_audio_file(Path::new("song.wav")));
-        assert!(is_audio_file(Path::new("song.aiff")));
-        assert!(is_audio_file(Path::new("song.aif")));
-        assert!(is_audio_file(Path::new("song.dsf")));
-        assert!(is_audio_file(Path::new("song.dff")));
+        assert!(!is_audio_file(Path::new("song.aiff")));
+        assert!(!is_audio_file(Path::new("song.aif")));
+        assert!(!is_audio_file(Path::new("song.dsf")));
+        assert!(!is_audio_file(Path::new("song.dff")));
+        assert!(is_audio_file(Path::new("song.mp3")));
         assert!(is_audio_file(Path::new("song.ogg")));
         assert!(is_audio_file(Path::new("song.opus")));
         assert!(is_audio_file(Path::new("song.aac")));

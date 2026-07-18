@@ -25,6 +25,7 @@ pub struct Config {
     pub dev_mode: bool,
     pub resource_profile: michi_core::ResourceProfile,
     pub stream_profile: michi_core::StreamProfile,
+    pub format_policy: michi_core::AudioFormatPolicy,
 }
 
 impl Config {
@@ -99,6 +100,10 @@ impl Config {
             &env::var("MICHI_STREAM_PROFILE").unwrap_or_else(|_| "original".into()),
         );
 
+        let format_policy = michi_core::AudioFormatPolicy::from_config_str(
+            &env::var("MICHI_FORMAT_POLICY").unwrap_or_else(|_| "lossless".into()),
+        );
+
         Self {
             port,
             music_paths,
@@ -120,6 +125,7 @@ impl Config {
             dev_mode,
             resource_profile,
             stream_profile,
+            format_policy,
         }
     }
 

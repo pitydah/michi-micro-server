@@ -27,9 +27,6 @@ pub enum AudioFormat {
     Aac,
     M4a,
     Wav,
-    Aiff,
-    Dsf,
-    Dff,
     Unknown,
 }
 
@@ -43,9 +40,6 @@ impl AudioFormat {
             "aac" => Self::Aac,
             "m4a" => Self::M4a,
             "wav" => Self::Wav,
-            "aiff" | "aif" => Self::Aiff,
-            "dsf" => Self::Dsf,
-            "dff" => Self::Dff,
             _ => Self::Unknown,
         }
     }
@@ -59,9 +53,6 @@ impl AudioFormat {
             Self::Aac => "audio/aac",
             Self::M4a => "audio/mp4",
             Self::Wav => "audio/wav",
-            Self::Aiff => "audio/aiff",
-            Self::Dsf => "audio/dsf",
-            Self::Dff => "audio/dff",
             Self::Unknown => "application/octet-stream",
         }
     }
@@ -75,10 +66,20 @@ impl AudioFormat {
             Self::Aac => "aac",
             Self::M4a => "m4a",
             Self::Wav => "wav",
-            Self::Aiff => "aiff",
-            Self::Dsf => "dsf",
-            Self::Dff => "dff",
             Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn is_lossless(&self) -> bool {
+        matches!(self, Self::Flac | Self::Wav)
+    }
+
+    pub fn bitrate_requirement_kbps(&self) -> u32 {
+        match self {
+            Self::Mp3 | Self::Aac | Self::M4a => 320,
+            Self::Ogg => 160,
+            Self::Opus => 160,
+            _ => 0,
         }
     }
 }
@@ -447,10 +448,10 @@ mod tests {
         assert_eq!(AudioFormat::from_extension("mp3"), AudioFormat::Mp3);
         assert_eq!(AudioFormat::from_extension("FLAC"), AudioFormat::Flac);
         assert_eq!(AudioFormat::from_extension("Wav"), AudioFormat::Wav);
-        assert_eq!(AudioFormat::from_extension("aiff"), AudioFormat::Aiff);
-        assert_eq!(AudioFormat::from_extension("aif"), AudioFormat::Aiff);
-        assert_eq!(AudioFormat::from_extension("dsf"), AudioFormat::Dsf);
-        assert_eq!(AudioFormat::from_extension("dff"), AudioFormat::Dff);
+        assert_eq!(AudioFormat::from_extension("aiff"), AudioFormat::Unknown);
+        assert_eq!(AudioFormat::from_extension("aif"), AudioFormat::Unknown);
+        assert_eq!(AudioFormat::from_extension("dsf"), AudioFormat::Unknown);
+        assert_eq!(AudioFormat::from_extension("dff"), AudioFormat::Unknown);
         assert_eq!(AudioFormat::from_extension("ogg"), AudioFormat::Ogg);
         assert_eq!(AudioFormat::from_extension("opus"), AudioFormat::Opus);
         assert_eq!(AudioFormat::from_extension("aac"), AudioFormat::Aac);
@@ -463,9 +464,6 @@ mod tests {
         assert_eq!(AudioFormat::Mp3.as_str(), "mp3");
         assert_eq!(AudioFormat::Flac.as_str(), "flac");
         assert_eq!(AudioFormat::Wav.as_str(), "wav");
-        assert_eq!(AudioFormat::Aiff.as_str(), "aiff");
-        assert_eq!(AudioFormat::Dsf.as_str(), "dsf");
-        assert_eq!(AudioFormat::Dff.as_str(), "dff");
         assert_eq!(AudioFormat::Ogg.as_str(), "ogg");
         assert_eq!(AudioFormat::Opus.as_str(), "opus");
         assert_eq!(AudioFormat::Aac.as_str(), "aac");
@@ -506,9 +504,6 @@ mod tests {
         assert_eq!(AudioFormat::M4a.mime_type(), "audio/mp4");
         assert_eq!(AudioFormat::Aac.mime_type(), "audio/aac");
         assert_eq!(AudioFormat::Wav.mime_type(), "audio/wav");
-        assert_eq!(AudioFormat::Aiff.mime_type(), "audio/aiff");
-        assert_eq!(AudioFormat::Dsf.mime_type(), "audio/dsf");
-        assert_eq!(AudioFormat::Dff.mime_type(), "audio/dff");
         assert_eq!(AudioFormat::Unknown.mime_type(), "application/octet-stream");
     }
 
@@ -880,4 +875,43 @@ pub struct PodcastEpisodeDb {
     pub duration_secs: Option<u64>,
     pub played: bool,
     pub position_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum AudioFormatPolicy {
+    LosslessOnly,
+    StandardOnly,
+    DirectPlay,
+}
+
+impl AudioFormatPolicy {
+    pub fn from_config_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "standard" => Self::StandardOnly,
+            "direct" => Self::DirectPlay,
+            _ => Self::LosslessOnly,
+        }
+    }
+
+    pub fn requires_transcode(&self, format: &AudioFormat, profile: &ResourceProfile) -> bool {
+        match self {
+            Self::LosslessOnly => {
+                profile.max_transcodes() == 0 && format.is_lossless()
+            }
+            Self::StandardOnly => {
+                format.is_lossless()
+            }
+            Self::DirectPlay => false,
+        }
+    }
+}
+
+impl std::fmt::Display for AudioFormatPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LosslessOnly => write!(f, "lossless"),
+            Self::StandardOnly => write!(f, "standard"),
+            Self::DirectPlay => write!(f, "direct"),
+        }
+    }
 }
