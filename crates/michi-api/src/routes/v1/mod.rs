@@ -22,6 +22,7 @@ pub mod rooms;
 pub mod search;
 pub mod server;
 pub mod sessions;
+pub mod shares;
 pub mod stream;
 pub mod sync;
 pub mod tracks;

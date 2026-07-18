@@ -363,7 +363,17 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 28 applied");
     }
 
-    info!("database schema at version 28");
+    if current < 29 {
+        info!("applying migration 29: shared links");
+        migration_029(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (29, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 29 applied");
+    }
+
+    info!("database schema at version 29");
     Ok(())
 }
 
@@ -891,6 +901,29 @@ async fn migration_028(pool: &SqlitePool) -> Result<(), DbError> {
             last_checked TEXT,
             enabled INTEGER NOT NULL DEFAULT 1,
             favorite INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn migration_029(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS shared_links (
+            id TEXT PRIMARY KEY,
+            token_hash TEXT NOT NULL,
+            track_id TEXT NOT NULL REFERENCES tracks(id),
+            password_hash TEXT,
+            expires_at TEXT,
+            max_plays INTEGER,
+            max_downloads INTEGER,
+            allow_stream INTEGER NOT NULL DEFAULT 1,
+            allow_download INTEGER NOT NULL DEFAULT 0,
+            play_count INTEGER NOT NULL DEFAULT 0,
+            download_count INTEGER NOT NULL DEFAULT 0,
+            last_accessed TEXT,
             created_at TEXT NOT NULL
         )",
     )

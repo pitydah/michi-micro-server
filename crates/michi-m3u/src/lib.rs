@@ -148,3 +148,85 @@ mod tests {
         assert!(entries.is_empty());
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct CueTrack {
+    pub index: u32,
+    pub title: String,
+    pub performer: Option<String>,
+    pub file: String,
+    pub start_ms: u64,
+    pub end_ms: Option<u64>,
+}
+
+pub fn parse_cue(content: &str) -> Vec<CueTrack> {
+    let mut tracks = Vec::new();
+    let mut current_file = String::new();
+    let mut current_performer = None;
+    let mut current_title = String::new();
+    let mut current_index = 0u32;
+    let mut current_start = 0u64;
+    let mut in_track = false;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("REM") {
+            continue;
+        }
+        if let Some(file) = line.strip_prefix("FILE ") {
+            if let Some(path) = file.split('"').nth(1) {
+                current_file = path.to_string();
+            }
+        } else if line.starts_with("PERFORMER ") {
+            current_performer = line.split('"').nth(1).map(|s| s.to_string());
+        } else if line.starts_with("TRACK ") {
+            if in_track && !current_title.is_empty() {
+                tracks.push(CueTrack {
+                    index: current_index,
+                    title: current_title.clone(),
+                    performer: current_performer.clone(),
+                    file: current_file.clone(),
+                    start_ms: current_start,
+                    end_ms: None,
+                });
+            }
+            in_track = true;
+            current_index = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            current_title.clear();
+        } else if line.starts_with("TITLE ") {
+            current_title = line.split('"').nth(1).unwrap_or("").to_string();
+        } else if line.starts_with("INDEX 01 ") {
+            if let Some(time) = line.strip_prefix("INDEX 01 ") {
+                let parts: Vec<&str> = time.split(':').collect();
+                if parts.len() == 3 {
+                    let mins: u64 = parts[0].parse().unwrap_or(0);
+                    let secs: u64 = parts[1].parse().unwrap_or(0);
+                    let frames: u64 = parts[2].parse().unwrap_or(0);
+                    current_start = (mins * 60 + secs) * 1000 + (frames * 1000 / 75);
+                }
+            }
+        }
+    }
+
+    if in_track && !current_title.is_empty() {
+        tracks.push(CueTrack {
+            index: current_index,
+            title: current_title,
+            performer: current_performer,
+            file: current_file,
+            start_ms: current_start,
+            end_ms: None,
+        });
+    }
+
+    // Calculate end_ms for each track (except last)
+    for i in 0..tracks.len().saturating_sub(1) {
+        tracks[i].end_ms = Some(tracks[i + 1].start_ms - 1);
+    }
+
+    tracks
+}

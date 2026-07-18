@@ -106,6 +106,12 @@ impl AppState {
                 }
             }
         });
+        // Start library watcher
+        let watch_paths = config.music_paths.clone();
+        tokio::spawn(async move {
+            let watcher = michi_scanner::watcher::LibraryWatcher::new(watch_paths);
+            watcher.start().await;
+        });
         // Spawn receiver heartbeat monitor
         let rm = receiver_manager.clone();
         tokio::spawn(async move {
@@ -644,6 +650,15 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/player/announce",
             post(routes::v1::announce::announce_handler),
+        )
+        .route(
+            "/api/v1/shares",
+            get(routes::v1::shares::list_shares_handler)
+                .post(routes::v1::shares::create_share_handler),
+        )
+        .route(
+            "/api/v1/shares/:id",
+            delete(routes::v1::shares::delete_share_handler),
         )
         // Queue
         .route("/api/v1/queue", get(routes::v1::queue::queue_handler))

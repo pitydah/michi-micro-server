@@ -6,6 +6,8 @@ use michi_metadata::read_metadata_safe;
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
+pub mod watcher;
+
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "mp3", "flac", "ogg", "opus", "aac", "m4a", "wav", "aiff", "aif", "dsf", "dff",
 ];

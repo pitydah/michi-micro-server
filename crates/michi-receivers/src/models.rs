@@ -128,3 +128,28 @@ impl ReceiverRegistry {
         self.receivers.remove(id);
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiverCapabilities {
+    pub device_type: String,
+    pub supported_codecs: Vec<String>,
+    pub max_sample_rate: u32,
+    pub max_bit_depth: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayRequest {
+    pub track_id: String,
+    pub stream_url: String,
+    pub codec: String,
+    pub sample_rate: u32,
+    pub bit_depth: u32,
+    pub volume: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackPosition {
+    pub position_ms: u64,
+    pub duration_ms: u64,
+    pub playing: bool,
+}
