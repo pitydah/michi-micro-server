@@ -1,4 +1,8 @@
-#![allow(unused_variables, clippy::needless_borrows_for_generic_args, clippy::len_zero)]
+#![allow(
+    unused_variables,
+    clippy::needless_borrows_for_generic_args,
+    clippy::len_zero
+)]
 use std::path::{Path, PathBuf};
 
 use axum::{
@@ -3831,4 +3835,76 @@ async fn test_v1_backup_export() {
     assert!(body["playlists"].is_array());
     assert!(body["starred_tracks"].is_array());
     assert!(body["play_history"].is_array());
+}
+
+#[tokio::test]
+async fn test_version_consistency() {
+    let (app, _pool) = make_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let status: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let status_version = status["version"].as_str().unwrap_or("");
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/server/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let info: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let info_version = info["version"].as_str().unwrap_or("");
+
+    assert_eq!(
+        status_version, info_version,
+        "status version {} must match server info version {}",
+        status_version, info_version
+    );
+    assert!(!status_version.is_empty(), "version must not be empty");
+}
+
+#[tokio::test]
+async fn test_static_content_types() {
+    let (app, _pool) = make_app().await;
+
+    let tests = vec![
+        ("/static/styles.css", "text/css"),
+        ("/static/app.js", "application/javascript"),
+        ("/static/assets/michi-micro-server.svg", "image/svg+xml"),
+    ];
+
+    for (path, expected_type) in tests {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "expected 200 for {}", path);
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            content_type.starts_with(expected_type),
+            "expected {} to start with '{}', got '{}'",
+            path,
+            expected_type,
+            content_type
+        );
+    }
 }

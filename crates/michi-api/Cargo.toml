@@ -35,6 +35,7 @@ michi-opensubsonic = { path = "../michi-opensubsonic" }
 michi-rooms = { path = "../michi-rooms" }
 michi-link = { path = "../michi-link" }
 michi-receivers = { path = "../michi-receivers" }
+michi-security = { path = "../michi-security" }
 mdns-sd = "0.13"
 rand = "0.8"
 base64 = "0.22"

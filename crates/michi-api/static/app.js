@@ -136,7 +136,9 @@ function showSection(section) {
 async function init() {
   showSection('dashboard');
   await Promise.all([loadStatus(), loadServerInfo(), loadDashboard(), loadTracks()]);
-  State.polling = setInterval(() => { loadStatus(); loadDashboard(); }, 30000);
+  State.polling = setInterval(function () {
+    if (!document.hidden) { loadStatus(); loadDashboard(); }
+  }, 60000);
 }
 
 document.addEventListener('DOMContentLoaded', init);

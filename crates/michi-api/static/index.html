@@ -10,15 +10,16 @@
     <title>Michi Server</title>
 </head>
 <body>
-    <div class="toast" id="toast"></div>
+    <div class="toast" id="toast" role="alert" aria-live="polite"></div>
     <audio id="audio-player" preload="none"></audio>
 
     <!-- Sidebar -->
     <aside class="sidebar">
         <div class="sidebar-logo">
             <img src="/static/assets/michi-micro-server.svg" alt="Michi" class="sidebar-logo-img">
-            <div>
+            <div class="brand">
                 <h1>Michi</h1>
+                <span class="sub">Micro Server</span>
                 <span class="ver" id="sidebar-ver">--</span>
             </div>
         </div>

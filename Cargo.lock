@@ -1544,6 +1544,7 @@ dependencies = [
  "michi-receivers",
  "michi-rooms",
  "michi-scanner",
+ "michi-security",
  "michi-streaming",
  "michi-sync",
  "rand 0.8.6",

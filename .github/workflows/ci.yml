@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -16,7 +17,7 @@ permissions:
   packages: write
 
 jobs:
-  check:
+  ci-rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,12 +43,39 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: docker build
-        run: docker build .
+  ci-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-  publish:
-    needs: check
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: michi-server:test
+
+      - name: Smoke test
+        run: |
+          docker run -d --name michi-test -p 9090:9090 \
+            -e MICHI_PORT=9090 \
+            michi-server:test
+          sleep 5
+          curl -f http://127.0.0.1:9090/api/status || exit 1
+          curl -f http://127.0.0.1:9090/ || exit 1
+          docker stop michi-test
+          docker rm michi-test
+
+  release-ghcr:
+    needs: [ci-rust, ci-docker]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,15 +99,15 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=raw,value=latest
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

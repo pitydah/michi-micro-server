@@ -9,6 +9,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use michi_config::Config;
+use michi_security::SecurityState;
 use michi_sync::PlaybackState;
 use michi_sync::SyncManager;
 use sqlx::SqlitePool;
@@ -57,6 +58,7 @@ pub struct AppState {
     pub token_store: michi_link::TokenStore,
     pub receiver_manager: michi_receivers::ReceiverSessionManager,
     pub sync_manager: SyncManager,
+    pub security_state: SecurityState,
 }
 
 impl AppState {
@@ -75,6 +77,8 @@ impl AppState {
         let upload_dir = config.cache_path.join("uploads");
         let _ = std::fs::create_dir_all(&upload_dir);
         let sync_manager = michi_sync::SyncManager::new(db.clone(), upload_dir);
+        let security_config = michi_security::SecurityConfig::default();
+        let security_state = michi_security::SecurityState::new(security_config);
         routes::v1::import::spawn_import_cleanup(&config, db.clone());
         routes::v1::playback::auto_restore_playback_state(db.clone(), playback_state.clone());
         routes::v1::backup::spawn_integrity_cron(db.clone());
@@ -90,10 +94,14 @@ impl AppState {
                 for entry in reg_read.list() {
                     if let Some(last) = entry.last_seen {
                         if (now - last).num_seconds() > 180 {
-                            tracing::warn!(
-                                "receiver {} not seen for >180s, marking offline",
-                                entry.receiver_id
-                            );
+                            let recv_id = entry.receiver_id.clone();
+                            drop(reg_read);
+                            let mut reg_write = reg.write().await;
+                            if let Some(e) = reg_write.get_mut(&recv_id) {
+                                e.active_session_id = None;
+                                tracing::warn!("receiver {} marked offline", recv_id);
+                            }
+                            return;
                         }
                     }
                 }
@@ -113,6 +121,7 @@ impl AppState {
             token_store,
             receiver_manager,
             sync_manager,
+            security_state,
         }
     }
 
@@ -176,92 +185,118 @@ pub fn start_sync_peers(state: &AppState) {
 
     tokio::spawn(async move {
         for peer in &peers {
-            let url = format!("ws://{}/api/sync", peer);
-            info!("connecting to sync peer: {}", url);
-            match tokio_tungstenite::connect_async(&url).await {
-                Ok((ws_stream, _)) => {
-                    info!("connected to sync peer: {}", peer);
-                    let (mut sender, mut receiver) = ws_stream.split();
-                    let mut local_sync_rx = sync_tx.subscribe();
+            let peer = peer.clone();
+            let sync_name = sync_name.clone();
+            let sync_tx = sync_tx.clone();
+            let tx = tx.clone();
+            let playback_state = playback_state.clone();
 
-                    let identify = michi_sync::SyncMessage::Identify {
-                        name: sync_name.clone(),
-                        version: "0.1.0".into(),
-                        device_type: michi_sync::DeviceType::Server,
-                    };
-                    if let Ok(json) = identify.serialize() {
-                        let _ = sender.send(Message::Text(json)).await;
-                    }
+            tokio::spawn(async move {
+                let url = format!("ws://{}/api/sync", peer);
+                let mut attempt = 0u64;
 
-                    let send_task = tokio::spawn(async move {
-                        while let Ok(msg) = local_sync_rx.recv().await {
-                            if let Ok(json) = msg.serialize() {
-                                if sender.send(Message::Text(json)).await.is_err() {
-                                    break;
-                                }
+                loop {
+                    info!("connecting to sync peer: {} (attempt {})", url, attempt + 1);
+                    match tokio_tungstenite::connect_async(&url).await {
+                        Ok((ws_stream, _)) => {
+                            info!("connected to sync peer: {}", peer);
+                            attempt = 0;
+                            let (mut sender, mut receiver) = ws_stream.split();
+                            let mut local_sync_rx = sync_tx.subscribe();
+
+                            let identify = michi_sync::SyncMessage::Identify {
+                                name: sync_name.clone(),
+                                version: "0.1.0".into(),
+                                device_type: michi_sync::DeviceType::Server,
+                            };
+                            if let Ok(json) = identify.serialize() {
+                                let _ = sender.send(Message::Text(json)).await;
                             }
-                        }
-                    });
 
-                    let recv_tx = tx.clone();
-                    let recv_playback = playback_state.clone();
-                    let recv_task = tokio::spawn(async move {
-                        while let Some(Ok(msg)) = receiver.next().await {
-                            match msg {
-                                Message::Text(text) => {
-                                    if let Ok(michi_sync::SyncMessage::State {
-                                        track_id,
-                                        position_ms,
-                                        playing,
-                                        volume,
-                                        ..
-                                    }) = michi_sync::SyncMessage::deserialize(&text)
-                                    {
-                                        let new_state = michi_sync::PlaybackState {
-                                            track_id,
-                                            position_ms,
-                                            playing,
-                                            volume,
-                                            updated_at: chrono::Utc::now(),
-                                            playlist_id: None,
-                                            queue_position: None,
-                                            device_id: None,
-                                        };
-                                        {
-                                            let mut current = recv_playback.write().await;
-                                            *current = new_state;
+                            let send_task = tokio::spawn(async move {
+                                while let Ok(msg) = local_sync_rx.recv().await {
+                                    if let Ok(json) = msg.serialize() {
+                                        if sender.send(Message::Text(json)).await.is_err() {
+                                            break;
                                         }
-                                        let tid = track_id
-                                            .map(|id| format!("\"{}\"", id))
-                                            .unwrap_or_else(|| "null".into());
-                                        let msg = format!(
-                                            "{{\"type\":\"sync_state\",\
-                                             \"track_id\":{tid},\
-                                             \"position_ms\":{pos},\
-                                             \"playing\":{play},\
-                                             \"volume\":{vol}}}",
-                                            pos = position_ms,
-                                            play = playing,
-                                            vol = volume,
-                                        );
-                                        let _ = recv_tx.send(msg);
                                     }
                                 }
-                                Message::Close(_) => break,
-                                _ => {}
+                            });
+
+                            let recv_tx = tx.clone();
+                            let recv_playback = playback_state.clone();
+                            let recv_task = tokio::spawn(async move {
+                                while let Some(Ok(msg)) = receiver.next().await {
+                                    match msg {
+                                        Message::Text(text) => {
+                                            if let Ok(michi_sync::SyncMessage::State {
+                                                track_id,
+                                                position_ms,
+                                                playing,
+                                                volume,
+                                                ..
+                                            }) = michi_sync::SyncMessage::deserialize(&text)
+                                            {
+                                                let new_state = michi_sync::PlaybackState {
+                                                    track_id,
+                                                    position_ms,
+                                                    playing,
+                                                    volume,
+                                                    updated_at: chrono::Utc::now(),
+                                                    playlist_id: None,
+                                                    queue_position: None,
+                                                    device_id: None,
+                                                };
+                                                {
+                                                    let mut current = recv_playback.write().await;
+                                                    *current = new_state;
+                                                }
+                                                let tid = track_id
+                                                    .map(|id| format!("\"{}\"", id))
+                                                    .unwrap_or_else(|| "null".into());
+                                                let msg = format!(
+                                                    "{{\"type\":\"sync_state\",\
+                                                     \"track_id\":{tid},\
+                                                     \"position_ms\":{pos},\
+                                                     \"playing\":{play},\
+                                                     \"volume\":{vol}}}",
+                                                    pos = position_ms,
+                                                    play = playing,
+                                                    vol = volume,
+                                                );
+                                                let _ = recv_tx.send(msg);
+                                            }
+                                        }
+                                        Message::Close(_) => break,
+                                        _ => {}
+                                    }
+                                }
+                            });
+
+                            tokio::select! {
+                                _ = send_task => {},
+                                _ = recv_task => {},
                             }
                         }
-                    });
-
-                    tokio::select! {
-                        _ = send_task => {},
-                        _ = recv_task => {},
+                        Err(e) => {
+                            warn!(
+                                "failed to connect to sync peer {} (attempt {}): {}",
+                                peer,
+                                attempt + 1,
+                                e
+                            );
+                        }
                     }
+
+                    // Exponential backoff with jitter
+                    attempt += 1;
+                    let delay = std::time::Duration::from_secs(
+                        std::cmp::min(attempt * 5, 300) + rand::random::<u64>() % 10,
+                    );
+                    info!("sync peer {}: reconnecting in {}s", peer, delay.as_secs());
+                    tokio::time::sleep(delay).await;
                 }
-                Err(e) => {
-                    warn!("failed to connect to sync peer {}: {}", peer, e);
-                }
-            }
+            });
         }
     });
 }
@@ -699,6 +734,13 @@ pub fn create_router(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.security_state.clone(),
+            michi_security::rate_limit_middleware,
+        ))
+        .layer(middleware::from_fn(
+            michi_security::security_headers_middleware,
         ))
         .with_state(state.clone());
 

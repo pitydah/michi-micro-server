@@ -54,7 +54,7 @@ impl Default for SecurityConfig {
 }
 
 /// Application state for security middleware
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SecurityState {
     pub config: SecurityConfig,
     pub rate_limiter: SharedRateLimiter,
