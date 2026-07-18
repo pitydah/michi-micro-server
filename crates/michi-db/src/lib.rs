@@ -373,7 +373,17 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 29 applied");
     }
 
-    info!("database schema at version 29");
+    if current < 30 {
+        info!("applying migration 30: pairing QR codes");
+        migration_030(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (30, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 30 applied");
+    }
+
+    info!("database schema at version 30");
     Ok(())
 }
 
@@ -929,6 +939,28 @@ async fn migration_029(pool: &SqlitePool) -> Result<(), DbError> {
     )
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn migration_030(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS pairing_qr_codes (
+            id TEXT PRIMARY KEY,
+            qr_code TEXT NOT NULL UNIQUE,
+            server_url TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            claimed INTEGER NOT NULL DEFAULT 0,
+            claimed_at TEXT,
+            created_at TEXT NOT NULL
+        )"
+    )
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_pairing_qr_code ON pairing_qr_codes(qr_code)"
+    )
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -3405,6 +3437,13 @@ pub async fn run_hourly_maintenance(pool: &SqlitePool) -> Result<(), DbError> {
         .await?;
     // Clean expired pairing sessions
     sqlx::query("DELETE FROM pairing_sessions WHERE expires_at < datetime('now')")
+        .execute(pool)
+        .await
+        .ok();
+    // Clean expired QR codes (claimed or expired)
+    sqlx::query(
+        "DELETE FROM pairing_qr_codes WHERE expires_at < datetime('now') OR claimed = 1"
+    )
         .execute(pool)
         .await
         .ok();

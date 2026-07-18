@@ -353,6 +353,18 @@ fn v1_link_routes() -> Router<AppState> {
             post(routes::v1::pair::link_token_refresh),
         )
         .route(
+            "/api/v1/pair/qr",
+            post(routes::v1::pair::qr_generate_handler),
+        )
+        .route(
+            "/api/v1/pair/qr/:qr_code/svg",
+            get(routes::v1::pair::qr_svg_handler),
+        )
+        .route(
+            "/api/v1/pair/qr/:qr_code/claim",
+            post(routes::v1::pair::qr_claim_handler),
+        )
+        .route(
             "/api/v1/devices/revoke",
             post(routes::v1::pair::link_devices_revoke),
         )

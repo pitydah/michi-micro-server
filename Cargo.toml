@@ -60,3 +60,5 @@ opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
 tracing-opentelemetry = "0.27"
 # mDNS discovery
 mdns-sd = "0.13"
+# QR code generation
+qrcode = { version = "0.14", features = ["svg"] }

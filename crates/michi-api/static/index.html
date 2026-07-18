@@ -190,6 +190,21 @@
                 <div class="panel-header">Features</div>
                 <div class="feature-grid" id="features-grid"></div>
             </div>
+            <div class="panel" id="qr-pairing-panel">
+                <div class="panel-header">QR Pairing</div>
+                <p style="color:var(--text-3);font-size:.78rem;margin-bottom:12px">Scan this code with the Michi Mobile App to connect instantly.</p>
+                <div id="qr-code-container" class="qr-container hidden">
+                    <div class="qr-svg" id="qr-svg"></div>
+                    <div class="qr-countdown" id="qr-countdown"></div>
+                    <div class="qr-connected hidden" id="qr-connected">
+                        <span style="font-size:1.5rem">✓</span>
+                        <span>Connected</span>
+                    </div>
+                </div>
+                <div id="qr-empty" class="qr-empty">
+                    <button class="btn btn-primary" onclick="generateQR()">Generate QR Code</button>
+                </div>
+            </div>
             <div class="panel">
                 <button class="btn btn-primary" onclick="testMichiLink()">Test Connection</button>
             </div>

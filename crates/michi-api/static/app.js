@@ -600,6 +600,81 @@ function testMichiLink() {
   showToast('Michi Link connection tested!');
 }
 
+// ── QR Pairing ───────────────────────────────────────────────────
+var _qrCode = null;
+var _qrExpiresAt = null;
+var _qrTimer = null;
+
+async function generateQR() {
+  try {
+    var resp = await MichiAPI.request('/api/v1/pair/qr', { method: 'POST', timeout: 10000 });
+    _qrCode = resp.qr_code;
+    _qrExpiresAt = new Date(resp.expires_at);
+    renderQR(resp);
+    pollQRStatus();
+  } catch (e) { showToast(e.message, true); }
+}
+
+function renderQR(resp) {
+  var container = $('#qr-code-container');
+  var empty = $('#qr-empty');
+  var svgEl = $('#qr-svg');
+  var countdown = $('#qr-countdown');
+  var connected = $('#qr-connected');
+  if (container) container.classList.remove('hidden');
+  if (empty) empty.classList.add('hidden');
+  if (connected) connected.classList.add('hidden');
+
+  // Load SVG
+  if (svgEl) {
+    svgEl.innerHTML = '<img src="' + resp.svg_url + '" alt="QR Code" style="width:100%;height:100%">';
+  }
+  updateQRCountdown();
+}
+
+function updateQRCountdown() {
+  var el = $('#qr-countdown');
+  if (!el || !_qrExpiresAt) return;
+  var now = new Date();
+  var diff = Math.max(0, Math.floor((_qrExpiresAt - now) / 1000));
+  if (diff <= 0) {
+    el.textContent = 'Expired';
+    return;
+  }
+  var m = Math.floor(diff / 60);
+  var s = diff % 60;
+  el.textContent = 'Expires in ' + m + 'm ' + s + 's';
+}
+
+function pollQRStatus() {
+  if (_qrTimer) clearInterval(_qrTimer);
+  _qrTimer = setInterval(async function () {
+    if (!_qrCode) { clearInterval(_qrTimer); return; }
+    updateQRCountdown();
+    // Check if expired
+    if (_qrExpiresAt && new Date() > _qrExpiresAt) {
+      clearInterval(_qrTimer);
+      var el = $('#qr-countdown');
+      if (el) el.textContent = 'Expired';
+      showToast('QR code expired. Generate a new one.', true);
+      resetQR();
+      return;
+    }
+  }, 1000);
+}
+
+function resetQR() {
+  _qrCode = null;
+  _qrExpiresAt = null;
+  if (_qrTimer) { clearInterval(_qrTimer); _qrTimer = null; }
+  var container = $('#qr-code-container');
+  var empty = $('#qr-empty');
+  var connected = $('#qr-connected');
+  if (container) container.classList.add('hidden');
+  if (empty) empty.classList.remove('hidden');
+  if (connected) connected.classList.add('hidden');
+}
+
 function copyServerUrl() {
   const inp = $('#server-url-input');
   if (!inp) return;
