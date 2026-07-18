@@ -12,6 +12,7 @@ pub mod favorites;
 pub mod history;
 pub mod import;
 pub mod insights;
+pub mod jobs;
 pub mod library;
 pub mod pair;
 pub mod modules;

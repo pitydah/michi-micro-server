@@ -3651,6 +3651,176 @@ pub async fn run_weekly_maintenance(pool: &SqlitePool) -> Result<(), DbError> {
     Ok(())
 }
 
+// ── Job Queue ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Job {
+    pub id: String,
+    pub kind: String,
+    pub state: String,
+    pub priority: i32,
+    pub progress: f64,
+    pub payload: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+pub async fn create_job(
+    db: &SqlitePool,
+    kind: &str,
+    priority: i32,
+    payload: Option<&serde_json::Value>,
+) -> Result<Job, DbError> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let payload_str = payload.and_then(|p| serde_json::to_string(p).ok());
+    sqlx::query(
+        "INSERT INTO job_queue (id, kind, state, priority, progress, payload_json, created_at)
+         VALUES (?, ?, 'pending', ?, 0.0, ?, ?)"
+    )
+        .bind(&id)
+        .bind(kind)
+        .bind(priority)
+        .bind(&payload_str)
+        .bind(&now)
+        .execute(db)
+        .await?;
+    Ok(Job {
+        id,
+        kind: kind.to_string(),
+        state: "pending".into(),
+        priority,
+        progress: 0.0,
+        payload: payload.cloned(),
+        error_message: None,
+        created_at: now,
+        started_at: None,
+        finished_at: None,
+    })
+}
+
+pub async fn get_pending_jobs(db: &SqlitePool, limit: i32) -> Result<Vec<Job>, DbError> {
+    let rows = sqlx::query_as::<_, (String, String, String, i32, f64, Option<String>, Option<String>, String, Option<String>, Option<String>)>(
+        "SELECT id, kind, state, priority, progress, payload_json, error_message, created_at, started_at, finished_at
+         FROM job_queue WHERE state = 'pending' ORDER BY priority DESC, created_at ASC LIMIT ?"
+    )
+        .bind(limit)
+        .fetch_all(db)
+        .await?;
+    Ok(rows_to_jobs(rows))
+}
+
+pub async fn claim_job(db: &SqlitePool, id: &str) -> Result<bool, DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = sqlx::query(
+        "UPDATE job_queue SET state = 'running', started_at = ? WHERE id = ? AND state = 'pending'"
+    )
+        .bind(&now)
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn update_job_progress(db: &SqlitePool, id: &str, progress: f64) -> Result<(), DbError> {
+    sqlx::query("UPDATE job_queue SET progress = ? WHERE id = ?")
+        .bind(progress)
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn complete_job(db: &SqlitePool, id: &str) -> Result<(), DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE job_queue SET state = 'completed', progress = 1.0, finished_at = ? WHERE id = ?"
+    )
+        .bind(&now)
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn fail_job(db: &SqlitePool, id: &str, error: &str) -> Result<(), DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE job_queue SET state = 'failed', error_message = ?, finished_at = ? WHERE id = ?"
+    )
+        .bind(error)
+        .bind(&now)
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn cancel_job(db: &SqlitePool, id: &str) -> Result<(), DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE job_queue SET state = 'cancelled', finished_at = ? WHERE id = ? AND state IN ('pending', 'running')"
+    )
+        .bind(&now)
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn list_jobs(
+    db: &SqlitePool,
+    kind: Option<&str>,
+    state: Option<&str>,
+    limit: i32,
+    offset: i32,
+) -> Result<Vec<Job>, DbError> {
+    let mut sql = "SELECT id, kind, state, priority, progress, payload_json, error_message, created_at, started_at, finished_at FROM job_queue WHERE 1=1".to_string();
+    let mut params: Vec<String> = Vec::new();
+    if let Some(k) = kind {
+        params.push(format!("AND kind = '{}'", k.replace('\'', "''")));
+    }
+    if let Some(s) = state {
+        params.push(format!("AND state = '{}'", s.replace('\'', "''")));
+    }
+    if !params.is_empty() {
+        sql.push_str(" ");
+        sql.push_str(&params.join(" "));
+    }
+    sql.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
+
+    let rows = sqlx::query_as::<_, (String, String, String, i32, f64, Option<String>, Option<String>, String, Option<String>, Option<String>)>(&sql)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(db)
+        .await?;
+    Ok(rows_to_jobs(rows))
+}
+
+pub async fn get_job(db: &SqlitePool, id: &str) -> Result<Option<Job>, DbError> {
+    let rows = sqlx::query_as::<_, (String, String, String, i32, f64, Option<String>, Option<String>, String, Option<String>, Option<String>)>(
+        "SELECT id, kind, state, priority, progress, payload_json, error_message, created_at, started_at, finished_at
+         FROM job_queue WHERE id = ?"
+    )
+        .bind(id)
+        .fetch_all(db)
+        .await?;
+    Ok(rows_to_jobs(rows).into_iter().next())
+}
+
+fn rows_to_jobs(
+    rows: Vec<(String, String, String, i32, f64, Option<String>, Option<String>, String, Option<String>, Option<String>)>,
+) -> Vec<Job> {
+    rows.into_iter().map(|(id, kind, state, priority, progress, payload_json, error_message, created_at, started_at, finished_at)| {
+        let payload = payload_json.and_then(|s| serde_json::from_str(&s).ok());
+        Job {
+            id, kind, state, priority, progress, payload, error_message, created_at, started_at, finished_at,
+        }
+    }).collect()
+}
+
 // ── Radio Stations ───────────────────────────────────────────────
 
 pub async fn list_radio_stations(

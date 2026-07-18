@@ -5,7 +5,6 @@ use anyhow::Result;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-/// Watchdog: monitor worker health, restart if hung >5s
 struct Watchdog {
     health: Arc<RwLock<Vec<WorkerHealth>>>,
 }
@@ -86,14 +85,11 @@ async fn main() -> Result<()> {
         "starting Michi Micro Server",
     );
 
-    // Initialize DB (WAL mode set by init_pool)
     let pool = michi_db::init_pool(&config.database_url).await?;
 
-    // Load identity
     let identity = michi_identity::MichiIdentity::load_or_create(&config.config_path).await?;
     info!("michi_id: {}...", &identity.get_id().await[..12]);
 
-    // Start mDNS announce
     let michi_connect = michi_connect::MichiConnect::new(
         identity.clone(),
         config.port(),
@@ -101,16 +97,13 @@ async fn main() -> Result<()> {
     );
     let _ = michi_connect.announce_mdns().await;
 
-    // Start watchdog
     let watchdog = Watchdog::new();
     watchdog.run().await;
 
-    // Register workers
     let _sync_health = watchdog.register("sync_peer").await;
     let _ingest_health = watchdog.register("ingest").await;
     let _playback_health = watchdog.register("playback").await;
 
-    // Tick watchdog from background tasks
     let sync_h = _sync_health.clone();
     tokio::spawn(async move {
         loop {
@@ -123,7 +116,6 @@ async fn main() -> Result<()> {
     let state = michi_api::AppState::new(config.clone(), pool, admin_user_id);
     let app = michi_api::create_router(state.clone());
 
-    // Mount OpenSubsonic compatible layer
     let os_router = michi_opensubsonic::routes::router(michi_opensubsonic::routes::OsAppState {
         db: state.db.clone(),
         music_paths: config.music_paths.clone(),
@@ -131,38 +123,82 @@ async fn main() -> Result<()> {
     });
     let app = app.merge(os_router);
 
-    // Start sync peer connections in background
+    // Start sync peer connections (respeta módulo sync)
     michi_api::start_sync_peers(&state);
 
-    // Start Home Assistant MQTT integration if env vars are set
+    // Start Home Assistant MQTT integration (respeta módulo homeassistant)
     if std::env::var("MICHI_MQTT_HOST").is_ok() {
-        let ha_config = config.clone();
-        let ha_playback = state.playback_state.clone();
-        let ha_db = state.db.clone();
-        tokio::spawn(async move {
-            michi_homeassistant::run(ha_config, ha_playback, ha_db).await;
-        });
+        let ha_dm = state.disabled_modules.clone();
+        if !ha_dm.read().await.contains("homeassistant") {
+            let ha_config = config.clone();
+            let ha_playback = state.playback_state.clone();
+            let ha_db = state.db.clone();
+            let ha_shutdown = state.shutdown_token.clone();
+            let ha_cancel = state.homeassistant_cancel.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = ha_cancel.cancelled() => {
+                        info!("homeassistant module cancelled, HA not started");
+                    }
+                    _ = async {
+                        if ha_dm.read().await.contains("homeassistant") {
+                            info!("homeassistant module disabled at startup");
+                            futures_util::future::pending::<()>().await;
+                        }
+                        michi_homeassistant::run(ha_config, ha_playback, ha_db).await;
+                    } => {}
+                }
+                info!("homeassistant stopped");
+            });
+        } else {
+            info!("homeassistant module disabled, not starting");
+        }
     } else {
         info!("MICHI_MQTT_HOST not set, Home Assistant integration disabled");
     }
-
-    use tokio::signal;
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!("listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
+    // Graceful shutdown: SIGINT + SIGTERM
+    let shutdown_token = state.shutdown_token.clone();
+    let shutdown_tx = state.tx.clone();
+    let shutdown_db = state.db.clone();
+
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            signal::ctrl_c().await.ok();
-            info!("shutdown signal received, draining...");
-            // Perform checkpoint WAL
+            use tokio::signal::unix::{signal, SignalKind};
+
+            let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+            let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+
+            tokio::select! {
+                _ = sigint.recv() => {
+                    info!("received SIGINT, starting graceful shutdown...");
+                }
+                _ = sigterm.recv() => {
+                    info!("received SIGTERM, starting graceful shutdown...");
+                }
+            }
+
+            // 1. Cancel global shutdown token — all background tasks will stop
+            shutdown_token.cancel();
+            info!("background tasks notified of shutdown");
+
+            // 2. Close WebSocket connections via broadcast
+            let _ = shutdown_tx.send("shutdown".to_string());
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // 3. Checkpoint WAL
             let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-                .execute(&state.db).await;
-            // Close WebSocket connections would go here
-            // Cancel background tasks
-            info!("database checkpoint complete, shutting down");
+                .execute(&shutdown_db).await;
+            info!("WAL checkpoint complete");
+
+            // 4. Allow brief time for tasks to finish
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            info!("shutdown complete");
         })
         .await?;
 

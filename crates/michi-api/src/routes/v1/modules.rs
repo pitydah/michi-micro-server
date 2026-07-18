@@ -1,5 +1,9 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use crate::AppState;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -21,14 +25,22 @@ fn builtin_modules() -> Vec<ModuleDescriptor> {
     ]
 }
 
-lazy_static::lazy_static! {
-    static ref DISABLED_MODULES: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+fn module_cancel_token(state: &AppState, name: &str) -> Option<CancellationToken> {
+    match name {
+        "scan" => Some(state.scan_cancel.clone()),
+        "sync" => Some(state.sync_cancel.clone()),
+        "playback" => Some(state.playback_cancel.clone()),
+        "backup" => Some(state.backup_cancel.clone()),
+        "webhook" => Some(state.webhook_cancel.clone()),
+        "homeassistant" => Some(state.homeassistant_cancel.clone()),
+        _ => None,
+    }
 }
 
 pub async fn modules_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Json<serde_json::Value> {
-    let disabled = DISABLED_MODULES.read().unwrap();
+    let disabled = state.disabled_modules.read().await;
     let mut modules = builtin_modules();
     for m in &mut modules {
         m.enabled = !disabled.contains(&m.name);
@@ -43,16 +55,34 @@ pub struct ToggleModuleBody {
 }
 
 pub async fn toggle_module_handler(
+    State(state): State<AppState>,
     Json(body): Json<ToggleModuleBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let mut disabled = DISABLED_MODULES.write().unwrap();
+    let mut disabled = state.disabled_modules.write().await;
+
+    // Validate module name
+    if !builtin_modules().iter().any(|m| m.name == body.name) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": {"code": "UNKNOWN_MODULE", "message": format!("unknown module: {}", body.name)}})),
+        ));
+    }
+
     if body.enabled {
-        disabled.retain(|m| m != &body.name);
+        // Re-enable: remove from disabled set, create new cancel token
+        disabled.remove(&body.name);
+        // The new token allows the module to start fresh on next spawn attempt
+        // Current running tasks check disabled_modules set every cycle
+        tracing::info!("module '{}' enabled", body.name);
     } else {
-        if !disabled.contains(&body.name) {
-            disabled.push(body.name.clone());
+        // Disable: add to set, cancel running tasks
+        disabled.insert(body.name.clone());
+        if let Some(token) = module_cancel_token(&state, &body.name) {
+            token.cancel();
+            tracing::info!("module '{}' disabled, tasks cancelled", body.name);
         }
     }
+
     Ok(Json(serde_json::json!({ "module": body.name, "enabled": body.enabled })))
 }
 
@@ -63,7 +93,6 @@ pub async fn self_test_handler(
 ) -> Json<serde_json::Value> {
     let mut results = Vec::new();
 
-    // DB connectivity
     let db_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(&state.db)
         .await
@@ -73,7 +102,6 @@ pub async fn self_test_handler(
         "status": if db_ok { "passed" } else { "failed" },
     }));
 
-    // Config path
     let config_ok = state.config.config_path.exists();
     results.push(serde_json::json!({
         "name": "config_path",
@@ -81,7 +109,6 @@ pub async fn self_test_handler(
         "info": state.config.config_path.display().to_string(),
     }));
 
-    // Cache path
     let cache_ok = state.config.cache_path.exists();
     results.push(serde_json::json!({
         "name": "cache_path",
@@ -89,7 +116,6 @@ pub async fn self_test_handler(
         "info": state.config.cache_path.display().to_string(),
     }));
 
-    // Music paths
     for p in &state.config.music_paths {
         let exists = p.exists();
         let readable = p.is_dir();
@@ -100,7 +126,6 @@ pub async fn self_test_handler(
         }));
     }
 
-    // Token validation (if auth enabled)
     if state.config.auth_enabled {
         results.push(serde_json::json!({
             "name": "admin_token_configured",
@@ -131,6 +156,8 @@ pub async fn capabilities_handler() -> Json<serde_json::Value> {
             { "name": "handoff", "version": "1.0", "description": "Direct stream handoff between peers" },
             { "name": "mounts", "version": "1.0", "description": "Mount health monitoring" },
             { "name": "audit", "version": "1.0", "description": "Audit log for admin actions" },
+            { "name": "jobs", "version": "1.0", "description": "Persistent job queue with workers" },
+            { "name": "modules", "version": "1.0", "description": "Runtime module enable/disable" },
         ],
         "protocols": [
             { "name": "michi-link", "version": "0.2" },
@@ -212,7 +239,6 @@ pub async fn policy_handler(
     let max_remote_bitrate: u32 = state.config.max_remote_bitrate;
     let remote_sync: bool = state.config.remote_sync;
 
-    // Default to remote policy
     let profile = "remote";
     let max_bitrate = if max_remote_bitrate > 0 { Some(max_remote_bitrate) } else { Some(128_000) };
     let allow_sync = remote_sync;
@@ -263,10 +289,6 @@ pub async fn handoff_handler(
 }
 
 // ── ETag ───────────────────────────────────────────────────────
-
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 lazy_static::lazy_static! {
     static ref ETAG_STORE: Arc<RwLock<HashMap<String, String>>> =

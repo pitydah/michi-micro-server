@@ -1868,6 +1868,7 @@ version = "0.2.0"
 dependencies = [
  "chrono",
  "michi-core",
+ "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",
@@ -2080,6 +2081,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
+ "futures-util",
  "michi-api",
  "michi-config",
  "michi-connect",
