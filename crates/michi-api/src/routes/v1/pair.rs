@@ -274,16 +274,22 @@ pub async fn qr_generate_handler(
     let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
     sqlx::query(
         "INSERT INTO pairing_qr_codes (id, qr_code, server_url, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?)"
+         VALUES (?, ?, ?, ?, ?)",
     )
-        .bind(Uuid::new_v4().to_string())
-        .bind(qr_code.to_string())
-        .bind(&server_url)
-        .bind(expires_at.to_rfc3339())
-        .bind(chrono::Utc::now().to_rfc3339())
-        .execute(&state.db)
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+    .bind(Uuid::new_v4().to_string())
+    .bind(qr_code.to_string())
+    .bind(&server_url)
+    .bind(expires_at.to_rfc3339())
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     Ok(Json(serde_json::json!({
         "qr_code": qr_code,
@@ -306,15 +312,24 @@ pub async fn qr_svg_handler(
         .await
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
 
-    let (server_url, expires_at_str, claimed, _claimed_at) = row
-        .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "QR code not found"))?;
+    let (server_url, expires_at_str, claimed, _claimed_at) =
+        row.ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "QR code not found"))?;
 
     if claimed != 0 {
-        return Err(v1_error(StatusCode::GONE, "ALREADY_USED", "QR code has already been used"));
+        return Err(v1_error(
+            StatusCode::GONE,
+            "ALREADY_USED",
+            "QR code has already been used",
+        ));
     }
 
-    let expires_at = chrono::DateTime::parse_from_rfc3339(&expires_at_str)
-        .map_err(|_| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "PARSE_ERROR", "invalid expiry"))?;
+    let expires_at = chrono::DateTime::parse_from_rfc3339(&expires_at_str).map_err(|_| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "PARSE_ERROR",
+            "invalid expiry",
+        )
+    })?;
     if expires_at < chrono::Utc::now() {
         return Err(v1_error(StatusCode::GONE, "EXPIRED", "QR code has expired"));
     }
@@ -325,15 +340,25 @@ pub async fn qr_svg_handler(
         "url": server_url,
         "code": qr_str,
     });
-    let payload_str = serde_json::to_string(&payload)
-        .map_err(|_| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "JSON_ERROR", "serialization failed"))?;
+    let payload_str = serde_json::to_string(&payload).map_err(|_| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "JSON_ERROR",
+            "serialization failed",
+        )
+    })?;
 
     // Generate QR code
-    let code = qrcode::QrCode::new(payload_str.as_bytes())
-        .map_err(|_| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "QR_ERROR", "QR generation failed"))?;
+    let code = qrcode::QrCode::new(payload_str.as_bytes()).map_err(|_| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "QR_ERROR",
+            "QR generation failed",
+        )
+    })?;
 
     // Build QR SVG with premium styling
-    let modules = code.to_vec();
+    let modules = code.to_colors();
     let size = code.width();
     let cell_size = 5.0;
     let qr_dim = size as f64 * cell_size;
@@ -358,7 +383,9 @@ pub async fn qr_svg_handler(
     // White QR background with rounded rect
     svg.push_str(&format!(
         r##"<rect x="{p}" y="{p}" width="{d}" height="{d}" rx="{cr}" fill="#ffffff"/>"##,
-        p = padding, d = qr_dim, cr = 12.0
+        p = padding,
+        d = qr_dim,
+        cr = 12.0
     ));
 
     // Draw QR modules as circles with gradient
@@ -370,12 +397,14 @@ pub async fn qr_svg_handler(
     let radius = (cell_size - 0.4) / 2.0;
     for y in 0..size {
         for x in 0..size {
-            if modules[y * size + x] {
+            if modules[y * size + x] == qrcode::types::Color::Dark {
                 let cx = padding + x as f64 * cell_size + cell_size / 2.0;
                 let cy = padding + y as f64 * cell_size + cell_size / 2.0;
                 svg.push_str(&format!(
                     r##"<circle cx="{cx}" cy="{cy}" r="{r}" fill="url(#qrGrad)"/>"##,
-                    cx = cx, cy = cy, r = radius
+                    cx = cx,
+                    cy = cy,
+                    r = radius
                 ));
             }
         }
@@ -390,17 +419,25 @@ pub async fn qr_svg_handler(
         // Outer
         svg.push_str(&format!(
             r##"<rect x="{x}" y="{y}" width="{s}" height="{s}" rx="{cr}" fill="url(#qrGrad)"/>"##,
-            x = fx, y = fy, s = f_size, cr = corner_radius
+            x = fx,
+            y = fy,
+            s = f_size,
+            cr = corner_radius
         ));
         // Inner
         svg.push_str(&format!(
             r##"<rect x="{x}" y="{y}" width="{s}" height="{s}" rx="{cr}" fill="#ffffff"/>"##,
-            x = fx + cell_size, y = fy + cell_size, s = 5.0 * cell_size, cr = corner_radius - 1.0
+            x = fx + cell_size,
+            y = fy + cell_size,
+            s = 5.0 * cell_size,
+            cr = corner_radius - 1.0
         ));
         // Core
         svg.push_str(&format!(
             r##"<rect x="{x}" y="{y}" width="{s}" height="{s}" rx="3" fill="url(#qrGrad)"/>"##,
-            x = fx + 2.0 * cell_size, y = fy + 2.0 * cell_size, s = 3.0 * cell_size
+            x = fx + 2.0 * cell_size,
+            y = fy + 2.0 * cell_size,
+            s = 3.0 * cell_size
         ));
     }
 
@@ -433,10 +470,7 @@ pub async fn qr_svg_handler(
 
     svg.push_str("</svg>");
 
-    Ok((
-        [(header::CONTENT_TYPE, "image/svg+xml")],
-        svg,
-    ).into_response())
+    Ok(([(header::CONTENT_TYPE, "image/svg+xml")], svg).into_response())
 }
 
 #[derive(Deserialize)]
@@ -453,22 +487,37 @@ pub async fn qr_claim_handler(
     let qr_str = qr_code.to_string();
 
     let row = sqlx::query_as::<_, (String, String, i64)>(
-        "SELECT id, expires_at, claimed FROM pairing_qr_codes WHERE qr_code = ?"
+        "SELECT id, expires_at, claimed FROM pairing_qr_codes WHERE qr_code = ?",
     )
-        .bind(&qr_str)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+    .bind(&qr_str)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
-    let (db_id, expires_at_str, claimed) = row
-        .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "QR code not found"))?;
+    let (db_id, expires_at_str, claimed) =
+        row.ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "QR code not found"))?;
 
     if claimed != 0 {
-        return Err(v1_error(StatusCode::GONE, "ALREADY_USED", "QR code has already been used"));
+        return Err(v1_error(
+            StatusCode::GONE,
+            "ALREADY_USED",
+            "QR code has already been used",
+        ));
     }
 
-    let expires_at = chrono::DateTime::parse_from_rfc3339(&expires_at_str)
-        .map_err(|_| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "PARSE_ERROR", "invalid expiry"))?;
+    let expires_at = chrono::DateTime::parse_from_rfc3339(&expires_at_str).map_err(|_| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "PARSE_ERROR",
+            "invalid expiry",
+        )
+    })?;
     if expires_at < chrono::Utc::now() {
         return Err(v1_error(StatusCode::GONE, "EXPIRED", "QR code has expired"));
     }
@@ -479,7 +528,13 @@ pub async fn qr_claim_handler(
         .bind(&db_id)
         .execute(&state.db)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DB_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     // Delete the QR code (self-destruct)
     sqlx::query("DELETE FROM pairing_qr_codes WHERE id = ?")
@@ -489,15 +544,14 @@ pub async fn qr_claim_handler(
         .ok();
 
     // Generate device token for the claimer
-    let device_name = body.device_name.unwrap_or_else(|| "QR-Paired".into());
+    let _device_name = body.device_name.unwrap_or_else(|| "QR-Paired".into());
     let device_id = Uuid::new_v4();
     let token = generate_device_token();
 
-    state.token_store.store(
-        &token,
-        TokenType::Device,
-        device_id,
-    ).await;
+    state
+        .token_store
+        .store(&token, TokenType::Device, device_id)
+        .await;
 
     Ok(Json(serde_json::json!({
         "status": "claimed",

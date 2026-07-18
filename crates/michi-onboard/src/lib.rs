@@ -57,7 +57,7 @@ pub async fn check_setup_status(db: &SqlitePool) -> SetupStatus {
 
 /// Discover common music paths
 fn discover_music_paths() -> Vec<String> {
-    let candidates = vec!["/music", "/media", "/media/music", "/data/music"];
+    let candidates = ["/music", "/media", "/media/music", "/data/music"];
     candidates
         .iter()
         .filter(|p| std::path::Path::new(p).exists())
@@ -82,11 +82,15 @@ pub async fn scan_music_stats(paths: &[String]) -> (u64, u64) {
             while let Ok(Some(entry)) = dir.next_entry().await {
                 if let Ok(meta) = entry.metadata().await {
                     if meta.is_file() {
-                        let ext = entry.path().extension()
+                        let ext = entry
+                            .path()
+                            .extension()
                             .and_then(|e| e.to_str())
                             .unwrap_or("")
                             .to_lowercase();
-                        if let "mp3" | "flac" | "ogg" | "opus" | "aac" | "m4a" | "wav" | "aiff" | "dsf" = ext.as_str() {
+                        if let "mp3" | "flac" | "ogg" | "opus" | "aac" | "m4a" | "wav" | "aiff"
+                        | "dsf" = ext.as_str()
+                        {
                             files += 1;
                             total_bytes += meta.len();
                         }

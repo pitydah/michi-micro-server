@@ -30,32 +30,45 @@ pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
         .map_err(|e| format!("client: {}", e))?;
 
     // Try HEAD first
-    let resp = client.head(url)
+    let resp = client
+        .head(url)
         .send()
         .await
         .map_err(|e| format!("head: {}", e))?;
 
     let headers = resp.headers();
-    let ct = headers.get("content-type")
+    let ct = headers
+        .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let icy_name = headers.get("icy-name")
+    let icy_name = headers
+        .get("icy-name")
         .or_else(|| headers.get("ice-name"))
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let icy_genre = headers.get("icy-genre")
+    let icy_genre = headers
+        .get("icy-genre")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let icy_br = headers.get("icy-br")
+    let icy_br = headers
+        .get("icy-br")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
 
     // Detect by content type
-    if ct.contains("audio/mpeg") || ct.contains("audio/aac") || ct.contains("audio/ogg") || ct.contains("audio/opus") {
-        if icy_name.is_some() || headers.get("icy-metaint").is_some() || headers.get("ice-version").is_some() {
+    if ct.contains("audio/mpeg")
+        || ct.contains("audio/aac")
+        || ct.contains("audio/ogg")
+        || ct.contains("audio/opus")
+    {
+        if icy_name.is_some()
+            || headers.get("icy-metaint").is_some()
+            || headers.get("ice-version").is_some()
+        {
+            let _icy_br = icy_br;
             return Ok(StreamInfo {
                 url: url.to_string(),
                 stream_type: StreamType::Radio,
@@ -80,8 +93,14 @@ pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
     }
 
     // Detect podcast by trying to fetch a small piece and looking for RSS/XML
-    if ct.contains("xml") || ct.contains("rss") || ct.contains("atom") || url.ends_with(".xml") || url.ends_with(".rss") {
-        let body_resp = client.get(url)
+    if ct.contains("xml")
+        || ct.contains("rss")
+        || ct.contains("atom")
+        || url.ends_with(".xml")
+        || url.ends_with(".rss")
+    {
+        let body_resp = client
+            .get(url)
             .header("Range", "bytes=0-4095")
             .send()
             .await
@@ -117,12 +136,15 @@ pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
     }
 
     // Fallback: try to GET a few bytes and detect
-    let fallback_resp = client.get(url)
+    let fallback_resp = client
+        .get(url)
         .header("Range", "bytes=0-2047")
         .send()
         .await
         .map_err(|e| format!("fallback: {}", e))?;
-    let fb_ct = fallback_resp.headers().get("content-type")
+    let fb_ct = fallback_resp
+        .headers()
+        .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
@@ -167,13 +189,21 @@ pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
 }
 
 fn codec_from_mime(mime: &str) -> &'static str {
-    if mime.contains("mpeg") { "mp3" }
-    else if mime.contains("aac") { "aac" }
-    else if mime.contains("ogg") { "ogg" }
-    else if mime.contains("opus") { "opus" }
-    else if mime.contains("flac") { "flac" }
-    else if mime.contains("wav") { "wav" }
-    else { "unknown" }
+    if mime.contains("mpeg") {
+        "mp3"
+    } else if mime.contains("aac") {
+        "aac"
+    } else if mime.contains("ogg") {
+        "ogg"
+    } else if mime.contains("opus") {
+        "opus"
+    } else if mime.contains("flac") {
+        "flac"
+    } else if mime.contains("wav") {
+        "wav"
+    } else {
+        "unknown"
+    }
 }
 
 fn extract_rss_title(body: &str) -> Option<String> {
@@ -197,10 +227,18 @@ pub fn parse_rss_episodes(body: &str) -> Vec<PodcastEpisode> {
         let mut pub_date = String::new();
         let mut duration = String::new();
 
-        if let Some(t) = extract_tag(item, "title") { title = t; }
-        if let Some(u) = extract_attr(item, "enclosure", "url") { url = u; }
-        if let Some(d) = extract_tag(item, "pubDate") { pub_date = d; }
-        if let Some(d) = extract_tag(item, "duration") { duration = d; }
+        if let Some(t) = extract_tag(item, "title") {
+            title = t;
+        }
+        if let Some(u) = extract_attr(item, "enclosure", "url") {
+            url = u;
+        }
+        if let Some(d) = extract_tag(item, "pubDate") {
+            pub_date = d;
+        }
+        if let Some(d) = extract_tag(item, "duration") {
+            duration = d;
+        }
 
         if !title.is_empty() && !url.is_empty() {
             episodes.push(PodcastEpisode {
@@ -211,7 +249,9 @@ pub fn parse_rss_episodes(body: &str) -> Vec<PodcastEpisode> {
             });
         }
         pos += item_start + 5;
-        if episodes.len() >= 100 { break; }
+        if episodes.len() >= 100 {
+            break;
+        }
     }
     episodes
 }

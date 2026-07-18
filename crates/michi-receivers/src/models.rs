@@ -10,7 +10,6 @@ pub struct ReceiverInfo {
     #[serde(default)]
     pub id: Option<Uuid>,
     pub api_version: Option<String>,
-    pub michi_link_version: Option<String>,
     pub firmware: Option<String>,
     #[serde(rename = "type")]
     pub device_type: Option<String>,

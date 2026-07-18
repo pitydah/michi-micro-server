@@ -10,4 +10,4 @@ pub use device_registry::{generate_device_token, generate_pairing_code, DeviceEn
 pub use errors::LinkError;
 pub use models::*;
 pub use permissions::{DevicePermissions, Permission};
-pub use version::MICHI_LINK_VERSION;
+pub use version::APP_VERSION;

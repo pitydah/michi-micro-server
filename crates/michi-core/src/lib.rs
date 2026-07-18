@@ -820,19 +820,26 @@ impl std::fmt::Display for StreamProfile {
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum RoomMode { Party, Relax, Custom }
+pub enum RoomMode {
+    Party,
+    Relax,
+    Custom,
+}
 
 impl RoomMode {
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_config_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "party" => Self::Party, "relax" => Self::Relax, _ => Self::Custom,
+            "party" => Self::Party,
+            "relax" => Self::Relax,
+            _ => Self::Custom,
         }
     }
 }
 impl std::fmt::Display for RoomMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Party => write!(f, "party"), Self::Relax => write!(f, "relax"),
+            Self::Party => write!(f, "party"),
+            Self::Relax => write!(f, "relax"),
             Self::Custom => write!(f, "custom"),
         }
     }

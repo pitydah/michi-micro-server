@@ -303,7 +303,8 @@ async fn discover_mdns_receivers() -> Result<Vec<serde_json::Value>, String> {
                         let host = info.get_hostname().to_string();
                         let port = info.get_port();
                         let fullname = info.get_fullname().to_string();
-                        let addresses: Vec<String> = info.get_addresses().iter().map(|a| a.to_string()).collect();
+                        let addresses: Vec<String> =
+                            info.get_addresses().iter().map(|a| a.to_string()).collect();
                         let addr = format!("http://{}:{}", host.trim_end_matches('.'), port);
                         discovered.lock().unwrap().push(serde_json::json!({
                             "name": fullname,
@@ -317,7 +318,8 @@ async fn discover_mdns_receivers() -> Result<Vec<serde_json::Value>, String> {
                 }
             }
         }
-    }).await;
+    })
+    .await;
 
     let _ = daemon.shutdown();
     Ok(discovered.into_inner().unwrap())
@@ -345,15 +347,23 @@ pub async fn create_room_group_handler(
     Json(body): Json<CreateRoomGroupBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if body.name.trim().is_empty() {
-        return Err(v1_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", "name is required"));
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "name is required",
+        ));
     }
-    let mode = michi_core::RoomMode::from_str(body.mode.as_deref().unwrap_or("party"));
+    let mode = michi_core::RoomMode::from_config_str(body.mode.as_deref().unwrap_or("party"));
     let default_vol = match mode {
         michi_core::RoomMode::Party => 80,
         michi_core::RoomMode::Relax => 40,
         michi_core::RoomMode::Custom => 60,
     };
-    let volumes: HashMap<String, u32> = body.receiver_ids.iter().map(|id| (id.clone(), default_vol)).collect();
+    let volumes: HashMap<String, u32> = body
+        .receiver_ids
+        .iter()
+        .map(|id| (id.clone(), default_vol))
+        .collect();
 
     let group = michi_core::RoomGroup {
         id: Uuid::new_v4(),
@@ -376,7 +386,11 @@ pub async fn get_room_group_handler(
     let group = groups.iter().find(|g| g.id == id).cloned();
     match group {
         Some(g) => Ok(Json(serde_json::json!({ "group": g }))),
-        None => Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found")),
+        None => Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "group not found",
+        )),
     }
 }
 
@@ -395,15 +409,23 @@ pub async fn update_room_group_handler(
     let group = groups.iter_mut().find(|g| g.id == id);
     match group {
         Some(g) => {
-            if let Some(name) = body.name { g.name = name; }
+            if let Some(name) = body.name {
+                g.name = name;
+            }
             if let Some(mode_str) = body.mode {
-                let new_mode = michi_core::RoomMode::from_str(&mode_str);
+                let new_mode = michi_core::RoomMode::from_config_str(&mode_str);
                 g.mode = new_mode;
             }
-            if let Some(ids) = body.receiver_ids { g.receiver_ids = ids; }
+            if let Some(ids) = body.receiver_ids {
+                g.receiver_ids = ids;
+            }
             Ok(Json(serde_json::json!({ "group": g.clone() })))
         }
-        None => Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found")),
+        None => Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "group not found",
+        )),
     }
 }
 
@@ -414,7 +436,11 @@ pub async fn delete_room_group_handler(
     let len_before = groups.len();
     groups.retain(|g| g.id != id);
     if groups.len() == len_before {
-        return Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found"));
+        return Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "group not found",
+        ));
     }
     Ok(Json(serde_json::json!({ "status": "deleted" })))
 }
@@ -423,18 +449,32 @@ pub async fn activate_room_group_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let (recv_ids, vols, mode, group_clone, was_active) = {
+    let (recv_ids, vols, mode, group_clone, _was_active) = {
         let mut groups = ROOM_GROUPS.write().await;
         let group = groups.iter_mut().find(|g| g.id == id);
         match group {
             Some(g) => {
                 if g.active {
-                    return Ok(Json(serde_json::json!({ "status": "already_active", "group": g.clone() })));
+                    return Ok(Json(
+                        serde_json::json!({ "status": "already_active", "group": g.clone() }),
+                    ));
                 }
                 g.active = true;
-                (g.receiver_ids.clone(), g.volumes.clone(), g.mode, g.clone(), false)
+                (
+                    g.receiver_ids.clone(),
+                    g.volumes.clone(),
+                    g.mode,
+                    g.clone(),
+                    false,
+                )
             }
-            None => return Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found")),
+            None => {
+                return Err(v1_error(
+                    StatusCode::NOT_FOUND,
+                    "NOT_FOUND",
+                    "group not found",
+                ))
+            }
         }
     };
 
@@ -448,7 +488,8 @@ pub async fn activate_room_group_handler(
         let reg_read = reg.read().await;
         if let Some(entry) = reg_read.get(recv_id) {
             if entry.paired && entry.active_session_id.is_none() {
-                let _ = state.receiver_manager
+                let _ = state
+                    .receiver_manager
                     .start_session(recv_id, &id.to_string(), "pcm", 48000, 24, 2, 0, 200, vol)
                     .await;
             }
@@ -456,7 +497,9 @@ pub async fn activate_room_group_handler(
         }
     }
 
-    Ok(Json(serde_json::json!({ "status": "activated", "group": group_clone })))
+    Ok(Json(
+        serde_json::json!({ "status": "activated", "group": group_clone }),
+    ))
 }
 
 pub async fn deactivate_room_group_handler(
@@ -485,7 +528,11 @@ pub async fn deactivate_room_group_handler(
             }
             Ok(Json(serde_json::json!({ "status": "deactivated" })))
         }
-        None => Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found")),
+        None => Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "group not found",
+        )),
     }
 }
 
@@ -498,7 +545,7 @@ pub async fn set_room_mode_handler(
     Path(id): Path<Uuid>,
     Json(body): Json<SetRoomModeBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let new_mode = michi_core::RoomMode::from_str(&body.mode);
+    let new_mode = michi_core::RoomMode::from_config_str(&body.mode);
     let mut groups = ROOM_GROUPS.write().await;
     let group = groups.iter_mut().find(|g| g.id == id);
     match group {
@@ -512,8 +559,14 @@ pub async fn set_room_mode_handler(
             for (_, vol) in g.volumes.iter_mut() {
                 *vol = default_vol;
             }
-            Ok(Json(serde_json::json!({ "status": "mode_updated", "group": g.clone() })))
+            Ok(Json(
+                serde_json::json!({ "status": "mode_updated", "group": g.clone() }),
+            ))
         }
-        None => Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found")),
+        None => Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "group not found",
+        )),
     }
 }

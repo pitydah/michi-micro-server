@@ -1408,7 +1408,7 @@ async fn test_v1_server_info() {
     assert_eq!(json["auth"]["strategy"], "SERVER_CODE");
     assert!(json["auth"]["token_refresh"].as_bool().unwrap_or(false));
     assert!(json["auth"]["required"].as_bool().unwrap_or(false));
-    assert_eq!(json["michi_link_version"], "1.0.0-alpha");
+    assert_eq!(json["api_version"], "v1");
 }
 
 #[tokio::test]
@@ -2050,7 +2050,7 @@ async fn test_v1_e2e_mobile_flow() {
     assert_eq!(resp.status(), StatusCode::OK);
     let info: Value = serde_json::from_str(&body_text(resp).await).unwrap();
     assert_eq!(info["service"], "michi-micro-server");
-    assert_eq!(info["michi_link_version"], "1.0.0-alpha");
+    assert_eq!(info["api_version"], "v1");
 
     // 2. status
     let resp = app

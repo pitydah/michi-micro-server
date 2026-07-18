@@ -11,7 +11,6 @@ pub struct V1ServerInfo {
     pub server_id: Uuid,
     pub version: String,
     pub api_version: String,
-    pub michi_link_version: &'static str,
     pub roles: Vec<String>,
     pub features: V1Features,
     pub auth: V1AuthInfo,
@@ -50,7 +49,6 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
         server_id: state.server_id(),
         version: state.config.version().to_string(),
         api_version: "v1".into(),
-        michi_link_version: michi_link::MICHI_LINK_VERSION,
         roles: vec![
             "library_server".into(),
             "stream_server".into(),

@@ -1,6 +1,6 @@
+use crate::AppState;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::Deserialize;
-use crate::AppState;
 
 fn v1_error(s: StatusCode, c: &str, m: &str) -> (StatusCode, Json<serde_json::Value>) {
     (s, Json(serde_json::json!({"error":{"code":c,"message":m}})))
@@ -14,7 +14,7 @@ pub async fn setup_status_handler(
 }
 
 pub async fn setup_scan_handler(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let paths = michi_onboard::discover_music_paths_wrapper();
     let (files, bytes) = michi_onboard::scan_music_stats(&paths).await;
@@ -38,7 +38,11 @@ pub async fn setup_fix_perms_handler(
     let target = body.path.unwrap_or_else(|| "/music".to_string());
     let path = std::path::Path::new(&target);
     if !path.exists() {
-        return Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "path does not exist"));
+        return Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "path does not exist",
+        ));
     }
     // In container: chown -R 1000:1000 (safe, no symlink follow)
     let result = std::process::Command::new("chown")
@@ -52,9 +56,13 @@ pub async fn setup_fix_perms_handler(
                 Ok(Json(serde_json::json!({ "status": "ok", "path": target })))
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                Ok(Json(serde_json::json!({ "status": "error", "message": stderr })))
+                Ok(Json(
+                    serde_json::json!({ "status": "error", "message": stderr }),
+                ))
             }
         }
-        Err(e) => Ok(Json(serde_json::json!({ "status": "error", "message": e.to_string() }))),
+        Err(e) => Ok(Json(
+            serde_json::json!({ "status": "error", "message": e.to_string() }),
+        )),
     }
 }

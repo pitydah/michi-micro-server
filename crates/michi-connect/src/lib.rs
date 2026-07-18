@@ -28,15 +28,18 @@ impl MichiConnect {
     /// Generate a QR code link string: michi://connect?id=XYZ&host=IP&port=PORT
     pub async fn qr_link(&self, host: &str, port: u16) -> String {
         let michi_id = self.identity.get_id().await;
-        format!("michi://connect?id={}&host={}&port={}", michi_id, host, port)
+        format!(
+            "michi://connect?id={}&host={}&port={}",
+            michi_id, host, port
+        )
     }
 
     /// Generate QR SVG
     pub async fn qr_svg(&self, host: &str, port: u16) -> Result<String, String> {
         let link = self.qr_link(host, port).await;
-        let code = qrcode::QrCode::new(link.as_bytes())
-            .map_err(|e| format!("QR error: {}", e))?;
-        let svg = code.render()
+        let code = qrcode::QrCode::new(link.as_bytes()).map_err(|e| format!("QR error: {}", e))?;
+        let svg = code
+            .render()
             .min_dimensions(300, 300)
             .dark_color(qrcode::render::svg::Color("#8B5CF6"))
             .light_color(qrcode::render::svg::Color("transparent"))

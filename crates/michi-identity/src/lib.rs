@@ -36,6 +36,7 @@ struct IdentityInner {
     signing_key: SigningKey,
     verifying_key: VerifyingKey,
     michi_id: String,
+    #[allow(dead_code)]
     key_path: PathBuf,
 }
 
@@ -49,9 +50,12 @@ impl MichiIdentity {
             let bytes = tokio::fs::read(&key_path).await?;
             let key_str = String::from_utf8(bytes)
                 .map_err(|_| IdentityError::InvalidKey("not valid UTF-8".into()))?;
-            let decoded = BASE64.decode(key_str.trim().as_bytes())
+            let decoded = BASE64
+                .decode(key_str.trim().as_bytes())
                 .map_err(|e| IdentityError::InvalidKey(format!("base64: {}", e)))?;
-            let arr: [u8; 64] = decoded.as_slice().try_into()
+            let arr: [u8; 64] = decoded
+                .as_slice()
+                .try_into()
                 .map_err(|_| IdentityError::InvalidKey("key length invalid".into()))?;
             let signing_key = SigningKey::from_keypair_bytes(&arr)
                 .map_err(|e| IdentityError::InvalidKey(format!("dalek: {}", e)))?;
@@ -113,14 +117,18 @@ impl MichiIdentity {
         payload: &[u8],
         signature_b64: &str,
     ) -> Result<bool, IdentityError> {
-        let arr: [u8; 32] = peer_public_key.try_into()
+        let arr: [u8; 32] = peer_public_key
+            .try_into()
             .map_err(|_| IdentityError::Signature("invalid public key length".into()))?;
         let verifying_key = VerifyingKey::from_bytes(&arr)
             .map_err(|e| IdentityError::Signature(format!("invalid key: {}", e)))?;
 
-        let sig_bytes = BASE64.decode(signature_b64.as_bytes())
+        let sig_bytes = BASE64
+            .decode(signature_b64.as_bytes())
             .map_err(|e| IdentityError::Signature(format!("base64: {}", e)))?;
-        let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into()
+        let sig_arr: [u8; 64] = sig_bytes
+            .as_slice()
+            .try_into()
             .map_err(|_| IdentityError::Signature("invalid signature length".into()))?;
         let signature = Signature::from_bytes(&sig_arr);
 
@@ -133,10 +141,12 @@ impl MichiIdentity {
     /// Sign and return a signed identity packet: { michi_id, public_key, signature }
     pub async fn signed_packet(&self) -> serde_json::Value {
         let inner = self.inner.read().await;
-        let payload = format!("{}:{}", inner.michi_id, hex::encode(inner.verifying_key.to_bytes()));
-        let signature = BASE64.encode(
-            inner.signing_key.sign(payload.as_bytes()).to_bytes()
+        let payload = format!(
+            "{}:{}",
+            inner.michi_id,
+            hex::encode(inner.verifying_key.to_bytes())
         );
+        let signature = BASE64.encode(inner.signing_key.sign(payload.as_bytes()).to_bytes());
         serde_json::json!({
             "michi_id": inner.michi_id,
             "public_key": hex::encode(inner.verifying_key.to_bytes()),
@@ -193,7 +203,7 @@ mod tests {
         let identity = MichiIdentity::load_or_create(dir.path()).await.unwrap();
         let packet = identity.signed_packet().await;
         assert!(packet["michi_id"].as_str().unwrap().len() == 64);
-        assert!(packet["public_key"].as_str().unwrap().len() > 0);
-        assert!(packet["signature"].as_str().unwrap().len() > 0);
+        assert!(!packet["public_key"].as_str().unwrap().is_empty());
+        assert!(!packet["signature"].as_str().unwrap().is_empty());
     }
 }

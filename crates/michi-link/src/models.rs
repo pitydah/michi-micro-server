@@ -8,7 +8,6 @@ pub struct LinkServerInfo {
     pub server_id: Uuid,
     pub version: String,
     pub api_version: String,
-    pub michi_link_version: String,
     pub roles: Vec<String>,
     pub features: LinkFeatures,
     pub auth: LinkAuthInfo,

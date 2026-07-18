@@ -1,14 +1,13 @@
+use crate::AppState;
 use axum::{
     body::Body,
     extract::{Path, State},
     http::{header, StatusCode},
-    response::IntoResponse,
     Json,
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
 use uuid::Uuid;
-use crate::AppState;
 
 fn v1_error(s: StatusCode, c: &str, m: &str) -> (StatusCode, Json<serde_json::Value>) {
     (s, Json(serde_json::json!({"error":{"code":c,"message":m}})))
@@ -24,7 +23,11 @@ pub async fn add_source_handler(
     Json(body): Json<AddSourceBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if body.url.trim().is_empty() {
-        return Err(v1_error(StatusCode::BAD_REQUEST, "VALIDATION", "url is required"));
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION",
+            "url is required",
+        ));
     }
 
     let info = michi_ingest::sniff_stream(&body.url)
@@ -32,7 +35,11 @@ pub async fn add_source_handler(
         .map_err(|e| v1_error(StatusCode::BAD_REQUEST, "SNIFF_ERROR", &e))?;
 
     if matches!(info.stream_type, michi_ingest::StreamType::Unknown) {
-        return Err(v1_error(StatusCode::BAD_REQUEST, "UNKNOWN_STREAM", "could not determine stream type"));
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "UNKNOWN_STREAM",
+            "could not determine stream type",
+        ));
     }
 
     let source = michi_core::StreamSource {
@@ -49,7 +56,13 @@ pub async fn add_source_handler(
 
     michi_db::add_stream_source(&state.db, &source)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DB_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     // If podcast, fetch and store episodes
     if source.stream_type == "podcast" {
@@ -81,7 +94,13 @@ pub async fn list_sources_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let sources = michi_db::list_stream_sources(&state.db)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DB_ERROR",
+                &e.to_string(),
+            )
+        })?;
     Ok(Json(serde_json::json!({ "sources": sources })))
 }
 
@@ -91,9 +110,19 @@ pub async fn delete_source_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let deleted = michi_db::delete_stream_source(&state.db, &id)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DB_ERROR",
+                &e.to_string(),
+            )
+        })?;
     if !deleted {
-        return Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "source not found"));
+        return Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "source not found",
+        ));
     }
     Ok(Json(serde_json::json!({ "status": "deleted" })))
 }
@@ -104,7 +133,13 @@ pub async fn get_episodes_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let episodes = michi_db::list_podcast_episodes(&state.db, &source_id)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DB_ERROR",
+                &e.to_string(),
+            )
+        })?;
     Ok(Json(serde_json::json!({ "episodes": episodes })))
 }
 
@@ -119,9 +154,20 @@ pub async fn update_episode_handler(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateEpisodeBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    michi_db::update_episode_progress(&state.db, &id, body.position_ms.unwrap_or(0), body.played.unwrap_or(false))
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+    michi_db::update_episode_progress(
+        &state.db,
+        &id,
+        body.position_ms.unwrap_or(0),
+        body.played.unwrap_or(false),
+    )
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+    })?;
     Ok(Json(serde_json::json!({ "status": "updated" })))
 }
 
@@ -133,13 +179,25 @@ pub async fn proxy_stream_handler(
 ) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
     let sources = michi_db::list_stream_sources(&state.db)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DB_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
-    let source = sources.into_iter().find(|s| s.id == source_id)
+    let source = sources
+        .into_iter()
+        .find(|s| s.id == source_id)
         .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "source not found"))?;
 
     if !source.enabled {
-        return Err(v1_error(StatusCode::BAD_REQUEST, "DISABLED", "source is disabled"));
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "DISABLED",
+            "source is disabled",
+        ));
     }
 
     let client = reqwest::Client::new();
@@ -149,8 +207,7 @@ pub async fn proxy_stream_handler(
             let headers = resp.headers().clone();
             let stream = resp.bytes_stream();
 
-            let mut response = axum::response::Response::builder()
-                .status(status);
+            let mut response = axum::response::Response::builder().status(status);
 
             // Forward relevant headers
             if let Some(ct) = headers.get(header::CONTENT_TYPE) {
@@ -163,10 +220,16 @@ pub async fn proxy_stream_handler(
                 .header("Access-Control-Allow-Headers", "Range, Content-Type");
 
             Ok(response
-                .body(Body::from_stream(stream.map(|chunk| chunk.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))))
+                .body(Body::from_stream(stream.map(|chunk| {
+                    chunk.map_err(std::io::Error::other)
+                })))
                 .unwrap())
         }
-        Err(e) => Err(v1_error(StatusCode::BAD_GATEWAY, "PROXY_ERROR", &format!("failed to connect: {}", e))),
+        Err(e) => Err(v1_error(
+            StatusCode::BAD_GATEWAY,
+            "PROXY_ERROR",
+            &format!("failed to connect: {}", e),
+        )),
     }
 }
 
@@ -179,7 +242,13 @@ pub async fn proxy_episode_handler(
     // Simplified: query all episodes to find the one
     let sources = michi_db::list_stream_sources(&state.db)
         .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DB_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     for source in &sources {
         if let Ok(eps) = michi_db::list_podcast_episodes(&state.db, &source.id).await {
@@ -198,7 +267,9 @@ pub async fn proxy_episode_handler(
                             .header("Access-Control-Allow-Origin", "*")
                             .header("Access-Control-Allow-Methods", "GET, OPTIONS");
                         return Ok(response
-                            .body(Body::from_stream(stream.map(|chunk| chunk.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))))
+                            .body(Body::from_stream(stream.map(|chunk| {
+                                chunk.map_err(std::io::Error::other)
+                            })))
                             .unwrap());
                     }
                     Err(_) => break,
@@ -207,5 +278,9 @@ pub async fn proxy_episode_handler(
         }
     }
 
-    Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "episode not found"))
+    Err(v1_error(
+        StatusCode::NOT_FOUND,
+        "NOT_FOUND",
+        "episode not found",
+    ))
 }
