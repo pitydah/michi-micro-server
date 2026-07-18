@@ -353,7 +353,17 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 27 applied");
     }
 
-    info!("database schema at version 27");
+    if current < 28 {
+        info!("applying migration 28: radio stations");
+        migration_028(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (28, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 28 applied");
+    }
+
+    info!("database schema at version 28");
     Ok(())
 }
 
@@ -865,6 +875,27 @@ async fn migration_027(pool: &SqlitePool) -> Result<(), DbError> {
     .execute(pool)
     .await?;
 
+    Ok(())
+}
+
+async fn migration_028(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS radio_stations (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            stream_url TEXT NOT NULL,
+            homepage TEXT,
+            icon TEXT,
+            codec TEXT,
+            bitrate INTEGER,
+            last_checked TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            favorite INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -3331,4 +3362,184 @@ pub async fn cleanup_old_bookmarks(pool: &SqlitePool) -> Result<(), DbError> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn run_hourly_maintenance(pool: &SqlitePool) -> Result<(), DbError> {
+    cleanup_old_bookmarks(pool).await?;
+    // Checkpoint WAL
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(pool)
+        .await?;
+    // Clean expired pairing sessions
+    sqlx::query("DELETE FROM pairing_sessions WHERE expires_at < datetime('now')")
+        .execute(pool)
+        .await
+        .ok();
+    // Clean old import sessions
+    sqlx::query(
+        "DELETE FROM import_sessions WHERE created_at < datetime('now', '-7 days') AND state = 'rolled_back'"
+    )
+        .execute(pool)
+        .await
+        .ok();
+    Ok(())
+}
+
+pub async fn run_daily_maintenance(pool: &SqlitePool) -> Result<(), DbError> {
+    run_hourly_maintenance(pool).await?;
+    // Integrity check
+    let result: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(pool)
+        .await?;
+    if result != "ok" {
+        tracing::warn!("database integrity check failed: {}", result);
+    }
+    // Analyze
+    sqlx::query("ANALYZE").execute(pool).await?;
+    // Clean old play history (>90 days)
+    sqlx::query("DELETE FROM play_history WHERE played_at < datetime('now', '-90 days')")
+        .execute(pool)
+        .await
+        .ok();
+    Ok(())
+}
+
+pub async fn run_weekly_maintenance(pool: &SqlitePool) -> Result<(), DbError> {
+    run_daily_maintenance(pool).await?;
+    // Check if VACUUM would reclaim significant space
+    let page_count: i64 = sqlx::query_scalar("PRAGMA page_count")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let freelist_count: i64 = sqlx::query_scalar("PRAGMA freelist_count")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    if page_count > 0 && freelist_count > page_count / 10 {
+        tracing::info!(
+            "VACUUM: {} free pages out of {} total (>{:.0}%), reclaiming space",
+            freelist_count,
+            page_count,
+            (freelist_count as f64 / page_count as f64) * 100.0
+        );
+        sqlx::query("VACUUM").execute(pool).await?;
+    }
+    Ok(())
+}
+
+// ── Radio Stations ───────────────────────────────────────────────
+
+pub async fn list_radio_stations(
+    pool: &SqlitePool,
+) -> Result<Vec<michi_core::RadioStation>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, name, stream_url, homepage, icon, codec, bitrate, last_checked, enabled, favorite
+         FROM radio_stations ORDER BY name ASC"
+    )
+        .fetch_all(pool)
+        .await?;
+
+    let stations = rows
+        .iter()
+        .map(|r| {
+            let id_str: &str = r.try_get("id").unwrap();
+            let name: &str = r.try_get("name").unwrap();
+            let url: &str = r.try_get("stream_url").unwrap();
+            let homepage: Option<&str> = r.try_get("homepage").ok();
+            let icon: Option<&str> = r.try_get("icon").ok();
+            let codec: Option<&str> = r.try_get("codec").ok();
+            let bitrate: Option<i64> = r.try_get("bitrate").ok();
+            let checked: Option<&str> = r.try_get("last_checked").ok();
+            let enabled: i64 = r.try_get("enabled").unwrap();
+            let fav: i64 = r.try_get("favorite").unwrap();
+            michi_core::RadioStation {
+                id: Uuid::parse_str(id_str).unwrap(),
+                name: name.to_string(),
+                stream_url: url.to_string(),
+                homepage: homepage.map(|s| s.to_string()),
+                icon: icon.map(|s| s.to_string()),
+                codec: codec.map(|s| s.to_string()),
+                bitrate: bitrate.map(|b| b as u32),
+                last_checked: checked.and_then(|s| {
+                    DateTime::parse_from_rfc3339(s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                }),
+                enabled: enabled != 0,
+                favorite: fav != 0,
+            }
+        })
+        .collect();
+    Ok(stations)
+}
+
+pub async fn create_radio_station(
+    pool: &SqlitePool,
+    id: &Uuid,
+    station: &michi_core::RadioStation,
+) -> Result<(), DbError> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO radio_stations (id, name, stream_url, homepage, icon, codec, bitrate, enabled, favorite, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+        .bind(id.to_string())
+        .bind(&station.name)
+        .bind(&station.stream_url)
+        .bind(&station.homepage)
+        .bind(&station.icon)
+        .bind(&station.codec)
+        .bind(station.bitrate.map(|b| b as i64))
+        .bind(station.enabled as i64)
+        .bind(station.favorite as i64)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn update_radio_station(
+    pool: &SqlitePool,
+    id: &Uuid,
+    station: &michi_core::RadioStation,
+) -> Result<bool, DbError> {
+    let id_s = id.to_string();
+    let res = sqlx::query(
+        "UPDATE radio_stations SET name = ?, stream_url = ?, homepage = ?, icon = ?, codec = ?, bitrate = ?, enabled = ?, favorite = ? WHERE id = ?"
+    )
+        .bind(&station.name)
+        .bind(&station.stream_url)
+        .bind(&station.homepage)
+        .bind(&station.icon)
+        .bind(&station.codec)
+        .bind(station.bitrate.map(|b| b as i64))
+        .bind(station.enabled as i64)
+        .bind(station.favorite as i64)
+        .bind(&id_s)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+pub async fn delete_radio_station(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbError> {
+    let id_s = id.to_string();
+    let res = sqlx::query("DELETE FROM radio_stations WHERE id = ?")
+        .bind(&id_s)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+pub async fn toggle_radio_favorite(
+    pool: &SqlitePool,
+    id: &Uuid,
+    favorite: bool,
+) -> Result<bool, DbError> {
+    let id_s = id.to_string();
+    let res = sqlx::query("UPDATE radio_stations SET favorite = ? WHERE id = ?")
+        .bind(favorite as i64)
+        .bind(&id_s)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
 }

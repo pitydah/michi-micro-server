@@ -85,7 +85,11 @@ pub async fn scan_handler(
 
     info!("scanning music library at {:?}", music_paths);
 
-    let tracks = michi_scanner::scan_directories(music_paths).await;
+    let tracks = michi_scanner::scan_directories_with_concurrency(
+        music_paths,
+        state.config.resource_profile.scan_concurrency(),
+    )
+    .await;
     let scanned = tracks.len();
 
     let saved = michi_db::upsert_tracks(&state.db, &tracks)

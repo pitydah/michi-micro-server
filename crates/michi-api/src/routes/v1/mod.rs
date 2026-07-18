@@ -14,6 +14,7 @@ pub mod pair;
 pub mod playback;
 pub mod playlists;
 pub mod queue;
+pub mod radio;
 pub mod receivers;
 pub mod rooms;
 pub mod search;

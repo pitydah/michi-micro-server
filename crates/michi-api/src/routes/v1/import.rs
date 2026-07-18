@@ -603,7 +603,8 @@ pub async fn import_commit_handler(
         }
     }
 
-    let tracks = michi_scanner::scan_directories(&[final_dir]).await;
+    let concurrency = state.config.resource_profile.scan_concurrency();
+    let tracks = michi_scanner::scan_directories_with_concurrency(&[final_dir], concurrency).await;
     let _scanned_count = tracks.len();
 
     // Check for unresolved conflicts: same content_hash but different duration_ms already in library

@@ -82,6 +82,30 @@ impl AppState {
         routes::v1::import::spawn_import_cleanup(&config, db.clone());
         routes::v1::playback::auto_restore_playback_state(db.clone(), playback_state.clone());
         routes::v1::backup::spawn_integrity_cron(db.clone());
+        // Spawn DB maintenance scheduler
+        let maintenace_db = db.clone();
+        tokio::spawn(async move {
+            let mut hourly = tokio::time::interval(std::time::Duration::from_secs(3600));
+            let mut daily = tokio::time::interval(std::time::Duration::from_secs(86400));
+            let mut weekly = tokio::time::interval(std::time::Duration::from_secs(604800));
+            // Skip first tick to avoid running at startup
+            hourly.tick().await;
+            daily.tick().await;
+            weekly.tick().await;
+            loop {
+                tokio::select! {
+                    _ = hourly.tick() => {
+                        let _ = michi_db::run_hourly_maintenance(&maintenace_db).await;
+                    }
+                    _ = daily.tick() => {
+                        let _ = michi_db::run_daily_maintenance(&maintenace_db).await;
+                    }
+                    _ = weekly.tick() => {
+                        let _ = michi_db::run_weekly_maintenance(&maintenace_db).await;
+                    }
+                }
+            }
+        });
         // Spawn receiver heartbeat monitor
         let rm = receiver_manager.clone();
         tokio::spawn(async move {
@@ -542,6 +566,24 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/backup/snapshot",
             post(routes::v1::backup::snapshot_handler),
+        )
+        .route(
+            "/api/v1/radio/stations",
+            get(routes::v1::radio::list_radio_stations_handler)
+                .post(routes::v1::radio::create_radio_station_handler),
+        )
+        .route(
+            "/api/v1/radio/stations/:id",
+            put(routes::v1::radio::update_radio_station_handler)
+                .delete(routes::v1::radio::delete_radio_station_handler),
+        )
+        .route(
+            "/api/v1/radio/stations/:id/test",
+            post(routes::v1::radio::test_radio_station_handler),
+        )
+        .route(
+            "/api/v1/radio/stations/:id/favorite",
+            post(routes::v1::radio::toggle_favorite_handler),
         )
         .route(
             "/api/v1/backup/snapshot/last",

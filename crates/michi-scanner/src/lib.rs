@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use michi_core::{track_id_from_library_path, AudioFormat, Track};
 use michi_metadata::read_metadata_safe;
+use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
@@ -96,8 +98,17 @@ fn scan_directory_sync(library_root: &Path, path: &Path) -> Vec<Track> {
 }
 
 pub async fn scan_directories(paths: &[PathBuf]) -> Vec<Track> {
-    let mut all_tracks: Vec<Track> = Vec::new();
+    scan_directories_with_concurrency(paths, 2).await
+}
 
+pub async fn scan_directories_with_concurrency(
+    paths: &[PathBuf],
+    concurrency: usize,
+) -> Vec<Track> {
+    let mut all_tracks: Vec<Track> = Vec::new();
+    let sem = Arc::new(Semaphore::new(concurrency));
+
+    let mut handles = Vec::new();
     for path in paths {
         info!("scanning directory: {}", path.display());
 
@@ -108,18 +119,34 @@ pub async fn scan_directories(paths: &[PathBuf]) -> Vec<Track> {
 
         let path_buf = path.clone();
         let path_for_closure = path_buf.clone();
-        let tracks = tokio::task::spawn_blocking(move || {
-            scan_directory_sync(&path_for_closure, &path_for_closure)
-        })
-        .await
-        .unwrap_or_default();
+        let sem_clone = sem.clone();
 
-        info!(
-            "scanned {} tracks from {}",
-            tracks.len(),
-            path_buf.display()
-        );
-        all_tracks.extend(tracks);
+        let handle = tokio::spawn(async move {
+            let _permit = sem_clone.acquire().await.expect("semaphore");
+            let tracks = tokio::task::spawn_blocking(move || {
+                scan_directory_sync(&path_for_closure, &path_for_closure)
+            })
+            .await
+            .unwrap_or_default();
+            (path_buf, tracks)
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        match handle.await {
+            Ok((path_buf, tracks)) => {
+                info!(
+                    "scanned {} tracks from {}",
+                    tracks.len(),
+                    path_buf.display()
+                );
+                all_tracks.extend(tracks);
+            }
+            Err(e) => {
+                warn!("scan task failed: {}", e);
+            }
+        }
     }
 
     // Deduplicate by track ID (UUID v5 of relative path is unique per path)

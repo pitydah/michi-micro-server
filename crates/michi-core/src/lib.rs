@@ -715,3 +715,31 @@ impl std::fmt::Display for ResourceProfile {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RadioStation {
+    pub id: Uuid,
+    pub name: String,
+    pub stream_url: String,
+    pub homepage: Option<String>,
+    pub icon: Option<String>,
+    pub codec: Option<String>,
+    pub bitrate: Option<u32>,
+    pub last_checked: Option<DateTime<Utc>>,
+    pub enabled: bool,
+    pub favorite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceCapabilities {
+    pub device_id: Uuid,
+    pub device_type: String,
+    pub supported_codecs: Vec<String>,
+    pub max_sample_rate: u32,
+    pub max_bit_depth: u32,
+    pub supports_gapless: bool,
+    pub supports_replaygain: bool,
+    pub supports_range: bool,
+    pub supports_websocket: bool,
+    pub updated_at: DateTime<Utc>,
+}
