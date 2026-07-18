@@ -637,6 +637,10 @@ fn v1_link_routes() -> Router<AppState> {
             "/api/v1/health/verify",
             get(routes::v1::backup::verify_integrity_handler),
         )
+        .route(
+            "/api/v1/health/mounts",
+            get(routes::v1::backup::mount_health_handler),
+        )
         .route("/health/live", get(routes::v1::server::health_live_handler))
         .route(
             "/health/ready",

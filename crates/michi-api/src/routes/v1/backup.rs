@@ -333,6 +333,26 @@ pub async fn verify_integrity_handler(
     })))
 }
 
+pub async fn mount_health_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let paths = &state.config.music_paths;
+    let results = michi_db::check_mount_health(paths).await;
+    for (path, st, err) in &results {
+        let _ = michi_db::update_mount_state(&state.db, path, st, err).await;
+    }
+    let states = michi_db::get_mount_states(&state.db)
+        .await
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+    let all_online = states.iter().all(|(_, s, _, _, _)| s == "online");
+    Ok(Json(serde_json::json!({
+        "healthy": all_online,
+        "mounts": states.into_iter().map(|(p, s, lc, lo, err)| {
+            serde_json::json!({"path": p, "state": s, "last_checked": lc, "last_online": lo, "error": err})
+        }).collect::<Vec<_>>(),
+    })))
+}
+
 /// Spawns a background integrity check every 24h
 pub fn spawn_integrity_cron(db: sqlx::SqlitePool) {
     tokio::spawn(async move {

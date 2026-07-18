@@ -393,7 +393,27 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 31 applied");
     }
 
-    info!("database schema at version 31");
+    if current < 32 {
+        info!("applying migration 32: mount guard");
+        migration_032(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (32, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 32 applied");
+    }
+
+    if current < 33 {
+        info!("applying migration 33: job queue");
+        migration_033(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (33, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 33 applied");
+    }
+
+    info!("database schema at version 33");
     Ok(())
 }
 
@@ -1005,6 +1025,41 @@ async fn migration_031(pool: &SqlitePool) -> Result<(), DbError> {
     )
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn migration_032(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS mount_guard (
+            path TEXT PRIMARY KEY,
+            state TEXT NOT NULL DEFAULT 'online',
+            last_checked TEXT NOT NULL,
+            last_online TEXT,
+            error_message TEXT
+        )"
+    )
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn migration_033(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS job_queue (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            priority INTEGER NOT NULL DEFAULT 0,
+            progress REAL NOT NULL DEFAULT 0.0,
+            payload_json TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT
+        )"
+    )
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -3808,4 +3863,55 @@ pub async fn update_episode_progress(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+// ── Mount Guard ─────────────────────────────────────────────────
+
+pub async fn check_mount_health(paths: &[std::path::PathBuf]) -> Vec<(String, String, String)> {
+    let mut results = Vec::new();
+    for p in paths {
+        let path_str = p.display().to_string();
+        if p.exists() {
+            results.push((path_str, "online".to_string(), String::new()));
+        } else {
+            results.push((path_str, "unavailable".to_string(), "path does not exist".to_string()));
+        }
+    }
+    results
+}
+
+pub async fn update_mount_state(pool: &SqlitePool, path: &str, state: &str, error: &str) -> Result<(), DbError> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO mount_guard (path, state, last_checked, last_online, error_message)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(path) DO UPDATE SET state = excluded.state, last_checked = excluded.last_checked,
+           last_online = CASE WHEN excluded.state = 'online' THEN excluded.last_checked ELSE mount_guard.last_online END,
+           error_message = excluded.error_message"
+    )
+        .bind(path)
+        .bind(state)
+        .bind(&now)
+        .bind(&now)
+        .bind(error)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_mount_states(pool: &SqlitePool) -> Result<Vec<(String, String, String, Option<String>, String)>, DbError> {
+    let rows = sqlx::query(
+        "SELECT path, state, last_checked, last_online, error_message FROM mount_guard ORDER BY path"
+    )
+        .fetch_all(pool)
+        .await?;
+    let states = rows.iter().map(|r| {
+        let p: &str = r.try_get("path").unwrap();
+        let s: &str = r.try_get("state").unwrap();
+        let lc: &str = r.try_get("last_checked").unwrap();
+        let lo: Option<&str> = r.try_get("last_online").ok();
+        let err: &str = r.try_get("error_message").unwrap_or("");
+        (p.to_string(), s.to_string(), lc.to_string(), lo.map(|x| x.to_string()), err.to_string())
+    }).collect();
+    Ok(states)
 }
