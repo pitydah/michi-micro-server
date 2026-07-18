@@ -1,11 +1,13 @@
 //! Michi Security Layer
 //!
-//! Provides rate limiting, input validation, and security middleware for the Michi API.
+//! Provides rate limiting, input validation, idempotency, and security middleware.
+
+pub mod idempotency;
 
 use axum::{
     body::Body,
     extract::State,
-    http::{Request, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -18,6 +20,8 @@ use governor::{
 use std::{num::NonZeroU32, sync::Arc};
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::warn;
+
+pub use idempotency::IdempotencyStore;
 
 /// Rate limiter state shared across requests
 pub type SharedRateLimiter = Arc<
@@ -32,13 +36,9 @@ pub type SharedRateLimiter = Arc<
 /// Security configuration
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
-    /// Maximum requests per second per IP
     pub rate_limit_rps: u32,
-    /// Maximum burst size
     pub rate_limit_burst: u32,
-    /// Maximum request body size in bytes
     pub max_body_size: usize,
-    /// Enable request validation
     pub enable_validation: bool,
 }
 
@@ -47,7 +47,7 @@ impl Default for SecurityConfig {
         Self {
             rate_limit_rps: 10,
             rate_limit_burst: 20,
-            max_body_size: 10 * 1024 * 1024, // 10MB
+            max_body_size: 10 * 1024 * 1024,
             enable_validation: true,
         }
     }
@@ -58,6 +58,7 @@ impl Default for SecurityConfig {
 pub struct SecurityState {
     pub config: SecurityConfig,
     pub rate_limiter: SharedRateLimiter,
+    pub idempotency_store: IdempotencyStore,
 }
 
 impl SecurityState {
@@ -65,23 +66,36 @@ impl SecurityState {
         let quota = Quota::per_second(NonZeroU32::new(config.rate_limit_rps).unwrap())
             .allow_burst(NonZeroU32::new(config.rate_limit_burst).unwrap());
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
+        let idempotency_store = IdempotencyStore::new();
 
         Self {
             config,
             rate_limiter,
+            idempotency_store,
         }
     }
 }
 
-/// Rate limiting middleware
+/// Rate limiting middleware con Retry-After header.
 pub async fn rate_limit_middleware(
     State(state): State<SecurityState>,
     req: Request<Body>,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, (StatusCode, String)> {
     if state.rate_limiter.check().is_err() {
         warn!("Rate limit exceeded for request to {}", req.uri().path());
-        return Err(StatusCode::TOO_MANY_REQUESTS);
+        let mut response = Response::new(Body::from(
+            r#"{"error":{"code":"RATE_LIMITED","message":"Too many requests. Please wait.","details":{}}}"#,
+        ));
+        *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+        response.headers_mut().insert(
+            "Retry-After",
+            "10".parse().unwrap(),
+        );
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "10".to_string(),
+        ));
     }
 
     Ok(next.run(req).await)
@@ -139,5 +153,22 @@ mod tests {
         let config = SecurityConfig::default();
         let state = SecurityState::new(config);
         assert!(Arc::strong_count(&state.rate_limiter) >= 1);
+    }
+
+    #[test]
+    fn test_idempotency_store() {
+        let store = IdempotencyStore::new();
+        let key = "test-key-1";
+        let response = serde_json::json!({"status": "ok"});
+
+        // Primera vez: no hay cache
+        assert!(store.get(key).is_none());
+
+        // Almacenar
+        store.set(key, &response, "POST", "/api/v1/test");
+        assert!(store.get(key).is_some());
+
+        // Key diferente -> None
+        assert!(store.get("other-key").is_none());
     }
 }

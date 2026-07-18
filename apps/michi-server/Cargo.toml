@@ -10,9 +10,12 @@ michi-config = { path = "../../crates/michi-config" }
 michi-db = { path = "../../crates/michi-db" }
 michi-homeassistant = { path = "../../crates/michi-homeassistant" }
 michi-opensubsonic = { path = "../../crates/michi-opensubsonic" }
+michi-identity = { path = "../../crates/michi-identity" }
+michi-connect = { path = "../../crates/michi-connect" }
 
 tokio.workspace = true
 axum.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+sqlx.workspace = true

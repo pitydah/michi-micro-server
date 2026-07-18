@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 michi-identity = { path = "../michi-identity" }
+mdns-sd = "0.13"
+hex = "0.4"
 tokio.workspace = true
 tracing.workspace = true
 serde.workspace = true

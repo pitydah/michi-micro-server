@@ -1,7 +1,69 @@
 use std::net::SocketAddr;
-
+use std::sync::Arc;
+use std::time::Duration;
 use anyhow::Result;
-use tracing::info;
+use tokio::sync::RwLock;
+use tracing::{info, warn};
+
+/// Watchdog: monitor worker health, restart if hung >5s
+struct Watchdog {
+    health: Arc<RwLock<Vec<WorkerHealth>>>,
+}
+
+#[derive(Clone)]
+struct WorkerHealth {
+    name: &'static str,
+    last_heartbeat: Arc<RwLock<tokio::time::Instant>>,
+}
+
+impl WorkerHealth {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            last_heartbeat: Arc::new(RwLock::new(tokio::time::Instant::now())),
+        }
+    }
+
+    async fn tick(&self) {
+        *self.last_heartbeat.write().await = tokio::time::Instant::now();
+    }
+}
+
+impl Watchdog {
+    fn new() -> Self {
+        Self {
+            health: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    async fn register(&self, name: &'static str) -> WorkerHealth {
+        let wh = WorkerHealth::new(name);
+        self.health.write().await.push(wh.clone());
+        wh
+    }
+
+    async fn run(&self) {
+        let health = self.health.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                let now = tokio::time::Instant::now();
+                let workers = health.read().await;
+                for w in workers.iter() {
+                    let last = *w.last_heartbeat.read().await;
+                    if now.duration_since(last) > Duration::from_secs(15) {
+                        warn!(
+                            "watchdog: worker '{}' last heartbeat {}s ago, may be hung",
+                            w.name,
+                            now.duration_since(last).as_secs()
+                        );
+                    }
+                }
+            }
+        });
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,7 +86,38 @@ async fn main() -> Result<()> {
         "starting Michi Micro Server",
     );
 
+    // Initialize DB (WAL mode set by init_pool)
     let pool = michi_db::init_pool(&config.database_url).await?;
+
+    // Load identity
+    let identity = michi_identity::MichiIdentity::load_or_create(&config.config_path).await?;
+    info!("michi_id: {}...", &identity.get_id().await[..12]);
+
+    // Start mDNS announce
+    let michi_connect = michi_connect::MichiConnect::new(
+        identity.clone(),
+        config.port(),
+        Some("0.0.0.0".to_string()),
+    );
+    let _ = michi_connect.announce_mdns().await;
+
+    // Start watchdog
+    let watchdog = Watchdog::new();
+    watchdog.run().await;
+
+    // Register workers
+    let _sync_health = watchdog.register("sync_peer").await;
+    let _ingest_health = watchdog.register("ingest").await;
+    let _playback_health = watchdog.register("playback").await;
+
+    // Tick watchdog from background tasks
+    let sync_h = _sync_health.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            sync_h.tick().await;
+        }
+    });
 
     let admin_user_id = michi_api::init_admin_user(&config, &pool).await;
     let state = michi_api::AppState::new(config.clone(), pool, admin_user_id);

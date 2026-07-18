@@ -16,6 +16,7 @@ use sqlx::SqlitePool;
 use tokio::sync::{broadcast, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 use tower_http::cors::CorsLayer;
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use utoipa::OpenApi;
@@ -929,6 +930,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(transcode::transcode_router())
         .merge(v1_link_routes())
         .layer(TraceLayer::new_for_http())
+        .layer(CompressionLayer::new())
         .layer(cors_layer(&state))
         .with_state(state)
 }
