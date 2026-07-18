@@ -22,6 +22,7 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
     let identify = michi_sync::SyncMessage::Identify {
         name: state.config.sync_name.clone(),
         version: "0.1.0".into(),
+        device_type: michi_sync::DeviceType::Server,
     };
     if let Ok(json) = identify.serialize() {
         let _ = sender.send(Message::Text(json)).await;
@@ -62,6 +63,8 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                 playing,
                                 volume,
                                 updated_at,
+                                playlist_id,
+                                queue_position,
                             } => {
                                 info!(
                                     "sync: received state track={:?} pos={} playing={}",
@@ -74,6 +77,9 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                     playing: *playing,
                                     volume: *volume,
                                     updated_at: *updated_at,
+                                    playlist_id: *playlist_id,
+                                    queue_position: *queue_position,
+                                    device_id: None,
                                 };
                                 {
                                     let mut current = state_clone.playback_state.write().await;
@@ -103,6 +109,12 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                 // Peer will detect liveness via TCP keepalive.
                             }
                             michi_sync::SyncMessage::Pong => {}
+                            michi_sync::SyncMessage::HandoffRequest { .. } => {
+                                info!("sync: handoff request received (not yet implemented)");
+                            }
+                            michi_sync::SyncMessage::HandoffAccept { .. } => {
+                                info!("sync: handoff accept received (not yet implemented)");
+                            }
                         }
                     }
                 }

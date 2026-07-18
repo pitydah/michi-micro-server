@@ -14,4 +14,4 @@ chrono.workspace = true
 thiserror.workspace = true
 utoipa = { version = "5", features = ["uuid", "chrono"] }
 sha2 = "0.10"
-sqlx = { workspace = true, features = ["sqlite", "runtime-tokio-rustls"] }
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio-rustls", "uuid", "chrono"] }

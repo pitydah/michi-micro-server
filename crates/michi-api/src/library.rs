@@ -874,6 +874,9 @@ pub async fn set_playback_state_handler(
         playing: input.playing,
         volume: input.volume.unwrap_or(0.8),
         updated_at: Utc::now(),
+        playlist_id: None,
+        queue_position: None,
+        device_id: None,
     };
 
     {

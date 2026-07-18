@@ -142,6 +142,9 @@ pub async fn sync_state_handler(
         playing: body.playing,
         volume: body.volume,
         updated_at: chrono::Utc::now(),
+        playlist_id: None,
+        queue_position: None,
+        device_id: None,
     };
 
     {

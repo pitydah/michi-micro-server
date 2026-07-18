@@ -180,6 +180,7 @@ pub fn start_sync_peers(state: &AppState) {
                     let identify = michi_sync::SyncMessage::Identify {
                         name: sync_name.clone(),
                         version: "0.1.0".into(),
+                        device_type: michi_sync::DeviceType::Server,
                     };
                     if let Ok(json) = identify.serialize() {
                         let _ = sender.send(Message::Text(json)).await;
@@ -215,6 +216,9 @@ pub fn start_sync_peers(state: &AppState) {
                                             playing,
                                             volume,
                                             updated_at: chrono::Utc::now(),
+                                            playlist_id: None,
+                                            queue_position: None,
+                                            device_id: None,
                                         };
                                         {
                                             let mut current = recv_playback.write().await;
