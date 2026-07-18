@@ -304,3 +304,63 @@ pub async fn smart_playlist_handler(
     })))
 }
 
+use axum::http::header;
+use axum::response::{IntoResponse, Response};
+
+pub async fn export_playlist_m3u_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    use axum::body::Body;
+
+    let playlist = michi_db::get_playlist(&state.db, &id)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("playlist not found: {}", id),
+            )
+        })?;
+
+    let tracks = michi_db::get_playlist_tracks(&state.db, &id)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+    let mut m3u = String::from("#EXTM3U\n");
+    for (_, track) in &tracks {
+        m3u.push_str(&format!(
+            "#EXTINF:{},{} - {}\n{}\n",
+            track.duration_ms.unwrap_or(0) / 1000,
+            track.artist.as_deref().unwrap_or("Unknown"),
+            track.title.as_deref().unwrap_or("Unknown"),
+            track.file_path,
+        ));
+    }
+
+    let filename = format!("{}.m3u", playlist.name.replace(' ', "_"));
+    let response = Response::builder()
+        .header(header::CONTENT_TYPE, "audio/x-mpegurl")
+        .header(
+            header::CONTENT_DISPOSITION,
+            &format!("attachment; filename=\"{}\"", filename),
+        )
+        .body(Body::from(m3u))
+        .unwrap();
+
+    Ok(response)
+}
+

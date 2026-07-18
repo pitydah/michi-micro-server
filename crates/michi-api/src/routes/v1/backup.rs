@@ -160,6 +160,10 @@ lazy_static::lazy_static! {
     static ref WEBHOOK_URL: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
 }
 
+pub async fn get_webhook_url() -> Option<String> {
+    WEBHOOK_URL.read().await.clone()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SetWebhookBody {
     pub url: String,

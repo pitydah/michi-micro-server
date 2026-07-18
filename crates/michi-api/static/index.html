@@ -75,6 +75,12 @@
                     </svg>
                     Settings
                 </button>
+                <button class="nav-item" data-section="history" onclick="showSection('history')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+                    </svg>
+                    History
+                </button>
             </div>
         </nav>
         <div class="sidebar-footer">
@@ -387,6 +393,23 @@
         <section class="section-page hidden" id="page-status">
             <div class="page-header"><h2>Server Status</h2><p>Health and information</p></div>
             <div class="status-grid" id="status-content"></div>
+        </section>
+
+        <!-- History -->
+        <section class="section-page hidden" id="page-history">
+            <div class="page-header"><h2>Play History</h2><p>Recently played tracks</p></div>
+            <div class="section">
+                <div class="section-header">
+                    <h3>History</h3>
+                    <div class="section-actions">
+                        <button class="btn btn-ghost btn-sm" onclick="exportHistory()">Export</button>
+                        <button class="btn btn-ghost btn-sm" onclick="clearHistory()" style="color:var(--error)">Clear</button>
+                    </div>
+                </div>
+                <div id="history-stats" class="history-stats"></div>
+                <div class="table-wrap" id="history-table"></div>
+                <div id="history-pagination" class="history-pagination"></div>
+            </div>
         </section>
 
     </main>

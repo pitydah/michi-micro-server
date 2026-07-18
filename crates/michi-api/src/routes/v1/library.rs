@@ -98,6 +98,25 @@ pub async fn library_health_handler(
     let total_duration_ms: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(duration_ms), 0) FROM tracks")
         .fetch_one(&state.db).await.unwrap_or(0);
 
+    // New: genre/year/format coverage
+    let with_genre: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE genre IS NOT NULL AND genre != ''")
+        .fetch_one(&state.db).await.unwrap_or(0);
+    let without_genre = stats.tracks - with_genre;
+
+    let with_year: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE year IS NOT NULL")
+        .fetch_one(&state.db).await.unwrap_or(0);
+    let without_year = stats.tracks - with_year;
+
+    let lossless_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tracks WHERE format IN ('FLAC', 'ALAC', 'WAV', 'AIFF', 'DSF', 'DFF')"
+    )
+        .fetch_one(&state.db).await.unwrap_or(0);
+    let lossy_count = stats.tracks - lossless_count;
+
+    // Missing files on disk (simplified: count tracks with file_path)
+    let with_file: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE file_path IS NOT NULL AND file_path != ''")
+        .fetch_one(&state.db).await.unwrap_or(0);
+
     Ok(Json(serde_json::json!({
         "total_tracks": stats.tracks,
         "total_albums": stats.albums,
@@ -107,7 +126,16 @@ pub async fn library_health_handler(
         "tracks_with_album": with_album,
         "tracks_without_metadata": without_meta,
         "tracks_with_artwork": with_artwork,
+        "tracks_with_genre": with_genre,
+        "tracks_without_genre": without_genre,
+        "tracks_with_year": with_year,
+        "tracks_without_year": without_year,
+        "lossless_count": lossless_count,
+        "lossy_count": lossy_count,
         "total_playlists": total_playlists,
-        "total_duration_hours": total_duration_ms as f64 / 3600000.0,
+        "total_duration_hours": (total_duration_ms as f64 / 3600000.0 * 10.0).round() / 10.0,
+        "genre_coverage_pct": if stats.tracks > 0 { (with_genre as f64 / stats.tracks as f64 * 100.0).round() as i64 } else { 0 },
+        "year_coverage_pct": if stats.tracks > 0 { (with_year as f64 / stats.tracks as f64 * 100.0).round() as i64 } else { 0 },
+        "artwork_coverage_pct": if stats.tracks > 0 { (with_artwork as f64 / stats.tracks as f64 * 100.0).round() as i64 } else { 0 },
     })))
 }

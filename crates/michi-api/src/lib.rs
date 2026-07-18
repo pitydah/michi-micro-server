@@ -308,6 +308,7 @@ fn v1_link_routes() -> Router<AppState> {
         .route("/api/v1/tracks", get(routes::v1::tracks::tracks_handler))
         .route("/api/v1/tracks/:id", get(routes::v1::tracks::track_handler))
         .route("/api/v1/search", get(routes::v1::tracks::search_handler))
+        .route("/api/v1/search/advanced", get(routes::v1::search::search_advanced_handler))
         // Stream
         .route(
             "/api/v1/stream/:id",
@@ -333,6 +334,10 @@ fn v1_link_routes() -> Router<AppState> {
             get(routes::v1::playlists::get_playlist_handler)
                 .put(routes::v1::playlists::update_playlist_handler)
                 .delete(routes::v1::playlists::delete_playlist_handler),
+        )
+        .route(
+            "/api/v1/playlists/:id/export/m3u",
+            get(routes::v1::playlists::export_playlist_m3u_handler),
         )
         .route(
             "/api/v1/playlists/smart",
@@ -384,6 +389,14 @@ fn v1_link_routes() -> Router<AppState> {
             "/api/v1/sync/playlist",
             post(routes::v1::sync::sync_playlist_handler),
         )
+        .route(
+            "/api/v1/artists/:name/insights",
+            get(routes::v1::insights::artist_insights_handler),
+        )
+        .route(
+            "/api/v1/albums/:key/health",
+            get(routes::v1::insights::album_health_handler),
+        )
         // Import
         .route(
             "/api/v1/import/session",
@@ -426,6 +439,23 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/backup",
             get(routes::v1::backup::backup_handler),
+        )
+        .route(
+            "/api/v1/home/dashboard",
+            get(routes::v1::dashboard::dashboard_handler),
+        )
+        .route(
+            "/api/v1/history",
+            get(routes::v1::history::history_handler)
+                .delete(routes::v1::history::clear_history_handler),
+        )
+        .route(
+            "/api/v1/history/stats",
+            get(routes::v1::history::history_stats_handler),
+        )
+        .route(
+            "/api/v1/history/export",
+            get(routes::v1::history::history_export_handler),
         )
         .route(
             "/api/v1/backup/snapshot",

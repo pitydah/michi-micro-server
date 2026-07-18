@@ -39,6 +39,7 @@ const MichiAPI = {
   },
   search(q) { return this.request('/api/v1/search?q=' + encodeURIComponent(q)); },
   scan() { return this.request('/api/library/scan', { method: 'POST' }); },
+  dashboard() { return this.request('/api/v1/home/dashboard'); },
   playlists() { return this.request('/api/v1/playlists'); },
   streamUrl(id) { return this.base + '/api/v1/stream/' + id; },
 };
@@ -48,6 +49,7 @@ const State = {
   status: null,
   serverInfo: null,
   stats: null,
+  dashboard: null,
   tracks: [],
   allTracks: [],
   currentTrack: null,
@@ -132,8 +134,8 @@ function showSection(section) {
 // ── Init ────────────────────────────────────────────────────────
 async function init() {
   showSection('dashboard');
-  await Promise.all([loadStatus(), loadServerInfo(), loadStats(), loadTracks()]);
-  State.polling = setInterval(() => { loadStatus(); loadStats(); }, 30000);
+  await Promise.all([loadStatus(), loadServerInfo(), loadDashboard(), loadTracks()]);
+  State.polling = setInterval(() => { loadStatus(); loadDashboard(); }, 30000);
 }
 
 document.addEventListener('DOMContentLoaded', init);
@@ -264,27 +266,41 @@ function renderServerInfo() {
 }
 
 // ── Stats / Dashboard ───────────────────────────────────────────
-async function loadStats() {
+async function loadDashboard() {
   try {
-    State.stats = await MichiAPI.libraryStats();
-    renderStats();
-  } catch (e) { console.warn('stats failed:', e.message); }
+    State.dashboard = await MichiAPI.dashboard();
+    renderDashboard();
+  } catch (e) { console.warn('dashboard failed:', e.message); }
 }
 
-function renderStats() {
-  const s = State.stats;
+function renderDashboard() {
+  const d = State.dashboard;
   const cd = $('#dashboard-cards');
-  if (!cd) return;
+  if (!cd || !d) return;
 
-  const tracks = s?.tracks ?? 'N/D';
-  const albums = s?.albums ?? 'N/D';
-  const artists = s?.artists ?? 'N/D';
+  const lib = d.library || {};
+  const health = d.health || {};
+  const eco = d.ecosystem || {};
+  const play = d.playback || {};
+
+  function fmtDur(ms) {
+    if (!ms) return '0h';
+    const h = Math.floor(ms / 3600000);
+    return h + 'h';
+  }
+
+  function badge(ok, label) {
+    return '<span class="badge ' + (ok ? 'stable' : 'disabled') + '">' + label + '</span>';
+  }
 
   cd.innerHTML =
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><div class="card-value">' + esc(tracks) + '</div><div class="card-label">Tracks</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h18"/><rect x="3" y="8" width="18" height="12" rx="2"/></svg></div><div class="card-value">' + esc(albums) + '</div><div class="card-label">Albums</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + esc(artists) + '</div><div class="card-label">Artists</div></div>' +
-    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></div><div class="card-value">' + (State.serverInfo?.features?.playlists ? '✓' : '--') + '</div><div class="card-label">Playlists</div></div>';
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><div class="card-value">' + esc(lib.tracks ?? '--') + '</div><div class="card-label">Tracks</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h18"/><rect x="3" y="8" width="18" height="12" rx="2"/></svg></div><div class="card-value">' + esc(lib.albums ?? '--') + '</div><div class="card-label">Albums</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + esc(lib.artists ?? '--') + '</div><div class="card-label">Artists</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="card-value">' + fmtDur(lib.total_duration_ms) + '</div><div class="card-label">Duration</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg></div><div class="card-value">' + (play.has_current ? play.title || 'Playing' : '--') + '</div><div class="card-label">Now Playing ' + badge(play.has_current, play.state || 'stopped') + '</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + esc(health.missing_files ?? 0) + '</div><div class="card-label">Missing Files ' + badge(health.is_healthy, 'OK') + '</div></div>' +
+    '<div class="card"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><div class="card-value">' + esc(eco.receivers_online ?? 0) + '</div><div class="card-label">Receivers ' + badge(eco.receivers_online > 0, 'Online') + '</div></div>';
 }
 
 // ── Tracks / Library ────────────────────────────────────────────
@@ -639,6 +655,100 @@ async function downloadBackup() {
   } catch (e) { showToast(e.message, true); }
 }
 
+// ── History ──────────────────────────────────────────────────────
+let _historyOffset = 0;
+const _historyLimit = 50;
+
+async function loadHistory() {
+  try {
+    const [list, stats] = await Promise.all([
+      MichiAPI.request('/api/v1/history?limit=' + _historyLimit + '&offset=' + _historyOffset),
+      MichiAPI.request('/api/v1/history/stats'),
+    ]);
+    renderHistory(list);
+    renderHistoryStats(stats);
+  } catch (e) { console.warn('history failed:', e.message); }
+}
+
+function renderHistoryStats(stats) {
+  const el = $('#history-stats');
+  if (!el) return;
+  el.innerHTML =
+    '<div class="history-stat"><div class="stat-value">' + (stats?.total || 0) + '</div><div class="stat-label">Total Plays</div></div>' +
+    '<div class="history-stat"><div class="stat-value">' + (stats?.unique_tracks || 0) + '</div><div class="stat-label">Unique Tracks</div></div>' +
+    '<div class="history-stat"><div class="stat-value">' + (stats?.today || 0) + '</div><div class="stat-label">Today</div></div>' +
+    '<div class="history-stat"><div class="stat-value">' + (stats?.this_week || 0) + '</div><div class="stat-label">This Week</div></div>' +
+    '<div class="history-stat"><div class="stat-value">' + (stats?.this_month || 0) + '</div><div class="stat-label">This Month</div></div>';
+}
+
+function renderHistory(list) {
+  const container = $('#history-table');
+  if (!container) return;
+  const entries = list?.history || [];
+  if (entries.length === 0) {
+    renderEmpty(container, '🕐', 'No play history', 'Play some tracks to see them here.');
+    return;
+  }
+  let html = '<table><thead><tr><th>#</th><th>Title</th><th>Artist</th><th>Album</th><th>Played At</th></tr></thead><tbody>';
+  entries.forEach(function (e, i) {
+    html += '<tr>' +
+      '<td style="color:var(--text-dim)">' + (_historyOffset + i + 1) + '</td>' +
+      '<td class="track-title">' + esc(e.title) + '</td>' +
+      '<td class="track-artist">' + esc(e.artist || '—') + '</td>' +
+      '<td class="track-artist">' + esc(e.album || '—') + '</td>' +
+      '<td style="color:var(--text-dim);font-size:.75rem">' + fmtDate(e.played_at) + '</td>' +
+      '</tr>';
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+
+  const total = list?.total || 0;
+  const pages = Math.ceil(total / _historyLimit);
+  const pag = $('#history-pagination');
+  if (pag) {
+    let ph = '';
+    if (_historyOffset > 0) {
+      ph += '<button class="btn btn-sm btn-ghost" onclick="historyPage(' + Math.max(0, _historyOffset - _historyLimit) + ')">Prev</button>';
+    }
+    ph += '<span style="color:var(--text-dim);font-size:.75rem;padding:0 8px">Page ' + (Math.floor(_historyOffset / _historyLimit) + 1) + ' of ' + pages + '</span>';
+    if (_historyOffset + _historyLimit < total) {
+      ph += '<button class="btn btn-sm btn-ghost" onclick="historyPage(' + (_historyOffset + _historyLimit) + ')">Next</button>';
+    }
+    pag.innerHTML = ph;
+  }
+}
+
+function historyPage(offset) {
+  _historyOffset = offset;
+  loadHistory();
+}
+
+async function exportHistory() {
+  try {
+    const data = await MichiAPI.request('/api/v1/history/export', { timeout: 15000 });
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'michi-history-' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('History exported!');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function clearHistory() {
+  if (!confirm('Clear all play history? This cannot be undone.')) return;
+  try {
+    await MichiAPI.request('/api/v1/history', { method: 'DELETE' });
+    _historyOffset = 0;
+    loadHistory();
+    showToast('History cleared');
+  } catch (e) { showToast(e.message, true); }
+}
+
 // Extend init to load playlists when navigating to playlists page
 var _origShowSection = showSection;
 showSection = function (section) {
@@ -648,6 +758,10 @@ showSection = function (section) {
   }
   if (section === 'settings') {
     loadCurrentState();
+  }
+  if (section === 'history') {
+    _historyOffset = 0;
+    loadHistory();
   }
 };
 

@@ -1502,6 +1502,104 @@ pub async fn search_tracks(pool: &SqlitePool, q: &str) -> Result<Vec<Track>, DbE
     Ok(tracks)
 }
 
+pub async fn search_tracks_advanced(
+    pool: &SqlitePool,
+    query: &str,
+) -> Result<Vec<Track>, DbError> {
+    let mut sql = String::from(
+        "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at FROM tracks WHERE 1=1"
+    );
+    let mut params: Vec<String> = Vec::new();
+
+    let mut fulltext_parts: Vec<String> = Vec::new();
+
+    for token in query.split_whitespace() {
+        if let Some((key, val)) = token.split_once(':') {
+            match key.to_lowercase().as_str() {
+                "artist" => {
+                    params.push(format!("%{}%", val));
+                    sql.push_str(&format!(" AND artist LIKE ?{}", params.len()));
+                }
+                "album" => {
+                    params.push(format!("%{}%", val));
+                    sql.push_str(&format!(" AND album LIKE ?{}", params.len()));
+                }
+                "genre" => {
+                    params.push(format!("%{}%", val));
+                    sql.push_str(&format!(" AND genre LIKE ?{}", params.len()));
+                }
+                "format" => {
+                    params.push(val.to_uppercase());
+                    sql.push_str(&format!(" AND format = ?{}", params.len()));
+                }
+                "year" => {
+                    if let Some(rest) = val.strip_prefix('>') {
+                        if let Ok(y) = rest.parse::<i32>() {
+                            params.push(y.to_string());
+                            sql.push_str(&format!(" AND year > ?{}", params.len()));
+                        }
+                    } else if let Some(rest) = val.strip_prefix('<') {
+                        if let Ok(y) = rest.parse::<i32>() {
+                            params.push(y.to_string());
+                            sql.push_str(&format!(" AND year < ?{}", params.len()));
+                        }
+                    } else if let Some(rest) = val.strip_prefix(">=") {
+                        if let Ok(y) = rest.parse::<i32>() {
+                            params.push(y.to_string());
+                            sql.push_str(&format!(" AND year >= ?{}", params.len()));
+                        }
+                    } else if let Some(rest) = val.strip_prefix("<=") {
+                        if let Ok(y) = rest.parse::<i32>() {
+                            params.push(y.to_string());
+                            sql.push_str(&format!(" AND year <= ?{}", params.len()));
+                        }
+                    } else if let Ok(y) = val.parse::<i32>() {
+                        params.push(y.to_string());
+                        sql.push_str(&format!(" AND year = ?{}", params.len()));
+                    }
+                }
+                "rating" => {
+                    if let Some(rest) = val.strip_prefix('>') {
+                        if let Ok(r) = rest.parse::<i32>() {
+                            params.push(r.to_string());
+                            sql.push_str(&format!(" AND rating >= ?{}", params.len()));
+                        }
+                    } else if let Ok(r) = val.parse::<i32>() {
+                        params.push(r.to_string());
+                        sql.push_str(&format!(" AND rating = ?{}", params.len()));
+                    }
+                }
+                _ => {
+                    fulltext_parts.push(format!("%{}%", token));
+                }
+            }
+        } else {
+            fulltext_parts.push(format!("%{}%", token));
+        }
+    }
+
+    if !fulltext_parts.is_empty() {
+        let like_clauses: Vec<String> = fulltext_parts.iter().map(|p| {
+            params.push(p.clone());
+            format!("(title LIKE ?{} OR artist LIKE ?{} OR album LIKE ?{})", params.len(), params.len(), params.len())
+        }).collect();
+        sql.push_str(" AND (");
+        sql.push_str(&like_clauses.join(" AND "));
+        sql.push(')');
+    }
+
+    sql.push_str(" ORDER BY title ASC LIMIT 100");
+
+    let mut query_builder = sqlx::query(&sql);
+    for p in &params {
+        query_builder = query_builder.bind(p);
+    }
+
+    let rows = query_builder.fetch_all(pool).await?;
+    let tracks = rows.iter().map(row_to_track).collect();
+    Ok(tracks)
+}
+
 pub async fn list_tracks_paged(
     pool: &SqlitePool,
     limit: i64,
