@@ -94,6 +94,13 @@
                     </svg>
                     Chains
                 </button>
+                <button class="nav-item" data-section="broadcast" onclick="showSection('broadcast')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 2a14.5 14.5 0 0 0 0 20" stroke="currentColor"/><path d="M12 6a10.5 10.5 0 0 0 0 12" stroke="currentColor"/>
+                        <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>
+                    </svg>
+                    Broadcast
+                </button>
             </div>
         </nav>
         <div class="sidebar-footer">
@@ -276,8 +283,36 @@
                             <button class="btn btn-primary" onclick="downloadBackup()">Download Backup</button>
                         </div>
                         <p style="color:var(--text-3);font-size:.78rem;margin-top:8px">Export all tracks, playlists, stars, and play history as a JSON file.</p>
-                    </div>
                 </div>
+            </div>
+        </section>
+
+        <!-- Broadcast & Cast -->
+        <section class="section-page hidden" id="page-broadcast">
+            <div class="hero">
+                <h2>Broadcast & Cast</h2>
+                <p>Radio streams, podcasts and external audio sources</p>
+                <div class="hero-meta" id="broadcast-meta"></div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">Add Source</div>
+                <div class="panel-row">
+                    <span class="panel-label">URL</span>
+                    <input type="url" id="source-url-input" class="panel-input" placeholder="Paste radio stream, podcast RSS or audio URL here..." style="max-width:500px">
+                    <button class="btn btn-primary btn-sm" onclick="addSource()">Add</button>
+                </div>
+                <div id="source-add-result" class="panel-result"></div>
+            </div>
+            <div class="section">
+                <div class="section-header">
+                    <h3>Sources</h3>
+                    <span class="sub" id="sources-count">--</span>
+                </div>
+                <div id="sources-list"></div>
+            </div>
+            <div id="episode-view" class="panel hidden">
+                <div class="panel-header" id="episode-source-name"></div>
+                <div id="episodes-list"></div>
             </div>
         </section>
 

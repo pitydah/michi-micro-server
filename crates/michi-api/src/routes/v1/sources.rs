@@ -1,4 +1,11 @@
-use axum::{extract::{Path, State}, http::StatusCode, Json};
+use axum::{
+    body::Body,
+    extract::{Path, State},
+    http::{header, StatusCode},
+    response::IntoResponse,
+    Json,
+};
+use futures_util::StreamExt;
 use serde::Deserialize;
 use uuid::Uuid;
 use crate::AppState;
@@ -116,4 +123,89 @@ pub async fn update_episode_handler(
         .await
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
     Ok(Json(serde_json::json!({ "status": "updated" })))
+}
+
+// ── Proxy Stream ─────────────────────────────────────────────────
+
+pub async fn proxy_stream_handler(
+    Path(source_id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
+    let sources = michi_db::list_stream_sources(&state.db)
+        .await
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+
+    let source = sources.into_iter().find(|s| s.id == source_id)
+        .ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "source not found"))?;
+
+    if !source.enabled {
+        return Err(v1_error(StatusCode::BAD_REQUEST, "DISABLED", "source is disabled"));
+    }
+
+    let client = reqwest::Client::new();
+    match client.get(&source.url).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let stream = resp.bytes_stream();
+
+            let mut response = axum::response::Response::builder()
+                .status(status);
+
+            // Forward relevant headers
+            if let Some(ct) = headers.get(header::CONTENT_TYPE) {
+                response = response.header(header::CONTENT_TYPE, ct);
+            }
+            // Add CORS headers for web playback
+            response = response
+                .header("Access-Control-Allow-Origin", "*")
+                .header("Access-Control-Allow-Methods", "GET, OPTIONS")
+                .header("Access-Control-Allow-Headers", "Range, Content-Type");
+
+            Ok(response
+                .body(Body::from_stream(stream.map(|chunk| chunk.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))))
+                .unwrap())
+        }
+        Err(e) => Err(v1_error(StatusCode::BAD_GATEWAY, "PROXY_ERROR", &format!("failed to connect: {}", e))),
+    }
+}
+
+/// Proxy a podcast episode audio URL
+pub async fn proxy_episode_handler(
+    Path(episode_id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
+    // We need to find which source this episode belongs to, then get its audio_url
+    // Simplified: query all episodes to find the one
+    let sources = michi_db::list_stream_sources(&state.db)
+        .await
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+
+    for source in &sources {
+        if let Ok(eps) = michi_db::list_podcast_episodes(&state.db, &source.id).await {
+            if let Some(ep) = eps.into_iter().find(|e| e.id == episode_id) {
+                let client = reqwest::Client::new();
+                match client.get(&ep.audio_url).send().await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let headers = resp.headers().clone();
+                        let stream = resp.bytes_stream();
+                        let mut response = axum::response::Response::builder().status(status);
+                        if let Some(ct) = headers.get(header::CONTENT_TYPE) {
+                            response = response.header(header::CONTENT_TYPE, ct);
+                        }
+                        response = response
+                            .header("Access-Control-Allow-Origin", "*")
+                            .header("Access-Control-Allow-Methods", "GET, OPTIONS");
+                        return Ok(response
+                            .body(Body::from_stream(stream.map(|chunk| chunk.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))))
+                            .unwrap());
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+
+    Err(v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "episode not found"))
 }

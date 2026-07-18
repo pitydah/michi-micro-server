@@ -981,6 +981,125 @@ async function deleteRoomGroup(id) {
   } catch (e) { showToast(e.message, true); }
 }
 
+// ── Broadcast & Cast ────────────────────────────────────────────
+async function loadSources() {
+  try {
+    var raw = await MichiAPI.request('/api/v1/sources');
+    var sources = raw.sources || [];
+    var container = $('#sources-list');
+    var count = $('#sources-count');
+    if (count) count.textContent = sources.length + ' source(s)';
+    if (!container) return;
+    if (sources.length === 0) {
+      container.innerHTML = '<div class="empty-state"><div class="icon">📡</div><p><strong>No sources yet</strong></p><p style="font-size:.78rem;margin-top:4px">Add a radio stream, podcast RSS or audio URL above.</p></div>';
+      return;
+    }
+    container.innerHTML = sources.map(function (s) {
+      var typeIcons = { radio: '📻', podcast: '🎙️', directfile: '🎵', unknown: '❓' };
+      var icon = typeIcons[s.stream_type] || '📡';
+      var statusDot = s.enabled ? '<span class="feature-dot on"></span>' : '<span class="feature-dot off"></span>';
+      var playUrl = (s.stream_type === 'podcast')
+        ? '<button class="btn btn-sm btn-ghost" onclick="showEpisodes(\'' + s.id + '\',\'' + esc(s.name || s.url) + '\')">Episodes</button>'
+        : '<button class="btn btn-sm btn-ghost" onclick="playSource(\'' + s.id + '\')">▶ Play</button>';
+      return '<div class="chain-item" style="cursor:default">' +
+        '<div style="font-size:1.3rem">' + icon + '</div>' +
+        '<div class="info"><div class="name">' + statusDot + ' ' + esc(s.name || s.url) + '</div>' +
+        '<div class="meta">' + s.stream_type + (s.codec ? ' · ' + s.codec : '') + (s.genre ? ' · ' + s.genre : '') + '</div></div>' +
+        '<div style="display:flex;gap:4px">' +
+        playUrl +
+        '<button class="btn btn-sm btn-ghost" onclick="deleteSource(\'' + s.id + '\')">✕</button>' +
+        '</div></div>';
+    }).join('');
+    var meta = $('#broadcast-meta');
+    if (meta) meta.textContent = sources.length + ' sources · ' + sources.filter(function (s) { return s.stream_type === 'radio'; }).length + ' radio · ' + sources.filter(function (s) { return s.stream_type === 'podcast'; }).length + ' podcast';
+  } catch (e) { console.warn('sources:', e.message); }
+}
+
+async function addSource() {
+  var url = $('#source-url-input')?.value.trim();
+  if (!url) { showToast('Enter a URL', true); return; }
+  try {
+    var resp = await MichiAPI.request('/api/v1/sources', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url }),
+      timeout: 15000,
+    });
+    $('#source-url-input').value = '';
+    var el = $('#source-add-result');
+    if (el) el.innerHTML = '<span style="color:var(--green)">✓ Added: ' + esc(resp.source?.name || resp.source?.stream_type || 'source') + '</span>';
+    loadSources();
+    showToast('Source added');
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function deleteSource(id) {
+  try {
+    await MichiAPI.request('/api/v1/sources/' + id, { method: 'DELETE' });
+    loadSources();
+    showToast('Source deleted');
+  } catch (e) { showToast(e.message, true); }
+}
+
+function playSource(id) {
+  var audio = getAudio();
+  audio.src = '/api/v1/stream/proxy/' + id;
+  audio.play().catch(function (err) {
+    showToast('Could not play: ' + err.message, true);
+  });
+  State.currentTrack = { title: 'Radio Stream', artist: 'Broadcast', id: id, duration_ms: 0 };
+  updateNowPlaying(State.currentTrack);
+  updateMiniPlayer(State.currentTrack);
+  updatePlayButtons();
+}
+
+var _currentSourceId = null;
+
+async function showEpisodes(sourceId, sourceName) {
+  _currentSourceId = sourceId;
+  var view = $('#episode-view');
+  var nameEl = $('#episode-source-name');
+  if (view) view.classList.remove('hidden');
+  if (nameEl) nameEl.textContent = 'Episodes: ' + sourceName;
+  try {
+    var raw = await MichiAPI.request('/api/v1/sources/' + sourceId + '/episodes');
+    var eps = raw.episodes || [];
+    var container = $('#episodes-list');
+    if (!container) return;
+    if (eps.length === 0) {
+      container.innerHTML = '<p style="color:var(--text-dim);font-size:.82rem;padding:12px 0">No episodes found.</p>';
+      return;
+    }
+    container.innerHTML = eps.map(function (ep) {
+      var dur = ep.duration_secs ? Math.floor(ep.duration_secs / 60) + 'm' : '--';
+      return '<div class="chain-item" style="cursor:default">' +
+        '<div style="font-size:1rem">🎙️</div>' +
+        '<div class="info"><div class="name">' + esc(ep.title) + '</div>' +
+        '<div class="meta">' + dur + (ep.played ? ' · Played' : '') + '</div></div>' +
+        '<button class="btn btn-sm btn-ghost" onclick="playEpisode(\'' + ep.id + '\')">▶</button>' +
+        '</div>';
+    }).join('');
+  } catch (e) { showToast(e.message, true); }
+}
+
+function playEpisode(episodeId) {
+  var audio = getAudio();
+  audio.src = '/api/v1/stream/proxy/episode/' + episodeId;
+  audio.play().catch(function (err) {
+    showToast('Could not play: ' + err.message, true);
+  });
+  State.currentTrack = { title: 'Podcast Episode', artist: 'Podcast', id: episodeId, duration_ms: 0 };
+  updateNowPlaying(State.currentTrack);
+  updateMiniPlayer(State.currentTrack);
+  updatePlayButtons();
+  // Mark as played
+  MichiAPI.request('/api/v1/sources/episodes/' + episodeId, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ played: true }),
+  }).catch(function () {});
+}
+
 // Extend init to load playlists when navigating to playlists page
 var _origShowSection = showSection;
 showSection = function (section) {
@@ -999,6 +1118,9 @@ showSection = function (section) {
   if (section === 'chains') {
     _currentChainId = null;
     loadChains();
+  }
+  if (section === 'broadcast') {
+    loadSources();
   }
 };
 

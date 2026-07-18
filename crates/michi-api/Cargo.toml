@@ -27,7 +27,7 @@ michi-sync = { path = "../michi-sync" }
 tokio-tungstenite = "0.24"
 chrono.workspace = true
 serde_json.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
 argon2.workspace = true

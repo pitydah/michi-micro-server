@@ -681,6 +681,14 @@ fn v1_link_routes() -> Router<AppState> {
             put(routes::v1::sources::update_episode_handler),
         )
         .route(
+            "/api/v1/stream/proxy/:source_id",
+            get(routes::v1::sources::proxy_stream_handler),
+        )
+        .route(
+            "/api/v1/stream/proxy/episode/:episode_id",
+            get(routes::v1::sources::proxy_episode_handler),
+        )
+        .route(
             "/api/v1/shares",
             get(routes::v1::shares::list_shares_handler)
                 .post(routes::v1::shares::create_share_handler),
