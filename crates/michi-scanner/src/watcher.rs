@@ -39,14 +39,14 @@ impl LibraryWatcher {
         tokio::spawn(async move {
             let mut last_mtimes: Vec<(PathBuf, u64)> = paths
                 .iter()
-                .filter_map(|p| {
+                .map(|p| {
                     let mtime = std::fs::metadata(p)
                         .ok()
                         .and_then(|m| m.modified().ok())
                         .and_then(|t| t.elapsed().ok())
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
-                    Some((p.clone(), mtime))
+                    (p.clone(), mtime)
                 })
                 .collect();
 

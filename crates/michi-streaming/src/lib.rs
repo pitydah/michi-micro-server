@@ -361,7 +361,7 @@ impl StreamDecision {
 
 pub fn select_stream_profile(
     profile: StreamProfile,
-    track_format: &AudioFormat,
+    _track_format: &AudioFormat,
     original_sample_rate: Option<u32>,
     original_bit_depth: Option<u32>,
     max_transcodes: usize,
