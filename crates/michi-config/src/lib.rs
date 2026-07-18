@@ -23,6 +23,7 @@ pub struct Config {
     pub server_id: Uuid,
     pub cors_origin: Option<String>,
     pub dev_mode: bool,
+    pub resource_profile: michi_core::ResourceProfile,
 }
 
 impl Config {
@@ -89,6 +90,10 @@ impl Config {
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false);
 
+        let resource_profile = michi_core::ResourceProfile::from_config_str(
+            &env::var("MICHI_RESOURCE_PROFILE").unwrap_or_else(|_| "balanced".into()),
+        );
+
         Self {
             port,
             music_paths,
@@ -108,6 +113,7 @@ impl Config {
             server_id,
             cors_origin,
             dev_mode,
+            resource_profile,
         }
     }
 

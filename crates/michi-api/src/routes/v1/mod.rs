@@ -1,5 +1,6 @@
 pub mod artwork;
 pub mod backup;
+pub mod bookmarks;
 pub mod chains;
 pub mod dashboard;
 pub mod diagnostics;

@@ -21,7 +21,7 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
     // Send identify message
     let identify = michi_sync::SyncMessage::Identify {
         name: state.config.sync_name.clone(),
-        version: "0.1.0".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
         device_type: michi_sync::DeviceType::Server,
     };
     if let Ok(json) = identify.serialize() {

@@ -343,7 +343,17 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 26 applied");
     }
 
-    info!("database schema at version 26");
+    if current < 27 {
+        info!("applying migration 27: bookmarks");
+        migration_027(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (27, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 27 applied");
+    }
+
+    info!("database schema at version 27");
     Ok(())
 }
 
@@ -825,6 +835,32 @@ async fn migration_026(pool: &SqlitePool) -> Result<(), DbError> {
             muted INTEGER NOT NULL DEFAULT 0,
             delay_ms INTEGER NOT NULL DEFAULT 0
         )",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+async fn migration_027(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bookmarks (
+            id TEXT PRIMARY KEY,
+            track_id TEXT NOT NULL REFERENCES tracks(id),
+            user_id TEXT NOT NULL DEFAULT 'default',
+            device_id TEXT,
+            position_ms INTEGER NOT NULL DEFAULT 0,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            finished INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_bookmarks_track_user ON bookmarks(track_id, user_id)",
     )
     .execute(pool)
     .await?;
@@ -3146,4 +3182,153 @@ mod tests {
         let result = get_track(&pool, &uuid::Uuid::nil()).await.unwrap();
         assert!(result.is_none());
     }
+}
+
+// ── Bookmarks ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct Bookmark {
+    pub id: Uuid,
+    pub track_id: Uuid,
+    pub user_id: String,
+    pub device_id: Option<String>,
+    pub position_ms: i64,
+    pub duration_ms: i64,
+    pub finished: bool,
+}
+
+pub async fn upsert_bookmark(
+    pool: &SqlitePool,
+    track_id: &Uuid,
+    user_id: &str,
+    device_id: Option<&str>,
+    position_ms: i64,
+    duration_ms: i64,
+    finished: bool,
+) -> Result<(), DbError> {
+    let now = Utc::now().to_rfc3339();
+    let tid = track_id.to_string();
+
+    sqlx::query(
+        "INSERT INTO bookmarks (id, track_id, user_id, device_id, position_ms, duration_ms, finished, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(track_id, user_id) DO UPDATE SET
+           position_ms = excluded.position_ms,
+           device_id = excluded.device_id,
+           duration_ms = excluded.duration_ms,
+           finished = excluded.finished,
+           updated_at = excluded.updated_at"
+    )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&tid)
+        .bind(user_id)
+        .bind(device_id)
+        .bind(position_ms)
+        .bind(duration_ms)
+        .bind(finished as i64)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+pub async fn get_bookmark(
+    pool: &SqlitePool,
+    track_id: &Uuid,
+    user_id: &str,
+) -> Result<Option<Bookmark>, DbError> {
+    let tid = track_id.to_string();
+    let rows = sqlx::query(
+        "SELECT id, track_id, user_id, device_id, position_ms, duration_ms, finished
+         FROM bookmarks WHERE track_id = ? AND user_id = ?",
+    )
+    .bind(&tid)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.first().map(|r| {
+        let id_str: &str = r.try_get("id").unwrap();
+        let tid_str: &str = r.try_get("track_id").unwrap();
+        let uid: &str = r.try_get("user_id").unwrap();
+        let did: Option<&str> = r.try_get("device_id").ok();
+        let pos: i64 = r.try_get("position_ms").unwrap();
+        let dur: i64 = r.try_get("duration_ms").unwrap();
+        let fin: i64 = r.try_get("finished").unwrap();
+        Bookmark {
+            id: Uuid::parse_str(id_str).unwrap(),
+            track_id: Uuid::parse_str(tid_str).unwrap(),
+            user_id: uid.to_string(),
+            device_id: did.map(|s| s.to_string()),
+            position_ms: pos,
+            duration_ms: dur,
+            finished: fin != 0,
+        }
+    }))
+}
+
+pub async fn list_bookmarks(
+    pool: &SqlitePool,
+    user_id: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Bookmark>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, track_id, user_id, device_id, position_ms, duration_ms, finished
+         FROM bookmarks WHERE user_id = ? AND finished = 0
+         ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+    )
+    .bind(user_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+
+    let bookmarks = rows
+        .iter()
+        .map(|r| {
+            let id_str: &str = r.try_get("id").unwrap();
+            let tid_str: &str = r.try_get("track_id").unwrap();
+            let uid: &str = r.try_get("user_id").unwrap();
+            let did: Option<&str> = r.try_get("device_id").ok();
+            let pos: i64 = r.try_get("position_ms").unwrap();
+            let dur: i64 = r.try_get("duration_ms").unwrap();
+            let fin: i64 = r.try_get("finished").unwrap();
+            Bookmark {
+                id: Uuid::parse_str(id_str).unwrap(),
+                track_id: Uuid::parse_str(tid_str).unwrap(),
+                user_id: uid.to_string(),
+                device_id: did.map(|s| s.to_string()),
+                position_ms: pos,
+                duration_ms: dur,
+                finished: fin != 0,
+            }
+        })
+        .collect();
+    Ok(bookmarks)
+}
+
+pub async fn delete_bookmark(
+    pool: &SqlitePool,
+    track_id: &Uuid,
+    user_id: &str,
+) -> Result<bool, DbError> {
+    let tid = track_id.to_string();
+    let res = sqlx::query("DELETE FROM bookmarks WHERE track_id = ? AND user_id = ?")
+        .bind(&tid)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+pub async fn cleanup_old_bookmarks(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "DELETE FROM bookmarks WHERE finished = 1 AND updated_at < datetime('now', '-30 days')",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }

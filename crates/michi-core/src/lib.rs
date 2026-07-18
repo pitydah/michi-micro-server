@@ -658,3 +658,60 @@ pub struct ChainLinkUpdate {
     pub delay_ms: Option<i64>,
     pub position: Option<i64>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum ResourceProfile {
+    Eco,
+    Balanced,
+    Performance,
+    Custom,
+}
+
+impl ResourceProfile {
+    pub fn from_config_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "eco" => Self::Eco,
+            "performance" => Self::Performance,
+            "balanced" => Self::Balanced,
+            _ => Self::Balanced,
+        }
+    }
+
+    pub fn scan_concurrency(&self) -> usize {
+        match self {
+            Self::Eco => 1,
+            Self::Balanced => 2,
+            Self::Performance => 4,
+            Self::Custom => 2,
+        }
+    }
+
+    pub fn max_transcodes(&self) -> usize {
+        match self {
+            Self::Eco => 0,
+            Self::Balanced => 2,
+            Self::Performance => 4,
+            Self::Custom => 2,
+        }
+    }
+
+    pub fn db_pool_size(&self) -> u32 {
+        match self {
+            Self::Eco => 4,
+            Self::Balanced => 8,
+            Self::Performance => 16,
+            Self::Custom => 8,
+        }
+    }
+}
+
+impl std::fmt::Display for ResourceProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Eco => write!(f, "eco"),
+            Self::Balanced => write!(f, "balanced"),
+            Self::Performance => write!(f, "performance"),
+            Self::Custom => write!(f, "custom"),
+        }
+    }
+}

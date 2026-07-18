@@ -54,7 +54,7 @@ pub fn ok_response(data: Option<Value>) -> SubsonicResponse {
             status: "ok",
             version: OS_VERSION,
             server_type: "michi-micro-server",
-            server_version: "0.2.0",
+            server_version: env!("CARGO_PKG_VERSION"),
             open_subsonic: true,
             error: None,
             data,
@@ -68,7 +68,7 @@ pub fn err_response(code: i32, message: &str) -> SubsonicResponse {
             status: "failed",
             version: OS_VERSION,
             server_type: "michi-micro-server",
-            server_version: "0.2.0",
+            server_version: env!("CARGO_PKG_VERSION"),
             open_subsonic: true,
             error: Some(SubsonicError {
                 code,

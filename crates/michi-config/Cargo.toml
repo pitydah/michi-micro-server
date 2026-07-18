@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+michi-core = { path = "../michi-core" }
 uuid.workspace = true
 
 [dev-dependencies]

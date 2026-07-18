@@ -42,6 +42,7 @@ fn test_config() -> Config {
         server_id: uuid::Uuid::new_v4(),
         cors_origin: None,
         dev_mode: true,
+        resource_profile: michi_core::ResourceProfile::Balanced,
     }
 }
 
@@ -347,6 +348,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         server_id: uuid::Uuid::new_v4(),
         cors_origin: None,
         dev_mode: true,
+        resource_profile: michi_core::ResourceProfile::Balanced,
     };
     let id = track_id_from_path(file_path.to_str().unwrap());
     let track = Track {
@@ -554,6 +556,7 @@ async fn test_stream_file_not_on_disk() {
         server_id: uuid::Uuid::new_v4(),
         cors_origin: None,
         dev_mode: true,
+        resource_profile: michi_core::ResourceProfile::Balanced,
     };
 
     let id = track_id_from_path("/nonexistent/path/file.flac");
@@ -1300,6 +1303,7 @@ async fn test_full_pipeline_scan_and_stream() {
         server_id: uuid::Uuid::new_v4(),
         cors_origin: None,
         dev_mode: true,
+        resource_profile: michi_core::ResourceProfile::Balanced,
     };
     let state = michi_api::AppState::new(config, pool.clone(), None);
     let test_app = create_router(state);
@@ -1750,6 +1754,7 @@ async fn test_v1_stream_range_not_satisfiable() {
         server_id: uuid::Uuid::new_v4(),
         cors_origin: None,
         dev_mode: true,
+        resource_profile: michi_core::ResourceProfile::Balanced,
     };
     let state = michi_api::AppState::new(config, pool, None);
     let app = michi_api::create_router(state);
@@ -2803,6 +2808,7 @@ async fn test_v1_stream_and_download_range() {
         server_id: uuid::Uuid::new_v4(),
         cors_origin: None,
         dev_mode: true,
+        resource_profile: michi_core::ResourceProfile::Balanced,
     };
     let state = michi_api::AppState::new(config, pool, None);
     let app = michi_api::create_router(state);

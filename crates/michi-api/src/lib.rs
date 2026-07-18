@@ -206,7 +206,7 @@ pub fn start_sync_peers(state: &AppState) {
 
                             let identify = michi_sync::SyncMessage::Identify {
                                 name: sync_name.clone(),
-                                version: "0.1.0".into(),
+                                version: env!("CARGO_PKG_VERSION").into(),
                                 device_type: michi_sync::DeviceType::Server,
                             };
                             if let Ok(json) = identify.serialize() {
@@ -530,6 +530,16 @@ fn v1_link_routes() -> Router<AppState> {
             get(routes::v1::history::history_export_handler),
         )
         .route(
+            "/api/v1/bookmarks",
+            get(routes::v1::bookmarks::list_bookmarks_handler)
+                .post(routes::v1::bookmarks::upsert_bookmark_handler),
+        )
+        .route(
+            "/api/v1/bookmarks/:track_id",
+            get(routes::v1::bookmarks::get_bookmark_handler)
+                .delete(routes::v1::bookmarks::delete_bookmark_handler),
+        )
+        .route(
             "/api/v1/backup/snapshot",
             post(routes::v1::backup::snapshot_handler),
         )
@@ -550,6 +560,11 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/health/verify",
             get(routes::v1::backup::verify_integrity_handler),
+        )
+        .route("/health/live", get(routes::v1::server::health_live_handler))
+        .route(
+            "/health/ready",
+            get(routes::v1::server::health_ready_handler),
         )
         // Playback
         .route(

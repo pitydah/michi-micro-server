@@ -1,4 +1,4 @@
-use axum::{extract::State, Json};
+use axum::{extract::State, http::StatusCode, Json};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -84,6 +84,28 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
     })
 }
 
+pub async fn health_live_handler() -> &'static str {
+    "OK"
+}
+
+pub async fn health_ready_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let db_ok = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tracks")
+        .fetch_one(&state.db)
+        .await
+        .is_ok();
+
+    if db_ok {
+        Ok(Json(serde_json::json!({ "status": "ok" })))
+    } else {
+        Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "status": "error", "message": "database unavailable" })),
+        ))
+    }
+}
+
 pub async fn status_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let uptime = state.started_at.elapsed().as_secs();
     Json(serde_json::json!({
@@ -93,5 +115,6 @@ pub async fn status_handler(State(state): State<AppState>) -> Json<serde_json::V
         "port": state.config.port(),
         "server_id": state.server_id(),
         "uptime_seconds": uptime,
+        "resource_profile": state.config.resource_profile.to_string(),
     }))
 }
