@@ -330,6 +330,33 @@ pub async fn link_devices_revoke(
     Ok(Json(serde_json::json!({ "status": "revoked" })))
 }
 
+pub async fn list_devices_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let devices = michi_db::list_link_devices(&state.db)
+        .await
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+
+    let now = chrono::Utc::now();
+    let items: Vec<serde_json::Value> = devices.into_iter().map(|d| {
+        let online = d.last_seen.as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds() < 180)
+            .unwrap_or(false);
+        serde_json::json!({
+            "device_id": d.device_id,
+            "alias": d.alias,
+            "device_type": d.device_type,
+            "device_model": d.device_model,
+            "last_seen": d.last_seen,
+            "online": online,
+            "revoked": d.revoked,
+        })
+    }).collect();
+
+    Ok(Json(serde_json::json!({ "devices": items })))
+}
+
 // ── QR Pairing ───────────────────────────────────────────────────
 
 #[derive(Serialize)]

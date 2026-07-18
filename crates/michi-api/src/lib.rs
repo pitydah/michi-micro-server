@@ -378,6 +378,10 @@ fn v1_link_routes() -> Router<AppState> {
             "/api/v1/devices/revoke",
             post(routes::v1::pair::link_devices_revoke),
         )
+        .route(
+            "/api/v1/link/devices",
+            get(routes::v1::pair::list_devices_handler),
+        )
         // Library
         .route(
             "/api/v1/library/stats",
@@ -929,6 +933,8 @@ pub fn create_router(state: AppState) -> Router {
             "/static/assets/michi-micro-server.png",
             get(static_files::favicon_png),
         )
+        .route("/static/i18n/en.json", get(static_files::i18n_en))
+        .route("/static/i18n/es.json", get(static_files::i18n_es))
         .route("/manifest.json", get(pwa::manifest_json))
         .route("/sw.js", get(pwa::sw_js))
         .route("/api/shared/:code", get(library::shared_playlist_handler))

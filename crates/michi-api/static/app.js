@@ -45,6 +45,55 @@ const MichiAPI = {
   streamUrl(id) { return this.base + '/api/v1/stream/' + id; },
 };
 
+// ── i18n ────────────────────────────────────────────────────────
+var _i18n = {};
+var _currentLang = localStorage.getItem('michi_lang') || navigator.language.split('-')[0] || 'en';
+
+function t(key) {
+  var val = _i18n[key];
+  return val !== undefined && val !== null ? val : key;
+}
+
+async function loadI18n(lang) {
+  _currentLang = lang || _currentLang;
+  localStorage.setItem('michi_lang', _currentLang);
+  try {
+    var resp = await fetch('/static/i18n/' + _currentLang + '.json');
+    if (resp.ok) {
+      _i18n = await resp.json();
+    } else {
+      var fallback = await fetch('/static/i18n/en.json');
+      _i18n = await fallback.json();
+    }
+  } catch (e) {
+    _i18n = {};
+  }
+  applyI18n();
+}
+
+function applyI18n() {
+  document.querySelectorAll('[data-i18n]').forEach(function (el) {
+    var key = el.getAttribute('data-i18n');
+    var text = t(key);
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      el.placeholder = text;
+    } else {
+      el.textContent = text;
+    }
+  });
+  // Update placeholder for search
+  var searchInput = $('#search-input');
+  if (searchInput) searchInput.placeholder = t('search_placeholder');
+}
+
+function setLanguage(lang) {
+  loadI18n(lang).then(function () {
+    var sel = $('#lang-select');
+    if (sel) sel.value = lang;
+    showToast('Language: ' + lang.toUpperCase());
+  });
+}
+
 // ── State ───────────────────────────────────────────────────────
 const State = {
   status: null,
@@ -151,6 +200,7 @@ function showSection(section) {
 
 // ── Init ────────────────────────────────────────────────────────
 async function init() {
+  await loadI18n();
   showSection('dashboard');
   await Promise.all([loadStatus(), loadServerInfo(), loadDashboard(), loadTracks()]);
   State.polling = setInterval(function () {
@@ -596,8 +646,34 @@ function updateMiniPlayer(t) {
 function testMichiLink() {
   loadStatus();
   loadServerInfo();
-  loadStats();
-  showToast('Michi Link connection tested!');
+  loadEcosystemDevices();
+  showToast('Michi Link tested!');
+}
+
+// ── Ecosystem ────────────────────────────────────────────────────
+async function loadEcosystemDevices() {
+  try {
+    var raw = await MichiAPI.request('/api/v1/link/devices');
+    var devices = raw.devices || [];
+    var container = $('#ecosystem-devices');
+    if (!container) return;
+    if (devices.length === 0) {
+      container.innerHTML = '<p style="color:var(--text-dim);font-size:.78rem;padding:8px 0">No devices connected yet. Use QR pairing above to connect.</p>';
+      return;
+    }
+    var typeIcons = { mobile: '📱', desktop: '💻', player: '🎵', receiver: '📡', server: '🖥️', default: '📱' };
+    container.innerHTML = devices.map(function (d) {
+      var icon = typeIcons[d.device_type] || typeIcons.default;
+      var status = d.online
+        ? '<span class="badge stable" style="font-size:.6rem">ONLINE</span>'
+        : '<span class="badge disabled" style="font-size:.6rem">OFFLINE</span>';
+      return '<div class="chain-item" style="cursor:default;padding:10px 14px">' +
+        '<div style="font-size:1.1rem">' + icon + '</div>' +
+        '<div class="info"><div class="name">' + esc(d.alias || 'Unknown') + ' ' + status + '</div>' +
+        '<div class="meta">' + esc(d.device_type) + (d.device_model ? ' · ' + esc(d.device_model) : '') + '</div></div>' +
+        '</div>';
+    }).join('');
+  } catch (e) { console.warn('ecosystem:', e.message); }
 }
 
 // ── QR Pairing ───────────────────────────────────────────────────
@@ -1111,6 +1187,9 @@ showSection = function (section) {
     loadCurrentState();
     loadSettings();
     setTimeout(loadRoomGroups, 100);
+  }
+  if (section === 'michilink') {
+    setTimeout(loadEcosystemDevices, 200);
   }
   if (section === 'history') {
     _historyOffset = 0;

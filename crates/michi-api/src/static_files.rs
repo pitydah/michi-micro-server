@@ -6,6 +6,9 @@ const LOGO: &[u8] = include_bytes!("../static/assets/michi-logo.svg");
 const FAVICON_SVG: &[u8] = include_bytes!("../static/assets/michi-micro-server.svg");
 const FAVICON_PNG: &[u8] = include_bytes!("../static/assets/michi-micro-server.png");
 
+const I18N_EN: &str = include_str!("../static/i18n/en.json");
+const I18N_ES: &str = include_str!("../static/i18n/es.json");
+
 pub async fn styles_css() -> impl IntoResponse {
     Response::builder()
         .header("content-type", "text/css; charset=utf-8")
@@ -41,5 +44,21 @@ pub async fn favicon_png() -> impl IntoResponse {
         .header("content-type", "image/png")
         .header("cache-control", "public, max-age=86400")
         .body(axum::body::Body::from(FAVICON_PNG))
+        .unwrap()
+}
+
+pub async fn i18n_en() -> impl IntoResponse {
+    Response::builder()
+        .header("content-type", "application/json; charset=utf-8")
+        .header("cache-control", "public, max-age=3600")
+        .body(axum::body::Body::from(I18N_EN))
+        .unwrap()
+}
+
+pub async fn i18n_es() -> impl IntoResponse {
+    Response::builder()
+        .header("content-type", "application/json; charset=utf-8")
+        .header("cache-control", "public, max-age=3600")
+        .body(axum::body::Body::from(I18N_ES))
         .unwrap()
 }
