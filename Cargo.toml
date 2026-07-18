@@ -20,6 +20,9 @@ members = [
     "crates/michi-receivers",
     "crates/michi-security",
     "crates/michi-ingest",
+    "crates/michi-identity",
+    "crates/michi-connect",
+    "crates/michi-onboard",
 ]
 
 [workspace.package]

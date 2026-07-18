@@ -37,6 +37,9 @@ michi-link = { path = "../michi-link" }
 michi-receivers = { path = "../michi-receivers" }
 michi-security = { path = "../michi-security" }
 michi-ingest = { path = "../michi-ingest" }
+michi-identity = { path = "../michi-identity" }
+michi-connect = { path = "../michi-connect" }
+michi-onboard = { path = "../michi-onboard" }
 mdns-sd = "0.13"
 qrcode = { workspace = true }
 rand = "0.8"

@@ -1,0 +1,16 @@
+[package]
+name = "michi-connect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+michi-identity = { path = "../michi-identity" }
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+qrcode = { workspace = true }

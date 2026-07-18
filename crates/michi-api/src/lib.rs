@@ -664,6 +664,18 @@ fn v1_link_routes() -> Router<AppState> {
             post(routes::v1::announce::announce_handler),
         )
         .route(
+            "/api/v1/setup/status",
+            get(routes::v1::setup::setup_status_handler),
+        )
+        .route(
+            "/api/v1/setup/scan",
+            post(routes::v1::setup::setup_scan_handler),
+        )
+        .route(
+            "/api/v1/setup/fix-perms",
+            post(routes::v1::setup::setup_fix_perms_handler),
+        )
+        .route(
             "/api/v1/sources",
             get(routes::v1::sources::list_sources_handler)
                 .post(routes::v1::sources::add_source_handler),
