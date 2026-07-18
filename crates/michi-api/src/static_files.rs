@@ -12,6 +12,9 @@ const I18N_PT: &str = include_str!("../static/i18n/pt.json");
 const I18N_DE: &str = include_str!("../static/i18n/de.json");
 const I18N_FR: &str = include_str!("../static/i18n/fr.json");
 const I18N_IT: &str = include_str!("../static/i18n/it.json");
+const I18N_RU: &str = include_str!("../static/i18n/ru.json");
+const I18N_ZH: &str = include_str!("../static/i18n/zh.json");
+const I18N_JA: &str = include_str!("../static/i18n/ja.json");
 
 pub async fn styles_css() -> impl IntoResponse {
     Response::builder()
@@ -96,5 +99,29 @@ pub async fn i18n_it() -> impl IntoResponse {
         .header("content-type", "application/json; charset=utf-8")
         .header("cache-control", "public, max-age=3600")
         .body(axum::body::Body::from(I18N_IT))
+        .unwrap()
+}
+
+pub async fn i18n_ru() -> impl IntoResponse {
+    Response::builder()
+        .header("content-type", "application/json; charset=utf-8")
+        .header("cache-control", "public, max-age=3600")
+        .body(axum::body::Body::from(I18N_RU))
+        .unwrap()
+}
+
+pub async fn i18n_zh() -> impl IntoResponse {
+    Response::builder()
+        .header("content-type", "application/json; charset=utf-8")
+        .header("cache-control", "public, max-age=3600")
+        .body(axum::body::Body::from(I18N_ZH))
+        .unwrap()
+}
+
+pub async fn i18n_ja() -> impl IntoResponse {
+    Response::builder()
+        .header("content-type", "application/json; charset=utf-8")
+        .header("cache-control", "public, max-age=3600")
+        .body(axum::body::Body::from(I18N_JA))
         .unwrap()
 }
