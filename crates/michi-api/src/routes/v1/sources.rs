@@ -200,6 +200,10 @@ pub async fn proxy_stream_handler(
         ));
     }
 
+    // SSRF protection
+    michi_ingest::validate_url(&source.url)
+        .map_err(|e| v1_error(StatusCode::BAD_REQUEST, "SSRF_BLOCKED", &e))?;
+
     let client = reqwest::Client::new();
     match client.get(&source.url).send().await {
         Ok(resp) => {
@@ -253,6 +257,9 @@ pub async fn proxy_episode_handler(
     for source in &sources {
         if let Ok(eps) = michi_db::list_podcast_episodes(&state.db, &source.id).await {
             if let Some(ep) = eps.into_iter().find(|e| e.id == episode_id) {
+                // SSRF protection
+                let _ = michi_ingest::validate_url(&ep.audio_url)
+                    .map_err(|e| v1_error(StatusCode::BAD_REQUEST, "SSRF_BLOCKED", &e))?;
                 let client = reqwest::Client::new();
                 match client.get(&ep.audio_url).send().await {
                     Ok(resp) => {

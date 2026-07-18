@@ -21,39 +21,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
       - uses: Swatinem/rust-cache@v2
-
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
-
       - name: cargo fmt
         run: cargo fmt --check
-
       - name: cargo check
         run: cargo check --workspace
-
       - name: cargo test
         run: cargo test --workspace
-
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   ci-docker:
     runs-on: ubuntu-latest
+    needs: ci-rust
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Build Docker image
         uses: docker/build-push-action@v6
         with:
@@ -61,7 +52,6 @@ jobs:
           push: false
           load: true
           tags: michi-server:test
-
       - name: Smoke test
         run: |
           docker run -d --name michi-test -p 9090:9090 \
@@ -79,20 +69,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
@@ -102,7 +88,6 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:

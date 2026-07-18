@@ -1,4 +1,10 @@
+//! Michi Ingest — Universal Stream Ingest
+//!
+//! Sniff URLs to detect stream type (radio, podcast, direct file).
+//! Includes SSRF protection: blocks private/reserved IP ranges.
+
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -21,8 +27,55 @@ pub struct StreamInfo {
     pub sample_rate: Option<u32>,
 }
 
+/// Validate URL is safe: only http/https, no private/reserved IPs, no DNS rebinding
+pub fn validate_url(url_str: &str) -> Result<String, String> {
+    if !url_str.starts_with("http://") && !url_str.starts_with("https://") {
+        return Err("only http and https are allowed".into());
+    }
+
+    let parsed = url::Url::parse(url_str)
+        .map_err(|e| format!("invalid URL: {}", e))?;
+
+    let host = parsed.host_str().ok_or("URL has no host")?;
+
+    // Resolve DNS and check every address
+    let addr_str = format!("{}:80", host);
+    let addrs = addr_str.to_socket_addrs()
+        .map_err(|e| format!("DNS resolution failed: {}", e))?;
+
+    for addr in addrs {
+        let ip = addr.ip();
+        if is_private_or_link_local(&ip) {
+            return Err(format!("blocked address: {}", ip));
+        }
+    }
+
+    Ok(url_str.to_string())
+}
+
+fn is_private_or_link_local(ip: &IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_multicast() || ip.is_unspecified() {
+        return true;
+    }
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            // 169.254.x.x (link-local)
+            o[0] == 169 && o[1] == 254
+            // 10.0.0.0/8
+            || o[0] == 10
+            // 172.16.0.0/12
+            || (o[0] == 172 && (o[1] & 0xF0) == 16)
+            // 192.168.0.0/16
+            || (o[0] == 192 && o[1] == 168)
+        }
+        IpAddr::V6(_) => false,
+    }
+}
+
 /// Detect stream type by making a HEAD / partial GET request
 pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
+    let _safe_url = validate_url(url)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::limited(5))

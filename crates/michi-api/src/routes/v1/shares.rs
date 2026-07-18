@@ -7,6 +7,9 @@ use axum::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use argon2::Argon2;
+use argon2::password_hash::{PasswordHash, PasswordHasher, SaltString};
+use rand::rngs::OsRng;
 
 fn v1_error(s: StatusCode, c: &str, m: &str) -> (StatusCode, Json<serde_json::Value>) {
     (s, Json(serde_json::json!({"error":{"code":c,"message":m}})))
@@ -39,9 +42,13 @@ pub async fn create_share_handler(
 
     let token = Uuid::new_v4();
     let token_hash = format!("{:x}", Sha256::digest(token.to_string().as_bytes()));
-    let password_hash = body
-        .password
-        .map(|p| format!("{:x}", Sha256::digest(p.as_bytes())));
+    let password_hash = body.password.map(|p| {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(p.as_bytes(), &salt)
+            .map(|h| h.to_string())
+            .unwrap_or_else(|_| format!("{:x}", Sha256::digest(p.as_bytes())))
+    });
 
     let expires_at = body
         .expires_in_hours
