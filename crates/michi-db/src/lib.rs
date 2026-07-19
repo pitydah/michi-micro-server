@@ -1643,9 +1643,12 @@ pub async fn update_chain(
     for p in &params {
         q = q.bind(p);
     }
-    q.execute(pool).await?;
-    let _ = record_change(pool, "chain", &id.to_string(), "update", None).await;
-    Ok(true)
+    let res = q.execute(pool).await?;
+    let affected = res.rows_affected() > 0;
+    if affected {
+        let _ = record_change(pool, "chain", &id.to_string(), "update", None).await;
+    }
+    Ok(affected)
 }
 
 pub async fn delete_chain(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbError> {
@@ -1794,9 +1797,12 @@ pub async fn update_chain_link(
     for p in &params {
         q = q.bind(p);
     }
-    q.execute(pool).await?;
-    let _ = record_change(pool, "chain_link", &link_id.to_string(), "update", None).await;
-    Ok(true)
+    let res = q.execute(pool).await?;
+    let affected = res.rows_affected() > 0;
+    if affected {
+        let _ = record_change(pool, "chain_link", &link_id.to_string(), "update", None).await;
+    }
+    Ok(affected)
 }
 
 pub async fn delete_chain_link(pool: &SqlitePool, link_id: &Uuid) -> Result<bool, DbError> {
@@ -1934,13 +1940,15 @@ pub async fn set_share_code(
     share_code: Option<&str>,
 ) -> Result<(), DbError> {
     let id_str = playlist_id.to_string();
-    sqlx::query("UPDATE playlists SET share_code = ?, is_public = ? WHERE id = ?")
+    let res = sqlx::query("UPDATE playlists SET share_code = ?, is_public = ? WHERE id = ?")
         .bind(share_code)
         .bind(if share_code.is_some() { 1 } else { 0 })
         .bind(&id_str)
         .execute(pool)
         .await?;
-    let _ = record_change(pool, "playlist", &id_str, "share", None).await;
+    if res.rows_affected() > 0 {
+        let _ = record_change(pool, "playlist", &id_str, "share", None).await;
+    }
     Ok(())
 }
 
@@ -3093,7 +3101,7 @@ pub async fn update_playback_session(
     session: &michi_core::PlaybackSessionDb,
 ) -> Result<(), DbError> {
     let now = Utc::now().to_rfc3339();
-    sqlx::query(
+    let res = sqlx::query(
         "UPDATE playback_sessions SET queue_id = ?, queue_state = ?, current_index = ?, current_track_id = ?, position_ms = ?, playing = ?, repeat_mode = ?, shuffle = ?, volume = ?, source = ?, resume_policy = ?, restored = ?, updated_at = ? WHERE id = ?",
     )
     .bind(session.queue_id.map(|u| u.to_string()))
@@ -3112,7 +3120,9 @@ pub async fn update_playback_session(
     .bind(session.id.to_string())
     .execute(pool)
     .await?;
-    let _ = record_change(pool, "session", &session.id.to_string(), "update", None).await;
+    if res.rows_affected() > 0 {
+        let _ = record_change(pool, "session", &session.id.to_string(), "update", None).await;
+    }
     Ok(())
 }
 

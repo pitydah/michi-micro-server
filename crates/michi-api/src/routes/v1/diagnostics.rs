@@ -315,10 +315,7 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
         .list()
         .len();
 
-    let active_token_count = michi_db::list_link_devices(&state.db)
-        .await
-        .map(|d| d.len())
-        .unwrap_or(0);
+    let active_token_count = total_devices.max(0) as usize;
 
     // Compute CPU% with a 200ms sample window
     let cpu_percent = {
