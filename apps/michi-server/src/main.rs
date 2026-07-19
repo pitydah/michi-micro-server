@@ -85,7 +85,9 @@ async fn main() -> Result<()> {
         "starting Michi Micro Server",
     );
 
-    let pool = michi_db::init_pool(&config.database_url).await?;
+    let pool =
+        michi_db::init_pool_with_size(&config.database_url, config.resource_profile.db_pool_size())
+            .await?;
 
     let identity = michi_identity::MichiIdentity::load_or_create(&config.config_path).await?;
     info!("michi_id: {}...", &identity.get_id().await[..12]);

@@ -51,6 +51,13 @@ fn ensure_db_parent_dir(database_url: &str) -> Result<(), DbError> {
 }
 
 pub async fn init_pool(database_url: &str) -> Result<SqlitePool, DbError> {
+    init_pool_with_size(database_url, 5).await
+}
+
+pub async fn init_pool_with_size(
+    database_url: &str,
+    max_connections: u32,
+) -> Result<SqlitePool, DbError> {
     info!("initializing database at {}", database_url);
 
     ensure_db_parent_dir(database_url)?;
@@ -63,7 +70,7 @@ pub async fn init_pool(database_url: &str) -> Result<SqlitePool, DbError> {
         .busy_timeout(std::time::Duration::from_secs(5));
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(max_connections)
         .connect_with(opts)
         .await?;
 
@@ -93,7 +100,6 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
             .bind(Utc::now().to_rfc3339())
             .execute(pool)
             .await?;
-        info!("migration 1 applied");
     }
 
     if current < 2 {
@@ -436,7 +442,27 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 35 applied");
     }
 
-    info!("database schema at version 35");
+    if current < 36 {
+        info!("applying migration 36: backup snapshots");
+        migration_036(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (36, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 36 applied");
+    }
+
+    if current < 37 {
+        info!("applying migration 37: server config");
+        migration_037(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (37, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 37 applied");
+    }
+
+    info!("database schema at version 37");
     Ok(())
 }
 
@@ -1122,6 +1148,71 @@ async fn migration_035(pool: &SqlitePool) -> Result<(), DbError> {
     Ok(())
 }
 
+async fn migration_036(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS backup_snapshots (
+            id TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn migration_037(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS server_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn save_snapshot(pool: &SqlitePool, data: &str) -> Result<(), DbError> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO backup_snapshots (id, data, created_at) VALUES (?, ?, ?)")
+        .bind(&id)
+        .bind(data)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn last_snapshot(pool: &SqlitePool) -> Result<Option<String>, DbError> {
+    let row = sqlx::query_scalar::<_, String>(
+        "SELECT data FROM backup_snapshots ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn set_server_config(pool: &SqlitePool, key: &str, value: &str) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO server_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_server_config(pool: &SqlitePool, key: &str) -> Result<Option<String>, DbError> {
+    let row = sqlx::query_scalar::<_, String>("SELECT value FROM server_config WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row)
+}
+
 async fn migration_015(pool: &SqlitePool) -> Result<(), DbError> {
     sqlx::query("ALTER TABLE tracks ADD COLUMN genre TEXT")
         .execute(pool)
@@ -1399,8 +1490,10 @@ pub async fn create_chain(
         .bind(&input.name)
         .bind(&now)
         .bind(&now)
-        .execute(pool)
-        .await?;
+    .execute(pool)
+    .await?;
+
+    let _ = record_change(pool, "chain", &id.to_string(), "create", None).await;
 
     Ok(PlaybackChain {
         id,
@@ -1551,6 +1644,7 @@ pub async fn update_chain(
         q = q.bind(p);
     }
     q.execute(pool).await?;
+    let _ = record_change(pool, "chain", &id.to_string(), "update", None).await;
     Ok(true)
 }
 
@@ -1565,7 +1659,11 @@ pub async fn delete_chain(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbError>
         .bind(&id_str)
         .execute(pool)
         .await?;
-    Ok(res.rows_affected() > 0)
+    let affected = res.rows_affected() > 0;
+    if affected {
+        let _ = record_change(pool, "chain", &id_str, "delete", None).await;
+    }
+    Ok(affected)
 }
 
 // ── Chain Links ──────────────────────────────────────────────────
@@ -1601,6 +1699,8 @@ pub async fn add_chain_link(
     .bind(delay)
     .execute(pool)
     .await?;
+
+    let _ = record_change(pool, "chain_link", &id.to_string(), "create", None).await;
 
     Ok(ChainLink {
         id,
@@ -1695,6 +1795,7 @@ pub async fn update_chain_link(
         q = q.bind(p);
     }
     q.execute(pool).await?;
+    let _ = record_change(pool, "chain_link", &link_id.to_string(), "update", None).await;
     Ok(true)
 }
 
@@ -1704,7 +1805,11 @@ pub async fn delete_chain_link(pool: &SqlitePool, link_id: &Uuid) -> Result<bool
         .bind(&lid)
         .execute(pool)
         .await?;
-    Ok(res.rows_affected() > 0)
+    let affected = res.rows_affected() > 0;
+    if affected {
+        let _ = record_change(pool, "chain_link", &lid, "delete", None).await;
+    }
+    Ok(affected)
 }
 
 pub async fn reorder_chain_links(
@@ -1721,6 +1826,7 @@ pub async fn reorder_chain_links(
             .execute(pool)
             .await?;
     }
+    let _ = record_change(pool, "chain_link", &cid, "reorder", None).await;
     Ok(())
 }
 
@@ -1834,6 +1940,7 @@ pub async fn set_share_code(
         .bind(&id_str)
         .execute(pool)
         .await?;
+    let _ = record_change(pool, "playlist", &id_str, "share", None).await;
     Ok(())
 }
 
@@ -1895,6 +2002,15 @@ pub async fn add_track_to_playlist(
     .execute(pool)
     .await?;
 
+    let _ = record_change(
+        pool,
+        "playlist",
+        &playlist_id.to_string(),
+        "add_track",
+        Some(&track_id.to_string()),
+    )
+    .await;
+
     Ok(PlaylistTrack {
         id,
         playlist_id: *playlist_id,
@@ -1929,6 +2045,10 @@ pub async fn remove_track_from_playlist(
     .bind(&p_id)
     .execute(pool)
     .await?;
+
+    if removed {
+        let _ = record_change(pool, "playlist", &p_id, "remove_track", Some(&t_id)).await;
+    }
 
     Ok(removed)
 }
@@ -1972,6 +2092,8 @@ pub async fn reorder_playlist_tracks(
         .await?;
 
     tx.commit().await?;
+
+    let _ = record_change(pool, "playlist", &p_id, "reorder", None).await;
 
     Ok(())
 }
@@ -2135,7 +2257,18 @@ pub async fn star_track(
             .execute(pool)
             .await?
     };
-    Ok(result.rows_affected() > 0)
+    let affected = result.rows_affected() > 0;
+    if affected {
+        let _ = record_change(
+            pool,
+            "track",
+            &track_id.to_string(),
+            if starred { "star" } else { "unstar" },
+            None,
+        )
+        .await;
+    }
+    Ok(affected)
 }
 
 pub async fn rate_track(pool: &SqlitePool, track_id: &Uuid, rating: u8) -> Result<bool, DbError> {
@@ -2145,7 +2278,11 @@ pub async fn rate_track(pool: &SqlitePool, track_id: &Uuid, rating: u8) -> Resul
         .bind(track_id.to_string())
         .execute(pool)
         .await?;
-    Ok(result.rows_affected() > 0)
+    let affected = result.rows_affected() > 0;
+    if affected {
+        let _ = record_change(pool, "track", &track_id.to_string(), "rate", None).await;
+    }
+    Ok(affected)
 }
 
 pub async fn get_starred_tracks(pool: &SqlitePool) -> Result<Vec<Track>, DbError> {
@@ -2365,7 +2502,11 @@ pub async fn delete_track(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbError>
 
 pub async fn delete_all_tracks(pool: &SqlitePool) -> Result<u64, DbError> {
     let result = sqlx::query("DELETE FROM tracks").execute(pool).await?;
-    Ok(result.rows_affected())
+    let count = result.rows_affected();
+    if count > 0 {
+        let _ = record_change(pool, "track", "all", "delete_all", None).await;
+    }
+    Ok(count)
 }
 
 pub async fn find_track_by_path(
@@ -2628,7 +2769,11 @@ pub async fn update_track(
     .await?
     .rows_affected();
 
-    Ok(rows_affected > 0)
+    let affected = rows_affected > 0;
+    if affected {
+        let _ = record_change(pool, "track", &id_str, "update", None).await;
+    }
+    Ok(affected)
 }
 
 // --- Link Device functions ---
@@ -2885,6 +3030,7 @@ pub async fn upsert_receiver(
     .bind(&now)
     .execute(pool)
     .await?;
+    let _ = record_change(pool, "receiver", &receiver.id.to_string(), "upsert", None).await;
     Ok(())
 }
 
@@ -2938,6 +3084,7 @@ pub async fn create_playback_session(
     .bind(&now)
     .execute(pool)
     .await?;
+    let _ = record_change(pool, "session", &session.id.to_string(), "create", None).await;
     Ok(())
 }
 
@@ -2965,6 +3112,7 @@ pub async fn update_playback_session(
     .bind(session.id.to_string())
     .execute(pool)
     .await?;
+    let _ = record_change(pool, "session", &session.id.to_string(), "update", None).await;
     Ok(())
 }
 
@@ -3529,6 +3677,8 @@ pub async fn upsert_bookmark(
         .execute(pool)
         .await?;
 
+    let _ = record_change(pool, "bookmark", &tid, "upsert", None).await;
+
     Ok(())
 }
 
@@ -3624,7 +3774,11 @@ pub async fn delete_bookmark(
         .bind(user_id)
         .execute(pool)
         .await?;
-    Ok(res.rows_affected() > 0)
+    let affected = res.rows_affected() > 0;
+    if affected {
+        let _ = record_change(pool, "bookmark", &tid, "delete", None).await;
+    }
+    Ok(affected)
 }
 
 pub async fn cleanup_old_bookmarks(pool: &SqlitePool) -> Result<(), DbError> {
@@ -3990,8 +4144,9 @@ pub async fn create_radio_station(
         .bind(station.enabled as i64)
         .bind(station.favorite as i64)
         .bind(&now)
-        .execute(pool)
-        .await?;
+    .execute(pool)
+    .await?;
+    let _ = record_change(pool, "radio", &id.to_string(), "create", None).await;
     Ok(())
 }
 
@@ -4015,7 +4170,11 @@ pub async fn update_radio_station(
         .bind(&id_s)
         .execute(pool)
         .await?;
-    Ok(res.rows_affected() > 0)
+    let affected = res.rows_affected() > 0;
+    if affected {
+        let _ = record_change(pool, "radio", &id_s, "update", None).await;
+    }
+    Ok(affected)
 }
 
 pub async fn delete_radio_station(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbError> {
@@ -4024,7 +4183,11 @@ pub async fn delete_radio_station(pool: &SqlitePool, id: &Uuid) -> Result<bool, 
         .bind(&id_s)
         .execute(pool)
         .await?;
-    Ok(res.rows_affected() > 0)
+    let affected = res.rows_affected() > 0;
+    if affected {
+        let _ = record_change(pool, "radio", &id_s, "delete", None).await;
+    }
+    Ok(affected)
 }
 
 pub async fn toggle_radio_favorite(

@@ -188,6 +188,12 @@ pub async fn update_settings_handler(
     if let Some(v) = body.dev_mode {
         cfg.dev_mode = v;
     }
+    if let Some(ref v) = body.sync_name {
+        cfg.sync_name = v.clone();
+    }
+    if let Some(ref v) = body.sync_peers {
+        cfg.sync_peers = v.clone();
+    }
 
     cfg.save_to_file().map_err(|e| {
         (
@@ -196,7 +202,7 @@ pub async fn update_settings_handler(
         )
     })?;
 
-    // Determine if restart is required
+    // Restart required for all settings except UI (which take effect on next page load)
     let restart_required = body.resource_profile.is_some()
         || body.stream_profile.is_some()
         || body.format_policy.is_some()
@@ -206,7 +212,10 @@ pub async fn update_settings_handler(
         || body.reconnect_delay_max.is_some()
         || body.max_remote_bitrate.is_some()
         || body.remote_sync.is_some()
-        || body.dev_mode.is_some();
+        || body.scrobble_enabled.is_some()
+        || body.dev_mode.is_some()
+        || body.sync_name.is_some()
+        || body.sync_peers.is_some();
 
     Ok(Json(serde_json::json!({
         "status": "settings_updated",

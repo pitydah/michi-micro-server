@@ -119,7 +119,12 @@ pub struct PlayerCompatibility {
 }
 
 impl PlayerCompatibility {
-    fn new(has_queue: bool, playback_restored: bool) -> Self {
+    fn new(
+        has_queue: bool,
+        playback_restored: bool,
+        has_receivers: bool,
+        has_imports: bool,
+    ) -> Self {
         let status = if has_queue && playback_restored {
             "CONTRACT_OK"
         } else if has_queue {
@@ -128,13 +133,13 @@ impl PlayerCompatibility {
             "CONTRACT_OK"
         };
         Self {
-            supports_import_preflight: true,
-            supports_upload_mapping: true,
-            supports_commit_mapping: true,
-            supports_queue_transfer: true,
+            supports_import_preflight: has_imports,
+            supports_upload_mapping: has_imports,
+            supports_commit_mapping: has_imports,
+            supports_queue_transfer: has_queue,
             queue_restored: has_queue,
             playback_restored,
-            receiver_e2e_ready: true,
+            receiver_e2e_ready: has_receivers,
             contract_status: status.into(),
         }
     }
@@ -446,7 +451,12 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
             client_available: registered_receivers > 0,
             registered_receivers,
         },
-        player_compatibility: PlayerCompatibility::new(total_queues > 0, playback_restored),
+        player_compatibility: PlayerCompatibility::new(
+            total_queues > 0,
+            playback_restored,
+            registered_receivers > 0,
+            active_import_sessions > 0,
+        ),
         system: SystemStatus {
             memory_rss_mb,
             memory_vm_mb,

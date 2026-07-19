@@ -668,6 +668,7 @@ impl ResourceProfile {
             "eco" => Self::Eco,
             "performance" => Self::Performance,
             "balanced" => Self::Balanced,
+            "custom" => Self::Custom,
             _ => Self::Balanced,
         }
     }
@@ -760,6 +761,7 @@ impl StreamProfile {
             "mp3192" => Self::Mp3Compatibility192,
             "mp3320" => Self::Mp3Compatibility320,
             "downsample" => Self::Downsample2448,
+            "custom" => Self::Custom,
             _ => Self::Original,
         }
     }

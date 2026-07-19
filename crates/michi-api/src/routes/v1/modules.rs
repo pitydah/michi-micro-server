@@ -325,9 +325,11 @@ pub struct HandoffOffer {
 
 use std::sync::LazyLock;
 
-static HANDOFF_TOKENS: LazyLock<
-    Arc<RwLock<HashMap<String, (String, String, u64, std::time::Instant)>>>,
-> = LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
+type HandoffEntry = (String, String, u64, std::time::Instant);
+type HandoffTokenMap = Arc<RwLock<HashMap<String, HandoffEntry>>>;
+
+static HANDOFF_TOKENS: LazyLock<HandoffTokenMap> =
+    LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 pub async fn handoff_handler(Json(body): Json<HandoffOffer>) -> Json<serde_json::Value> {
     let handoff_token = uuid::Uuid::new_v4().to_string();
