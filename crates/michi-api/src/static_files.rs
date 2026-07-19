@@ -5,7 +5,11 @@ use axum::{
     Json,
 };
 
-const CSS: &str = include_str!("../static/styles.css");
+const CSS: &str = concat!(
+    include_str!("../static/styles.css"),
+    "\n",
+    include_str!("../static/hero-cat.css")
+);
 const JS: &str = include_str!("../static/app.js");
 const LOGO: &[u8] = include_bytes!("../static/assets/michi-logo.svg");
 const FAVICON_SVG: &[u8] = include_bytes!("../static/assets/michi-micro-server.svg");
