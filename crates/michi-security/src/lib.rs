@@ -7,7 +7,7 @@ pub mod idempotency;
 use axum::{
     body::Body,
     extract::{ConnectInfo, Request, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     middleware::Next,
     response::Response,
 };
@@ -67,8 +67,8 @@ pub struct SecurityState {
 
 impl SecurityState {
     pub fn new(config: SecurityConfig) -> Self {
-        let quota = Quota::per_second(NonZeroU32::new(config.rate_limit_rps).unwrap())
-            .allow_burst(NonZeroU32::new(config.rate_limit_burst).unwrap());
+        let quota = Quota::per_second(NonZeroU32::new(config.rate_limit_rps.max(1)).unwrap())
+            .allow_burst(NonZeroU32::new(config.rate_limit_burst.max(1)).unwrap());
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
         let idempotency_store = IdempotencyStore::new();
         let pairing_attempts = Arc::new(dashmap::DashMap::new());
@@ -90,10 +90,7 @@ pub async fn rate_limit_middleware(
 ) -> Result<Response, (StatusCode, String)> {
     if state.rate_limiter.check().is_err() {
         warn!("Rate limit exceeded for request to {}", req.uri().path());
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            "10".to_string(),
-        ));
+        return Err((StatusCode::TOO_MANY_REQUESTS, "10".to_string()));
     }
     Ok(next.run(req).await)
 }
@@ -116,10 +113,7 @@ pub async fn pairing_rate_limit_middleware(
         *entry = (1, now);
     } else if *count >= 5 {
         warn!("Pairing rate limit exceeded for IP: {}", ip);
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            "60".to_string(),
-        ));
+        return Err((StatusCode::TOO_MANY_REQUESTS, "60".to_string()));
     } else {
         entry.value_mut().0 += 1;
     }

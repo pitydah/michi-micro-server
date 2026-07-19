@@ -63,6 +63,7 @@ function t(key, vars) {
 async function loadI18n(lang) {
   _currentLang = lang || _currentLang;
   localStorage.setItem('michi_lang', _currentLang);
+  document.documentElement.lang = _currentLang;
   try {
     var resp = await fetch('/static/i18n/' + _currentLang);
     if (resp.ok) {
@@ -182,6 +183,7 @@ function showToast(msg, isErr) {
 
 // ── Modal ────────────────────────────────────────────────────────
 var _modalCallback = null;
+var _modalPreviousFocus = null;
 
 function showModal(title, message, confirmText, callback) {
   var overlay = $('#modal-overlay');
@@ -193,17 +195,67 @@ function showModal(title, message, confirmText, callback) {
   msgEl.textContent = message;
   btn.textContent = confirmText || t('common.confirm');
   _modalCallback = callback;
+  _modalPreviousFocus = document.activeElement;
+  btn.onclick = function () {
+    var fn = _modalCallback;
+    closeModal();
+    if (typeof fn === 'function') fn();
+  };
   overlay.classList.remove('hidden');
+  requestAnimationFrame(function () { btn.focus(); });
 }
 
 function closeModal() {
   var overlay = $('#modal-overlay');
   if (overlay) overlay.classList.add('hidden');
   _modalCallback = null;
+  if (_modalPreviousFocus && typeof _modalPreviousFocus.focus === 'function') {
+    _modalPreviousFocus.focus();
+  }
+  _modalPreviousFocus = null;
 }
 
 document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape') closeModal();
+});
+
+// ── Shell / appearance ──────────────────────────────────────────
+function resolvedTheme(theme) {
+  if (theme === 'system') {
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  }
+  return theme === 'light' ? 'light' : 'dark';
+}
+
+function setTheme(theme, persist) {
+  var selected = ['dark', 'light', 'system'].includes(theme) ? theme : 'dark';
+  document.documentElement.dataset.theme = resolvedTheme(selected);
+  document.documentElement.dataset.themePreference = selected;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute(
+    'content',
+    resolvedTheme(selected) === 'light' ? '#f4f1f7' : '#090711'
+  );
+  $$('.theme-options [data-theme-option]').forEach(function (button) {
+    button.classList.toggle('active', button.dataset.themeOption === selected);
+  });
+  localStorage.setItem('michi_theme', selected);
+  if (persist) saveSetting('theme', selected);
+}
+
+function toggleTheme() {
+  var current = document.documentElement.dataset.theme;
+  setTheme(current === 'light' ? 'dark' : 'light', true);
+}
+
+function toggleNavigation(force) {
+  var open = typeof force === 'boolean' ? force : !document.body.classList.contains('nav-open');
+  document.body.classList.toggle('nav-open', open);
+  var button = $('#mobile-menu-btn');
+  if (button) button.setAttribute('aria-expanded', String(open));
+}
+
+window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', function () {
+  if (document.documentElement.dataset.themePreference === 'system') setTheme('system', false);
 });
 
 // ── Navigation ──────────────────────────────────────────────────
@@ -216,6 +268,9 @@ function showSection(section) {
   if (nav) {
     nav.classList.add('active');
     nav.setAttribute('aria-current', 'page');
+    var title = $('#current-section-title');
+    var label = nav.querySelector('span');
+    if (title && label) title.textContent = label.textContent;
   }
   $$('.section-page').forEach(p => {
     p.classList.add('hidden');
@@ -228,16 +283,21 @@ function showSection(section) {
     void page.offsetHeight;
     page.classList.add('fade-in');
   }
+  toggleNavigation(false);
 }
 
 // ── Init ────────────────────────────────────────────────────────
 async function init() {
+  setTheme(localStorage.getItem('michi_theme') || 'dark', false);
   await loadI18n();
   showSection('dashboard');
   await Promise.all([loadStatus(), loadServerInfo(), loadDashboard(), loadTracks()]);
   State.polling = setInterval(function () {
     if (!document.hidden) { loadStatus(); loadDashboard(); }
   }, 60000);
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(function () {});
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);
@@ -428,6 +488,7 @@ async function loadTracks() {
     State.allTracks = State.tracks;
     updateTracksCount();
     renderTracks(State.tracks, 'tracks-table');
+    renderTracks(State.tracks, 'library-table');
   } catch (e) { console.warn('tracks failed:', e.message); }
 }
 
@@ -506,6 +567,7 @@ async function handleSearch() {
     } else {
       $('#search-input').style.borderColor = '';
     }
+    showSection('library');
     showToast(t('toast.found_results', {n: State.tracks.length}));
   } catch (e) { showToast(e.message, true); }
 }
@@ -1238,13 +1300,37 @@ showSection = function (section) {
 
 // ── Settings ─────────────────────────────────────────────────────
 function switchSettingsTab(tab) {
-  $$('.tab[data-stab]').forEach(function (b) { b.classList.remove('active'); });
+  $$('.tab[data-stab]').forEach(function (b) {
+    b.classList.remove('active');
+    b.setAttribute('aria-selected', 'false');
+    b.setAttribute('tabindex', '-1');
+  });
   var btn = $('.tab[data-stab="' + tab + '"]');
-  if (btn) btn.classList.add('active');
-  $$('[id^="stab-"]').forEach(function (t) { t.classList.add('hidden'); });
+  if (btn) {
+    btn.classList.add('active');
+    btn.setAttribute('aria-selected', 'true');
+    btn.setAttribute('tabindex', '0');
+  }
+  $$('[id^="stab-"]').forEach(function (t) {
+    t.classList.add('hidden');
+    t.setAttribute('aria-hidden', 'true');
+  });
   var pane = $('#stab-' + tab);
-  if (pane) pane.classList.remove('hidden');
+  if (pane) {
+    pane.classList.remove('hidden');
+    pane.setAttribute('aria-hidden', 'false');
+  }
 }
+
+document.addEventListener('keydown', function (e) {
+  if (!e.target.matches('.tab[data-stab]') || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+  var tabs = Array.from($$('.tab[data-stab]'));
+  var current = tabs.indexOf(e.target);
+  var next = e.key === 'ArrowRight' ? (current + 1) % tabs.length : (current - 1 + tabs.length) % tabs.length;
+  e.preventDefault();
+  tabs[next].focus();
+  switchSettingsTab(tabs[next].dataset.stab);
+});
 
 async function loadSettings() {
   try {
@@ -1264,6 +1350,8 @@ async function loadSettings() {
     $('#settings-auth').innerHTML = s.auth_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
     $('#settings-dev-mode').innerHTML = s.dev_mode ? '<span class="badge stable">On</span>' : '<span class="badge disabled">Off</span>';
     $('#settings-scrobble').innerHTML = s.scrobble_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
+    var savedTheme = localStorage.getItem('michi_theme');
+    if (!savedTheme && s.theme) setTheme(s.theme, false);
     // Profile details
     var profileMap = { eco: { scan: 1, tc: 0, db: 4 }, balanced: { scan: 2, tc: 2, db: 8 }, performance: { scan: 4, tc: 4, db: 16 } };
     var p = profileMap[s.resource_profile] || profileMap.balanced;
@@ -1737,10 +1825,9 @@ document.addEventListener('keydown', function (e) {
     var si = $('#search-input');
     if (si) { si.focus(); si.select(); }
   }
-  if (e.key === ' ' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+  if (e.key === ' ' && !e.target.closest('input, textarea, select, button, a, [role="button"], [contenteditable="true"]')) {
     e.preventDefault();
     playPause();
   }
 });
-
 

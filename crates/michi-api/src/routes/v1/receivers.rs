@@ -499,7 +499,17 @@ pub async fn activate_room_group_handler(
             if entry.paired && entry.active_session_id.is_none() {
                 let _ = state
                     .receiver_manager
-                    .start_session(recv_id, &id.to_string(), "pcm", 48000, 24, 2, 0, 200, capped_vol)
+                    .start_session(
+                        recv_id,
+                        &id.to_string(),
+                        "pcm",
+                        48000,
+                        24,
+                        2,
+                        0,
+                        200,
+                        capped_vol,
+                    )
                     .await;
             }
             let _ = state.receiver_manager.set_volume(recv_id, capped_vol).await;

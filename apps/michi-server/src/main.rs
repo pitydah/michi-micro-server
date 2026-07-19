@@ -1,7 +1,7 @@
+use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use anyhow::Result;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -133,8 +133,13 @@ async fn main() -> Result<()> {
             let ha_config = config.clone();
             let ha_playback = state.playback_state.clone();
             let ha_db = state.db.clone();
-            let ha_shutdown = state.shutdown_token.clone();
-            let ha_cancel = state.homeassistant_cancel.clone();
+            let _ha_shutdown = state.shutdown_token.clone();
+            let ha_cancel = state
+                .module_tokens
+                .try_read()
+                .ok()
+                .and_then(|m| m.get("homeassistant").cloned())
+                .unwrap_or_default();
             tokio::spawn(async move {
                 tokio::select! {
                     _ = ha_cancel.cancelled() => {
@@ -163,7 +168,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     // Graceful shutdown: SIGINT + SIGTERM
-    let shutdown_token = state.shutdown_token.clone();
+    let shutdown_state = state.clone();
     let shutdown_tx = state.tx.clone();
     let shutdown_db = state.db.clone();
 
@@ -171,8 +176,10 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(async move {
             use tokio::signal::unix::{signal, SignalKind};
 
-            let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
-            let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+            let mut sigint =
+                signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
 
             tokio::select! {
                 _ = sigint.recv() => {
@@ -183,21 +190,18 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // 1. Cancel global shutdown token — all background tasks will stop
-            shutdown_token.cancel();
-            info!("background tasks notified of shutdown");
+            shutdown_state
+                .shutdown_and_wait(Duration::from_secs(15))
+                .await;
 
-            // 2. Close WebSocket connections via broadcast
             let _ = shutdown_tx.send("shutdown".to_string());
             tokio::time::sleep(Duration::from_millis(500)).await;
 
-            // 3. Checkpoint WAL
             let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-                .execute(&shutdown_db).await;
+                .execute(&shutdown_db)
+                .await;
             info!("WAL checkpoint complete");
 
-            // 4. Allow brief time for tasks to finish
-            tokio::time::sleep(Duration::from_secs(3)).await;
             info!("shutdown complete");
         })
         .await?;

@@ -1,10 +1,4 @@
-use axum::{
-    body::Body,
-    extract::State,
-    http::{header, StatusCode},
-    response::Response,
-    Json,
-};
+use axum::{body::Body, extract::State, http::StatusCode, response::Response, Json};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -44,37 +38,8 @@ struct PlayHistoryEntry {
 }
 
 pub async fn backup_handler(
-    headers: axum::http::HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    // Verify authentication
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
-
-    if let Some(ref token) = token {
-        if state
-            .token_store
-            .validate(token, michi_link::TokenType::Device)
-            .await
-            .is_err()
-        {
-            return Err(v1_error(
-                StatusCode::UNAUTHORIZED,
-                "UNAUTHORIZED",
-                "Invalid or expired token",
-            ));
-        }
-    } else if state.config.auth_enabled {
-        return Err(v1_error(
-            StatusCode::UNAUTHORIZED,
-            "UNAUTHORIZED",
-            "Authentication required",
-        ));
-    }
-
     let tracks = michi_db::list_tracks(&state.db).await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -127,7 +92,7 @@ pub async fn backup_handler(
         .collect();
 
     let server_id = state.server_id().to_string();
-    let server_name = "Michi Micro Server".to_string();
+    let server_name = state.config.sync_name.clone();
 
     let backup = BackupPayload {
         version: 1,
@@ -343,9 +308,13 @@ pub async fn mount_health_handler(
     for (path, st, err) in &results {
         let _ = michi_db::update_mount_state(&state.db, path, st, err).await;
     }
-    let states = michi_db::get_mount_states(&state.db)
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+    let states = michi_db::get_mount_states(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+    })?;
     let all_online = states.iter().all(|(_, s, _, _, _)| s == "online");
     Ok(Json(serde_json::json!({
         "healthy": all_online,
@@ -363,7 +332,11 @@ pub async fn backup_bundle_handler(
     let temp_dir = std::env::temp_dir().join(format!("michi-bundle-{}", timestamp));
 
     std::fs::create_dir_all(&temp_dir).map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "TEMP_DIR", &e.to_string())
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "TEMP_DIR",
+            &e.to_string(),
+        )
     })?;
 
     let settings = serde_json::json!({
@@ -375,9 +348,14 @@ pub async fn backup_bundle_handler(
     std::fs::write(
         temp_dir.join("manifest.json"),
         serde_json::to_string_pretty(&settings).map_err(|e| {
-            v1_error(StatusCode::INTERNAL_SERVER_ERROR, "SERIALIZE", &e.to_string())
-        })?
-    ).map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SERIALIZE",
+                &e.to_string(),
+            )
+        })?,
+    )
+    .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
 
     let config_json = serde_json::json!({
         "port": state.config.port(),
@@ -388,41 +366,60 @@ pub async fn backup_bundle_handler(
     std::fs::write(
         temp_dir.join("config.json"),
         serde_json::to_string_pretty(&config_json).map_err(|e| {
-            v1_error(StatusCode::INTERNAL_SERVER_ERROR, "SERIALIZE", &e.to_string())
-        })?
-    ).map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SERIALIZE",
+                &e.to_string(),
+            )
+        })?,
+    )
+    .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
 
     let mut checksums = serde_json::Map::new();
     for entry in std::fs::read_dir(&temp_dir).map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ_DIR", &e.to_string())
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "READ_DIR",
+            &e.to_string(),
+        )
     })? {
-        let entry = entry.map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "ENTRY", &e.to_string()))?;
+        let entry = entry
+            .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "ENTRY", &e.to_string()))?;
         let name = entry.file_name().to_string_lossy().to_string();
-        let data = std::fs::read(entry.path()).map_err(|e| {
-            v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ", &e.to_string())
-        })?;
+        let data = std::fs::read(entry.path())
+            .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ", &e.to_string()))?;
         let hash = blake3::hash(&data);
         checksums.insert(name, serde_json::Value::String(hash.to_hex().to_string()));
     }
     std::fs::write(
         temp_dir.join("checksums.json"),
-        serde_json::to_string_pretty(&checksums).unwrap()
-    ).map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE_CHECKSUMS", &e.to_string()))?;
-
-    let file = std::fs::File::create(&bundle_path).map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "CREATE", &e.to_string())
+        serde_json::to_string_pretty(&checksums).unwrap(),
+    )
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "WRITE_CHECKSUMS",
+            &e.to_string(),
+        )
     })?;
+
+    let file = std::fs::File::create(&bundle_path)
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "CREATE", &e.to_string()))?;
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::best());
     let mut tar = tar::Builder::new(encoder);
 
     for entry in std::fs::read_dir(&temp_dir).map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ_DIR", &e.to_string())
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "READ_DIR",
+            &e.to_string(),
+        )
     })? {
-        let entry = entry.map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "ENTRY", &e.to_string()))?;
+        let entry = entry
+            .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "ENTRY", &e.to_string()))?;
         let name = entry.file_name().to_string_lossy().to_string();
-        let data = std::fs::read(entry.path()).map_err(|e| {
-            v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ", &e.to_string())
-        })?;
+        let data = std::fs::read(entry.path())
+            .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ", &e.to_string()))?;
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Regular);
         header.set_mode(0o644);
@@ -433,15 +430,22 @@ pub async fn backup_bundle_handler(
     }
 
     let encoder = tar.into_inner().map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "TAR_FINISH", &e.to_string())
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "TAR_FINISH",
+            &e.to_string(),
+        )
     })?;
     encoder.finish().map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "GZ_FINISH", &e.to_string())
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "GZ_FINISH",
+            &e.to_string(),
+        )
     })?;
 
-    let bundle_data = std::fs::read(&bundle_path).map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ", &e.to_string())
-    })?;
+    let bundle_data = std::fs::read(&bundle_path)
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ", &e.to_string()))?;
 
     let _ = std::fs::remove_file(&bundle_path);
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -449,9 +453,18 @@ pub async fn backup_bundle_handler(
     let filename = format!("michi-backup-{}.tar.gz", timestamp);
     Response::builder()
         .header("Content-Type", "application/gzip")
-        .header("Content-Disposition", format!("attachment; filename=\"{}\"", filename))
+        .header(
+            "Content-Disposition",
+            format!("attachment; filename=\"{}\"", filename),
+        )
         .body(Body::from(bundle_data))
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "RESPONSE", &e.to_string()))
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RESPONSE",
+                &e.to_string(),
+            )
+        })
 }
 
 /// Spawns a background integrity check every 24h

@@ -1,15 +1,15 @@
 use crate::AppState;
+use argon2::password_hash::{PasswordHasher, SaltString};
+use argon2::Argon2;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
+use rand::rngs::OsRng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use argon2::Argon2;
-use argon2::password_hash::{PasswordHash, PasswordHasher, SaltString};
-use rand::rngs::OsRng;
 
 fn v1_error(s: StatusCode, c: &str, m: &str) -> (StatusCode, Json<serde_json::Value>) {
     (s, Json(serde_json::json!({"error":{"code":c,"message":m}})))

@@ -20,6 +20,9 @@ pub enum DbError {
 
     #[error("migration error: {0}")]
     Migration(String),
+
+    #[error("invalid data: {0}")]
+    InvalidData(String),
 }
 
 fn ensure_db_parent_dir(database_url: &str) -> Result<(), DbError> {
@@ -1056,10 +1059,10 @@ async fn migration_032(pool: &SqlitePool) -> Result<(), DbError> {
             last_checked TEXT NOT NULL,
             last_online TEXT,
             error_message TEXT
-        )"
+        )",
     )
-        .execute(pool)
-        .await?;
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1076,10 +1079,10 @@ async fn migration_033(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL,
             started_at TEXT,
             finished_at TEXT
-        )"
+        )",
     )
-        .execute(pool)
-        .await?;
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1093,13 +1096,11 @@ async fn migration_034(pool: &SqlitePool) -> Result<(), DbError> {
             details_json TEXT,
             ip_prefix TEXT,
             created_at TEXT NOT NULL
-        )"
+        )",
     )
-        .execute(pool)
-        .await?;
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC)"
-    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC)")
         .execute(pool)
         .await?;
     Ok(())
@@ -1114,10 +1115,10 @@ async fn migration_035(pool: &SqlitePool) -> Result<(), DbError> {
             action TEXT NOT NULL,
             diff_json TEXT,
             created_at TEXT NOT NULL
-        )"
+        )",
     )
-        .execute(pool)
-        .await?;
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1439,7 +1440,8 @@ pub async fn get_chain(pool: &SqlitePool, id: &Uuid) -> Result<Option<PlaybackCh
     let updated_str: &str = r.try_get("updated_at")?;
 
     Ok(Some(PlaybackChain {
-        id: Uuid::parse_str(id_str).unwrap(),
+        id: Uuid::parse_str(id_str)
+            .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
         name: name.to_string(),
         track_id: track_id_str.and_then(|s| Uuid::parse_str(s).ok()),
         position_ms: pos as u64,
@@ -1463,20 +1465,21 @@ pub async fn list_chains(pool: &SqlitePool) -> Result<Vec<PlaybackChain>, DbErro
         .fetch_all(pool)
         .await?;
 
-    let chains = rows
+    let chains: Result<Vec<_>, _> = rows
         .iter()
-        .map(|r| {
-            let id_str: &str = r.try_get("id").unwrap();
-            let name: &str = r.try_get("name").unwrap();
+        .map(|r| -> Result<_, DbError> {
+            let id_str: &str = r.try_get("id")?;
+            let name: &str = r.try_get("name")?;
             let track_id_str: Option<&str> = r.try_get("track_id").ok();
-            let pos: i64 = r.try_get("position_ms").unwrap();
-            let playing: i64 = r.try_get("playing").unwrap();
-            let shuffle_val: i64 = r.try_get("shuffle").unwrap();
-            let repeat_mode: &str = r.try_get("repeat_mode").unwrap();
-            let created_str: &str = r.try_get("created_at").unwrap();
-            let updated_str: &str = r.try_get("updated_at").unwrap();
-            PlaybackChain {
-                id: Uuid::parse_str(id_str).unwrap(),
+            let pos: i64 = r.try_get("position_ms")?;
+            let playing: i64 = r.try_get("playing")?;
+            let shuffle_val: i64 = r.try_get("shuffle")?;
+            let repeat_mode: &str = r.try_get("repeat_mode")?;
+            let created_str: &str = r.try_get("created_at")?;
+            let updated_str: &str = r.try_get("updated_at")?;
+            Ok(PlaybackChain {
+                id: Uuid::parse_str(id_str)
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
                 name: name.to_string(),
                 track_id: track_id_str.and_then(|s| Uuid::parse_str(s).ok()),
                 position_ms: pos as u64,
@@ -1489,10 +1492,10 @@ pub async fn list_chains(pool: &SqlitePool) -> Result<Vec<PlaybackChain>, DbErro
                 updated_at: DateTime::parse_from_rfc3339(updated_str)
                     .map(|d| d.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now()),
-            }
+            })
         })
         .collect();
-    Ok(chains)
+    chains
 }
 
 pub async fn update_chain(
@@ -1624,29 +1627,31 @@ pub async fn get_chain_links(
     .fetch_all(pool)
     .await?;
 
-    let links = rows
+    let links: Result<Vec<_>, _> = rows
         .iter()
-        .map(|r| {
-            let id_str: &str = r.try_get("id").unwrap();
-            let cid_str: &str = r.try_get("chain_id").unwrap();
-            let pos: i64 = r.try_get("position").unwrap();
-            let recv_id: &str = r.try_get("receiver_id").unwrap();
-            let vol: i64 = r.try_get("volume").unwrap();
-            let muted: i64 = r.try_get("muted").unwrap();
-            let delay: i64 = r.try_get("delay_ms").unwrap();
-            ChainLink {
-                id: Uuid::parse_str(id_str).unwrap(),
-                chain_id: Uuid::parse_str(cid_str).unwrap(),
+        .map(|r| -> Result<_, DbError> {
+            let id_str: &str = r.try_get("id")?;
+            let cid_str: &str = r.try_get("chain_id")?;
+            let pos: i64 = r.try_get("position")?;
+            let recv_id: &str = r.try_get("receiver_id")?;
+            let vol: i64 = r.try_get("volume")?;
+            let muted: i64 = r.try_get("muted")?;
+            let delay: i64 = r.try_get("delay_ms")?;
+            Ok(ChainLink {
+                id: Uuid::parse_str(id_str)
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+                chain_id: Uuid::parse_str(cid_str)
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
                 position: pos,
                 receiver_id: recv_id.to_string(),
                 receiver_name: None,
                 volume: vol,
                 muted: muted != 0,
                 delay_ms: delay,
-            }
+            })
         })
         .collect();
-    Ok(links)
+    links
 }
 
 pub async fn update_chain_link(
@@ -1753,6 +1758,8 @@ pub async fn create_playlist(
     .execute(pool)
     .await?;
 
+    let _ = record_change(pool, "playlist", &id.to_string(), "create", None).await;
+
     Ok(Playlist {
         id,
         name: input.name.clone(),
@@ -1808,7 +1815,11 @@ pub async fn delete_playlist(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbErr
         .bind(&id_str)
         .execute(pool)
         .await?;
-    Ok(result.rows_affected() > 0)
+    let deleted = result.rows_affected() > 0;
+    if deleted {
+        let _ = record_change(pool, "playlist", &id_str, "delete", None).await;
+    }
+    Ok(deleted)
 }
 
 pub async fn set_share_code(
@@ -1908,6 +1919,8 @@ pub async fn remove_track_from_playlist(
         .execute(pool)
         .await?;
 
+    let removed = result.rows_affected() > 0;
+
     sqlx::query(
         "UPDATE playlists SET track_count = (SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?), updated_at = ? WHERE id = ?",
     )
@@ -1917,7 +1930,7 @@ pub async fn remove_track_from_playlist(
     .execute(pool)
     .await?;
 
-    Ok(result.rows_affected() > 0)
+    Ok(removed)
 }
 
 pub async fn reorder_playlist_tracks(
@@ -2086,6 +2099,8 @@ pub async fn upsert_track(pool: &SqlitePool, track: &Track) -> Result<(), DbErro
     .bind(&now)
     .execute(pool)
     .await?;
+
+    let _ = record_change(pool, "track", &id, "upsert", None).await;
 
     Ok(())
 }
@@ -2341,7 +2356,11 @@ pub async fn delete_track(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbError>
         .bind(&id_str)
         .execute(pool)
         .await?;
-    Ok(result.rows_affected() > 0)
+    let deleted = result.rows_affected() > 0;
+    if deleted {
+        let _ = record_change(pool, "track", &id_str, "delete", None).await;
+    }
+    Ok(deleted)
 }
 
 pub async fn delete_all_tracks(pool: &SqlitePool) -> Result<u64, DbError> {
@@ -3432,6 +3451,35 @@ mod tests {
         let result = get_track(&pool, &uuid::Uuid::nil()).await.unwrap();
         assert!(result.is_none());
     }
+
+    #[tokio::test]
+    async fn test_cancel_job_is_terminal_and_idempotent() {
+        let pool = test_pool().await;
+        let job = create_job(&pool, "scan", 0, None).await.unwrap();
+
+        assert!(cancel_job(&pool, &job.id).await.unwrap());
+        assert!(!cancel_job(&pool, &job.id).await.unwrap());
+        complete_job(&pool, &job.id).await.unwrap();
+        fail_job(&pool, &job.id, "late worker result")
+            .await
+            .unwrap();
+
+        let job = get_job(&pool, &job.id).await.unwrap().unwrap();
+        assert_eq!(job.state, "cancelled");
+        assert!(job.error_message.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_running_job_can_be_cancelled() {
+        let pool = test_pool().await;
+        let job = create_job(&pool, "scan", 0, None).await.unwrap();
+        assert!(claim_job(&pool, &job.id).await.unwrap());
+        assert!(cancel_job(&pool, &job.id).await.unwrap());
+        assert_eq!(
+            get_job(&pool, &job.id).await.unwrap().unwrap().state,
+            "cancelled"
+        );
+    }
 }
 
 // ── Bookmarks ────────────────────────────────────────────────────
@@ -3499,24 +3547,27 @@ pub async fn get_bookmark(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.first().map(|r| {
-        let id_str: &str = r.try_get("id").unwrap();
-        let tid_str: &str = r.try_get("track_id").unwrap();
-        let uid: &str = r.try_get("user_id").unwrap();
+    let bookmark: Option<Result<_, DbError>> = rows.first().map(|r| -> Result<_, DbError> {
+        let id_str: &str = r.try_get("id")?;
+        let tid_str: &str = r.try_get("track_id")?;
+        let uid: &str = r.try_get("user_id")?;
         let did: Option<&str> = r.try_get("device_id").ok();
-        let pos: i64 = r.try_get("position_ms").unwrap();
-        let dur: i64 = r.try_get("duration_ms").unwrap();
-        let fin: i64 = r.try_get("finished").unwrap();
-        Bookmark {
-            id: Uuid::parse_str(id_str).unwrap(),
-            track_id: Uuid::parse_str(tid_str).unwrap(),
+        let pos: i64 = r.try_get("position_ms")?;
+        let dur: i64 = r.try_get("duration_ms")?;
+        let fin: i64 = r.try_get("finished")?;
+        Ok(Bookmark {
+            id: Uuid::parse_str(id_str)
+                .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+            track_id: Uuid::parse_str(tid_str)
+                .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
             user_id: uid.to_string(),
             device_id: did.map(|s| s.to_string()),
             position_ms: pos,
             duration_ms: dur,
             finished: fin != 0,
-        }
-    }))
+        })
+    });
+    bookmark.transpose()
 }
 
 pub async fn list_bookmarks(
@@ -3536,28 +3587,30 @@ pub async fn list_bookmarks(
     .fetch_all(pool)
     .await?;
 
-    let bookmarks = rows
+    let bookmarks: Result<Vec<_>, _> = rows
         .iter()
-        .map(|r| {
-            let id_str: &str = r.try_get("id").unwrap();
-            let tid_str: &str = r.try_get("track_id").unwrap();
-            let uid: &str = r.try_get("user_id").unwrap();
+        .map(|r| -> Result<_, DbError> {
+            let id_str: &str = r.try_get("id")?;
+            let tid_str: &str = r.try_get("track_id")?;
+            let uid: &str = r.try_get("user_id")?;
             let did: Option<&str> = r.try_get("device_id").ok();
-            let pos: i64 = r.try_get("position_ms").unwrap();
-            let dur: i64 = r.try_get("duration_ms").unwrap();
-            let fin: i64 = r.try_get("finished").unwrap();
-            Bookmark {
-                id: Uuid::parse_str(id_str).unwrap(),
-                track_id: Uuid::parse_str(tid_str).unwrap(),
+            let pos: i64 = r.try_get("position_ms")?;
+            let dur: i64 = r.try_get("duration_ms")?;
+            let fin: i64 = r.try_get("finished")?;
+            Ok(Bookmark {
+                id: Uuid::parse_str(id_str)
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+                track_id: Uuid::parse_str(tid_str)
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
                 user_id: uid.to_string(),
                 device_id: did.map(|s| s.to_string()),
                 position_ms: pos,
                 duration_ms: dur,
                 finished: fin != 0,
-            }
+            })
         })
         .collect();
-    Ok(bookmarks)
+    bookmarks
 }
 
 pub async fn delete_bookmark(
@@ -3678,15 +3731,15 @@ pub async fn create_job(
     let payload_str = payload.and_then(|p| serde_json::to_string(p).ok());
     sqlx::query(
         "INSERT INTO job_queue (id, kind, state, priority, progress, payload_json, created_at)
-         VALUES (?, ?, 'pending', ?, 0.0, ?, ?)"
+         VALUES (?, ?, 'pending', ?, 0.0, ?, ?)",
     )
-        .bind(&id)
-        .bind(kind)
-        .bind(priority)
-        .bind(&payload_str)
-        .bind(&now)
-        .execute(db)
-        .await?;
+    .bind(&id)
+    .bind(kind)
+    .bind(priority)
+    .bind(&payload_str)
+    .bind(&now)
+    .execute(db)
+    .await?;
     Ok(Job {
         id,
         kind: kind.to_string(),
@@ -3715,12 +3768,12 @@ pub async fn get_pending_jobs(db: &SqlitePool, limit: i32) -> Result<Vec<Job>, D
 pub async fn claim_job(db: &SqlitePool, id: &str) -> Result<bool, DbError> {
     let now = chrono::Utc::now().to_rfc3339();
     let result = sqlx::query(
-        "UPDATE job_queue SET state = 'running', started_at = ? WHERE id = ? AND state = 'pending'"
+        "UPDATE job_queue SET state = 'running', started_at = ? WHERE id = ? AND state = 'pending'",
     )
-        .bind(&now)
-        .bind(id)
-        .execute(db)
-        .await?;
+    .bind(&now)
+    .bind(id)
+    .execute(db)
+    .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -3736,38 +3789,38 @@ pub async fn update_job_progress(db: &SqlitePool, id: &str, progress: f64) -> Re
 pub async fn complete_job(db: &SqlitePool, id: &str) -> Result<(), DbError> {
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query(
-        "UPDATE job_queue SET state = 'completed', progress = 1.0, finished_at = ? WHERE id = ?"
+        "UPDATE job_queue SET state = 'completed', progress = 1.0, finished_at = ? WHERE id = ? AND state = 'running'",
     )
-        .bind(&now)
-        .bind(id)
-        .execute(db)
-        .await?;
+    .bind(&now)
+    .bind(id)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
 pub async fn fail_job(db: &SqlitePool, id: &str, error: &str) -> Result<(), DbError> {
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query(
-        "UPDATE job_queue SET state = 'failed', error_message = ?, finished_at = ? WHERE id = ?"
+        "UPDATE job_queue SET state = 'failed', error_message = ?, finished_at = ? WHERE id = ? AND state = 'running'",
     )
-        .bind(error)
-        .bind(&now)
-        .bind(id)
-        .execute(db)
-        .await?;
+    .bind(error)
+    .bind(&now)
+    .bind(id)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
-pub async fn cancel_job(db: &SqlitePool, id: &str) -> Result<(), DbError> {
+pub async fn cancel_job(db: &SqlitePool, id: &str) -> Result<bool, DbError> {
     let now = chrono::Utc::now().to_rfc3339();
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE job_queue SET state = 'cancelled', finished_at = ? WHERE id = ? AND state IN ('pending', 'running')"
     )
         .bind(&now)
         .bind(id)
         .execute(db)
         .await?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn list_jobs(
@@ -3786,16 +3839,30 @@ pub async fn list_jobs(
         params.push(format!("AND state = '{}'", s.replace('\'', "''")));
     }
     if !params.is_empty() {
-        sql.push_str(" ");
+        sql.push(' ');
         sql.push_str(&params.join(" "));
     }
     sql.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
 
-    let rows = sqlx::query_as::<_, (String, String, String, i32, f64, Option<String>, Option<String>, String, Option<String>, Option<String>)>(&sql)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(db)
-        .await?;
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            i32,
+            f64,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+        ),
+    >(&sql)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(db)
+    .await?;
     Ok(rows_to_jobs(rows))
 }
 
@@ -3810,15 +3877,50 @@ pub async fn get_job(db: &SqlitePool, id: &str) -> Result<Option<Job>, DbError> 
     Ok(rows_to_jobs(rows).into_iter().next())
 }
 
-fn rows_to_jobs(
-    rows: Vec<(String, String, String, i32, f64, Option<String>, Option<String>, String, Option<String>, Option<String>)>,
-) -> Vec<Job> {
-    rows.into_iter().map(|(id, kind, state, priority, progress, payload_json, error_message, created_at, started_at, finished_at)| {
-        let payload = payload_json.and_then(|s| serde_json::from_str(&s).ok());
-        Job {
-            id, kind, state, priority, progress, payload, error_message, created_at, started_at, finished_at,
-        }
-    }).collect()
+type JobRow = (
+    String,
+    String,
+    String,
+    i32,
+    f64,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
+fn rows_to_jobs(rows: Vec<JobRow>) -> Vec<Job> {
+    rows.into_iter()
+        .map(
+            |(
+                id,
+                kind,
+                state,
+                priority,
+                progress,
+                payload_json,
+                error_message,
+                created_at,
+                started_at,
+                finished_at,
+            )| {
+                let payload = payload_json.and_then(|s| serde_json::from_str(&s).ok());
+                Job {
+                    id,
+                    kind,
+                    state,
+                    priority,
+                    progress,
+                    payload,
+                    error_message,
+                    created_at,
+                    started_at,
+                    finished_at,
+                }
+            },
+        )
+        .collect()
 }
 
 // ── Radio Stations ───────────────────────────────────────────────
@@ -3833,21 +3935,22 @@ pub async fn list_radio_stations(
         .fetch_all(pool)
         .await?;
 
-    let stations = rows
+    let stations: Result<Vec<_>, _> = rows
         .iter()
-        .map(|r| {
-            let id_str: &str = r.try_get("id").unwrap();
-            let name: &str = r.try_get("name").unwrap();
-            let url: &str = r.try_get("stream_url").unwrap();
+        .map(|r| -> Result<_, DbError> {
+            let id_str: &str = r.try_get("id")?;
+            let name: &str = r.try_get("name")?;
+            let url: &str = r.try_get("stream_url")?;
             let homepage: Option<&str> = r.try_get("homepage").ok();
             let icon: Option<&str> = r.try_get("icon").ok();
             let codec: Option<&str> = r.try_get("codec").ok();
             let bitrate: Option<i64> = r.try_get("bitrate").ok();
             let checked: Option<&str> = r.try_get("last_checked").ok();
-            let enabled: i64 = r.try_get("enabled").unwrap();
-            let fav: i64 = r.try_get("favorite").unwrap();
-            michi_core::RadioStation {
-                id: Uuid::parse_str(id_str).unwrap(),
+            let enabled: i64 = r.try_get("enabled")?;
+            let fav: i64 = r.try_get("favorite")?;
+            Ok(michi_core::RadioStation {
+                id: Uuid::parse_str(id_str)
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
                 name: name.to_string(),
                 stream_url: url.to_string(),
                 homepage: homepage.map(|s| s.to_string()),
@@ -3861,10 +3964,10 @@ pub async fn list_radio_stations(
                 }),
                 enabled: enabled != 0,
                 favorite: fav != 0,
-            }
+            })
         })
         .collect();
-    Ok(stations)
+    stations
 }
 
 pub async fn create_radio_station(
@@ -3949,20 +4052,21 @@ pub async fn list_stream_sources(
     )
     .fetch_all(pool)
     .await?;
-    let sources = rows
+    let sources: Result<Vec<_>, _> = rows
         .iter()
-        .map(|r| {
-            let id_str: &str = r.try_get("id").unwrap();
-            let url: &str = r.try_get("url").unwrap();
-            let st: &str = r.try_get("stream_type").unwrap();
+        .map(|r| -> Result<_, DbError> {
+            let id_str: &str = r.try_get("id")?;
+            let url: &str = r.try_get("url")?;
+            let st: &str = r.try_get("stream_type")?;
             let name: Option<&str> = r.try_get("name").ok();
             let genre: Option<&str> = r.try_get("genre").ok();
             let desc: Option<&str> = r.try_get("description").ok();
             let logo: Option<&str> = r.try_get("logo_url").ok();
             let codec: Option<&str> = r.try_get("codec").ok();
-            let enabled: i64 = r.try_get("enabled").unwrap();
-            michi_core::StreamSource {
-                id: Uuid::parse_str(id_str).unwrap(),
+            let enabled: i64 = r.try_get("enabled")?;
+            Ok(michi_core::StreamSource {
+                id: Uuid::parse_str(id_str)
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
                 url: url.to_string(),
                 stream_type: st.to_string(),
                 name: name.map(|s| s.to_string()),
@@ -3971,10 +4075,10 @@ pub async fn list_stream_sources(
                 logo_url: logo.map(|s| s.to_string()),
                 codec: codec.map(|s| s.to_string()),
                 enabled: enabled != 0,
-            }
+            })
         })
         .collect();
-    Ok(sources)
+    sources
 }
 
 pub async fn add_stream_source(
@@ -4036,18 +4140,19 @@ pub async fn list_podcast_episodes(
     .bind(&sid)
     .fetch_all(pool)
     .await?;
-    let episodes = rows
+    let episodes: Result<Vec<_>, _> = rows
         .iter()
-        .map(|r| {
-            let id_str: &str = r.try_get("id").unwrap();
-            let title: &str = r.try_get("title").unwrap();
-            let url_str: &str = r.try_get("audio_url").unwrap();
+        .map(|r| -> Result<_, DbError> {
+            let id_str: &str = r.try_get("id")?;
+            let title: &str = r.try_get("title")?;
+            let url_str: &str = r.try_get("audio_url")?;
             let pub_date_str: Option<&str> = r.try_get("pub_date").ok();
             let dur: Option<i64> = r.try_get("duration_secs").ok();
-            let played: i64 = r.try_get("played").unwrap();
-            let pos: i64 = r.try_get("position_ms").unwrap();
-            michi_core::PodcastEpisodeDb {
-                id: Uuid::parse_str(id_str).unwrap(),
+            let played: i64 = r.try_get("played")?;
+            let pos: i64 = r.try_get("position_ms")?;
+            Ok(michi_core::PodcastEpisodeDb {
+                id: Uuid::parse_str(id_str)
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
                 source_id: *source_id,
                 title: title.to_string(),
                 audio_url: url_str.to_string(),
@@ -4055,10 +4160,10 @@ pub async fn list_podcast_episodes(
                 duration_secs: dur.map(|d| d as u64),
                 played: played != 0,
                 position_ms: pos as u64,
-            }
+            })
         })
         .collect();
-    Ok(episodes)
+    episodes
 }
 
 pub async fn upsert_podcast_episode(
@@ -4095,6 +4200,29 @@ pub async fn update_episode_progress(
 
 // ── Mount Guard ─────────────────────────────────────────────────
 
+pub async fn record_change(
+    pool: &SqlitePool,
+    entity_type: &str,
+    entity_id: &str,
+    action: &str,
+    diff_json: Option<&str>,
+) -> Result<(), DbError> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO change_journal (id, entity_type, entity_id, action, diff_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(entity_type)
+    .bind(entity_id)
+    .bind(action)
+    .bind(diff_json)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn check_mount_health(paths: &[std::path::PathBuf]) -> Vec<(String, String, String)> {
     let mut results = Vec::new();
     for p in paths {
@@ -4102,13 +4230,22 @@ pub async fn check_mount_health(paths: &[std::path::PathBuf]) -> Vec<(String, St
         if p.exists() {
             results.push((path_str, "online".to_string(), String::new()));
         } else {
-            results.push((path_str, "unavailable".to_string(), "path does not exist".to_string()));
+            results.push((
+                path_str,
+                "unavailable".to_string(),
+                "path does not exist".to_string(),
+            ));
         }
     }
     results
 }
 
-pub async fn update_mount_state(pool: &SqlitePool, path: &str, state: &str, error: &str) -> Result<(), DbError> {
+pub async fn update_mount_state(
+    pool: &SqlitePool,
+    path: &str,
+    state: &str,
+    error: &str,
+) -> Result<(), DbError> {
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         "INSERT INTO mount_guard (path, state, last_checked, last_online, error_message)
@@ -4127,19 +4264,30 @@ pub async fn update_mount_state(pool: &SqlitePool, path: &str, state: &str, erro
     Ok(())
 }
 
-pub async fn get_mount_states(pool: &SqlitePool) -> Result<Vec<(String, String, String, Option<String>, String)>, DbError> {
+pub async fn get_mount_states(
+    pool: &SqlitePool,
+) -> Result<Vec<(String, String, String, Option<String>, String)>, DbError> {
     let rows = sqlx::query(
         "SELECT path, state, last_checked, last_online, error_message FROM mount_guard ORDER BY path"
     )
         .fetch_all(pool)
         .await?;
-    let states = rows.iter().map(|r| {
-        let p: &str = r.try_get("path").unwrap();
-        let s: &str = r.try_get("state").unwrap();
-        let lc: &str = r.try_get("last_checked").unwrap();
-        let lo: Option<&str> = r.try_get("last_online").ok();
-        let err: &str = r.try_get("error_message").unwrap_or("");
-        (p.to_string(), s.to_string(), lc.to_string(), lo.map(|x| x.to_string()), err.to_string())
-    }).collect();
-    Ok(states)
+    let states: Result<Vec<_>, _> = rows
+        .iter()
+        .map(|r| -> Result<_, DbError> {
+            let p: &str = r.try_get("path")?;
+            let s: &str = r.try_get("state")?;
+            let lc: &str = r.try_get("last_checked")?;
+            let lo: Option<&str> = r.try_get("last_online").ok();
+            let err: &str = r.try_get("error_message").unwrap_or("");
+            Ok((
+                p.to_string(),
+                s.to_string(),
+                lc.to_string(),
+                lo.map(|x| x.to_string()),
+                err.to_string(),
+            ))
+        })
+        .collect();
+    states
 }

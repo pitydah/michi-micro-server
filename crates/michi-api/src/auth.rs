@@ -112,6 +112,90 @@ fn extract_token(request: &Request) -> Option<String> {
     auth_header.strip_prefix("Bearer ").map(|s| s.to_string())
 }
 
+fn auth_error(status: StatusCode, message: &str) -> Response {
+    (
+        status,
+        Json(json!({
+            "status": "error",
+            "message": message
+        })),
+    )
+        .into_response()
+}
+
+fn is_admin_route(path: &str) -> bool {
+    [
+        "/api/v1/audit",
+        "/api/v1/backup",
+        "/api/v1/config",
+        "/api/v1/devices",
+        "/api/v1/diagnostics",
+        "/api/v1/health/mounts",
+        "/api/v1/health/storage",
+        "/api/v1/health/verify",
+        "/api/v1/import",
+        "/api/v1/jobs",
+        "/api/v1/library/scan",
+        "/api/v1/link/devices",
+        "/api/v1/modules",
+        "/api/v1/pair/start",
+        "/api/v1/pair/qr",
+        "/api/v1/receivers",
+        "/api/v1/rooms",
+        "/api/v1/settings",
+        "/api/v1/setup",
+        "/api/v1/sources",
+        "/api/v1/webhook",
+        "/api/v1/transcode",
+    ]
+    .iter()
+    .any(|prefix| path.starts_with(prefix))
+}
+
+/// V1 authorization policy:
+/// - admin paths require an active administrator session;
+/// - other protected paths accept an active user session or paired device token;
+/// - this never fails open when username/password authentication is disabled.
+pub async fn v1_auth_middleware(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let token = match extract_token(&request) {
+        Some(token) => token,
+        None => return auth_error(StatusCode::UNAUTHORIZED, "missing authorization header"),
+    };
+
+    if is_admin_route(request.uri().path()) {
+        let Some(user_id) = state.auth_sessions.extract_user_id(&token).await else {
+            return auth_error(StatusCode::UNAUTHORIZED, "administrator session required");
+        };
+        let is_admin = michi_db::get_user_by_id(&state.db, &user_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, _, _, is_admin)| is_admin)
+            .unwrap_or(false);
+        return if is_admin {
+            next.run(request).await
+        } else {
+            auth_error(StatusCode::FORBIDDEN, "administrator privileges required")
+        };
+    }
+
+    if state.auth_sessions.validate(&token).await
+        || state
+            .token_store
+            .validate(&token, michi_link::TokenType::Device)
+            .await
+            .is_ok()
+    {
+        next.run(request).await
+    } else {
+        auth_error(StatusCode::UNAUTHORIZED, "invalid or expired token")
+    }
+}
+
 pub async fn auth_middleware(
     State(state): State<AppState>,
     request: Request,

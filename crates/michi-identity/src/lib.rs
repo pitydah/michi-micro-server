@@ -7,7 +7,7 @@
 
 use base64::Engine;
 use chacha20poly1305::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -62,6 +62,7 @@ struct IdentityInner {
     signing_key: SigningKey,
     verifying_key: VerifyingKey,
     michi_id: String,
+    #[allow(dead_code)]
     key_path: PathBuf,
 }
 
@@ -274,4 +275,3 @@ mod tests {
         assert!(!invalid);
     }
 }
-

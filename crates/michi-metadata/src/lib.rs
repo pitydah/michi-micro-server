@@ -180,10 +180,22 @@ mod tests {
         assert_eq!(format_from_path(Path::new("song.aac")), AudioFormat::Aac);
         assert_eq!(format_from_path(Path::new("song.m4a")), AudioFormat::M4a);
         assert_eq!(format_from_path(Path::new("song.opus")), AudioFormat::Opus);
-        assert_eq!(format_from_path(Path::new("song.aiff")), AudioFormat::Unknown);
-        assert_eq!(format_from_path(Path::new("song.aif")), AudioFormat::Unknown);
-        assert_eq!(format_from_path(Path::new("song.dsf")), AudioFormat::Unknown);
-        assert_eq!(format_from_path(Path::new("song.dff")), AudioFormat::Unknown);
+        assert_eq!(
+            format_from_path(Path::new("song.aiff")),
+            AudioFormat::Unknown
+        );
+        assert_eq!(
+            format_from_path(Path::new("song.aif")),
+            AudioFormat::Unknown
+        );
+        assert_eq!(
+            format_from_path(Path::new("song.dsf")),
+            AudioFormat::Unknown
+        );
+        assert_eq!(
+            format_from_path(Path::new("song.dff")),
+            AudioFormat::Unknown
+        );
         assert_eq!(
             format_from_path(Path::new("song.txt")),
             AudioFormat::Unknown

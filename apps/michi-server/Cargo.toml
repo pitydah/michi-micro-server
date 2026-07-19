@@ -14,6 +14,7 @@ michi-identity = { path = "../../crates/michi-identity" }
 michi-connect = { path = "../../crates/michi-connect" }
 
 tokio.workspace = true
+tokio-util = { workspace = true }
 axum.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

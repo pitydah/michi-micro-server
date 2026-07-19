@@ -33,14 +33,14 @@ pub fn validate_url(url_str: &str) -> Result<String, String> {
         return Err("only http and https are allowed".into());
     }
 
-    let parsed = url::Url::parse(url_str)
-        .map_err(|e| format!("invalid URL: {}", e))?;
+    let parsed = url::Url::parse(url_str).map_err(|e| format!("invalid URL: {}", e))?;
 
     let host = parsed.host_str().ok_or("URL has no host")?;
 
     // Resolve DNS and check every address
     let addr_str = format!("{}:80", host);
-    let addrs = addr_str.to_socket_addrs()
+    let addrs = addr_str
+        .to_socket_addrs()
         .map_err(|e| format!("DNS resolution failed: {}", e))?;
 
     for addr in addrs {
@@ -69,7 +69,19 @@ fn is_private_or_link_local(ip: &IpAddr) -> bool {
             // 192.168.0.0/16
             || (o[0] == 192 && o[1] == 168)
         }
-        IpAddr::V6(_) => false,
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            // ::1 (loopback)
+            (s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 && s[6] == 0 && s[7] == 1)
+            // fe80::/10 (link-local)
+            || (s[0] & 0xFFC0) == 0xFE80
+            // fc00::/7 (unique-local)
+            || (s[0] & 0xFE00) == 0xFC00
+            // ff00::/8 (multicast) - already caught by is_multicast() above, but belt-and-suspenders
+            || (s[0] & 0xFF00) == 0xFF00
+            // ::ffff:0:0/96 (IPv4-mapped IPv6) — unwrap and re-validate the embedded IPv4
+            || (s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0xFFFF)
+        }
     }
 }
 

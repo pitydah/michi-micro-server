@@ -25,9 +25,7 @@ fn v1_error(
 
 const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 const MAX_SESSION_SIZE: u64 = 1024 * 1024 * 1024;
-const ALLOWED_AUDIO_EXTS: &[&str] = &[
-    "mp3", "flac", "ogg", "opus", "aac", "m4a", "wav",
-];
+const ALLOWED_AUDIO_EXTS: &[&str] = &["mp3", "flac", "ogg", "opus", "aac", "m4a", "wav"];
 
 #[derive(Debug, Deserialize)]
 pub struct ImportSessionRequest {
@@ -97,14 +95,21 @@ fn is_allowed_extension(filename: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn get_staging_dir(music_paths: &[std::path::PathBuf], cache_path: &std::path::Path) -> std::path::PathBuf {
+fn get_staging_dir(
+    music_paths: &[std::path::PathBuf],
+    cache_path: &std::path::Path,
+) -> std::path::PathBuf {
     music_paths
         .first()
         .map(|p| p.join(".import"))
         .unwrap_or_else(|| cache_path.join("import_staging"))
 }
 
-fn get_session_dir(music_paths: &[std::path::PathBuf], cache_path: &std::path::Path, session_id: &Uuid) -> std::path::PathBuf {
+fn get_session_dir(
+    music_paths: &[std::path::PathBuf],
+    cache_path: &std::path::Path,
+    session_id: &Uuid,
+) -> std::path::PathBuf {
     get_staging_dir(music_paths, cache_path).join(session_id.to_string())
 }
 
@@ -288,7 +293,11 @@ pub async fn import_upload_handler(
     }
 
     let safe_name = sanitize_filename(&body.filename);
-    let import_dir = get_session_dir(&state.config.music_paths, &state.config.cache_path, &session_id);
+    let import_dir = get_session_dir(
+        &state.config.music_paths,
+        &state.config.cache_path,
+        &session_id,
+    );
     tokio::fs::create_dir_all(&import_dir).await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -592,7 +601,11 @@ pub async fn import_commit_handler(
         .await
         .ok();
 
-    let staging_dir = get_session_dir(&state.config.music_paths, &state.config.cache_path, &session_id);
+    let staging_dir = get_session_dir(
+        &state.config.music_paths,
+        &state.config.cache_path,
+        &session_id,
+    );
     let final_dir = state
         .config
         .music_paths
@@ -712,7 +725,11 @@ pub async fn import_rollback_handler(
     Path(session_id): Path<Uuid>,
 ) -> Json<serde_json::Value> {
     IMPORT_SESSIONS.write().await.remove(&session_id);
-    let staging_dir = get_session_dir(&state.config.music_paths, &state.config.cache_path, &session_id);
+    let staging_dir = get_session_dir(
+        &state.config.music_paths,
+        &state.config.cache_path,
+        &session_id,
+    );
     cleanup_session_dir(&staging_dir).await;
     michi_db::set_import_session_status(&state.db, &session_id, &ImportState::RolledBack, None)
         .await

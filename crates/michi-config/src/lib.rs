@@ -54,12 +54,30 @@ pub struct Config {
     pub reconnect_delay_max: u32,
 }
 
-fn default_port() -> u16 { 8096 }
-fn default_music_paths() -> Vec<PathBuf> { vec![PathBuf::from("/music")] }
-fn default_lang() -> String { "en".into() }
-fn default_backup_keep() -> u32 { 7 }
-fn default_max_jobs() -> u32 { 3 }
-fn default_reconnect() -> u32 { 300 }
+#[allow(dead_code)]
+fn default_port() -> u16 {
+    8096
+}
+#[allow(dead_code)]
+fn default_music_paths() -> Vec<PathBuf> {
+    vec![PathBuf::from("/music")]
+}
+#[allow(dead_code)]
+fn default_lang() -> String {
+    "en".into()
+}
+#[allow(dead_code)]
+fn default_backup_keep() -> u32 {
+    7
+}
+#[allow(dead_code)]
+fn default_max_jobs() -> u32 {
+    3
+}
+#[allow(dead_code)]
+fn default_reconnect() -> u32 {
+    300
+}
 
 impl Config {
     pub fn from_env() -> Self {
@@ -201,33 +219,80 @@ impl Config {
 
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = env::var("MICHI_PORT") {
-            if let Ok(p) = v.parse::<u16>() { self.port = p; }
+            if let Ok(p) = v.parse::<u16>() {
+                self.port = p;
+            }
         }
         if let Ok(v) = env::var("MICHI_MUSIC_PATH") {
-            let paths: Vec<PathBuf> = v.split(',')
+            let paths: Vec<PathBuf> = v
+                .split(',')
                 .map(|s| PathBuf::from(s.trim()))
                 .filter(|p| !p.as_os_str().is_empty())
                 .collect();
-            if !paths.is_empty() { self.music_paths = paths; }
+            if !paths.is_empty() {
+                self.music_paths = paths;
+            }
         }
-        if let Ok(v) = env::var("MICHI_RESOURCE_PROFILE") { self.resource_profile = michi_core::ResourceProfile::from_config_str(&v); }
-        if let Ok(v) = env::var("MICHI_STREAM_PROFILE") { self.stream_profile = michi_core::StreamProfile::from_config_str(&v); }
-        if let Ok(v) = env::var("MICHI_FORMAT_POLICY") { self.format_policy = michi_core::AudioFormatPolicy::from_config_str(&v); }
+        if let Ok(v) = env::var("MICHI_RESOURCE_PROFILE") {
+            self.resource_profile = michi_core::ResourceProfile::from_config_str(&v);
+        }
+        if let Ok(v) = env::var("MICHI_STREAM_PROFILE") {
+            self.stream_profile = michi_core::StreamProfile::from_config_str(&v);
+        }
+        if let Ok(v) = env::var("MICHI_FORMAT_POLICY") {
+            self.format_policy = michi_core::AudioFormatPolicy::from_config_str(&v);
+        }
         if let Ok(v) = env::var("MICHI_SYNC_PEERS") {
-            self.sync_peers = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            self.sync_peers = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
-        if let Ok(v) = env::var("MICHI_SYNC_NAME") { self.sync_name = v; }
-        if let Ok(v) = env::var("MICHI_SCROBBLE_ENABLED") { self.scrobble_enabled = v == "1" || v.to_lowercase() == "true"; }
-        if let Ok(v) = env::var("MICHI_ALLOW_REGISTRATION") { self.allow_registration = v == "1" || v.to_lowercase() == "true"; }
-        if let Ok(v) = env::var("MICHI_CORS_ORIGIN") { self.cors_origin = Some(v); }
-        if let Ok(v) = env::var("MICHI_DEV_MODE") { self.dev_mode = v == "1" || v.to_lowercase() == "true"; }
-        if let Ok(v) = env::var("MICHI_MAX_REMOTE_BITRATE") { if let Ok(p) = v.parse() { self.max_remote_bitrate = p; } }
-        if let Ok(v) = env::var("MICHI_REMOTE_SYNC") { self.remote_sync = v == "1" || v.to_lowercase() == "true"; }
-        if let Ok(v) = env::var("MICHI_LANG") { self.language = v; }
-        if let Ok(v) = env::var("MICHI_AUTO_BACKUP") { self.auto_backup_enabled = v == "1" || v.to_lowercase() == "true"; }
-        if let Ok(v) = env::var("MICHI_BACKUP_KEEP") { if let Ok(p) = v.parse() { self.backup_max_keep = p; } }
-        if let Ok(v) = env::var("MICHI_MAX_JOBS") { if let Ok(p) = v.parse() { self.job_max_concurrent = p; } }
-        if let Ok(v) = env::var("MICHI_RECONNECT_MAX") { if let Ok(p) = v.parse() { self.reconnect_delay_max = p; } }
+        if let Ok(v) = env::var("MICHI_SYNC_NAME") {
+            self.sync_name = v;
+        }
+        if let Ok(v) = env::var("MICHI_SCROBBLE_ENABLED") {
+            self.scrobble_enabled = v == "1" || v.to_lowercase() == "true";
+        }
+        if let Ok(v) = env::var("MICHI_ALLOW_REGISTRATION") {
+            self.allow_registration = v == "1" || v.to_lowercase() == "true";
+        }
+        if let Ok(v) = env::var("MICHI_CORS_ORIGIN") {
+            self.cors_origin = Some(v);
+        }
+        if let Ok(v) = env::var("MICHI_DEV_MODE") {
+            self.dev_mode = v == "1" || v.to_lowercase() == "true";
+        }
+        if let Ok(v) = env::var("MICHI_MAX_REMOTE_BITRATE") {
+            if let Ok(p) = v.parse() {
+                self.max_remote_bitrate = p;
+            }
+        }
+        if let Ok(v) = env::var("MICHI_REMOTE_SYNC") {
+            self.remote_sync = v == "1" || v.to_lowercase() == "true";
+        }
+        if let Ok(v) = env::var("MICHI_LANG") {
+            self.language = v;
+        }
+        if let Ok(v) = env::var("MICHI_AUTO_BACKUP") {
+            self.auto_backup_enabled = v == "1" || v.to_lowercase() == "true";
+        }
+        if let Ok(v) = env::var("MICHI_BACKUP_KEEP") {
+            if let Ok(p) = v.parse() {
+                self.backup_max_keep = p;
+            }
+        }
+        if let Ok(v) = env::var("MICHI_MAX_JOBS") {
+            if let Ok(p) = v.parse() {
+                self.job_max_concurrent = p;
+            }
+        }
+        if let Ok(v) = env::var("MICHI_RECONNECT_MAX") {
+            if let Ok(p) = v.parse() {
+                self.reconnect_delay_max = p;
+            }
+        }
     }
 
     pub fn save_to_file(&self) -> Result<(), String> {
@@ -255,13 +320,15 @@ impl Config {
     }
 
     pub fn human_resource_profile(&self) -> String {
-        match self.resource_profile.to_string().as_str() {
-            "balanced" => "Balanced — good quality, moderate CPU usage".into(),
-            "original" => "Original — no transcoding, direct stream".into(),
-            "lossless" => "Lossless — high quality, files served as-is".into(),
-            "high" => "High Quality — high bitrate audio".into(),
-            "low" => "Efficient — lower quality, saves bandwidth".into(),
-            _ => self.resource_profile.to_string(),
+        match self.resource_profile {
+            michi_core::ResourceProfile::Eco => "Eco — minimal CPU/memory usage".into(),
+            michi_core::ResourceProfile::Balanced => {
+                "Balanced — good quality, moderate CPU usage".into()
+            }
+            michi_core::ResourceProfile::Performance => {
+                "Performance — maximum quality, highest resources".into()
+            }
+            michi_core::ResourceProfile::Custom => "Custom — user-defined resource limits".into(),
         }
     }
 
@@ -364,26 +431,98 @@ impl<'de> Deserialize<'de> for Config {
         }
 
         let h = ConfigHelper::deserialize(deserializer)?;
-        let mut cfg = Config::from_env();
-        if let Some(v) = h.port { cfg.port = v; }
-        if let Some(v) = h.music_paths { if !v.is_empty() { cfg.music_paths = v; } }
-        if let Some(v) = h.sync_peers { cfg.sync_peers = v; }
-        if let Some(v) = h.sync_name { cfg.sync_name = v; }
-        if let Some(v) = h.scrobble_enabled { cfg.scrobble_enabled = v; }
-        if let Some(v) = h.allow_registration { cfg.allow_registration = v; }
-        if let Some(v) = h.dev_mode { cfg.dev_mode = v; }
-        if let Some(ref v) = h.resource_profile { cfg.resource_profile = michi_core::ResourceProfile::from_config_str(v); }
-        if let Some(ref v) = h.stream_profile { cfg.stream_profile = michi_core::StreamProfile::from_config_str(v); }
-        if let Some(ref v) = h.format_policy { cfg.format_policy = michi_core::AudioFormatPolicy::from_config_str(v); }
-        if let Some(v) = h.max_remote_bitrate { cfg.max_remote_bitrate = v; }
-        if let Some(v) = h.remote_sync { cfg.remote_sync = v; }
-        if let Some(v) = h.language { cfg.language = v; }
-        if let Some(v) = h.ui { cfg.ui = v; }
-        if let Some(v) = h.auto_backup_enabled { cfg.auto_backup_enabled = v; }
-        if let Some(v) = h.backup_max_keep { cfg.backup_max_keep = v; }
-        if let Some(v) = h.job_max_concurrent { cfg.job_max_concurrent = v; }
-        if let Some(v) = h.reconnect_delay_max { cfg.reconnect_delay_max = v; }
-        if let Some(v) = h.cors_origin { cfg.cors_origin = Some(v); }
+        // Build directly from defaults to avoid recursion:
+        // from_env() -> load_file_overrides() -> Deserialize -> from_env() -> ...
+        let mut cfg = Config {
+            port: 8096,
+            music_paths: vec![PathBuf::from("/music")],
+            config_path: PathBuf::from("/config"),
+            cache_path: PathBuf::from("/cache"),
+            database_url: "sqlite:///config/michi.db".to_string(),
+            version: env!("CARGO_PKG_VERSION"),
+            sync_peers: Vec::new(),
+            sync_name: "default".to_string(),
+            listenbrainz_token: None,
+            lastfm_token: None,
+            scrobble_enabled: false,
+            auth_username: None,
+            auth_password: None,
+            auth_enabled: false,
+            allow_registration: false,
+            server_id: uuid::Uuid::new_v4(),
+            cors_origin: None,
+            dev_mode: false,
+            resource_profile: michi_core::ResourceProfile::from_config_str("balanced"),
+            stream_profile: michi_core::StreamProfile::from_config_str("original"),
+            format_policy: michi_core::AudioFormatPolicy::from_config_str("lossless"),
+            max_remote_bitrate: 320_000,
+            remote_sync: false,
+            language: "en".into(),
+            ui: UiConfig::default(),
+            auto_backup_enabled: false,
+            backup_max_keep: 7,
+            job_max_concurrent: 3,
+            reconnect_delay_max: 300,
+        };
+        if let Some(v) = h.port {
+            cfg.port = v;
+        }
+        if let Some(v) = h.music_paths {
+            if !v.is_empty() {
+                cfg.music_paths = v;
+            }
+        }
+        if let Some(v) = h.sync_peers {
+            cfg.sync_peers = v;
+        }
+        if let Some(v) = h.sync_name {
+            cfg.sync_name = v;
+        }
+        if let Some(v) = h.scrobble_enabled {
+            cfg.scrobble_enabled = v;
+        }
+        if let Some(v) = h.allow_registration {
+            cfg.allow_registration = v;
+        }
+        if let Some(v) = h.dev_mode {
+            cfg.dev_mode = v;
+        }
+        if let Some(ref v) = h.resource_profile {
+            cfg.resource_profile = michi_core::ResourceProfile::from_config_str(v);
+        }
+        if let Some(ref v) = h.stream_profile {
+            cfg.stream_profile = michi_core::StreamProfile::from_config_str(v);
+        }
+        if let Some(ref v) = h.format_policy {
+            cfg.format_policy = michi_core::AudioFormatPolicy::from_config_str(v);
+        }
+        if let Some(v) = h.max_remote_bitrate {
+            cfg.max_remote_bitrate = v;
+        }
+        if let Some(v) = h.remote_sync {
+            cfg.remote_sync = v;
+        }
+        if let Some(v) = h.language {
+            cfg.language = v;
+        }
+        if let Some(v) = h.ui {
+            cfg.ui = v;
+        }
+        if let Some(v) = h.auto_backup_enabled {
+            cfg.auto_backup_enabled = v;
+        }
+        if let Some(v) = h.backup_max_keep {
+            cfg.backup_max_keep = v;
+        }
+        if let Some(v) = h.job_max_concurrent {
+            cfg.job_max_concurrent = v;
+        }
+        if let Some(v) = h.reconnect_delay_max {
+            cfg.reconnect_delay_max = v;
+        }
+        if let Some(v) = h.cors_origin {
+            cfg.cors_origin = Some(v);
+        }
         Ok(cfg)
     }
 }

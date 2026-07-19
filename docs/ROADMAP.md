@@ -68,10 +68,27 @@
 - [x] conservative feature flags for stable v1 integration
 - [x] Michi Music Player Python client (CLI + desktop PySide6 skeleton)
 - [x] GHCR publish CI (multi-arch amd64+arm64)
-- [ ] Docker image published to ghcr.io (CI configurado, verificar publicación)
+- [x] Docker image published to ghcr.io
 
 ## Phase 9: Future
 - [ ] Mobile client (Michi Music Player)
-- [ ] Podcast support (RSS feeds)
+- [x] Podcast support (RSS feeds via michi-ingest)
 - [ ] HLS/DASH adaptive streaming
-- [ ] Docker image on ghcr.io
+- [x] Docker image on ghcr.io
+- [x] Multi-room dynamic room groups (Party/Relax/Custom)
+- [x] QR Code pairing for devices
+- [x] Broadcast & Cast proxy streaming
+- [x] Bookmark system
+- [x] Job queue with audit log
+- [x] Stream sources / Radio stations
+- [x] Mount guard monitoring
+- [x] i18n (9 idiomas)
+- [x] Identity: Ed25519 + AEAD encryption
+- [x] Setup wizard (onboard)
+- [x] mDNS device discovery (connect)
+
+## Phase 10: Future
+- [ ] Mobile client (Michi Music Player)
+- [ ] HLS/DASH adaptive streaming
+- [ ] AI-powered recommendations
+- [ ] Lyrics integration

@@ -54,8 +54,8 @@ pub fn check_auth_with_config(
 
     // Check password if provided (legacy: hex-encoded "enc:<hex>")
     if let Some(ref p) = query.p {
-        let decoded = if p.starts_with("enc:") {
-            hex::decode(&p[4..]).unwrap_or_default()
+        let decoded = if let Some(payload) = p.strip_prefix("enc:") {
+            hex::decode(payload).unwrap_or_default()
         } else {
             p.as_bytes().to_vec()
         };

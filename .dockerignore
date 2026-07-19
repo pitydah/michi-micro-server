@@ -1,0 +1,12 @@
+target/
+.git/
+.github/
+*.md
+docs/
+tests/
+scripts/
+casaos/
+deploy/
+docker-compose*.yml
+.DS_Store
+*.log
