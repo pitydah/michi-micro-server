@@ -16,20 +16,27 @@ fn v1_error(
     )
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BackupPlaylist {
+    pub name: String,
+    pub description: Option<String>,
+    pub tracks: Vec<michi_core::Track>,
+}
+
 #[derive(Serialize)]
 struct BackupPayload {
     version: i32,
     exported_at: String,
     tracks: Vec<michi_core::Track>,
-    playlists: Vec<michi_core::Playlist>,
+    playlists: Vec<BackupPlaylist>,
     starred_tracks: Vec<michi_core::Track>,
-    play_history: Vec<PlayHistoryEntry>,
+    play_history: Vec<BackupHistoryEntry>,
     server_id: String,
     server_name: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct PlayHistoryEntry {
+pub struct BackupHistoryEntry {
     track_id: String,
     played_at: String,
     timestamp: String,
@@ -46,7 +53,7 @@ pub async fn backup_handler(
         )
     })?;
 
-    let playlists = michi_db::list_playlists(&state.db, None)
+    let playlists_raw = michi_db::list_playlists(&state.db, None)
         .await
         .map_err(|e| {
             v1_error(
@@ -55,6 +62,33 @@ pub async fn backup_handler(
                 &e.to_string(),
             )
         })?;
+
+    let mut playlists = Vec::with_capacity(playlists_raw.len());
+    for pl in &playlists_raw {
+        let track_rows = michi_db::get_playlist_tracks(&state.db, &pl.id)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
+        let mut tracks = Vec::with_capacity(track_rows.len());
+        for pt in &track_rows {
+            if let Some(track) = michi_db::get_track(&state.db, &pt.0.track_id)
+                .await
+                .unwrap_or(None)
+            {
+                tracks.push(track);
+            }
+        }
+        playlists.push(BackupPlaylist {
+            name: pl.name.clone(),
+            description: pl.description.clone(),
+            tracks,
+        });
+    }
 
     let starred_tracks = michi_db::get_starred_tracks(&state.db).await.map_err(|e| {
         v1_error(
@@ -77,11 +111,11 @@ pub async fn backup_handler(
         )
     })?;
 
-    let play_history: Vec<PlayHistoryEntry> = play_history_rows
+    let play_history: Vec<BackupHistoryEntry> = play_history_rows
         .into_iter()
         .map(|(track_id, played_at)| {
             let timestamp = played_at.clone();
-            PlayHistoryEntry {
+            BackupHistoryEntry {
                 track_id,
                 played_at,
                 timestamp,
@@ -109,18 +143,11 @@ pub async fn backup_handler(
 #[derive(Debug, Deserialize)]
 pub struct RestoreBody {
     pub tracks: Vec<michi_core::Track>,
-    pub playlists: Vec<RestorePlaylist>,
+    pub playlists: Vec<BackupPlaylist>,
     pub starred_tracks: Vec<michi_core::Track>,
-    pub play_history: Vec<PlayHistoryEntry>,
+    pub play_history: Vec<BackupHistoryEntry>,
     #[serde(default)]
     pub force: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RestorePlaylist {
-    pub name: String,
-    pub description: Option<String>,
-    pub tracks: Vec<michi_core::Track>,
 }
 
 pub async fn restore_handler(
@@ -148,6 +175,13 @@ pub async fn restore_handler(
     let mut restored_history = 0u64;
 
     if body.force && !existing_tracks.is_empty() {
+        if body.tracks.is_empty() && body.starred_tracks.is_empty() {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "EMPTY_RESTORE",
+                "force=true but no tracks or starred_tracks provided to restore",
+            ));
+        }
         michi_db::delete_all_tracks(&state.db).await.map_err(|e| {
             v1_error(
                 StatusCode::INTERNAL_SERVER_ERROR,

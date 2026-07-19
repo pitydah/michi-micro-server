@@ -140,6 +140,12 @@ pub async fn update_settings_handler(
     if let Some(v) = body.dev_mode {
         tracing::info!("settings: dev_mode -> {}", v);
     }
+    if let Some(ref v) = body.sync_name {
+        tracing::info!("settings: sync_name -> {}", v);
+    }
+    if let Some(ref v) = body.sync_peers {
+        tracing::info!("settings: sync_peers -> {:?}", v);
+    }
 
     // Build a fresh config from env + current state + body overrides, persist
     let mut cfg = michi_config::Config::from_env();
