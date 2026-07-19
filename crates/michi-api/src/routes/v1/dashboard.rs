@@ -170,8 +170,12 @@ pub async fn dashboard_handler(
 
     let sync_peers = state.sync_tx.receiver_count();
 
-    let webhook_url_val = crate::routes::v1::backup::get_webhook_url().await;
-    let webhook_configured = webhook_url_val.is_some();
+    let webhook_configured = michi_db::get_server_config(&state.db, "webhook_url")
+        .await
+        .ok()
+        .flatten()
+        .map(|u| !u.is_empty())
+        .unwrap_or(false);
 
     let uploads_in_progress = 0; // simplified
 

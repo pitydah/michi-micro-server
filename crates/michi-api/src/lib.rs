@@ -585,9 +585,12 @@ async fn run_job_worker(
                 }
                 let _ = michi_db::update_mount_state(db, &path.display().to_string(), "online", "")
                     .await;
-                let tracks =
-                    michi_scanner::scan_directories_cancellable(&[path.clone()], 1, cancel.clone())
-                        .await;
+                let tracks = michi_scanner::scan_directories_cancellable(
+                    std::slice::from_ref(path),
+                    1,
+                    cancel.clone(),
+                )
+                .await;
                 michi_scanner::reconcile_root(db, path, &tracks, cancel)
                     .await
                     .map_err(|error| format!("reconcile error: {error}"))?;
@@ -1057,6 +1060,10 @@ fn v1_link_routes() -> Router<AppState> {
             get(routes::v1::diagnostics::diagnostics_handler),
         )
         .route("/api/v1/backup", get(routes::v1::backup::backup_handler))
+        .route(
+            "/api/v1/backup/restore",
+            post(routes::v1::backup::restore_handler),
+        )
         .route(
             "/api/v1/home/dashboard",
             get(routes::v1::dashboard::dashboard_handler),

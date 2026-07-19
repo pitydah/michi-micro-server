@@ -1,7 +1,5 @@
 use axum::{body::Body, extract::State, http::StatusCode, response::Response, Json};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::AppState;
 
@@ -30,8 +28,8 @@ struct BackupPayload {
     server_name: String,
 }
 
-#[derive(Serialize)]
-struct PlayHistoryEntry {
+#[derive(Serialize, Deserialize, Debug)]
+pub struct PlayHistoryEntry {
     track_id: String,
     played_at: String,
     timestamp: String,
@@ -108,11 +106,124 @@ pub async fn backup_handler(
     Ok(Json(serde_json::json!(backup)))
 }
 
-// ── Snapshot ────────────────────────────────────────────────────
-
-lazy_static::lazy_static! {
-    static ref LAST_SNAPSHOT: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+#[derive(Debug, Deserialize)]
+pub struct RestoreBody {
+    pub tracks: Vec<michi_core::Track>,
+    pub playlists: Vec<RestorePlaylist>,
+    pub starred_tracks: Vec<michi_core::Track>,
+    pub play_history: Vec<PlayHistoryEntry>,
+    #[serde(default)]
+    pub force: bool,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct RestorePlaylist {
+    pub name: String,
+    pub description: Option<String>,
+    pub tracks: Vec<michi_core::Track>,
+}
+
+pub async fn restore_handler(
+    State(state): State<AppState>,
+    Json(body): Json<RestoreBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let existing_tracks = michi_db::list_tracks(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+    if !existing_tracks.is_empty() && !body.force {
+        return Err(v1_error(
+            StatusCode::CONFLICT,
+            "RESTORE_REQUIRES_FORCE",
+            "tracks already exist; set force=true to overwrite",
+        ));
+    }
+
+    let mut restored_tracks = 0u64;
+    let mut restored_playlists = 0u64;
+    let mut restored_starred = 0u64;
+    let mut restored_history = 0u64;
+
+    if body.force && !existing_tracks.is_empty() {
+        michi_db::delete_all_tracks(&state.db).await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+    }
+
+    for track in &body.tracks {
+        michi_db::upsert_track(&state.db, track)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
+        restored_tracks += 1;
+    }
+
+    for pl in &body.playlists {
+        let playlist = michi_db::create_playlist(
+            &state.db,
+            &michi_core::PlaylistCreate {
+                name: pl.name.clone(),
+                description: pl.description.clone(),
+            },
+            None,
+        )
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+        restored_playlists += 1;
+
+        for track in pl.tracks.iter() {
+            let _ = michi_db::add_track_to_playlist(&state.db, &playlist.id, &track.id).await;
+        }
+    }
+
+    for track in &body.starred_tracks {
+        if michi_db::upsert_track(&state.db, track).await.is_ok()
+            && michi_db::star_track(&state.db, &track.id, true)
+                .await
+                .is_ok()
+        {
+            restored_starred += 1;
+        }
+    }
+
+    for entry in &body.play_history {
+        let _ =
+            sqlx::query("INSERT OR IGNORE INTO play_history (track_id, played_at) VALUES (?, ?)")
+                .bind(&entry.track_id)
+                .bind(&entry.played_at)
+                .execute(&state.db)
+                .await;
+        restored_history += 1;
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "restored",
+        "tracks": restored_tracks,
+        "playlists": restored_playlists,
+        "starred": restored_starred,
+        "history": restored_history,
+    })))
+}
+
+// ── Snapshot ────────────────────────────────────────────────────
 
 pub async fn snapshot_handler(
     State(state): State<AppState>,
@@ -161,7 +272,7 @@ pub async fn snapshot_handler(
         },
     });
 
-    *LAST_SNAPSHOT.write().await = Some(snapshot.to_string());
+    let _ = michi_db::save_snapshot(&state.db, &snapshot.to_string()).await;
 
     Ok(Json(serde_json::json!({
         "status": "snapshot_created",
@@ -169,25 +280,16 @@ pub async fn snapshot_handler(
     })))
 }
 
-pub async fn last_snapshot_handler() -> Json<serde_json::Value> {
-    let snap = LAST_SNAPSHOT.read().await;
-    match snap.as_ref() {
-        Some(s) => Json(
-            serde_json::json!({ "snapshot": serde_json::from_str::<serde_json::Value>(s).unwrap_or_default() }),
+pub async fn last_snapshot_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
+    match michi_db::last_snapshot(&state.db).await {
+        Ok(Some(s)) => Json(
+            serde_json::json!({ "snapshot": serde_json::from_str::<serde_json::Value>(&s).unwrap_or_default() }),
         ),
-        None => Json(serde_json::json!({ "snapshot": null })),
+        _ => Json(serde_json::json!({ "snapshot": null })),
     }
 }
 
 // ── Webhook ─────────────────────────────────────────────────────
-
-lazy_static::lazy_static! {
-    static ref WEBHOOK_URL: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
-}
-
-pub async fn get_webhook_url() -> Option<String> {
-    WEBHOOK_URL.read().await.clone()
-}
 
 #[derive(Debug, Deserialize)]
 pub struct SetWebhookBody {
@@ -195,6 +297,7 @@ pub struct SetWebhookBody {
 }
 
 pub async fn set_webhook_handler(
+    State(state): State<AppState>,
     Json(body): Json<SetWebhookBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if body.url.trim().is_empty() {
@@ -204,57 +307,69 @@ pub async fn set_webhook_handler(
             "webhook URL is required",
         ));
     }
-    *WEBHOOK_URL.write().await = Some(body.url.trim().to_string());
+    let _ = michi_db::set_server_config(&state.db, "webhook_url", body.url.trim()).await;
     Ok(Json(serde_json::json!({ "status": "webhook_set" })))
 }
 
-pub async fn get_webhook_handler() -> Json<serde_json::Value> {
-    let url = WEBHOOK_URL.read().await;
-    Json(serde_json::json!({ "webhook_url": url.clone() }))
+pub async fn get_webhook_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let url = michi_db::get_server_config(&state.db, "webhook_url")
+        .await
+        .ok()
+        .flatten();
+    Json(serde_json::json!({ "webhook_url": url }))
 }
 
-pub async fn delete_webhook_handler() -> Json<serde_json::Value> {
-    *WEBHOOK_URL.write().await = None;
+pub async fn delete_webhook_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let _ = michi_db::set_server_config(&state.db, "webhook_url", "").await;
     Json(serde_json::json!({ "status": "webhook_deleted" }))
 }
 
 pub async fn test_webhook_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let url = WEBHOOK_URL.read().await.clone();
-    match url {
-        Some(_) => {
-            fire_sync_webhook(&state).await;
-            Ok(Json(serde_json::json!({ "status": "webhook_fired" })))
-        }
-        None => Err(v1_error(
+    let has_url = michi_db::get_server_config(&state.db, "webhook_url")
+        .await
+        .ok()
+        .flatten()
+        .map(|u| !u.is_empty())
+        .unwrap_or(false);
+    if has_url {
+        fire_sync_webhook(&state).await;
+        Ok(Json(serde_json::json!({ "status": "webhook_fired" })))
+    } else {
+        Err(v1_error(
             StatusCode::BAD_REQUEST,
             "NO_WEBHOOK_CONFIGURED",
             "set a webhook URL first",
-        )),
+        ))
     }
 }
 
 /// Called after sync completes to fire the webhook
 pub async fn fire_sync_webhook(state: &AppState) {
-    let url = WEBHOOK_URL.read().await.clone();
-    if let Some(url) = url {
-        let track_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks")
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
+    let url = michi_db::get_server_config(&state.db, "webhook_url")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if url.is_empty() {
+        return;
+    }
+    let track_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks")
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
 
-        let payload = serde_json::json!({
-            "event": "sync_completed",
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "stats": { "tracks": track_count },
-        });
+    let payload = serde_json::json!({
+        "event": "sync_completed",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "stats": { "tracks": track_count },
+    });
 
-        let client = reqwest::Client::new();
-        match client.post(&url).json(&payload).send().await {
-            Ok(resp) => tracing::info!("webhook sent: HTTP {}", resp.status()),
-            Err(e) => tracing::warn!("webhook failed: {}", e),
-        }
+    let client = reqwest::Client::new();
+    match client.post(&url).json(&payload).send().await {
+        Ok(resp) => tracing::info!("webhook sent: HTTP {}", resp.status()),
+        Err(e) => tracing::warn!("webhook failed: {}", e),
     }
 }
 
