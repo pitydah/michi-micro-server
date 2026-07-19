@@ -19,6 +19,6 @@ services:
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8096/api/status"]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 3
       start_period: 15s

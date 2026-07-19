@@ -33,7 +33,7 @@ GET /api/v1/server/info
 {
   "name": "Michi Micro Server",
   "server_id": "550e8400-e29b-41d4-a716-446655440000",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "api_version": "v1",
   "features": {
     "library": true,
@@ -59,8 +59,8 @@ GET /api/v1/server/info
 | `web_ui` | true | Vanilla HTML/CSS/JS, no build step — stable |
 | `playlists` | true | CRUD, reorder, share, M3U — stable in v1.1 |
 | `artwork` | true | Cover art serving from disk cache — stable in v1.1 |
-| `sync` | false | Experimental multi-room sync. Not part of v1 contract. |
-| `transcoding` | false | Optional, requires external ffmpeg. Not guaranteed. |
+| `sync` | true | Multi-room sync via WebSocket — stable in v1.2 |
+| `transcoding` | true | FFmpeg transcoding — stable in v1.2 |
 | `websocket` | true | Real-time events — stable in v1.1 |
 
 ## server_id
@@ -101,7 +101,7 @@ GET /api/v1/stream/{id}?format=ogg
 ```
 
 Range requests (206 Partial Content) supported.
-`?format=mp3|ogg` triggers FFmpeg transcoding (experimental — see feature flag).
+`?format=mp3|ogg` triggers FFmpeg transcoding.
 
 ## Client Data Model
 

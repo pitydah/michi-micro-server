@@ -204,7 +204,20 @@ pub async fn proxy_stream_handler(
     michi_ingest::validate_url(&source.url)
         .map_err(|e| v1_error(StatusCode::BAD_REQUEST, "SSRF_BLOCKED", &e))?;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::limited(3))
+        .build()
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "CLIENT_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+    // Re-validate SSRF on every redirect target via custom policy
     match client.get(&source.url).send().await {
         Ok(resp) => {
             let status = resp.status();
@@ -213,9 +226,22 @@ pub async fn proxy_stream_handler(
 
             let mut response = axum::response::Response::builder().status(status);
 
+            // Reject HTML content (SSRF content injection prevention)
+            let content_type = headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if content_type.contains("text/html") || content_type.contains("application/xhtml") {
+                return Err(v1_error(
+                    StatusCode::BAD_GATEWAY,
+                    "PROXY_BLOCKED",
+                    "stream returned HTML, possible SSRF redirect",
+                ));
+            }
+
             // Forward relevant headers
-            if let Some(ct) = headers.get(header::CONTENT_TYPE) {
-                response = response.header(header::CONTENT_TYPE, ct);
+            if !content_type.is_empty() {
+                response = response.header(header::CONTENT_TYPE, content_type);
             }
             // Add CORS headers for web playback
             response = response
@@ -224,9 +250,9 @@ pub async fn proxy_stream_handler(
                 .header("Access-Control-Allow-Headers", "Range, Content-Type");
 
             Ok(response
-                .body(Body::from_stream(stream.map(|chunk| {
-                    chunk.map_err(std::io::Error::other)
-                })))
+                .body(Body::from_stream(
+                    stream.map(|chunk| chunk.map_err(std::io::Error::other)),
+                ))
                 .unwrap())
         }
         Err(e) => Err(v1_error(
@@ -260,7 +286,18 @@ pub async fn proxy_episode_handler(
                 // SSRF protection
                 let _ = michi_ingest::validate_url(&ep.audio_url)
                     .map_err(|e| v1_error(StatusCode::BAD_REQUEST, "SSRF_BLOCKED", &e))?;
-                let client = reqwest::Client::new();
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(60))
+                    .connect_timeout(std::time::Duration::from_secs(5))
+                    .redirect(reqwest::redirect::Policy::limited(3))
+                    .build()
+                    .map_err(|e| {
+                        v1_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "CLIENT_ERROR",
+                            &e.to_string(),
+                        )
+                    })?;
                 match client.get(&ep.audio_url).send().await {
                     Ok(resp) => {
                         let status = resp.status();
@@ -274,9 +311,9 @@ pub async fn proxy_episode_handler(
                             .header("Access-Control-Allow-Origin", "*")
                             .header("Access-Control-Allow-Methods", "GET, OPTIONS");
                         return Ok(response
-                            .body(Body::from_stream(stream.map(|chunk| {
-                                chunk.map_err(std::io::Error::other)
-                            })))
+                            .body(Body::from_stream(
+                                stream.map(|chunk| chunk.map_err(std::io::Error::other)),
+                            ))
                             .unwrap());
                     }
                     Err(_) => break,

@@ -2,6 +2,109 @@ use axum::{extract::State, Json};
 use serde::Serialize;
 
 use crate::AppState;
+// Platform-specific system metrics helpers
+
+/// Read memory info from /proc/self/status
+fn read_memory() -> (u64, u64) {
+    if let Ok(content) = std::fs::read_to_string("/proc/self/status") {
+        let mut rss = 0u64;
+        let mut vm = 0u64;
+        for line in content.lines() {
+            if line.starts_with("VmRSS:") {
+                rss = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+            }
+            if line.starts_with("VmSize:") {
+                vm = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+            }
+        }
+        return (rss / 1024, vm / 1024); // Convert KB to MB
+    }
+    (0, 0)
+}
+
+/// Read thread count from /proc/self/stat or /proc/self/task
+fn read_thread_count() -> u32 {
+    if let Ok(entries) = std::fs::read_dir("/proc/self/task") {
+        return entries.count() as u32;
+    }
+    0
+}
+
+/// Read binary size
+fn read_binary_size() -> u64 {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Ok(meta) = std::fs::metadata(exe) {
+            return meta.len();
+        }
+    }
+    0
+}
+
+/// Read CPU usage from /proc/self/stat (utime + stime)
+fn read_cpu_ticks() -> u64 {
+    if let Ok(content) = std::fs::read_to_string("/proc/self/stat") {
+        let parts: Vec<&str> = content.split_whitespace().collect();
+        if parts.len() >= 15 {
+            let utime: u64 = parts[13].parse().unwrap_or(0);
+            let stime: u64 = parts[14].parse().unwrap_or(0);
+            return utime + stime;
+        }
+    }
+    0
+}
+
+fn read_total_cpu_ticks() -> u64 {
+    if let Ok(content) = std::fs::read_to_string("/proc/stat") {
+        for line in content.lines() {
+            if line.starts_with("cpu ") {
+                return line
+                    .split_whitespace()
+                    .skip(1)
+                    .filter_map(|s| s.parse::<u64>().ok())
+                    .sum();
+            }
+        }
+    }
+    0
+}
+
+fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        #[repr(C)]
+        struct Statvfs {
+            f_bsize: u64,
+            f_frsize: u64,
+            f_blocks: u64,
+            f_bfree: u64,
+            f_bavail: u64,
+            _rest: [u64; 10],
+        }
+        extern "C" {
+            fn statvfs(path: *const i8, buf: *mut Statvfs) -> i32;
+        }
+        let path_c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut stat: Statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { statvfs(path_c.as_ptr(), &mut stat) } != 0 {
+            return None;
+        }
+        Some(stat.f_frsize * stat.f_bavail)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct PlayerCompatibility {
@@ -51,7 +154,18 @@ pub struct DiagnosticsReport {
     pub receiver: ReceiverStatus,
     pub player_compatibility: PlayerCompatibility,
     pub config: ConfigStatus,
+    pub system: SystemStatus,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SystemStatus {
+    pub memory_rss_mb: u64,
+    pub memory_vm_mb: u64,
+    pub binary_size_bytes: u64,
+    pub thread_count: u32,
+    pub cpu_usage_percent: f64,
+    pub uptime_seconds: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,20 +244,6 @@ pub struct ConfigStatus {
     pub server_id: String,
 }
 
-fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
-    #[cfg(unix)]
-    {
-        // Placeholder: real implementation would use libc::statvfs
-        let _ = path;
-        Some(0)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        None
-    }
-}
-
 pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<DiagnosticsReport> {
     let mut warnings: Vec<String> = Vec::new();
 
@@ -192,6 +292,50 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
         dir_size(std::path::Path::new(staging_path.as_ref().unwrap())).unwrap_or(0)
     } else {
         0
+    };
+
+    let active_import_sessions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM import_sessions WHERE state NOT IN ('committed', 'rolled_back')",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+
+    let registered_receivers = state
+        .receiver_manager
+        .registry()
+        .await
+        .read()
+        .await
+        .list()
+        .len();
+
+    let active_token_count = michi_db::list_link_devices(&state.db)
+        .await
+        .map(|d| d.len())
+        .unwrap_or(0);
+
+    // Compute CPU% with a 200ms sample window
+    let cpu_percent = {
+        let (before_proc, before_total) =
+            tokio::task::spawn_blocking(|| (read_cpu_ticks(), read_total_cpu_ticks()))
+                .await
+                .unwrap_or((0, 0));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let (after_proc, after_total) =
+            tokio::task::spawn_blocking(|| (read_cpu_ticks(), read_total_cpu_ticks()))
+                .await
+                .unwrap_or((0, 0));
+        let proc_delta = after_proc.saturating_sub(before_proc);
+        let total_delta = after_total.saturating_sub(before_total);
+        let num_cores = std::thread::available_parallelism()
+            .map(|n| n.get() as f64)
+            .unwrap_or(1.0);
+        if total_delta > 0 {
+            (proc_delta as f64 / total_delta as f64) * 100.0 * num_cores
+        } else {
+            0.0
+        }
     };
 
     let playback = state.playback_state.read().await;
@@ -249,6 +393,11 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
         }
     }
 
+    let (memory_rss_mb, memory_vm_mb) = read_memory();
+    let thread_count = read_thread_count();
+    let binary_size_bytes = read_binary_size();
+    let uptime_seconds = state.started_at.elapsed().as_secs();
+
     Json(DiagnosticsReport {
         healthy: warnings.is_empty(),
         db: DbStatus {
@@ -256,7 +405,7 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
             total_tracks,
             total_playlists,
             total_devices,
-            active_import_sessions: 0,
+            active_import_sessions,
         },
         library: LibraryStatus {
             configured_paths,
@@ -264,7 +413,7 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
             total_tracks,
         },
         token_store: TokenStoreStatus {
-            active_tokens: 0,
+            active_tokens: active_token_count,
             cleanup_active: true,
         },
         import_staging: ImportStagingStatus {
@@ -277,12 +426,12 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
             playing: playback.playing,
             position_ms: playback.position_ms,
             volume: (playback.volume * 100.0) as u32,
-            restored: false,
+            restored: playback_restored,
             has_queue: total_queues > 0,
         },
         events: EventsStatus {
             websocket: true,
-            auth_enabled: false,
+            auth_enabled: state.config.auth_enabled,
             recommended_polling: true,
         },
         queues: QueuesStatus {
@@ -294,10 +443,18 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
             cache_path_free_bytes: cache_free,
         },
         receiver: ReceiverStatus {
-            client_available: true,
-            registered_receivers: 0,
+            client_available: registered_receivers > 0,
+            registered_receivers,
         },
         player_compatibility: PlayerCompatibility::new(total_queues > 0, playback_restored),
+        system: SystemStatus {
+            memory_rss_mb,
+            memory_vm_mb,
+            binary_size_bytes,
+            thread_count,
+            cpu_usage_percent: cpu_percent,
+            uptime_seconds,
+        },
         config: ConfigStatus {
             port: state.config.port(),
             music_paths: state

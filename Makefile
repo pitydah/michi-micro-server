@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check check test clippy build run clean docker docker-up ci install deb
+.PHONY: fmt fmt-check check test clippy build run clean docker docker-up docker-dev-up docker-down ci install deb audit coverage watch
 
 fmt:
 	cargo fmt
@@ -30,10 +30,25 @@ docker:
 docker-up:
 	docker compose up -d --build
 
-ci: fmt-check check test clippy docker
+docker-dev-up:
+	docker compose -f docker-compose.dev.yml up -d --build
+
+docker-down:
+	docker compose down
+
+ci: fmt-check check test clippy
 
 install: build
 	cp target/release/michi-server /usr/local/bin/michi-server
 
 deb:
 	cargo deb
+
+audit:
+	cargo audit
+
+coverage:
+	cargo tarpaulin --workspace --out html
+
+watch:
+	cargo watch -x check -x clippy -x test

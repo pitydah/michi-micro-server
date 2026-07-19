@@ -11,11 +11,19 @@ const MANIFEST_JSON: &str = r##"{
   "short_name": "Michi",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#1a1a2e",
-  "theme_color": "#e94560"
+  "background_color": "#08070d",
+  "theme_color": "#090711",
+  "icons": [
+    {
+      "src": "/static/assets/michi-logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
 }"##;
 
-const SW_JS: &str = r#"const CACHE = 'michi-v1';
+const SW_JS: &str = r#"const CACHE = 'michi-v4';
 
 self.addEventListener('install', function(e) {
   e.waitUntil(

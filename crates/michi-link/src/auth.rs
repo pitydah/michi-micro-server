@@ -53,12 +53,7 @@ impl TokenStore {
     }
 
     /// Insert a pre-hashed token entry directly (used for DB restoration).
-    pub async fn store_hash(
-        &self,
-        hash: String,
-        token_type: TokenType,
-        device_id: uuid::Uuid,
-    ) {
+    pub async fn store_hash(&self, hash: String, token_type: TokenType, device_id: uuid::Uuid) {
         let entry = TokenEntry {
             device_id,
             token_type,
@@ -119,11 +114,9 @@ pub async fn load_tokens_from_db(
     store: &TokenStore,
     pool: &sqlx::SqlitePool,
 ) -> Result<usize, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT device_id, token_hash FROM link_devices WHERE revoked = 0",
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query("SELECT device_id, token_hash FROM link_devices WHERE revoked = 0")
+        .fetch_all(pool)
+        .await?;
 
     let mut count = 0;
     for row in rows {

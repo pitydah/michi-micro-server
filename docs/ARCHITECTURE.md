@@ -7,25 +7,35 @@ Michi Micro Server is organized as a Rust workspace with a modular crate structu
 ```
 michi-micro-server/
 ├── apps/
-│   └── michi-server/       # Main binary
+│   └── michi-server/          # Main binary
 ├── crates/
-│   ├── michi-core/         # Shared models and types
-│   ├── michi-api/          # HTTP routes (Axum), auth, v1 API, WebSocket
-│   ├── michi-config/       # Configuration from env vars, server_id
-│   ├── michi-db/           # SQLite database layer + 8 migrations
-│   ├── michi-metadata/     # Audio metadata reading (Lofty)
-│   ├── michi-scanner/      # Music library scanner
-│   ├── michi-streaming/    # Audio streaming (+ experimental transcoding)
-│   ├── michi-homeassistant/# Home Assistant MQTT integration
-│   ├── michi-sync/         # Multi-room playback sync
-│   ├── michi-m3u/          # M3U playlist import/export
-│   └── michi-tui/          # Terminal UI client (ratatui)
-├── docs/                   # Documentation + MICHI_LINK.md
-├── deploy/                 # Systemd + Debian packaging
+│   ├── michi-core/            # Shared models and types
+│   ├── michi-api/             # HTTP routes (Axum), auth, v1 API, WebSocket
+│   ├── michi-config/          # Configuration from env vars, server_id
+│   ├── michi-db/              # SQLite database layer + 35 migrations
+│   ├── michi-metadata/        # Audio metadata reading (Lofty)
+│   ├── michi-scanner/         # Music library scanner
+│   ├── michi-streaming/       # Audio streaming (+ experimental transcoding)
+│   ├── michi-m3u/             # M3U playlist import/export
+│   ├── michi-sync/            # Multi-server sync (device pairing, jobs, playback state)
+│   ├── michi-homeassistant/   # Home Assistant MQTT integration
+│   ├── michi-tui/             # Terminal UI client (ratatui)
+│   ├── michi-client/          # Client SDK for connecting to Michi servers
+│   ├── michi-opensubsonic/    # OpenSubsonic (Subsonic API) compatibility
+│   ├── michi-rooms/           # Snapcast multi-room integration
+│   ├── michi-link/            # Device linking: tokens, pairing codes, permissions
+│   ├── michi-receivers/       # Receiver adapter trait and client (Chromecast, etc.)
+│   ├── michi-security/        # Rate limiting, input validation, idempotency
+│   ├── michi-ingest/          # Universal stream ingest (radio, podcast, HLS) + SSRF protection
+│   ├── michi-identity/        # Cryptographic identity (Ed25519 keypair, AEAD encryption)
+│   ├── michi-connect/         # Multi-layer discovery: mDNS, QR codes, dynamic CORS
+│   └── michi-onboard/         # First-time setup wizard
+├── docs/                      # Documentation + MICHI_LINK.md
+├── deploy/                    # Systemd + Debian packaging
 ├── Dockerfile
 ├── docker-compose.yml
 ├── Makefile
-└── casaos/                 # CasaOS metadata
+└── casaos/                    # CasaOS metadata
 ```
 
 ## Design Principles
@@ -63,7 +73,7 @@ Serves both JSON API endpoints (`/api/*`) and the Web UI at `GET /`. The Web UI 
 Reads configuration from environment variables with defaults suitable for containerized deployment.
 
 ### michi-db
-SQLite database layer using SQLx. Handles connection pooling and schema migrations.
+SQLite database layer using SQLx. Handles connection pooling and schema migrations (35 migrations covering users, playlists, play history, sync devices, pairing tokens, players, queues, track metadata, link devices, receivers, playback sessions, content hashing, and more).
 
 ### michi-metadata
 Audio metadata extraction using the Lofty crate. Parses tags and audio properties from music files.
@@ -87,8 +97,44 @@ Audio streaming with HTTP Range Request support. Provides:
 
 The crate is consumed by `michi-api` handlers and calls `michi-db` to look up tracks. It intentionally contains no HTTP or database logic — only file I/O and range math.
 
-### Placeholder Crates (Inactive)
-`michi-homeassistant`, `michi-sync`, and `michi-multiroom` are present in the filesystem but commented out of `Cargo.toml` workspace `members` until actively developed.
+### michi-m3u
+M3U playlist import and export. Converts between M3U file format and the internal playlist database representation.
+
+### michi-sync
+Multi-server synchronization layer. Handles device pairing, sync job creation and execution, and playback state replication across linked servers.
+
+### michi-homeassistant
+Home Assistant integration via MQTT discovery and state reporting. Publishes sensor states (now playing, player status, track count) and accepts playback commands.
+
+### michi-tui
+Terminal UI client built with ratatui. Provides a text-based interface for browsing and controlling playback.
+
+### michi-client
+Client SDK for connecting to Michi servers. Provides `MichiClient` with connection state management, server feature detection, and a typed client error type.
+
+### michi-opensubsonic
+OpenSubsonic / Subsonic API compatibility layer. Implements the Subsonic REST API endpoints for interoperability with third-party clients (DSub, Ultrasonic, etc.).
+
+### michi-rooms
+Snapcast multi-room audio integration. Manages rooms, clients, and groups via Snapcast's JSON-RPC interface for synchronized multi-room playback.
+
+### michi-link
+Device linking and authorization. Provides token-based device authentication, 6-digit pairing codes, permission models, and version tracking for client-server connections.
+
+### michi-receivers
+Receiver abstraction layer. Defines the `ReceiverAdapter` trait with capabilities, play/pause/stop control, volume, and position tracking. Includes a `ReceiverClient` and session manager for receiver-based playback.
+
+### michi-security
+Security middleware layer. Provides IP-based rate limiting, idempotency keys for mutation safety, and input validation guards for API endpoints.
+
+### michi-ingest
+Universal stream ingest pipeline. Sniffs URLs to detect stream type (radio, podcast, direct file, HLS). Includes SSRF protection that blocks private/reserved IP ranges. Supports RSS/Atom podcast feed parsing with episode extraction.
+
+### michi-identity
+Cryptographic identity system. On first run, generates an Ed25519 keypair persisted to disk encrypted with ChaCha20-Poly1305 AEAD. The encryption key is derived from blake3(hostname + salt) so a copied identity file is not usable on another machine.
+
+### michi-connect
+Multi-layer server discovery and connection. Provides mDNS announcement of the server as `_michi._tcp`, QR code-based connection links (`michi://connect?id=...`), and dynamic CORS based on signed tokens.
 
 ## Web UI
 

@@ -1,15 +1,13 @@
-use axum::{extract::State, Json};
 use crate::AppState;
+use axum::{extract::State, Json};
 
-pub async fn config_validate_handler(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn config_validate_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let cfg = &state.config;
     let mut errors: Vec<serde_json::Value> = Vec::new();
     let mut warnings: Vec<serde_json::Value> = Vec::new();
 
     // Validate port
-    if cfg.port() == 0 || cfg.port() > 65535 {
+    if cfg.port() == 0 {
         errors.push(serde_json::json!({"code": "INVALID_PORT", "message": "Port must be 1-65535"}));
     }
 

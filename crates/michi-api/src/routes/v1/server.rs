@@ -71,7 +71,7 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
             receivers: true,
             rooms: true,
             events: true,
-            transcoding: false,
+            transcoding: michi_streaming::check_ffmpeg(),
             token_refresh: true,
         },
         auth: V1AuthInfo {

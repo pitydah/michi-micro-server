@@ -1,10 +1,9 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use crate::AppState;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio_util::sync::CancellationToken;
-use crate::AppState;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ModuleDescriptor {
@@ -15,31 +14,45 @@ pub struct ModuleDescriptor {
 
 fn builtin_modules() -> Vec<ModuleDescriptor> {
     vec![
-        ModuleDescriptor { name: "scan".into(), enabled: true, description: "Music library scanning".into() },
-        ModuleDescriptor { name: "sync".into(), enabled: true, description: "Peer synchronization".into() },
-        ModuleDescriptor { name: "stream".into(), enabled: true, description: "Audio streaming".into() },
-        ModuleDescriptor { name: "playback".into(), enabled: true, description: "Playback tracking".into() },
-        ModuleDescriptor { name: "backup".into(), enabled: true, description: "Backup and restore".into() },
-        ModuleDescriptor { name: "webhook".into(), enabled: true, description: "Webhook notifications".into() },
-        ModuleDescriptor { name: "homeassistant".into(), enabled: true, description: "Home Assistant integration".into() },
+        ModuleDescriptor {
+            name: "scan".into(),
+            enabled: true,
+            description: "Music library scanning".into(),
+        },
+        ModuleDescriptor {
+            name: "sync".into(),
+            enabled: true,
+            description: "Peer synchronization".into(),
+        },
+        ModuleDescriptor {
+            name: "stream".into(),
+            enabled: true,
+            description: "Audio streaming".into(),
+        },
+        ModuleDescriptor {
+            name: "playback".into(),
+            enabled: true,
+            description: "Playback tracking".into(),
+        },
+        ModuleDescriptor {
+            name: "backup".into(),
+            enabled: true,
+            description: "Backup and restore".into(),
+        },
+        ModuleDescriptor {
+            name: "webhook".into(),
+            enabled: true,
+            description: "Webhook notifications".into(),
+        },
+        ModuleDescriptor {
+            name: "homeassistant".into(),
+            enabled: true,
+            description: "Home Assistant integration".into(),
+        },
     ]
 }
 
-fn module_cancel_token(state: &AppState, name: &str) -> Option<CancellationToken> {
-    match name {
-        "scan" => Some(state.scan_cancel.clone()),
-        "sync" => Some(state.sync_cancel.clone()),
-        "playback" => Some(state.playback_cancel.clone()),
-        "backup" => Some(state.backup_cancel.clone()),
-        "webhook" => Some(state.webhook_cancel.clone()),
-        "homeassistant" => Some(state.homeassistant_cancel.clone()),
-        _ => None,
-    }
-}
-
-pub async fn modules_handler(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn modules_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let disabled = state.disabled_modules.read().await;
     let mut modules = builtin_modules();
     for m in &mut modules {
@@ -58,39 +71,50 @@ pub async fn toggle_module_handler(
     State(state): State<AppState>,
     Json(body): Json<ToggleModuleBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let mut disabled = state.disabled_modules.write().await;
-
     // Validate module name
     if !builtin_modules().iter().any(|m| m.name == body.name) {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": {"code": "UNKNOWN_MODULE", "message": format!("unknown module: {}", body.name)}})),
+            Json(
+                serde_json::json!({"error": {"code": "UNKNOWN_MODULE", "message": format!("unknown module: {}", body.name)}}),
+            ),
         ));
     }
 
     if body.enabled {
-        // Re-enable: remove from disabled set, create new cancel token
-        disabled.remove(&body.name);
-        // The new token allows the module to start fresh on next spawn attempt
-        // Current running tasks check disabled_modules set every cycle
+        state.disabled_modules.write().await.remove(&body.name);
+        let mut tokens = state.module_tokens.write().await;
+        if tokens
+            .get(&body.name)
+            .map(|token| token.is_cancelled())
+            .unwrap_or(true)
+        {
+            tokens.insert(
+                body.name.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            );
+        }
         tracing::info!("module '{}' enabled", body.name);
     } else {
-        // Disable: add to set, cancel running tasks
-        disabled.insert(body.name.clone());
-        if let Some(token) = module_cancel_token(&state, &body.name) {
+        state
+            .disabled_modules
+            .write()
+            .await
+            .insert(body.name.clone());
+        if let Some(token) = state.module_tokens.read().await.get(&body.name).cloned() {
             token.cancel();
             tracing::info!("module '{}' disabled, tasks cancelled", body.name);
         }
     }
 
-    Ok(Json(serde_json::json!({ "module": body.name, "enabled": body.enabled })))
+    Ok(Json(
+        serde_json::json!({ "module": body.name, "enabled": body.enabled }),
+    ))
 }
 
 // ── Self-Test ──────────────────────────────────────────────────
 
-pub async fn self_test_handler(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn self_test_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let mut results = Vec::new();
 
     let db_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
@@ -142,27 +166,41 @@ pub async fn self_test_handler(
 
 // ── Capabilities Manifest ──────────────────────────────────────
 
-pub async fn capabilities_handler() -> Json<serde_json::Value> {
+pub async fn capabilities_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let disabled = state.disabled_modules.read().await;
+    let has_ffmpeg = false;
+    let receiver_count = state
+        .receiver_manager
+        .registry()
+        .await
+        .read()
+        .await
+        .list()
+        .len();
     Json(serde_json::json!({
         "version": "0.2.0",
         "features": [
-            { "name": "scan", "version": "1.0", "description": "Library scanning with watcher" },
-            { "name": "sync", "version": "1.0", "description": "Peer-to-peer library sync" },
-            { "name": "stream", "version": "1.0", "description": "Direct & proxied audio streaming" },
-            { "name": "playback", "version": "1.0", "description": "Playback tracking & history" },
-            { "name": "backup", "version": "1.0", "description": "JSON backup & tar.gz bundle" },
-            { "name": "webhook", "version": "1.0", "description": "Sync completion webhooks" },
-            { "name": "etag", "version": "1.0", "description": "ETag-based conditional requests" },
-            { "name": "handoff", "version": "1.0", "description": "Direct stream handoff between peers" },
-            { "name": "mounts", "version": "1.0", "description": "Mount health monitoring" },
-            { "name": "audit", "version": "1.0", "description": "Audit log for admin actions" },
-            { "name": "jobs", "version": "1.0", "description": "Persistent job queue with workers" },
-            { "name": "modules", "version": "1.0", "description": "Runtime module enable/disable" },
+            { "name": "scan", "version": "1.0", "description": "Library scanning with watcher", "enabled": !disabled.contains("scan") },
+            { "name": "sync", "version": "1.0", "description": "Peer-to-peer library sync", "enabled": !disabled.contains("sync") },
+            { "name": "stream", "version": "1.0", "description": "Direct & proxied audio streaming", "enabled": !disabled.contains("stream") },
+            { "name": "playback", "version": "1.0", "description": "Playback tracking & history", "enabled": !disabled.contains("playback") },
+            { "name": "backup", "version": "1.0", "description": "JSON backup & tar.gz bundle", "enabled": !disabled.contains("backup") },
+            { "name": "webhook", "version": "1.0", "description": "Sync completion webhooks", "enabled": !disabled.contains("webhook") },
+            { "name": "etag", "version": "1.0", "description": "ETag-based conditional requests", "enabled": true },
+            { "name": "handoff", "version": "1.0", "description": "Direct stream handoff between peers", "enabled": true },
+            { "name": "mounts", "version": "1.0", "description": "Mount health monitoring", "enabled": true },
+            { "name": "audit", "version": "1.0", "description": "Audit log for admin actions", "enabled": true },
+            { "name": "jobs", "version": "1.0", "description": "Persistent job queue with workers", "enabled": true },
+            { "name": "modules", "version": "1.0", "description": "Runtime module enable/disable", "enabled": true },
         ],
         "protocols": [
             { "name": "michi-link", "version": "0.2" },
             { "name": "websocket", "version": "1.0" },
         ],
+        "runtime": {
+            "receivers_connected": receiver_count,
+            "ffmpeg_available": has_ffmpeg,
+        },
     }))
 }
 
@@ -183,25 +221,31 @@ pub async fn change_journal_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let rows = sqlx::query_as::<_, (String, String, String, String, Option<String>, String)>(
         "SELECT id, entity_type, entity_id, action, diff_json, created_at
-         FROM change_journal ORDER BY created_at DESC LIMIT 100"
+         FROM change_journal ORDER BY created_at DESC LIMIT 100",
     )
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| {
-            let s = StatusCode::INTERNAL_SERVER_ERROR;
-            (s, Json(serde_json::json!({"error": {"code": "DB_ERROR", "message": e.to_string()}})))
-        })?;
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        let s = StatusCode::INTERNAL_SERVER_ERROR;
+        (
+            s,
+            Json(serde_json::json!({"error": {"code": "DB_ERROR", "message": e.to_string()}})),
+        )
+    })?;
 
-    let entries: Vec<serde_json::Value> = rows.into_iter().map(|(id, et, eid, action, diff, created)| {
-        serde_json::json!({
-            "id": id,
-            "entity_type": et,
-            "entity_id": eid,
-            "action": action,
-            "diff": diff.and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok()),
-            "created_at": created,
+    let entries: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(id, et, eid, action, diff, created)| {
+            serde_json::json!({
+                "id": id,
+                "entity_type": et,
+                "entity_id": eid,
+                "action": action,
+                "diff": diff.and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok()),
+                "created_at": created,
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(Json(serde_json::json!({ "entries": entries })))
 }
@@ -209,10 +253,9 @@ pub async fn change_journal_handler(
 // ── LAN / Remote Policy ────────────────────────────────────────
 
 const LAN_IP_RANGES: &[&str] = &[
-    "10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.",
-    "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
-    "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
-    "127.", "::1", "fd",
+    "10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.",
+    "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
+    "172.31.", "127.", "::1", "fd",
 ];
 
 fn is_lan_ip(ip: &str) -> bool {
@@ -233,14 +276,16 @@ pub struct PolicyResult {
     pub allow_stream: bool,
 }
 
-pub async fn policy_handler(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn policy_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let max_remote_bitrate: u32 = state.config.max_remote_bitrate;
     let remote_sync: bool = state.config.remote_sync;
 
     let profile = "remote";
-    let max_bitrate = if max_remote_bitrate > 0 { Some(max_remote_bitrate) } else { Some(128_000) };
+    let max_bitrate = if max_remote_bitrate > 0 {
+        Some(max_remote_bitrate)
+    } else {
+        Some(128_000)
+    };
     let allow_sync = remote_sync;
     let allow_stream = true;
 
@@ -252,10 +297,12 @@ pub async fn policy_handler(
     }))
 }
 
-pub async fn lan_policy_handler(
-    Json(query): Json<PolicyQuery>,
-) -> Json<serde_json::Value> {
-    let is_lan = query.client_ip.as_ref().map(|ip| is_lan_ip(ip)).unwrap_or(false);
+pub async fn lan_policy_handler(Json(query): Json<PolicyQuery>) -> Json<serde_json::Value> {
+    let is_lan = query
+        .client_ip
+        .as_ref()
+        .map(|ip| is_lan_ip(ip))
+        .unwrap_or(false);
     let profile = if is_lan { "lan" } else { "remote" };
 
     Json(serde_json::json!({
@@ -276,10 +323,23 @@ pub struct HandoffOffer {
     pub session_id: Option<String>,
 }
 
-pub async fn handoff_handler(
-    Json(body): Json<HandoffOffer>,
-) -> Json<serde_json::Value> {
+use std::sync::LazyLock;
+
+static HANDOFF_TOKENS: LazyLock<
+    Arc<RwLock<HashMap<String, (String, String, u64, std::time::Instant)>>>,
+> = LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
+
+pub async fn handoff_handler(Json(body): Json<HandoffOffer>) -> Json<serde_json::Value> {
     let handoff_token = uuid::Uuid::new_v4().to_string();
+    HANDOFF_TOKENS.write().await.insert(
+        handoff_token.clone(),
+        (
+            body.track_id.clone(),
+            body.target_peer.unwrap_or_default(),
+            body.session_id.clone().unwrap_or_default().len() as u64,
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        ),
+    );
     Json(serde_json::json!({
         "handoff_token": handoff_token,
         "track_id": body.track_id,
@@ -296,8 +356,11 @@ lazy_static::lazy_static! {
 }
 
 pub async fn set_resource_etag(resource: &str) -> String {
-    let etag = format!("\"{}\"", uuid::Uuid::new_v4().to_string());
-    ETAG_STORE.write().await.insert(resource.to_string(), etag.clone());
+    let etag = format!("\"{}\"", uuid::Uuid::new_v4());
+    ETAG_STORE
+        .write()
+        .await
+        .insert(resource.to_string(), etag.clone());
     etag
 }
 

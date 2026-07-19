@@ -1,4 +1,3 @@
-version: "3.8"
 services:
   michi:
     build: .
@@ -7,8 +6,8 @@ services:
       - "8096:8096"
     volumes:
       - ./music:/music:ro
-      - ./data/config:/config
-      - ./data/cache:/cache
+      - ./config:/config
+      - ./cache:/cache
     environment:
       - MICHI_PORT=8096
       - MICHI_MUSIC_PATH=/music

@@ -383,10 +383,30 @@ pub async fn sync_manifest_delta_handler(
         }
     }
 
+    let mut deleted: Vec<String> = Vec::new();
+    let mut updated: Vec<String> = Vec::new();
+    if let Some(since) = query.since.as_ref() {
+        if let Ok(changes) = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT entity_id, action, created_at FROM change_journal WHERE created_at > ? ORDER BY created_at ASC LIMIT 500",
+        )
+        .bind(since)
+        .fetch_all(&state.db)
+        .await
+        {
+            for (entity_id, action, _created_at) in changes {
+                match action.as_str() {
+                    "delete" => deleted.push(entity_id),
+                    "upsert" => updated.push(entity_id),
+                    _ => {}
+                }
+            }
+        }
+    }
+
     Ok(Json(serde_json::json!({
         "added": added,
-        "deleted": [],
-        "updated": [],
+        "deleted": deleted,
+        "updated": updated,
         "playlists_updated": false,
         "cursor": total_count,
         "total": total_count,

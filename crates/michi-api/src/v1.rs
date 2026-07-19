@@ -70,7 +70,7 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<ServerIn
             playlists: true,
             artwork: true,
             sync: false,
-            transcoding: false,
+            transcoding: michi_streaming::check_ffmpeg(),
             websocket: true,
         },
     })

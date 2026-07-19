@@ -1,6 +1,6 @@
+use crate::AppState;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
-use crate::AppState;
 
 #[derive(Serialize)]
 pub struct SettingsResponse {
@@ -31,13 +31,15 @@ pub struct SettingsResponse {
     pub remote_sync: bool,
 }
 
-pub async fn get_settings_handler(
-    State(state): State<AppState>,
-) -> Json<SettingsResponse> {
+pub async fn get_settings_handler(State(state): State<AppState>) -> Json<SettingsResponse> {
     let cfg = &state.config;
     Json(SettingsResponse {
         port: cfg.port(),
-        music_paths: cfg.music_paths.iter().map(|p| p.display().to_string()).collect(),
+        music_paths: cfg
+            .music_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
         resource_profile: cfg.resource_profile.to_string(),
         resource_profile_human: cfg.human_resource_profile(),
         stream_profile: cfg.stream_profile.to_string(),
@@ -86,7 +88,7 @@ pub struct UpdateSettingsBody {
 }
 
 pub async fn update_settings_handler(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Json(body): Json<UpdateSettingsBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     // We need a mutable reference to config. Since AppState stores Config immutably,
@@ -141,25 +143,74 @@ pub async fn update_settings_handler(
 
     // Build a fresh config from env + current state + body overrides, persist
     let mut cfg = michi_config::Config::from_env();
-    if let Some(ref v) = body.resource_profile { cfg.resource_profile = michi_core::ResourceProfile::from_config_str(v); }
-    if let Some(ref v) = body.stream_profile { cfg.stream_profile = michi_core::StreamProfile::from_config_str(v); }
-    if let Some(ref v) = body.format_policy { cfg.format_policy = michi_core::AudioFormatPolicy::from_config_str(v); }
-    if let Some(ref v) = body.language { cfg.language = v.clone(); }
-    if let Some(ref v) = body.theme { cfg.ui.theme = v.clone(); }
-    if let Some(v) = body.sidebar_collapsed { cfg.ui.sidebar_collapsed = v; }
-    if let Some(v) = body.cover_art_enabled { cfg.ui.cover_art_enabled = v; }
-    if let Some(v) = body.auto_backup_enabled { cfg.auto_backup_enabled = v; }
-    if let Some(v) = body.backup_max_keep { cfg.backup_max_keep = v; }
-    if let Some(v) = body.job_max_concurrent { cfg.job_max_concurrent = v; }
-    if let Some(v) = body.reconnect_delay_max { cfg.reconnect_delay_max = v; }
-    if let Some(v) = body.max_remote_bitrate { cfg.max_remote_bitrate = v; }
-    if let Some(v) = body.remote_sync { cfg.remote_sync = v; }
-    if let Some(v) = body.scrobble_enabled { cfg.scrobble_enabled = v; }
-    if let Some(v) = body.dev_mode { cfg.dev_mode = v; }
+    if let Some(ref v) = body.resource_profile {
+        cfg.resource_profile = michi_core::ResourceProfile::from_config_str(v);
+    }
+    if let Some(ref v) = body.stream_profile {
+        cfg.stream_profile = michi_core::StreamProfile::from_config_str(v);
+    }
+    if let Some(ref v) = body.format_policy {
+        cfg.format_policy = michi_core::AudioFormatPolicy::from_config_str(v);
+    }
+    if let Some(ref v) = body.language {
+        cfg.language = v.clone();
+    }
+    if let Some(ref v) = body.theme {
+        cfg.ui.theme = v.clone();
+    }
+    if let Some(v) = body.sidebar_collapsed {
+        cfg.ui.sidebar_collapsed = v;
+    }
+    if let Some(v) = body.cover_art_enabled {
+        cfg.ui.cover_art_enabled = v;
+    }
+    if let Some(v) = body.auto_backup_enabled {
+        cfg.auto_backup_enabled = v;
+    }
+    if let Some(v) = body.backup_max_keep {
+        cfg.backup_max_keep = v;
+    }
+    if let Some(v) = body.job_max_concurrent {
+        cfg.job_max_concurrent = v;
+    }
+    if let Some(v) = body.reconnect_delay_max {
+        cfg.reconnect_delay_max = v;
+    }
+    if let Some(v) = body.max_remote_bitrate {
+        cfg.max_remote_bitrate = v;
+    }
+    if let Some(v) = body.remote_sync {
+        cfg.remote_sync = v;
+    }
+    if let Some(v) = body.scrobble_enabled {
+        cfg.scrobble_enabled = v;
+    }
+    if let Some(v) = body.dev_mode {
+        cfg.dev_mode = v;
+    }
 
     cfg.save_to_file().map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": {"code": "SAVE_ERROR", "message": e}})))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": {"code": "SAVE_ERROR", "message": e}})),
+        )
     })?;
 
-    Ok(Json(serde_json::json!({"status": "settings_updated"})))
+    // Determine if restart is required
+    let restart_required = body.resource_profile.is_some()
+        || body.stream_profile.is_some()
+        || body.format_policy.is_some()
+        || body.auto_backup_enabled.is_some()
+        || body.backup_max_keep.is_some()
+        || body.job_max_concurrent.is_some()
+        || body.reconnect_delay_max.is_some()
+        || body.max_remote_bitrate.is_some()
+        || body.remote_sync.is_some()
+        || body.dev_mode.is_some();
+
+    Ok(Json(serde_json::json!({
+        "status": "settings_updated",
+        "restart_required": restart_required,
+        "note": if restart_required { serde_json::Value::String("Some settings require a restart to take effect".into()) } else { serde_json::Value::Null }
+    })))
 }

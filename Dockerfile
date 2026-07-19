@@ -41,7 +41,7 @@ RUN for dir in michi-core michi-api michi-config michi-db michi-metadata michi-s
       mkdir -p crates/$dir/src && echo "pub fn placeholder() {}" > crates/$dir/src/lib.rs; \
     done && \
     mkdir -p apps/michi-server/src && echo "fn main() {}" > apps/michi-server/src/main.rs && \
-    cargo build --release --package michi-server 2>&1 || echo "dependency caching step completed"
+    cargo build --release --package michi-server 2>&1 || { echo "dependency caching step completed (build may have warnings)"; }
 
 # Copy real source and rebuild
 COPY apps ./apps

@@ -895,12 +895,8 @@ impl AudioFormatPolicy {
 
     pub fn requires_transcode(&self, format: &AudioFormat, profile: &ResourceProfile) -> bool {
         match self {
-            Self::LosslessOnly => {
-                profile.max_transcodes() == 0 && format.is_lossless()
-            }
-            Self::StandardOnly => {
-                format.is_lossless()
-            }
+            Self::LosslessOnly => profile.max_transcodes() == 0 && format.is_lossless(),
+            Self::StandardOnly => format.is_lossless(),
             Self::DirectPlay => false,
         }
     }

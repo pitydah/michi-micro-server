@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 
 use axum::{
     body::Body,
+    extract::{Request as AxumRequest, State},
     http::{Request, StatusCode},
+    middleware::Next,
+    response::Response,
 };
 use base64::Engine;
 use michi_api::create_router;
@@ -45,6 +48,14 @@ fn test_config() -> Config {
         resource_profile: michi_core::ResourceProfile::Balanced,
         format_policy: michi_core::AudioFormatPolicy::LosslessOnly,
         stream_profile: michi_core::StreamProfile::Original,
+        max_remote_bitrate: 320_000,
+        remote_sync: false,
+        language: "en".into(),
+        ui: Default::default(),
+        auto_backup_enabled: false,
+        backup_max_keep: 7,
+        job_max_concurrent: 3,
+        reconnect_delay_max: 300,
     }
 }
 
@@ -52,7 +63,44 @@ async fn make_app() -> (axum::Router, SqlitePool) {
     let pool = test_db().await;
     let config = test_config();
     let state = michi_api::AppState::new(config, pool.clone(), None);
+    (router_with_test_admin(state, &pool).await, pool)
+}
+
+async fn router_with_test_admin(state: michi_api::AppState, pool: &SqlitePool) -> axum::Router {
+    let admin_id = Uuid::new_v4();
+    michi_db::create_user(
+        pool,
+        &admin_id,
+        &format!("test-admin-{admin_id}"),
+        "unused",
+        true,
+    )
+    .await
+    .unwrap();
+    let token = state.auth_sessions.create_session(admin_id).await;
+    create_router(state).layer(axum::middleware::from_fn_with_state(
+        token,
+        inject_test_authorization,
+    ))
+}
+
+async fn make_unauthenticated_app() -> (axum::Router, SqlitePool) {
+    let pool = test_db().await;
+    let state = michi_api::AppState::new(test_config(), pool.clone(), None);
     (create_router(state), pool)
+}
+
+async fn inject_test_authorization(
+    State(token): State<String>,
+    mut request: AxumRequest,
+    next: Next,
+) -> Response {
+    if !request.headers().contains_key("Authorization") {
+        request
+            .headers_mut()
+            .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    }
+    next.run(request).await
 }
 
 async fn body_text(response: axum::response::Response) -> String {
@@ -353,6 +401,14 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         resource_profile: michi_core::ResourceProfile::Balanced,
         format_policy: michi_core::AudioFormatPolicy::LosslessOnly,
         stream_profile: michi_core::StreamProfile::Original,
+        max_remote_bitrate: 320_000,
+        remote_sync: false,
+        language: "en".into(),
+        ui: Default::default(),
+        auto_backup_enabled: false,
+        backup_max_keep: 7,
+        job_max_concurrent: 3,
+        reconnect_delay_max: 300,
     };
     let id = track_id_from_path(file_path.to_str().unwrap());
     let track = Track {
@@ -563,6 +619,14 @@ async fn test_stream_file_not_on_disk() {
         resource_profile: michi_core::ResourceProfile::Balanced,
         format_policy: michi_core::AudioFormatPolicy::LosslessOnly,
         stream_profile: michi_core::StreamProfile::Original,
+        max_remote_bitrate: 320_000,
+        remote_sync: false,
+        language: "en".into(),
+        ui: Default::default(),
+        auto_backup_enabled: false,
+        backup_max_keep: 7,
+        job_max_concurrent: 3,
+        reconnect_delay_max: 300,
     };
 
     let id = track_id_from_path("/nonexistent/path/file.flac");
@@ -595,7 +659,7 @@ async fn test_stream_file_not_on_disk() {
     michi_db::upsert_track(&pool, &track).await.unwrap();
 
     let state = michi_api::AppState::new(config, pool.clone(), None);
-    let app = michi_api::create_router(state);
+    let app = router_with_test_admin(state, &pool).await;
 
     let response = app
         .oneshot(
@@ -1313,6 +1377,14 @@ async fn test_full_pipeline_scan_and_stream() {
         resource_profile: michi_core::ResourceProfile::Balanced,
         format_policy: michi_core::AudioFormatPolicy::LosslessOnly,
         stream_profile: michi_core::StreamProfile::Original,
+        max_remote_bitrate: 320_000,
+        remote_sync: false,
+        language: "en".into(),
+        ui: Default::default(),
+        auto_backup_enabled: false,
+        backup_max_keep: 7,
+        job_max_concurrent: 3,
+        reconnect_delay_max: 300,
     };
     let state = michi_api::AppState::new(config, pool.clone(), None);
     let test_app = create_router(state);
@@ -1406,8 +1478,8 @@ async fn test_v1_server_info() {
     );
     assert!(json["features"]["events"].as_bool().unwrap_or(false));
     assert!(
-        !json["features"]["transcoding"].as_bool().unwrap_or(true),
-        "transcoding should be false"
+        json["features"]["transcoding"].is_boolean(),
+        "transcoding should be a boolean"
     );
     assert!(json["roles"].is_array());
     assert_eq!(json["auth"]["strategy"], "SERVER_CODE");
@@ -1766,9 +1838,17 @@ async fn test_v1_stream_range_not_satisfiable() {
         resource_profile: michi_core::ResourceProfile::Balanced,
         format_policy: michi_core::AudioFormatPolicy::LosslessOnly,
         stream_profile: michi_core::StreamProfile::Original,
+        max_remote_bitrate: 320_000,
+        remote_sync: false,
+        language: "en".into(),
+        ui: Default::default(),
+        auto_backup_enabled: false,
+        backup_max_keep: 7,
+        job_max_concurrent: 3,
+        reconnect_delay_max: 300,
     };
-    let state = michi_api::AppState::new(config, pool, None);
-    let app = michi_api::create_router(state);
+    let state = michi_api::AppState::new(config, pool.clone(), None);
+    let app = router_with_test_admin(state, &pool).await;
 
     let response = app
         .oneshot(
@@ -2822,9 +2902,17 @@ async fn test_v1_stream_and_download_range() {
         resource_profile: michi_core::ResourceProfile::Balanced,
         format_policy: michi_core::AudioFormatPolicy::LosslessOnly,
         stream_profile: michi_core::StreamProfile::Original,
+        max_remote_bitrate: 320_000,
+        remote_sync: false,
+        language: "en".into(),
+        ui: Default::default(),
+        auto_backup_enabled: false,
+        backup_max_keep: 7,
+        job_max_concurrent: 3,
+        reconnect_delay_max: 300,
     };
-    let state = michi_api::AppState::new(config, pool, None);
-    let app = michi_api::create_router(state);
+    let state = michi_api::AppState::new(config, pool.clone(), None);
+    let app = router_with_test_admin(state, &pool).await;
 
     // Full file 200
     let resp = app
@@ -3266,7 +3354,7 @@ async fn test_v1_playback_queue_survives_restart() {
     // Now simulate restart: create new app state with same DB, verify restore works
     let config2 = test_config();
     let state2 = michi_api::AppState::new(config2, pool.clone(), None);
-    let app2 = michi_api::create_router(state2);
+    let app2 = router_with_test_admin(state2, &pool).await;
 
     // Verify queue is still queryable
     let resp2 = app2
@@ -3697,9 +3785,7 @@ async fn test_v1_auth_real_pair_and_use_token() {
         )
         .await
         .unwrap();
-    // Auth is not enabled in test config, so it should still pass
-    // (auth_enabled=false means the middleware doesn't check)
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -3723,7 +3809,7 @@ async fn test_v1_playback_queue_survives_full_restart() {
     // Simulate restart: create new AppState
     let config2 = test_config();
     let state2 = michi_api::AppState::new(config2, pool.clone(), None);
-    let app2 = michi_api::create_router(state2);
+    let app2 = router_with_test_admin(state2, &pool).await;
 
     // Give auto_restore time to run
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -3930,7 +4016,7 @@ async fn test_static_content_types() {
 
 #[tokio::test]
 async fn test_protected_route_rejects_no_auth() {
-    let (app, _) = make_app().await;
+    let (app, _) = make_unauthenticated_app().await;
 
     let resp = app
         .clone()
@@ -3942,12 +4028,12 @@ async fn test_protected_route_rejects_no_auth() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn test_protected_route_rejects_bad_token() {
-    let (app, _) = make_app().await;
+    let (app, _) = make_unauthenticated_app().await;
 
     let resp = app
         .clone()
@@ -3960,7 +4046,7 @@ async fn test_protected_route_rejects_bad_token() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

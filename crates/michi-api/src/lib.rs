@@ -16,10 +16,10 @@ use michi_sync::PlaybackState;
 use michi_sync::SyncManager;
 use sqlx::SqlitePool;
 use tokio::sync::{broadcast, RwLock};
-use tokio_util::sync::CancellationToken;
 use tokio_tungstenite::tungstenite::Message;
-use tower_http::cors::CorsLayer;
+use tokio_util::sync::CancellationToken;
 use tower_http::compression::CompressionLayer;
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use utoipa::OpenApi;
@@ -66,12 +66,24 @@ pub struct AppState {
     pub security_state: SecurityState,
     pub disabled_modules: Arc<RwLock<HashSet<String>>>,
     pub shutdown_token: CancellationToken,
-    pub scan_cancel: CancellationToken,
-    pub sync_cancel: CancellationToken,
-    pub playback_cancel: CancellationToken,
-    pub backup_cancel: CancellationToken,
-    pub webhook_cancel: CancellationToken,
-    pub homeassistant_cancel: CancellationToken,
+    pub module_tokens: Arc<RwLock<HashMap<String, CancellationToken>>>,
+    pub job_cancel_tokens: Arc<RwLock<HashMap<String, CancellationToken>>>,
+    pub task_handles: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl AppState {
+    pub fn track_task(&self, handle: tokio::task::JoinHandle<()>) {
+        self.task_handles.lock().unwrap().push(handle);
+    }
+
+    pub async fn shutdown_and_wait(&self, timeout: Duration) {
+        self.shutdown_token.cancel();
+        let handles: Vec<tokio::task::JoinHandle<()>> =
+            std::mem::take(&mut *self.task_handles.lock().unwrap());
+        for handle in handles {
+            let _ = tokio::time::timeout(timeout, handle).await;
+        }
+    }
 }
 
 impl AppState {
@@ -84,15 +96,6 @@ impl AppState {
             auth::spawn_session_cleanup(auth_sessions.clone());
         }
         let token_store = michi_link::TokenStore::new();
-        let db_for_tokens = db.clone();
-        let ts = token_store.clone();
-        tokio::spawn(async move {
-            match michi_link::load_tokens_from_db(&ts, &db_for_tokens).await {
-                Ok(n) => tracing::info!("loaded {} device tokens from DB", n),
-                Err(e) => tracing::warn!("failed to load device tokens from DB: {}", e),
-            }
-        });
-        michi_link::spawn_token_cleanup(token_store.clone());
         let playback_state = Arc::new(RwLock::new(PlaybackState::default()));
         let receiver_manager = michi_receivers::ReceiverSessionManager::new();
         let upload_dir = config.cache_path.join("uploads");
@@ -104,12 +107,30 @@ impl AppState {
         let disabled_modules: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
         let shutdown_token = CancellationToken::new();
 
-        let scan_cancel = CancellationToken::new();
-        let sync_cancel = CancellationToken::new();
-        let playback_cancel = CancellationToken::new();
-        let backup_cancel = CancellationToken::new();
-        let webhook_cancel = CancellationToken::new();
-        let homeassistant_cancel = CancellationToken::new();
+        let mut module_tokens = HashMap::new();
+        module_tokens.insert("scan".to_string(), CancellationToken::new());
+        module_tokens.insert("sync".to_string(), CancellationToken::new());
+        module_tokens.insert("playback".to_string(), CancellationToken::new());
+        module_tokens.insert("backup".to_string(), CancellationToken::new());
+        module_tokens.insert("webhook".to_string(), CancellationToken::new());
+        module_tokens.insert("homeassistant".to_string(), CancellationToken::new());
+        let module_tokens = Arc::new(RwLock::new(module_tokens));
+        let job_cancel_tokens: Arc<RwLock<HashMap<String, CancellationToken>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let task_handles: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let db_for_tokens = db.clone();
+        let ts = token_store.clone();
+        let th = task_handles.clone();
+        tokio::spawn(async move {
+            match michi_link::load_tokens_from_db(&ts, &db_for_tokens).await {
+                Ok(n) => tracing::info!("loaded {} device tokens from DB", n),
+                Err(e) => tracing::warn!("failed to load device tokens from DB: {}", e),
+            }
+            th.lock().unwrap().retain(|h| !h.is_finished());
+        });
+        michi_link::spawn_token_cleanup(token_store.clone());
 
         let state = Self {
             config,
@@ -128,12 +149,9 @@ impl AppState {
             security_state,
             disabled_modules,
             shutdown_token,
-            scan_cancel,
-            sync_cancel,
-            playback_cancel,
-            backup_cancel,
-            webhook_cancel,
-            homeassistant_cancel,
+            module_tokens,
+            job_cancel_tokens,
+            task_handles,
         };
 
         state.spawn_background_tasks();
@@ -153,7 +171,7 @@ impl AppState {
         // DB maintenance scheduler (siempre corre)
         let maintenance_db = db.clone();
         let maint_shutdown = shutdown.clone();
-        tokio::spawn(async move {
+        self.track_task(tokio::spawn(async move {
             let mut hourly = tokio::time::interval(Duration::from_secs(3600));
             let mut daily = tokio::time::interval(Duration::from_secs(86400));
             let mut weekly = tokio::time::interval(Duration::from_secs(604800));
@@ -175,13 +193,13 @@ impl AppState {
                 }
             }
             info!("DB maintenance scheduler stopped");
-        });
+        }));
 
         // Integrity cron (solo si scan habilitado)
         let integrity_db = db.clone();
         let integrity_shutdown = shutdown.clone();
         let integrity_dm = dm.clone();
-        tokio::spawn(async move {
+        self.track_task(tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(86400));
             interval.tick().await;
             loop {
@@ -216,38 +234,48 @@ impl AppState {
                 }
             }
             info!("integrity cron stopped");
-        });
+        }));
 
         // Library watcher (solo si scan habilitado)
         let watch_paths = self.config.music_paths.clone();
         let watch_db = db.clone();
         let watch_shutdown = shutdown.clone();
         let watch_dm = dm.clone();
-        let watch_cancel = self.scan_cancel.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = watch_cancel.cancelled() => {
-                    info!("scan module cancelled at startup, watcher not started");
+        let watch_tokens = self.module_tokens.clone();
+        self.track_task(tokio::spawn(async move {
+            loop {
+                if watch_shutdown.is_cancelled() {
+                    break;
                 }
-                _ = async {
-                    if watch_dm.read().await.contains("scan") {
-                        info!("scan module disabled, watcher not started");
-                        // Keep alive so we can react to re-enable
-                        futures_util::future::pending::<()>().await;
+                if watch_dm.read().await.contains("scan") {
+                    tokio::select! {
+                        _ = watch_shutdown.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
                     }
-                    let watcher = michi_scanner::watcher::LibraryWatcher::new(watch_paths, watch_db);
-                    watcher.start().await;
-                } => {}
+                }
+                let watch_cancel = watch_tokens
+                    .read()
+                    .await
+                    .get("scan")
+                    .cloned()
+                    .unwrap_or_default();
+                let watcher = michi_scanner::watcher::LibraryWatcher::new(
+                    watch_paths.clone(),
+                    watch_db.clone(),
+                );
+                watcher
+                    .run(watch_cancel, watch_shutdown.clone(), Duration::from_secs(5))
+                    .await;
             }
             info!("watcher stopped");
-        });
+        }));
 
         // Receiver heartbeat monitor (siempre corre)
         let rm = self.receiver_manager.clone();
         let hb_db = db.clone();
         let hb_shutdown = shutdown.clone();
         let hb_dm = dm.clone();
-        tokio::spawn(async move {
+        self.track_task(tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 tokio::select! {
@@ -274,7 +302,16 @@ impl AppState {
                         drop(reg_read);
 
                         for (recv_id, _last_seen, base_url) in candidates {
-                            let mut reg_write = reg.write().await;
+                            let reg_write = match tokio::time::timeout(
+                                Duration::from_secs(2),
+                                reg.write(),
+                            ).await {
+                                Ok(guard) => guard,
+                                Err(_) => {
+                                    warn!("heartbeat: write lock timeout for {}", recv_id);
+                                    continue;
+                                }
+                            };
                             let should_ping = reg_write
                                 .get(&recv_id)
                                 .and_then(|e| e.active_session_id.as_ref())
@@ -290,13 +327,25 @@ impl AppState {
                                     .await
                                 {
                                     Ok(_) => {
-                                        let mut reg_w2 = reg.write().await;
+                                        let mut reg_w2 = match tokio::time::timeout(
+                                            Duration::from_secs(1),
+                                            reg.write(),
+                                        ).await {
+                                            Ok(g) => g,
+                                            Err(_) => continue,
+                                        };
                                         if let Some(e) = reg_w2.get_mut(&recv_id) {
                                             e.last_seen = Some(Utc::now());
                                         }
                                     }
                                     Err(_) => {
-                                        let mut reg_w2 = reg.write().await;
+                                        let mut reg_w2 = match tokio::time::timeout(
+                                            Duration::from_secs(1),
+                                            reg.write(),
+                                        ).await {
+                                            Ok(g) => g,
+                                            Err(_) => continue,
+                                        };
                                         if let Some(e) = reg_w2.get_mut(&recv_id) {
                                             e.active_session_id = None;
                                         }
@@ -311,7 +360,13 @@ impl AppState {
                                     }
                                 }
                             } else {
-                                let mut reg_w2 = reg.write().await;
+                                let mut reg_w2 = match tokio::time::timeout(
+                                    Duration::from_secs(1),
+                                    reg.write(),
+                                ).await {
+                                    Ok(g) => g,
+                                    Err(_) => continue,
+                                };
                                 if let Some(e) = reg_w2.get_mut(&recv_id) {
                                     e.active_session_id = None;
                                 }
@@ -321,14 +376,14 @@ impl AppState {
                 }
             }
             info!("heartbeat monitor stopped");
-        });
+        }));
 
         // Job Queue supervisor
         let supervisor_db = db.clone();
         let supervisor_state = self.clone();
         let supervisor_shutdown = shutdown.clone();
         let supervisor_dm = dm.clone();
-        tokio::spawn(async move {
+        self.track_task(tokio::spawn(async move {
             let max_jobs: usize = std::env::var("MICHI_MAX_JOBS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -351,9 +406,12 @@ impl AppState {
                             }
                         };
                         for job in &pending {
-                            let permit = match semaphore.clone().acquire_owned().await {
-                                Ok(p) => p,
-                                Err(_) => break,
+                            let permit = match tokio::select! {
+                                _ = supervisor_shutdown.cancelled() => None,
+                                result = semaphore.clone().acquire_owned() => result.ok(),
+                            } {
+                                Some(permit) => permit,
+                                None => break,
                             };
                             let claimed = match michi_db::claim_job(&supervisor_db, &job.id).await {
                                 Ok(true) => true,
@@ -373,6 +431,12 @@ impl AppState {
                             let job_kind = job.kind.clone();
                             let job_payload = job.payload.clone();
                             let worker_dm = supervisor_dm.clone();
+                            let cancel = supervisor_shutdown.child_token();
+                            supervisor_state
+                                .job_cancel_tokens
+                                .write()
+                                .await
+                                .insert(job_id.clone(), cancel.clone());
 
                             tokio::spawn(async move {
                                 let _permit = permit;
@@ -383,9 +447,13 @@ impl AppState {
                                     &job_kind,
                                     job_payload.as_ref(),
                                     &worker_dm,
+                                    &cancel,
                                 )
                                 .await;
-                                match result {
+                                if cancel.is_cancelled() {
+                                    tracing::info!("job {} cancelled", job_id);
+                                } else {
+                                    match result {
                                     Ok(msg) => {
                                         tracing::info!("job {} completed: {}", job_id, msg);
                                         let _ = michi_db::complete_job(&worker_db, &job_id).await;
@@ -394,14 +462,16 @@ impl AppState {
                                         tracing::error!("job {} failed: {}", job_id, e);
                                         let _ = michi_db::fail_job(&worker_db, &job_id, &e).await;
                                     }
+                                    }
                                 }
+                                worker_state.job_cancel_tokens.write().await.remove(&job_id);
                             });
                         }
                     }
                 }
             }
             info!("job supervisor stopped");
-        });
+        }));
 
         // Start sync peers (solo si sync habilitado)
         // Se hace desde main.rs después de AppState::new()
@@ -421,37 +491,109 @@ impl AppState {
     }
 }
 
+/// Get the current CancellationToken for a module (supports dynamic replacement)
+impl AppState {
+    pub async fn scan_token(&self) -> CancellationToken {
+        self.module_tokens
+            .read()
+            .await
+            .get("scan")
+            .cloned()
+            .unwrap_or_else(CancellationToken::new)
+    }
+    pub async fn sync_token(&self) -> CancellationToken {
+        self.module_tokens
+            .read()
+            .await
+            .get("sync")
+            .cloned()
+            .unwrap_or_else(CancellationToken::new)
+    }
+    pub async fn playback_token(&self) -> CancellationToken {
+        self.module_tokens
+            .read()
+            .await
+            .get("playback")
+            .cloned()
+            .unwrap_or_else(CancellationToken::new)
+    }
+    pub async fn backup_token(&self) -> CancellationToken {
+        self.module_tokens
+            .read()
+            .await
+            .get("backup")
+            .cloned()
+            .unwrap_or_else(CancellationToken::new)
+    }
+    pub async fn webhook_token(&self) -> CancellationToken {
+        self.module_tokens
+            .read()
+            .await
+            .get("webhook")
+            .cloned()
+            .unwrap_or_else(CancellationToken::new)
+    }
+    pub async fn homeassistant_token(&self) -> CancellationToken {
+        self.module_tokens
+            .read()
+            .await
+            .get("homeassistant")
+            .cloned()
+            .unwrap_or_else(CancellationToken::new)
+    }
+}
+
 async fn run_job_worker(
     db: &SqlitePool,
     state: &AppState,
     job_id: &str,
     kind: &str,
-    payload: Option<&serde_json::Value>,
+    _payload: Option<&serde_json::Value>,
     _dm: &Arc<RwLock<HashSet<String>>>,
+    cancel: &CancellationToken,
 ) -> Result<String, String> {
+    if cancel.is_cancelled() {
+        return Err("cancelled".into());
+    }
     match kind {
         "scan" => {
             tracing::info!("job {}: starting library scan", job_id);
             let paths = &state.config.music_paths;
-            let tracks = michi_scanner::scan_directories(paths).await;
-            let total = tracks.len();
-            for (i, track) in tracks.iter().enumerate() {
-                michi_db::upsert_track(db, track)
+            let mut total = 0usize;
+            for (index, path) in paths.iter().enumerate() {
+                if cancel.is_cancelled() {
+                    return Err("cancelled".into());
+                }
+                let probe_path = path.clone();
+                let available = tokio::task::spawn_blocking(move || {
+                    std::fs::read_dir(probe_path)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                .map_err(|error| format!("mount probe failed: {error}"))?;
+                if let Err(error) = available {
+                    let _ = michi_db::update_mount_state(
+                        db,
+                        &path.display().to_string(),
+                        "unavailable",
+                        &error,
+                    )
+                    .await;
+                    tracing::warn!(path = %path.display(), %error, "scan skipped unavailable mount");
+                    continue;
+                }
+                let _ = michi_db::update_mount_state(db, &path.display().to_string(), "online", "")
+                    .await;
+                let tracks =
+                    michi_scanner::scan_directories_cancellable(&[path.clone()], 1, cancel.clone())
+                        .await;
+                michi_scanner::reconcile_root(db, path, &tracks, cancel)
                     .await
-                    .map_err(|e| format!("upsert error: {}", e))?;
-                if i % 50 == 0 {
-                    let progress = (i as f64) / (total as f64).max(1.0);
-                    let _ = michi_db::update_job_progress(db, job_id, progress).await;
-                }
-            }
-            // Detect deletions
-            if let Ok(db_tracks) = michi_db::list_tracks(db).await {
-                let scanned_ids: HashSet<_> = tracks.iter().map(|t| t.id).collect();
-                for old in &db_tracks {
-                    if !scanned_ids.contains(&old.id) {
-                        let _ = michi_db::delete_track(db, &old.id).await;
-                    }
-                }
+                    .map_err(|error| format!("reconcile error: {error}"))?;
+                total += tracks.len();
+                let progress = (index + 1) as f64 / paths.len().max(1) as f64;
+                let _ = michi_db::update_job_progress(db, job_id, progress).await;
             }
             record_audit(db, "scan_completed", Some("library"), None, None).await;
             Ok(format!("scanned {} tracks", total))
@@ -465,6 +607,9 @@ async fn run_job_worker(
             Ok("sync triggered".to_string())
         }
         "backup" => {
+            if cancel.is_cancelled() {
+                return Err("cancelled".into());
+            }
             tracing::info!("job {}: running backup", job_id);
             let tracks = michi_db::list_tracks(db)
                 .await
@@ -477,18 +622,18 @@ async fn run_job_worker(
                 "tracks_count": tracks.len(),
                 "playlists_count": playlists.len(),
             });
-            record_audit(
-                db,
-                "backup_completed",
-                Some("backup"),
-                None,
-                Some(output),
-            )
-            .await;
+            record_audit(db, "backup_completed", Some("backup"), None, Some(output)).await;
             let _ = michi_db::update_job_progress(db, job_id, 1.0).await;
-            Ok(format!("backup complete: {} tracks, {} playlists", tracks.len(), playlists.len()))
+            Ok(format!(
+                "backup complete: {} tracks, {} playlists",
+                tracks.len(),
+                playlists.len()
+            ))
         }
         "cleanup" => {
+            if cancel.is_cancelled() {
+                return Err("cancelled".into());
+            }
             tracing::info!("job {}: running cleanup", job_id);
             michi_db::run_hourly_maintenance(db)
                 .await
@@ -509,20 +654,6 @@ async fn run_job_worker(
             record_audit(db, "cleanup_completed", Some("system"), None, None).await;
             Ok("cleanup complete".to_string())
         }
-        "custom" => {
-            tracing::info!("job {}: executing custom SQL", job_id);
-            let sql = payload
-                .and_then(|p| p.get("sql"))
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "custom job requires payload.sql field".to_string())?;
-            sqlx::query(sql)
-                .execute(db)
-                .await
-                .map_err(|e| format!("custom SQL error: {}", e))?;
-            let _ = michi_db::update_job_progress(db, job_id, 1.0).await;
-            record_audit(db, "custom_job_executed", Some("system"), None, payload.cloned()).await;
-            Ok("custom SQL executed".to_string())
-        }
         _ => Err(format!("unknown job kind: {}", kind)),
     }
 }
@@ -539,7 +670,21 @@ pub async fn init_admin_user(config: &Config, db: &SqlitePool) -> Option<Uuid> {
         .ok()
         .flatten()
     {
-        Some((id, _, _, _)) => Some(id),
+        Some((id, _, _, is_admin)) => {
+            if !is_admin {
+                if sqlx::query("UPDATE users SET is_admin = 1 WHERE id = ?")
+                    .bind(id.to_string())
+                    .execute(db)
+                    .await
+                    .is_err()
+                {
+                    warn!("failed to promote configured admin user");
+                    return None;
+                }
+                info!("promoted configured user '{}' to administrator", username);
+            }
+            Some(id)
+        }
         None => {
             let id = Uuid::new_v4();
             match auth::hash_password(password) {
@@ -572,9 +717,14 @@ pub fn start_sync_peers(state: &AppState) {
     let playback_state = state.playback_state.clone();
     let shutdown = state.shutdown_token.clone();
     let dm = state.disabled_modules.clone();
-    let sync_cancel = state.sync_cancel.clone();
+    let sync_cancel = state
+        .module_tokens
+        .try_read()
+        .ok()
+        .and_then(|m| m.get("sync").cloned())
+        .unwrap_or_default();
 
-    tokio::spawn(async move {
+    state.track_task(tokio::spawn(async move {
         tokio::select! {
             _ = sync_cancel.cancelled() => {
                 info!("sync module cancelled at startup, sync peers not started");
@@ -712,35 +862,13 @@ pub fn start_sync_peers(state: &AppState) {
                 futures_util::future::pending::<()>().await;
             } => {}
         }
-    });
+    }));
 }
-
 fn v1_link_routes() -> Router<AppState> {
     Router::new()
         .route(
-            "/api/v1/server/info",
-            get(routes::v1::server::server_info_handler),
-        )
-        .route("/api/v1/status", get(routes::v1::server::status_handler))
-        .route(
-            "/api/v1/pair/start",
-            post(routes::v1::pair::link_pair_start),
-        )
-        .route(
-            "/api/v1/pair/confirm",
-            post(routes::v1::pair::link_pair_confirm),
-        )
-        .route(
-            "/api/v1/token/refresh",
-            post(routes::v1::pair::link_token_refresh),
-        )
-        .route(
             "/api/v1/pair/qr",
             post(routes::v1::pair::qr_generate_handler),
-        )
-        .route(
-            "/api/v1/pair/qr/:qr_code/svg",
-            get(routes::v1::pair::qr_svg_handler),
         )
         .route(
             "/api/v1/pair/qr/:qr_code/claim",
@@ -1016,33 +1144,14 @@ fn v1_link_routes() -> Router<AppState> {
             "/api/v1/audit/log",
             get(routes::v1::audit::audit_log_handler),
         )
-        .route(
-            "/api/v1/modules",
-            get(routes::v1::modules::modules_handler),
-        )
+        .route("/api/v1/modules", get(routes::v1::modules::modules_handler))
         .route(
             "/api/v1/modules/:name",
             post(routes::v1::modules::toggle_module_handler),
         )
         .route(
-            "/api/v1/health/self-test",
-            get(routes::v1::modules::self_test_handler),
-        )
-        .route(
-            "/api/v1/capabilities",
-            get(routes::v1::modules::capabilities_handler),
-        )
-        .route(
             "/api/v1/changes",
             get(routes::v1::modules::change_journal_handler),
-        )
-        .route(
-            "/api/v1/policy",
-            get(routes::v1::modules::policy_handler),
-        )
-        .route(
-            "/api/v1/policy/lan",
-            post(routes::v1::modules::lan_policy_handler),
         )
         .route(
             "/api/v1/stream/handoff/offer",
@@ -1050,21 +1159,12 @@ fn v1_link_routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/jobs",
-            get(routes::v1::jobs::list_jobs_handler)
-                .post(routes::v1::jobs::create_job_handler),
+            get(routes::v1::jobs::list_jobs_handler).post(routes::v1::jobs::create_job_handler),
         )
-        .route(
-            "/api/v1/jobs/:id",
-            get(routes::v1::jobs::get_job_handler),
-        )
+        .route("/api/v1/jobs/:id", get(routes::v1::jobs::get_job_handler))
         .route(
             "/api/v1/jobs/:id/cancel",
             post(routes::v1::jobs::cancel_job_handler),
-        )
-        .route("/health/live", get(routes::v1::server::health_live_handler))
-        .route(
-            "/health/ready",
-            get(routes::v1::server::health_ready_handler),
         )
         .route(
             "/api/v1/playback/state",
@@ -1254,11 +1354,69 @@ fn v1_link_routes() -> Router<AppState> {
             "/api/v1/rooms/groups/:id/mode",
             post(routes::v1::receivers::set_room_mode_handler),
         )
+}
+
+fn v1_public_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/v1/server/info",
+            get(routes::v1::server::server_info_handler),
+        )
+        .route("/api/v1/status", get(routes::v1::server::status_handler))
+        .route("/health/live", get(routes::v1::server::health_live_handler))
+        .route(
+            "/health/ready",
+            get(routes::v1::server::health_ready_handler),
+        )
+        .route(
+            "/api/v1/capabilities",
+            get(routes::v1::modules::capabilities_handler),
+        )
+        .route("/api/v1/policy", get(routes::v1::modules::policy_handler))
+        .route(
+            "/api/v1/policy/lan",
+            post(routes::v1::modules::lan_policy_handler),
+        )
+        .route(
+            "/api/v1/pair/qr/:qr_code/svg",
+            get(routes::v1::pair::qr_svg_handler),
+        )
+        .route(
+            "/api/v1/pair/confirm",
+            post(routes::v1::pair::link_pair_confirm),
+        )
+        .route(
+            "/api/v1/token/refresh",
+            post(routes::v1::pair::link_token_refresh),
+        )
+}
+
+fn v1_link_routes_with_auth(state: AppState) -> Router<AppState> {
+    v1_link_routes()
+        .route(
+            "/api/v1/pair/start",
+            post(routes::v1::pair::link_pair_start),
+        )
         .route("/api/v1/events", get(routes::v1::events::events_handler))
         .route(
             "/api/v1/events/sse",
             get(routes::v1::events::events_sse_handler),
         )
+        .route(
+            "/api/v1/health/self-test",
+            get(routes::v1::modules::self_test_handler),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::v1_auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.security_state.clone(),
+            michi_security::rate_limit_middleware,
+        ))
+        .layer(middleware::from_fn(
+            michi_security::security_headers_middleware,
+        ))
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -1363,11 +1521,30 @@ pub fn create_router(state: AppState) -> Router {
                 .url("/api-docs/openapi.json", ApiDoc::openapi()),
         )
         .merge(protected)
-        .merge(sync_api::sync_router())
-        .merge(rooms::rooms_router())
-        .merge(players::players_router())
-        .merge(transcode::transcode_router())
-        .merge(v1_link_routes())
+        .merge(
+            sync_api::sync_router().layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth::v1_auth_middleware,
+            )),
+        )
+        .merge(rooms::rooms_router().layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::v1_auth_middleware,
+        )))
+        .merge(
+            players::players_router().layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth::v1_auth_middleware,
+            )),
+        )
+        .merge(
+            transcode::transcode_router().layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth::v1_auth_middleware,
+            )),
+        )
+        .merge(v1_link_routes_with_auth(state.clone()))
+        .merge(v1_public_routes())
         .layer(middleware::from_fn(michi_security::content_type_middleware))
         .layer(TraceLayer::new_for_http())
         .layer(CompressionLayer::new())
@@ -1379,8 +1556,16 @@ fn cors_layer(state: &AppState) -> CorsLayer {
     if state.config.dev_mode {
         return CorsLayer::permissive();
     }
-    let methods = [axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT, axum::http::Method::DELETE];
-    let headers = [axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION];
+    let methods = [
+        axum::http::Method::GET,
+        axum::http::Method::POST,
+        axum::http::Method::PUT,
+        axum::http::Method::DELETE,
+    ];
+    let headers = [
+        axum::http::header::CONTENT_TYPE,
+        axum::http::header::AUTHORIZATION,
+    ];
     if let Some(ref origin) = state.config.cors_origin {
         match origin.parse::<axum::http::HeaderValue>() {
             Ok(header_origin) => CorsLayer::new()

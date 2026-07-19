@@ -4,13 +4,12 @@ use std::sync::Arc;
 use michi_core::{track_id_from_library_path, AudioFormat, Track};
 use michi_metadata::read_metadata_safe;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 pub mod watcher;
 
-const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "ogg", "opus", "aac", "m4a", "wav",
-];
+const SUPPORTED_EXTENSIONS: &[&str] = &["mp3", "flac", "ogg", "opus", "aac", "m4a", "wav"];
 
 fn is_audio_file(path: &Path) -> bool {
     path.extension()
@@ -19,7 +18,42 @@ fn is_audio_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn scan_directory_sync(library_root: &Path, path: &Path) -> Vec<Track> {
+fn track_from_file(library_root: &Path, entry_path: &Path) -> Option<Track> {
+    if !entry_path.is_file() || !is_audio_file(entry_path) {
+        return None;
+    }
+    let metadata = read_metadata_safe(entry_path);
+    let file_path = entry_path.to_string_lossy().to_string();
+    let track_id = track_id_from_library_path(library_root, entry_path);
+    Some(Track {
+        id: track_id,
+        title: metadata.title.clone(),
+        artist: metadata.artist.clone(),
+        album: metadata.album.clone(),
+        album_artist: metadata.album_artist.clone(),
+        duration_ms: metadata.duration_ms,
+        file_path,
+        format: metadata.format,
+        sample_rate: metadata.sample_rate,
+        bit_depth: metadata.bit_depth,
+        channels: metadata.channels,
+        artwork_id: metadata.has_artwork.then_some(track_id),
+        genre: metadata.genre.clone(),
+        year: metadata.year,
+        track_number: metadata.track_number,
+        disc_number: metadata.disc_number,
+        content_hash: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    })
+}
+
+fn scan_directory_sync(library_root: &Path, path: &Path, cancel: &CancellationToken) -> Vec<Track> {
     let mut tracks = Vec::new();
 
     if !path.exists() || !path.is_dir() {
@@ -35,6 +69,9 @@ fn scan_directory_sync(library_root: &Path, path: &Path) -> Vec<Track> {
     };
 
     for entry in entries.flatten() {
+        if cancel.is_cancelled() {
+            break;
+        }
         let entry_path = entry.path();
 
         if entry_path.is_symlink() {
@@ -43,55 +80,16 @@ fn scan_directory_sync(library_root: &Path, path: &Path) -> Vec<Track> {
         }
 
         if entry_path.is_dir() {
-            let sub_tracks = scan_directory_sync(library_root, &entry_path);
+            let sub_tracks = scan_directory_sync(library_root, &entry_path, cancel);
             tracks.extend(sub_tracks);
-        } else if entry_path.is_file() && is_audio_file(&entry_path) {
-            let metadata = read_metadata_safe(&entry_path);
-
-            let file_path = entry_path.to_string_lossy().to_string();
-            let track_id = track_id_from_library_path(library_root, &entry_path);
-
-            let artwork_id = if metadata.has_artwork {
-                Some(track_id)
-            } else {
-                None
-            };
-
-            let track = Track {
-                id: track_id,
-                title: metadata.title.clone(),
-                artist: metadata.artist.clone(),
-                album: metadata.album.clone(),
-                album_artist: metadata.album_artist.clone(),
-                duration_ms: metadata.duration_ms,
-                file_path,
-                format: metadata.format,
-                sample_rate: metadata.sample_rate,
-                bit_depth: metadata.bit_depth,
-                channels: metadata.channels,
-                artwork_id,
-                genre: metadata.genre.clone(),
-                year: metadata.year,
-                track_number: metadata.track_number,
-                disc_number: metadata.disc_number,
-                content_hash: None,
-                starred: false,
-                rating: 0,
-                starred_at: None,
-                replaygain_track_gain: None,
-                replaygain_track_peak: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            };
-
-            if metadata.format != AudioFormat::Unknown {
+        } else if let Some(track) = track_from_file(library_root, &entry_path) {
+            if track.format != AudioFormat::Unknown {
                 info!(
                     "found track: {} ({:?})",
                     track.title.as_deref().unwrap_or("unknown"),
-                    metadata.format
+                    track.format
                 );
             }
-
             tracks.push(track);
         }
     }
@@ -100,18 +98,29 @@ fn scan_directory_sync(library_root: &Path, path: &Path) -> Vec<Track> {
 }
 
 pub async fn scan_directories(paths: &[PathBuf]) -> Vec<Track> {
-    scan_directories_with_concurrency(paths, 2).await
+    scan_directories_cancellable(paths, 2, CancellationToken::new()).await
 }
 
 pub async fn scan_directories_with_concurrency(
     paths: &[PathBuf],
     concurrency: usize,
 ) -> Vec<Track> {
+    scan_directories_cancellable(paths, concurrency, CancellationToken::new()).await
+}
+
+pub async fn scan_directories_cancellable(
+    paths: &[PathBuf],
+    concurrency: usize,
+    cancel: CancellationToken,
+) -> Vec<Track> {
     let mut all_tracks: Vec<Track> = Vec::new();
     let sem = Arc::new(Semaphore::new(concurrency));
 
     let mut handles = Vec::new();
     for path in paths {
+        if cancel.is_cancelled() {
+            break;
+        }
         info!("scanning directory: {}", path.display());
 
         if !path.exists() || !path.is_dir() {
@@ -122,11 +131,12 @@ pub async fn scan_directories_with_concurrency(
         let path_buf = path.clone();
         let path_for_closure = path_buf.clone();
         let sem_clone = sem.clone();
+        let scan_cancel = cancel.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = sem_clone.acquire().await.expect("semaphore");
             let tracks = tokio::task::spawn_blocking(move || {
-                scan_directory_sync(&path_for_closure, &path_for_closure)
+                scan_directory_sync(&path_for_closure, &path_for_closure, &scan_cancel)
             })
             .await
             .unwrap_or_default();
@@ -156,6 +166,37 @@ pub async fn scan_directories_with_concurrency(
     all_tracks.retain(|t| seen.insert(t.id));
 
     all_tracks
+}
+
+pub async fn scan_file(library_root: PathBuf, path: PathBuf) -> Option<Track> {
+    tokio::task::spawn_blocking(move || track_from_file(&library_root, &path))
+        .await
+        .ok()
+        .flatten()
+}
+
+pub async fn reconcile_root(
+    db: &sqlx::SqlitePool,
+    root: &Path,
+    tracks: &[Track],
+    cancel: &CancellationToken,
+) -> Result<(), michi_db::DbError> {
+    for track in tracks {
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        michi_db::upsert_track(db, track).await?;
+    }
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+    let scanned: std::collections::HashSet<_> = tracks.iter().map(|track| track.id).collect();
+    for existing in michi_db::list_tracks(db).await? {
+        if Path::new(&existing.file_path).starts_with(root) && !scanned.contains(&existing.id) {
+            michi_db::delete_track(db, &existing.id).await?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -188,7 +229,7 @@ mod tests {
         fs::write(dir.path().join("readme.txt"), b"hello").unwrap();
         fs::write(dir.path().join("song.mp3"), b"not a real mp3").unwrap();
 
-        let tracks = scan_directory_sync(dir.path(), dir.path());
+        let tracks = scan_directory_sync(dir.path(), dir.path(), &CancellationToken::new());
         assert_eq!(tracks.len(), 2, "should find flac and mp3, skip txt");
     }
 
@@ -198,7 +239,7 @@ mod tests {
         let file = dir.path().join("corrupt.flac");
         fs::write(&file, b"not a valid audio file").unwrap();
 
-        let tracks = scan_directory_sync(dir.path(), dir.path());
+        let tracks = scan_directory_sync(dir.path(), dir.path(), &CancellationToken::new());
         assert_eq!(tracks.len(), 1, "corrupt file should still be registered");
         assert_eq!(tracks[0].format, AudioFormat::Flac);
         assert!(
@@ -214,7 +255,7 @@ mod tests {
         fs::create_dir_all(&sub).unwrap();
         fs::write(sub.join("song.flac"), b"data").unwrap();
 
-        let tracks = scan_directory_sync(dir.path(), dir.path());
+        let tracks = scan_directory_sync(dir.path(), dir.path(), &CancellationToken::new());
         assert_eq!(tracks.len(), 1);
 
         let relative_id =
@@ -237,7 +278,7 @@ mod tests {
             std::os::unix::fs::symlink(outside.path().join("secret.flac"), &symlink_path).ok();
         }
 
-        let tracks = scan_directory_sync(dir.path(), dir.path());
+        let tracks = scan_directory_sync(dir.path(), dir.path(), &CancellationToken::new());
         assert_eq!(tracks.len(), 0, "symlinks should be skipped");
     }
 }
