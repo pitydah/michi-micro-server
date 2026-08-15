@@ -1,4 +1,4 @@
-# Apply Progress: v1-stabilization — Work Unit 0 + 1 + 2 + 3 + 4a
+# Apply Progress: v1-stabilization — Work Unit 0 + 1 + 2 + 3 + 4a + 4b
 
 **Change**: v1-stabilization
 **Mode**: Standard (strict_tdd: false — characterization/regression program)
@@ -41,6 +41,12 @@
 - [x] 4.2 Delete dead duplicate `tests/e2e/test_receiver_simulator_integration.rs` (233 lines)
 - [x] 4.3 Regression: no behavior change (cargo test --workspace 217/0/14)
 
+### Work Unit 5 — Slice 04b: Receiver runner repair
+- [x] 5.1 Fix runner target + both sims + ignored (`-p michi-receivers`)
+- [x] 5.2 Env-overridable sim paths (already satisfied at HEAD — verified, no code change)
+- [x] 5.3 Loud unavailable-dependency failure proof (sims-down non-zero + contract-drift evidence)
+- [x] 5.4 Document simulator boundary truthfully
+
 ## Work Unit Evidence
 
 ### Work Unit 0
@@ -77,6 +83,13 @@
 | Focused test | `CARGO_TARGET_DIR=/home/cristian/.cache/michi-v1s/target cargo test --workspace` → exit 0, 217 passed / 0 failed / 14 ignored (full log `/tmp/opencode/michi-v1s/wu4a-cargo-test.log`). The `14 ignored` remain the authoritative crate target `crates/michi-receivers/tests/receiver_simulator_integration.rs` — proof the live copy still compiles and registers its ignored tests |
 | Runtime harness | N/A — deletion-only slice: the two deleted files were never compiled (no `Cargo.toml` target or workspace member references them; `tests/` has no crate manifest; root workspace has 22 members, none is `tests/`). No runtime boundary exists for dead files |
 | Rollback boundary | Restore `tests/receiver_simulator_integration.rs` and `tests/e2e/test_receiver_simulator_integration.rs` (exact bytes recoverable from parent `355cf0c`); revert the two commits; revert tasks.md/apply-progress.md marks |
+
+### Work Unit 5 (Slice 04b)
+| Evidence | Actual |
+|---|---|
+| Focused test | `bash -n scripts/test_receiver_e2e.sh scripts/run_receiver_sim_standard.sh scripts/run_receiver_sim_hifi.sh` → exit 0 (all three). Repaired target compiles: `CARGO_TARGET_DIR=…/target cargo test -p michi-receivers --test receiver_simulator_integration --no-run` → exit 0. `--list` = 14 tests, all `#[ignore]` (source grep: 14 `#[ignore]` + 14 `#[tokio::test]`). Authoritative copy sha256 `2118d06f…` unchanged (dedup guard held) |
+| Runtime harness | **sims-down (5.3)**: `bash scripts/test_receiver_e2e.sh` with no sims → exit 1, `ERROR: Standard simulator not running on port 8080`, elapsed 1s (no hang), 14 tests never run/reported passing. **5.2 missing path**: `MICHI_STREAM_SIM_PATH=/tmp/opencode/michi-v1s/does-not-exist-…` → both sim scripts print `ERROR: Simulator not found at …` + exit 1. **5.2 valid override**: `MICHI_STREAM_SIM_PATH=/tmp/opencode/michi-v1s/stub_receiver_sim.py` → stub executed (`STUB-SIM USED: args=['--type','standard','--port','8080']`), exit 0 — override used, machine default NOT used. **Contract-drift (honest N/A for sims-up green)**: the available `/home/cristian/michi-music-stream/simulator/receiver_sim.py` is the NEW canonical v1-lite sim (`/api/v1/server/info` 200, `version 0.3.0`); `GET /api/v1/receiver/info` → 404. The `michi-receivers` crate (`client.rs`) targets the legacy `/api/v1/receiver/*` contract. Running the repaired runner with the v1-lite sims UP on 8080/8081 still exits 1 with "Standard simulator not running on port 8080" (health check endpoint not served). A green sims-up run is therefore **not reproducible in this environment** — reported honestly, not fabricated |
+| Rollback boundary | Revert `scripts/test_receiver_e2e.sh` and `docs/STREAM_SIMULATOR_INTEGRATION.md`; revert tasks.md/apply-progress.md marks. No Rust, no CI, no schema/state change; `run_receiver_sim_*.sh` untouched |
 
 ## Evidence Log
 
@@ -120,6 +133,17 @@
 - Task 4.1/4.2: `git rm tests/receiver_simulator_integration.rs tests/e2e/test_receiver_simulator_integration.rs` → 2 files deleted, `git diff --cached --numstat` = `0 233` + `0 233` = 466 deletions, 0 additions. Commit `429deae`.
 - Task 4.3: `CARGO_TARGET_DIR=/home/cristian/.cache/michi-v1s/target cargo test --workspace` → exit 0, 217 passed / 0 failed / 14 ignored (full log `/tmp/opencode/michi-v1s/wu4a-cargo-test.log`). The `14 ignored` is the authoritative crate target, confirming it still registers its tests.
 
+### Work Unit 5 (Slice 04b)
+- Child worktree `git worktree add -b 04b-receiver-runner /home/cristian/.cache/michi-v1s/wt-05 ea330e5a667eff17284fccd7ed6a132d13fd8496` → HEAD `ea330e5`, clean. Parent ancestry exact: `ea330e5` is the `04a-receiver-dedup` tip.
+- Main worktree before/after manifests (byte/path/mode identity, identical sha256 `f4cb84530f504332bce8b3004043bd0194f85a8f35d825e5a67d091530caa706`, 234 entries): `/tmp/opencode/michi-v1s/main-before-wu5.manifest`, `main-after-wu5.manifest` (captured at the end of this slice). Main dirty-state `status_porcelain_z` hash unchanged `d44a16570145160f64a9c99a05fe757543a259fa8457950729006e999f5e31b0`.
+- **Baseline drift note**: WU4a recorded 231 entries / sha256 `66b631f4…`; the WU5 baseline is 234 entries / `f4cb8453…` because the WU4a native 4R review added exactly 3 gitignored `.atl/wu4a-review-context/{diff.txt,manifest.json,meta.json}` scratch files AFTER the WU4a after-manifest was captured. All 231 WU4a paths remain byte-identical; no existing file changed and this slice touched nothing in main.
+- Task 5.1: `scripts/test_receiver_e2e.sh:43` `cargo test --test receiver_simulator_integration -- --ignored` → `cargo test -p michi-receivers --test receiver_simulator_integration -- --ignored` (1 line). Both `MICHI_RECEIVER_SIM_URL` and `MICHI_RECEIVER_SIM_HIFI_URL` exports (lines 39–40) were already present at HEAD and remain. `bash -n` exit 0; repaired target compiles (`--no-run` exit 0); `--list` = 14 tests all `#[ignore]`.
+- Task 5.2: **no code change needed** — `scripts/run_receiver_sim_standard.sh` / `run_receiver_sim_hifi.sh` already implement `SIM_PATH="${MICHI_STREAM_SIM_PATH:-/home/cristian/michi-music-stream/simulator/receiver_sim.py}"` (override primary, machine default fallback) plus `[ ! -f "$SIM_PATH" ]` → `ERROR: Simulator not found at …` + `exit 1`. Verified: missing path → exit 1 (both scripts); valid `MICHI_STREAM_SIM_PATH` stub → executed (override used). The planned `fix(receivers): make simulator paths env-overridable…` commit is therefore dropped (empty diff).
+- Task 5.3 (sims-down): `bash scripts/test_receiver_e2e.sh` (no sims) → exit 1, `ERROR: Standard simulator not running on port 8080`, elapsed 1s (no hang), the 14 tests never compiled/run/reported passing. This is the authoritative loud-failure proof.
+- Task 5.3 (contract drift — honest N/A for sims-up green): the available simulator at `/home/cristian/michi-music-stream/simulator/receiver_sim.py` is the NEW canonical v1-lite implementation (`feat(simulator): implement canonical receiver v1-lite API`, serves `/api/v1/server/info` → 200 `version 0.3.0`, `/api/v1/receiver-lite/*`, `GET /api/v1/receiver/info` → 404). The `michi-receivers` crate (`client.rs:19-154`) targets the LEGACY `/api/v1/receiver/*` contract. Probe evidence: sims UP on 8080/8081 (`/api/v1/server/info` 200 both) → repaired runner still exits 1 with "Standard simulator not running on port 8080" (its health check hits `/api/v1/receiver/info` which the v1-lite sim no longer serves). **A green sims-up run cannot be reproduced in this environment**; reported honestly, NOT fabricated, per the delivery contract.
+- Task 5.4: `docs/STREAM_SIMULATOR_INTEGRATION.md` — added a truthful "Simulator Boundary" section (external `pitydah/michi-music-stream` dependency, acquisition via `git clone`, required env vars `MICHI_RECEIVER_SIM_URL`/`MICHI_RECEIVER_SIM_HIFI_URL`/`MICHI_STREAM_SIM_PATH`, "runner repaired, CI enablement deferred", contract-drift warning); corrected the running-commands block to `-p michi-receivers` + the runner script. `grep -n ci-receivers .github/workflows/ci.yml` → empty (no receiver CI job; no receiver CI claim).
+- Authoritative-copy guard held: `crates/michi-receivers/tests/receiver_simulator_integration.rs` sha256 `2118d06ff3f04652719464382a24435f4cefc92172482036a2cd96937e92ea73` unchanged (this slice did not touch it).
+
 ## Files Changed
 | File | Action | What was done |
 |---|---|---|
@@ -132,8 +156,10 @@
 | `rust-toolchain.toml` | Added | **WU3**: `channel = "1.96.0"` |
 | `tests/receiver_simulator_integration.rs` | Deleted | **WU4a**: dead duplicate (233 lines, never compiled) — authoritative copy is `crates/michi-receivers/tests/receiver_simulator_integration.rs` |
 | `tests/e2e/test_receiver_simulator_integration.rs` | Deleted | **WU4a**: dead duplicate (233 lines, never compiled) — byte-identical to the other dead duplicate |
-| `openspec/changes/v1-stabilization/tasks.md` | Modified | marked 1.1–1.7 `[x]`; added + marked 2.0–2.3 `[x]`; added + marked 3.0–3.4 `[x]`, 3.5 `[ ]` (NOT EXECUTED), 3.6 `[x]`; **WU4a**: marked 4.1–4.3 `[x]`, corrected ~305 → 233 lines |
-| `openspec/changes/v1-stabilization/apply-progress.md` | Modified | this artifact (WU0+WU1+WU2+WU3+WU4a merged) |
+| `scripts/test_receiver_e2e.sh` | Modified | **WU5 (04b)**: `cargo test …` → `cargo test -p michi-receivers …` (5.1) |
+| `docs/STREAM_SIMULATOR_INTEGRATION.md` | Modified | **WU5 (04b)**: add truthful "Simulator Boundary" section (external dependency, env vars, acquisition, "runner repaired, CI enablement deferred", contract-drift warning); fix running commands to `-p michi-receivers` (5.4) |
+| `openspec/changes/v1-stabilization/tasks.md` | Modified | marked 1.1–1.7 `[x]`; added + marked 2.0–2.3 `[x]`; added + marked 3.0–3.4 `[x]`, 3.5 `[ ]` (NOT EXECUTED), 3.6 `[x]`; **WU4a**: marked 4.1–4.3 `[x]`, corrected ~305 → 233 lines; **WU5**: marked 5.1–5.4 `[x]` |
+| `openspec/changes/v1-stabilization/apply-progress.md` | Modified | this artifact (WU0+WU1+WU2+WU3+WU4a+WU4b merged) |
 
 ## Deviations from Design
 1. Tasks 1.2/1.3/1.4 landed as one atomic rewrite (same file); each acceptance individually verified.
@@ -148,6 +174,9 @@
 10. Task 3.6 added by orchestrator as a P1 pre-review corrective: HEALTHCHECK moved from protected `/api/status` to public `/health/live`. One Dockerfile line; interval/timeout/start-period/retries unchanged.
 11. Slice 04a (WU4a): actual deletion is 233 lines per file (466 total), not the ~305-line estimate in proposal/tasks (the estimate overshot; the live file is 233 unformatted lines). Budget recorded as exact numstat `0 233` + `0 233`.
 12. Slice 04a: the two dead duplicates differ from the authoritative crate copy, but ONLY by rustfmt formatting plus one extra `#[allow(dead_code)]` attribute in the authoritative copy — the duplicates are a strict semantic subset (same 14 tests, same assertions, zero unique content). Verified before deleting (guard satisfied: not the only copy of live tests).
+13. Slice 04b (WU5), task 5.2: the two `scripts/run_receiver_sim_*.sh` scripts already implemented the `MICHI_STREAM_SIM_PATH` override + machine-default fallback + `[ ! -f ]` missing-file check at HEAD (`5d21f92`). No code change was needed; the planned `fix(receivers): make simulator paths env-overridable…` commit was dropped (would have been empty). Behavior verified with real evidence instead (missing path → exit 1; valid override stub → executed).
+14. Slice 04b (WU5), task 5.3: a sims-up green run is NOT reproducible in this environment. The available `receiver_sim.py` is the NEW canonical v1-lite implementation (serves `/api/v1/server/info`, `/api/v1/receiver-lite/*`; `GET /api/v1/receiver/info` → 404), while the `michi-receivers` crate targets the LEGACY `/api/v1/receiver/*` contract. Evidence recorded via the sims-down path plus the contract-drift probe; no green run fabricated. Migrating the crate to v1-lite is out of scope (future gate).
+15. Slice 04b (WU5), task 5.1: `-p michi-receivers` is required by spec even though cargo auto-resolves the unique `receiver_simulator_integration` target in this workspace (verified `--no-run` exit 0 both with and without `-p`); the explicit `-p` removes ambiguity and guards against a future second same-named target.
 
 ## Issues Found
 - Pre-existing flaky Rust tests (parallel race on shared `/tmp/michi-test/music`), not caused by this slice.
@@ -155,15 +184,16 @@
 - `rust:1.96.0` default image moved to Debian trixie (glibc 2.41) — bare-tag Docker builds now require the `-bookworm` variant to match a bookworm-slim runtime.
 - Server graceful shutdown takes ~15s (`shutdown_and_wait` timeout); default 10s `docker stop` SIGKILLs before the WAL checkpoint (use `-t 25`).
 - Main-worktree manifest baseline drifted from WU3's `8ab29e83…` (228 entries) to `66b631f4…` (231 entries) purely from the 3 gitignored `.atl/wu3-review-context/` files written by the WU3 review lifecycle — no source file changed; pre-existing WebUI dirty state (`d44a1657…`) unchanged.
+- **WU5 discovery (contract drift)**: the external `pitydah/michi-music-stream` simulator has evolved to a canonical v1-lite API (`/api/v1/server/info`, `/api/v1/pair/*`, `/api/v1/receiver-lite/*`; `version 0.3.0`, `api_version v1-lite`) and no longer serves the legacy `/api/v1/receiver/*` endpoints that `crates/michi-receivers/src/client.rs` targets. The 14 ignored tests cannot be exercised against the current simulator; CI enablement must wait for a crate→v1-lite migration (explicit future gate, documented).
 
 ## Remaining Tasks
-Work Units 4b–6 (Slices 04b/05) not begun — out of scope for this slice. Task 3.5 (ARM64 emulated boot) remains NOT EXECUTED pending a QEMU/binfmt-enabled environment. Slice 04a (this slice) is complete.
+Work Unit 6 (Slice 05, metadata truthfulness) not begun — out of scope for this slice. Task 3.5 (ARM64 emulated boot) remains NOT EXECUTED pending a QEMU/binfmt-enabled environment. Receiver CI enablement remains deferred pending a crate→v1-lite contract migration (future gate). Slice 04b (this slice) is complete.
 
 ## Workload / PR Boundary
 - Mode: chained PR slice (force-chained / feature-branch-chain)
-- Current work unit: 4a (Slice 04a — Receiver dedup, pure deletion exception)
-- Boundary: `355cf0c` (03-build-release) → `04a-receiver-dedup` (delete two dead duplicate receiver tests + task/progress marks)
-- Review budget (exact `git diff --numstat 355cf0c..HEAD`): 0 additions + 466 deletions (deletion-only exception; 0 authored lines) + bookkeeping lines in `tasks.md`/`apply-progress.md`
+- Current work unit: 5 (Slice 04b — Receiver runner repair)
+- Boundary: `ea330e5` (04a-receiver-dedup) → `04b-receiver-runner` (fix runner `-p michi-receivers` + truthful simulator boundary doc + task/progress marks)
+- Review budget (exact `git diff --numstat ea330e5..HEAD`): 1 script line (1+1) + 27/4 doc lines + bookkeeping lines in `tasks.md`/`apply-progress.md`. Authored code lines ≈ 0 Rust; total authored ≈ 33 lines.
 
 ## Status
-22/23 tasks complete across Work Units 0–4a (2 + 7 + 4 + 6 + 3 done; task 3.5 NOT EXECUTED). Work Unit 4a (Slice 04a) done. Nothing pushed; no PR created; Work Unit 4b (Slice 04b) NOT begun.
+26/27 tasks complete across Work Units 0–5 (2 + 7 + 4 + 6 + 3 + 4 done; task 3.5 NOT EXECUTED). Work Unit 5 (Slice 04b) done. Nothing pushed; no PR created; Work Unit 6 (Slice 05) NOT begun.
