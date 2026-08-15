@@ -51,3 +51,7 @@
 - Search avanzado conectado al frontend
 - Clippy warnings: todos resueltos (150+)
 - Docker build: Rust 1.86 para compatibilidad de crates
+
+### Notas
+- Apagado graceful: tarda ~15s (timeout `shutdown_and_wait`); el default de 10s de `docker stop` enviaría SIGKILL antes del checkpoint WAL — usar ≥25s de gracia (`docker stop -t 25`)
+- arm64: imagen configurada en CI de release; calificación en runtime pendiente del primer build arm64 exitoso (QEMU local no disponible)
