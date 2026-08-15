@@ -2,6 +2,27 @@
 
 This document describes how **Michi Micro Server** integrates with the **Michi Music Stream Simulator** (`receiver_sim.py`) for receiver testing without hardware.
 
+## Simulator Boundary
+
+The simulator is an **external dependency** — it is not vendored in this repository.
+It lives in the separate [`pitydah/michi-music-stream`](https://github.com/pitydah/michi-music-stream)
+repository and must be acquired and run manually before the receiver tests execute.
+
+- **Acquisition**: `git clone https://github.com/pitydah/michi-music-stream`
+- **Required env vars** (consumed by `scripts/test_receiver_e2e.sh`):
+  - `MICHI_RECEIVER_SIM_URL` — Standard URL (default `http://127.0.0.1:8080`)
+  - `MICHI_RECEIVER_SIM_HIFI_URL` — Hi-Fi URL (default `http://127.0.0.1:8081`)
+  - `MICHI_STREAM_SIM_PATH` — override for `scripts/run_receiver_sim_*.sh`
+- **Runner status**: repaired (targets `-p michi-receivers`, fails loudly when the
+  simulator is unavailable). **CI enablement is deferred** — there is no
+  `ci-receivers` job and the receiver suite is not wired into CI.
+
+> **Contract drift**: this crate targets the legacy `/api/v1/receiver/*` endpoints.
+> The current `receiver_sim.py` implements the newer canonical v1-lite API
+> (`/api/v1/server/info`, `/api/v1/receiver-lite/*`) and no longer serves the
+> legacy routes, so a green sims-up run cannot be reproduced with the current
+> simulator until the crate is migrated to v1-lite (out of scope for this change).
+
 ## Prerequisites
 
 - Python 3 with Flask: `pip install flask`
@@ -20,11 +41,13 @@ python3 receiver_sim.py --type hifi --port 8081
 ## Running Integration Tests
 
 ```bash
-# With simulators on default ports
-MICHI_RECEIVER_SIM_URL=http://127.0.0.1:8080 cargo test --test receiver_simulator_integration -- --ignored
+# With simulators on default ports (use the runner script)
+./scripts/test_receiver_e2e.sh
 
-# With custom ports
-MICHI_RECEIVER_SIM_URL=http://127.0.0.1:9000 cargo test --test receiver_simulator_integration -- --ignored
+# Or directly, with the crate target and both sims
+MICHI_RECEIVER_SIM_URL=http://127.0.0.1:8080 \
+MICHI_RECEIVER_SIM_HIFI_URL=http://127.0.0.1:8081 \
+  cargo test -p michi-receivers --test receiver_simulator_integration -- --ignored
 ```
 
 Tests are `#[ignore]` by default because they require an external process.
