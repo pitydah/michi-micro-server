@@ -34,7 +34,7 @@
 - Configuración persistente: UI settings guardados en config.json
 - CI: jobs separados (rust, docker, release GHCR)
 - Docker: multi-stage build, healthcheck, Docker Compose
-- 35 migraciones de base de datos
+- 37 migraciones de base de datos
 - 13 nuevos tests para michi-connect
 
 ### Changed
