@@ -40,7 +40,7 @@ export MICHI_RECEIVER_SIM_URL="http://127.0.0.1:${STD_PORT}"
 export MICHI_RECEIVER_SIM_HIFI_URL="http://127.0.0.1:${HIFI_PORT}"
 
 echo "Running receiver simulator integration tests..."
-cargo test --test receiver_simulator_integration -- --ignored 2>&1
+cargo test -p michi-receivers --test receiver_simulator_integration -- --ignored 2>&1
 
 echo ""
 echo "=== Done ==="
