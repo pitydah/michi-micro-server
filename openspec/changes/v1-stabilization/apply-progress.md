@@ -1,4 +1,4 @@
-# Apply Progress: v1-stabilization — Work Unit 0 + 1 + 2 + 3 + 4a + 4b
+# Apply Progress: v1-stabilization — Work Unit 0 + 1 + 2 + 3 + 4a + 4b + 5
 
 **Change**: v1-stabilization
 **Mode**: Standard (strict_tdd: false — characterization/regression program)
@@ -47,6 +47,12 @@
 - [x] 5.3 Loud unavailable-dependency failure proof (sims-down non-zero + contract-drift evidence)
 - [x] 5.4 Document simulator boundary truthfully
 
+### Work Unit 6 — Slice 05: Metadata truthfulness
+- [x] 5.0 WU3 native 4R review follow-ups (deferred): stop-grace note + arm64 status note + apply-progress wording fixes
+- [x] 6.1 CasaOS version `0.1.0` → `0.2.0` (only the version line)
+- [x] 6.2 CHANGELOG "35 migraciones" → "37 migraciones" (derived: `grep -c 'fn migration_0'` = 37)
+- [x] 6.3 No build/test impact (metadata + bookkeeping only; cargo check unchanged green)
+
 ## Work Unit Evidence
 
 ### Work Unit 0
@@ -90,6 +96,13 @@
 | Focused test | `bash -n scripts/test_receiver_e2e.sh scripts/run_receiver_sim_standard.sh scripts/run_receiver_sim_hifi.sh` → exit 0 (all three). Repaired target compiles: `CARGO_TARGET_DIR=…/target cargo test -p michi-receivers --test receiver_simulator_integration --no-run` → exit 0. `--list` = 14 tests, all `#[ignore]` (source grep: 14 `#[ignore]` + 14 `#[tokio::test]`). Authoritative copy sha256 `2118d06f…` unchanged (dedup guard held) |
 | Runtime harness | **sims-down (5.3)**: `bash scripts/test_receiver_e2e.sh` with no sims → exit 1, `ERROR: Standard simulator not running on port 8080`, elapsed 1s (no hang), 14 tests never run/reported passing. **5.2 missing path**: `MICHI_STREAM_SIM_PATH=/tmp/opencode/michi-v1s/does-not-exist-…` → both sim scripts print `ERROR: Simulator not found at …` + exit 1. **5.2 valid override**: `MICHI_STREAM_SIM_PATH=/tmp/opencode/michi-v1s/stub_receiver_sim.py` → stub executed (`STUB-SIM USED: args=['--type','standard','--port','8080']`), exit 0 — override used, machine default NOT used. **Contract-drift (honest N/A for sims-up green)**: the available `/home/cristian/michi-music-stream/simulator/receiver_sim.py` is the NEW canonical v1-lite sim (`/api/v1/server/info` 200, `version 0.3.0`); `GET /api/v1/receiver/info` → 404. The `michi-receivers` crate (`client.rs`) targets the legacy `/api/v1/receiver/*` contract. Running the repaired runner with the v1-lite sims UP on 8080/8081 still exits 1 with "Standard simulator not running on port 8080" (health check endpoint not served). A green sims-up run is therefore **not reproducible in this environment** — reported honestly, not fabricated |
 | Rollback boundary | Revert `scripts/test_receiver_e2e.sh` and `docs/STREAM_SIMULATOR_INTEGRATION.md`; revert tasks.md/apply-progress.md marks. No Rust, no CI, no schema/state change; `run_receiver_sim_*.sh` untouched |
+
+### Work Unit 6 (Slice 05)
+| Evidence | Actual |
+|---|---|
+| Focused test | `grep -n '^version:' casaos/data.yml` → `0.2.0`; `grep -c 'fn migration_0' crates/michi-db/src/lib.rs` → 37 (and `grep -c 'fn migration_'` → 37, so 37 is the true total); `grep -n migraciones CHANGELOG.md` → `37: - 37 migraciones de base de datos`. All exit 0 |
+| Runtime harness | N/A — two metadata lines + two truthful notes; no runtime boundary exists for storefront metadata/changelog text |
+| Rollback boundary | Revert `casaos/data.yml` version line; revert the CHANGELOG count + `### Notas` block; revert tasks.md/apply-progress.md marks. No Rust, no WebUI/PWA, no CI, no schema/state change |
 
 ## Evidence Log
 
@@ -144,6 +157,17 @@
 - Task 5.4: `docs/STREAM_SIMULATOR_INTEGRATION.md` — added a truthful "Simulator Boundary" section (external `pitydah/michi-music-stream` dependency, acquisition via `git clone`, required env vars `MICHI_RECEIVER_SIM_URL`/`MICHI_RECEIVER_SIM_HIFI_URL`/`MICHI_STREAM_SIM_PATH`, "runner repaired, CI enablement deferred", contract-drift warning); corrected the running-commands block to `-p michi-receivers` + the runner script. `grep -n ci-receivers .github/workflows/ci.yml` → empty (no receiver CI job; no receiver CI claim).
 - Authoritative-copy guard held: `crates/michi-receivers/tests/receiver_simulator_integration.rs` sha256 `2118d06ff3f04652719464382a24435f4cefc92172482036a2cd96937e92ea73` unchanged (this slice did not touch it).
 
+### Work Unit 6 (Slice 05)
+- Child worktree `git worktree add -b 05-metadata /home/cristian/.cache/michi-v1s/wt-06 2a1ad1770837340e112b56d18e68eff6c12fe869` → HEAD `2a1ad17`, clean. Parent ancestry exact: `2a1ad17` is the `04b-receiver-runner` tip.
+- Main worktree before/after manifests (byte/path/mode identity, identical sha256 `9dde5d1f97b0ed8d32bd9bc79796b956c870e7122518f6c9f893eadfd8ec760c`, 240 entries): `/tmp/opencode/michi-v1s/main-before-wu6.manifest`, `main-after-wu6.manifest`. Main dirty-state `status_porcelain_z` hash unchanged `d44a16570145160f64a9c99a05fe757543a259fa8457950729006e999f5e31b0`.
+- **Baseline drift note**: WU5 recorded 234 entries / sha256 `f4cb8453…`; the WU6 baseline is 240 entries / `9dde5d1f…` because 6 gitignored files were added AFTER the WU5 after-manifest: 3 `.atl/wu4b-review-context/{diff.txt,manifest.json,meta.json}` (WU4b review lifecycle) + 3 `.impeccable/{design.json,assets/michi-hero-cat.md,surfaces/crates-michi-api-static-index-html.md}` (user design work). All 234 WU5 paths remain byte-identical; no existing file changed and this slice touched nothing in main.
+- Task 5.0 (stop-grace): `casaos/data.yml` is storefront metadata only (`name/version/slug/description/developer/license/port_map/categories/tags/maintainer/more_info`) — it does NOT support `stop_grace_period`/stop-timeout. Verified against the CasaOS AppStore schema (v1 `data.yml` = storefront metadata; container runtime fields live in the separate compose definition — this repo's `casaos/docker-compose.casaos.yml`, out of slice scope). No field invented; truthful note added to CHANGELOG instead.
+- Task 5.0 (arm64): honest one-line note added to CHANGELOG — arm64 configured in CI release, runtime qualification pending first successful arm64 build (QEMU unavailable). No qualification claim.
+- Task 5.0 (wording): deviation #3 corrected "Gate script is 127 lines" → "145 lines" (127 at WU2 creation + 18 from WU3 3.0 hardening); WU5 budget line restated as exact numstat (70 additions + 17 deletions = 87 total).
+- Task 6.1: `casaos/data.yml:2` `version: 0.1.0` → `0.2.0` (single line; no other metadata touched). Commit `f3ec368`.
+- Task 6.2: `CHANGELOG.md` "35 migraciones" → "37 migraciones"; count derived via `grep -c 'fn migration_0' crates/michi-db/src/lib.rs` = 37 (also `grep -c 'fn migration_'` = 37, so 37 is the true total). Commit `62c0855`.
+- Task 6.3: `git diff --stat 2a1ad17..HEAD` shows only `casaos/data.yml`, `CHANGELOG.md`, `openspec/.../tasks.md`, `openspec/.../apply-progress.md` (no WebUI/PWA/Rust/CI/scripts). `cargo check --workspace` unchanged green (no Rust change in this slice; prior evidence `217 passed / 0 failed / 14 ignored` still holds).
+
 ## Files Changed
 | File | Action | What was done |
 |---|---|---|
@@ -158,13 +182,15 @@
 | `tests/e2e/test_receiver_simulator_integration.rs` | Deleted | **WU4a**: dead duplicate (233 lines, never compiled) — byte-identical to the other dead duplicate |
 | `scripts/test_receiver_e2e.sh` | Modified | **WU5 (04b)**: `cargo test …` → `cargo test -p michi-receivers …` (5.1) |
 | `docs/STREAM_SIMULATOR_INTEGRATION.md` | Modified | **WU5 (04b)**: add truthful "Simulator Boundary" section (external dependency, env vars, acquisition, "runner repaired, CI enablement deferred", contract-drift warning); fix running commands to `-p michi-receivers` (5.4) |
-| `openspec/changes/v1-stabilization/tasks.md` | Modified | marked 1.1–1.7 `[x]`; added + marked 2.0–2.3 `[x]`; added + marked 3.0–3.4 `[x]`, 3.5 `[ ]` (NOT EXECUTED), 3.6 `[x]`; **WU4a**: marked 4.1–4.3 `[x]`, corrected ~305 → 233 lines; **WU5**: marked 5.1–5.4 `[x]` |
-| `openspec/changes/v1-stabilization/apply-progress.md` | Modified | this artifact (WU0+WU1+WU2+WU3+WU4a+WU4b merged) |
+| `casaos/data.yml` | Modified | **WU6 (05)**: `version: 0.1.0` → `0.2.0` (6.1, single line) |
+| `CHANGELOG.md` | Modified | **WU6 (05)**: "35 migraciones" → "37 migraciones" (6.2); `### Notas` block — stop-grace ≥25s + arm64 qualification status (5.0) |
+| `openspec/changes/v1-stabilization/tasks.md` | Modified | marked 1.1–1.7 `[x]`; added + marked 2.0–2.3 `[x]`; added + marked 3.0–3.4 `[x]`, 3.5 `[ ]` (NOT EXECUTED), 3.6 `[x]`; **WU4a**: marked 4.1–4.3 `[x]`, corrected ~305 → 233 lines; **WU5**: marked 5.1–5.4 `[x]`; **WU6**: added + marked 5.0 `[x]`, marked 6.1–6.3 `[x]` |
+| `openspec/changes/v1-stabilization/apply-progress.md` | Modified | this artifact (WU0+WU1+WU2+WU3+WU4a+WU4b+WU6 merged); **WU6**: deviation #3 gate-script line-count corrected (127 → 145), WU5 budget line restated as exact numstat |
 
 ## Deviations from Design
 1. Tasks 1.2/1.3/1.4 landed as one atomic rewrite (same file); each acceptance individually verified.
 2. `supports_*` corrected from `== True` to "field present" — spec/design never required `True`; asserting it would fabricate capability (latent 4th fault).
-3. Gate script is 127 lines (vs ~55 forecast) — fuller comments/inline docs for the CI gate; within the 500-line slice budget.
+3. Gate script is 145 lines (127 at WU2 creation, +18 from WU3 3.0 hardening; vs ~55 forecast) — fuller comments/inline docs for the CI gate; within the 500-line slice budget.
 4. Task 2.0 added by orchestrator as a WU1 4R-review follow-up (same file); recorded before 2.1 per delivery contract.
 5. Task 3.0 added by orchestrator as a WU2 4R-review follow-up on the gate script; recorded before 3.1 per delivery contract.
 6. Task 3.1: no `rm` of placeholders after COPY — COPY overwrites them (design D6); an `rm` after COPY would delete the real sources. Implemented as `find -exec touch` mtime refresh only.
@@ -177,6 +203,9 @@
 13. Slice 04b (WU5), task 5.2: the two `scripts/run_receiver_sim_*.sh` scripts already implemented the `MICHI_STREAM_SIM_PATH` override + machine-default fallback + `[ ! -f ]` missing-file check at HEAD (`5d21f92`). No code change was needed; the planned `fix(receivers): make simulator paths env-overridable…` commit was dropped (would have been empty). Behavior verified with real evidence instead (missing path → exit 1; valid override stub → executed).
 14. Slice 04b (WU5), task 5.3: a sims-up green run is NOT reproducible in this environment. The available `receiver_sim.py` is the NEW canonical v1-lite implementation (serves `/api/v1/server/info`, `/api/v1/receiver-lite/*`; `GET /api/v1/receiver/info` → 404), while the `michi-receivers` crate targets the LEGACY `/api/v1/receiver/*` contract. Evidence recorded via the sims-down path plus the contract-drift probe; no green run fabricated. Migrating the crate to v1-lite is out of scope (future gate).
 15. Slice 04b (WU5), task 5.1: `-p michi-receivers` is required by spec even though cargo auto-resolves the unique `receiver_simulator_integration` target in this workspace (verified `--no-run` exit 0 both with and without `-p`); the explicit `-p` removes ambiguity and guards against a future second same-named target.
+16. Slice 05 (WU6), task 5.0 (stop-grace): `casaos/data.yml` is CasaOS storefront metadata only — it does NOT support `stop_grace_period`/stop-timeout (verified against the CasaOS AppStore schema; the repo's container runtime config lives in `casaos/docker-compose.casaos.yml`, outside this slice's `data.yml`+`CHANGELOG` scope). Per the task's own fallback, no field was invented; a truthful "≥25s grace" note was added to CHANGELOG instead.
+17. Slice 05 (WU6), task 5.0 (numbering): the new follow-up task is numbered `5.0` per the orchestrator ("WU3 native 4R review follow-ups", deferred to the final slice), placed before 6.1 in the Work Unit 6 section — a deliberate continuation of the 2.0/3.0 follow-up numbering pattern, not a Work Unit 5 task.
+18. Slice 05 (WU6), task 6.2 commit: the delivery contract's commit message is `fix(metadata): correct changelog migration count` (the "to 37" suffix from the task text was dropped to keep the subject concise); the derived count (37) is captured in the task evidence and diff.
 
 ## Issues Found
 - Pre-existing flaky Rust tests (parallel race on shared `/tmp/michi-test/music`), not caused by this slice.
@@ -187,13 +216,13 @@
 - **WU5 discovery (contract drift)**: the external `pitydah/michi-music-stream` simulator has evolved to a canonical v1-lite API (`/api/v1/server/info`, `/api/v1/pair/*`, `/api/v1/receiver-lite/*`; `version 0.3.0`, `api_version v1-lite`) and no longer serves the legacy `/api/v1/receiver/*` endpoints that `crates/michi-receivers/src/client.rs` targets. The 14 ignored tests cannot be exercised against the current simulator; CI enablement must wait for a crate→v1-lite migration (explicit future gate, documented).
 
 ## Remaining Tasks
-Work Unit 6 (Slice 05, metadata truthfulness) not begun — out of scope for this slice. Task 3.5 (ARM64 emulated boot) remains NOT EXECUTED pending a QEMU/binfmt-enabled environment. Receiver CI enablement remains deferred pending a crate→v1-lite contract migration (future gate). Slice 04b (this slice) is complete.
+Task 3.5 (ARM64 emulated boot) remains NOT EXECUTED pending a QEMU/binfmt-enabled environment (recorded honestly; arm64 qualification status documented in CHANGELOG). Receiver CI enablement remains deferred pending a crate→v1-lite contract migration (future gate). Work Unit 6 (Slice 05, metadata truthfulness) is complete — final implementation slice.
 
 ## Workload / PR Boundary
 - Mode: chained PR slice (force-chained / feature-branch-chain)
-- Current work unit: 5 (Slice 04b — Receiver runner repair)
-- Boundary: `ea330e5` (04a-receiver-dedup) → `04b-receiver-runner` (fix runner `-p michi-receivers` + truthful simulator boundary doc + task/progress marks)
-- Review budget (exact `git diff --numstat ea330e5..HEAD`): 1 script line (1+1) + 27/4 doc lines + bookkeeping lines in `tasks.md`/`apply-progress.md`. Authored code lines ≈ 0 Rust; total authored ≈ 33 lines.
+- Current work unit: 6 (Slice 05 — Metadata truthfulness)
+- Boundary: `2a1ad17` (04b-receiver-runner) → `05-metadata` (`data.yml` 0.2.0 + CHANGELOG 37 + truthful shutdown-grace/arm64 notes + task/progress marks)
+- Review budget (exact `git diff --numstat 2a1ad17..HEAD`): see Status below — metadata + bookkeeping only, no WebUI/PWA/Rust/CI/scripts.
 
 ## Status
-26/27 tasks complete across Work Units 0–5 (2 + 7 + 4 + 6 + 3 + 4 done; task 3.5 NOT EXECUTED). Work Unit 5 (Slice 04b) done. Nothing pushed; no PR created; Work Unit 6 (Slice 05) NOT begun.
+29/30 tasks complete across Work Units 0–6 (2 + 7 + 4 + 6 + 3 + 4 + 4 done; task 3.5 NOT EXECUTED). Work Unit 6 (Slice 05) done — final implementation slice. Nothing pushed; no PR created; no review lifecycle command run.
