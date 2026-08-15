@@ -1,4 +1,4 @@
-# Apply Progress: v1-stabilization — Work Unit 0 + Work Unit 1 + Work Unit 2
+# Apply Progress: v1-stabilization — Work Unit 0 + 1 + 2 + 3
 
 **Change**: v1-stabilization
 **Mode**: Standard (strict_tdd: false — characterization/regression program)
@@ -27,6 +27,14 @@
 - [x] 2.2 Wire `ci-python-contract` job gated on `ci-rust`
 - [x] 2.3 Local gate proof
 
+### Work Unit 3 — Slice 03: Docker/toolchain/ARM64
+- [x] 3.0 WU2 native 4R review follow-ups on `scripts/ci_contract_gate.sh`
+- [x] 3.1 Re-derive Docker cache fix from HEAD
+- [x] 3.2 Pin toolchain 1.96.0 consistently
+- [x] 3.3 Multiarch release platforms + prerelease latest prohibition
+- [x] 3.4 Docker smoke regression (local evidence)
+- [ ] 3.5 buildx arm64 + emulated boot — NOT EXECUTED (environment limitation)
+
 ## Work Unit Evidence
 
 ### Work Unit 0
@@ -50,6 +58,13 @@
 | Runtime harness | `CARGO_TARGET_DIR=/home/cristian/.cache/michi-v1s/target bash scripts/ci_contract_gate.sh` → exit 0, `CONTRACT: OK`, 33 passed/0 failed (31 WU1 + 2 new negative-auth checks); script booted real release binary on PID-derived port 18528, isolated temp paths, throwaway admin; trap cleanup stopped server, freed port, removed temp dir — no orphan/leak. Failure paths: dead server → `server did not become healthy on /health/live within 60s` exit 1; stub contract-FAIL server → `CONTRACT: FAILED` exit 1 (propagated). Persistent failure log verified via `MICHI_FAILURE_LOG` override; no credential leak (grep-verified) |
 | Rollback boundary | Revert `tests/e2e/test_player_micro_contract_compatibility.py`; delete `scripts/ci_contract_gate.sh`; remove `ci-python-contract` job block from `.github/workflows/ci.yml`; revert task/progress marks |
 
+### Work Unit 3
+| Evidence | Actual |
+|---|---|
+| Focused test | `bash -n scripts/ci_contract_gate.sh` → exit 0; `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"` → `YAML OK`; `rustc --version` → 1.96.0 (rust-toolchain.toml respected); `cargo test --workspace` → exit 0, 217 passed / 0 failed / 14 ignored (no regression) |
+| Runtime harness | `CARGO_TARGET_DIR=/home/cristian/.cache/michi-v1s/target bash scripts/ci_contract_gate.sh` → exit 0, `CONTRACT: OK`, 33/0, stale-binary rebuild triggered then PASS; forced failure (occupied port) → exit 1 with no orphan + temp dir removed; TERM mid-run → exit 130, server killed, temp dir removed. Docker smoke: `docker build` OK → container `healthy` → `/api/status` 200 `version 0.2.0`, `/health/live` 200, root 200, 37 migrations → `docker stop -t 25` → `received SIGTERM` → `WAL checkpoint complete` → `shutdown complete` (exit 0) → container + image removed |
+| Rollback boundary | Revert `scripts/ci_contract_gate.sh`; revert `Dockerfile`; delete `rust-toolchain.toml`; revert `ci.yml` platform/toolchain lines; revert task/progress marks |
+
 ## Evidence Log
 
 ### Work Unit 0 (tracker + planning)
@@ -72,35 +87,54 @@
 - Task 2.2: `.github/workflows/ci.yml` — `ci-python-contract` job (`needs: ci-rust`) with checkout, toolchain, rust-cache, system deps, gate run (`MICHI_FAILURE_LOG: contract-failure.log`), and `upload-artifact` on failure. YAML parses (`yaml.safe_load`); `ci-rust`/`ci-docker`/`release-ghcr` bodies untouched (diff shows only the inserted job block).
 - No Rust change in this slice: `git diff 52eaf0e..HEAD -- crates/ apps/ Cargo.toml Cargo.lock` empty.
 
+### Work Unit 3 (Slice 03)
+- Child worktree `git worktree add -b 03-build-release /home/cristian/.cache/michi-v1s/wt-03 05223f43b58c959d8da101d8330a2f363391acb5` → HEAD `05223f4`, clean.
+- Main worktree before/after manifests (byte/path/mode identity): before sha256 `8ab29e832185b6bb0b22e7ecbd486ed7968db6f50af4f026e831803ec314f9b1` (228 entries) — `/tmp/opencode/michi-v1s/main-before-wu3.manifest`; after sha256 `8ab29e832185b6bb0b22e7ecbd486ed7968db6f50af4f026e831803ec314f9b1` — `/tmp/opencode/michi-v1s/main-after-wu3.manifest`. Main dirty-state `status_porcelain_z` hash unchanged `d44a16570145160f64a9c99a05fe757543a259fa8457950729006e999f5e31b0` (before + after identical).
+- Task 3.0 (gate 4R follow-ups): trap INT+TERM (`trap '…; exit 130' INT TERM`) added to the EXIT trap; cleanup ignores INT/TERM during teardown (`trap '' INT TERM`) so a second signal cannot abort cleanup mid-way; health-poll `curl --connect-timeout 3 --max-time 5`; failure-log comment corrected (default lives inside RUN_DIR unless `MICHI_FAILURE_LOG` overrides); rebuild check (`find apps crates Cargo.toml Cargo.lock -newer "$SERVER_BIN"`) rebuilds stale binaries. Proof: happy path exit 0 (33/0, rebuild triggered), forced failure (occupied port) exit 1 + no orphan + temp dir removed, TERM mid-health-wait exit 130 + server killed + temp dir removed.
+- Task 3.1 (Dockerfile cache fix): placeholder pattern verified present in HEAD. Added `find apps crates -type f … -exec touch {} +` between `COPY crates ./crates` and the final `cargo build`; COPY overwrites placeholders (design D6) so no `rm` (an `rm` after COPY would delete the just-copied real sources).
+- Task 3.2 (toolchain pin): `rust-toolchain.toml` (`channel = "1.96.0"`), `Dockerfile` `ARG RUST_VERSION=1.96.0` + `FROM rust:${RUST_VERSION}-bookworm`, CI `dtolnay/rust-toolchain@stable` with `toolchain: 1.96.0` (both jobs). **Discovery**: `rust:1.96.0` (no variant) resolves to Debian trixie / glibc 2.41, which produced a binary requiring `GLIBC_2.38`/`GLIBC_2.39` that the `debian:bookworm-slim` runtime (glibc 2.36) could not run — fixed with the `-bookworm` builder variant (glibc 2.36 == runtime). `rustc --version` = 1.96.0; `cargo test --workspace` 217/0/14 green. Note: the dtolnay action input is named `toolchain`, not `channel` (verified against the action's action.yml).
+- Task 3.3 (multiarch): `platforms: linux/amd64,linux/arm64`; the `latest` meta guard (`startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')`) is unchanged.
+- Task 3.4 (Docker smoke): `docker build` OK (image 178MB). Container reached `healthy`; `/api/status` 200 `version 0.2.0`, `/health/live` 200, root 200; boot log shows exactly 37 migrations (last `migration 37: server config`). Graceful stop: `docker stop -t 25` (15.7s real) → `received SIGTERM, starting graceful shutdown...` → `WAL checkpoint complete` → `shutdown complete`, ExitCode 0; container + image removed. **Discovery**: graceful shutdown takes ~15s (`shutdown_and_wait(15s)`) because idle ingest/playback workers only stop at the 15s timeout; a default 10s `docker stop` SIGKILLs before `WAL checkpoint complete`.
+- Task 3.5 (ARM64): **NOT EXECUTED — ENVIRONMENT LIMITATION**. Host binfmt_misc has no QEMU arm64 handler; `docker run --rm --platform linux/arm64 alpine uname -m` and `docker buildx build --platform linux/arm64` both fail `exec /bin/sh: exec format error` at the first RUN step. No arm64 qualification is claimed.
+
 ## Files Changed
 | File | Action | What was done |
 |---|---|---|
 | `docs/V1_STABILIZATION_AUDIT.md` | Added | Phase 0 baseline audit (4 gates, 217/0/14, Docker 200 + 37 migrations, P0=0, 14 ignored-test inventory, P1.1–P1.4 file:line) |
 | `tests/e2e/test_player_micro_contract_compatibility.py` | Modified | remove `global BASE_URL`; thread `base_url`; `api_version == "v1"`; admin auth + Bearer; loud failures; `supports_*` shape asserts; **WU2**: negative auth guard, `_safe_json_or_raw`, queue-transfer wording, docstring |
 | `docs/MICHI_LINK_MICRO_E2E.md` | Modified | `:10` `michi_link_version` → `api_version` |
-| `scripts/ci_contract_gate.sh` | Added | CI contract gate (health wait, isolated boot, trap cleanup, failure propagation) |
-| `.github/workflows/ci.yml` | Modified | add `ci-python-contract` job gated on `ci-rust` |
-| `openspec/changes/v1-stabilization/tasks.md` | Modified | marked 1.1–1.7 `[x]`; added + marked 2.0–2.3 `[x]` |
-| `openspec/changes/v1-stabilization/apply-progress.md` | Modified | this artifact (WU0+WU1+WU2 merged) |
+| `scripts/ci_contract_gate.sh` | Added | CI contract gate (health wait, isolated boot, trap cleanup, failure propagation); **WU3**: INT/TERM trap, curl timeouts, stale-binary rebuild check, failure-log comment fix |
+| `.github/workflows/ci.yml` | Modified | add `ci-python-contract` job gated on `ci-rust`; **WU3**: pin `toolchain: 1.96.0` (ci-rust + ci-python-contract), `platforms: linux/amd64,linux/arm64` |
+| `Dockerfile` | Modified | **WU3**: `find -exec touch` cache invalidation; `ARG RUST_VERSION=1.96.0` + `-bookworm` builder variant |
+| `rust-toolchain.toml` | Added | **WU3**: `channel = "1.96.0"` |
+| `openspec/changes/v1-stabilization/tasks.md` | Modified | marked 1.1–1.7 `[x]`; added + marked 2.0–2.3 `[x]`; added + marked 3.0–3.4 `[x]`, 3.5 `[ ]` (NOT EXECUTED) |
+| `openspec/changes/v1-stabilization/apply-progress.md` | Modified | this artifact (WU0+WU1+WU2+WU3 merged) |
 
 ## Deviations from Design
 1. Tasks 1.2/1.3/1.4 landed as one atomic rewrite (same file); each acceptance individually verified.
 2. `supports_*` corrected from `== True` to "field present" — spec/design never required `True`; asserting it would fabricate capability (latent 4th fault).
 3. Gate script is 127 lines (vs ~55 forecast) — fuller comments/inline docs for the CI gate; within the 500-line slice budget.
 4. Task 2.0 added by orchestrator as a WU1 4R-review follow-up (same file); recorded before 2.1 per delivery contract.
+5. Task 3.0 added by orchestrator as a WU2 4R-review follow-up on the gate script; recorded before 3.1 per delivery contract.
+6. Task 3.1: no `rm` of placeholders after COPY — COPY overwrites them (design D6); an `rm` after COPY would delete the real sources. Implemented as `find -exec touch` mtime refresh only.
+7. Task 3.2: CI pin uses the dtolnay action's `toolchain:` input (verified in action.yml) rather than the literal `channel:` wording in the task; the action has no `channel` input, and `channel:` would be silently ignored.
+8. Task 3.2: builder pinned to `rust:1.96.0-bookworm` (not bare `rust:1.96.0`) — bare 1.96.0 is Debian trixie/glibc 2.41, incompatible with the bookworm-slim runtime.
+9. Task 3.5: NOT EXECUTED — QEMU/binfmt arm64 unavailable (exec format error). Recorded as environment limitation; no ARM64 qualification claimed.
 
 ## Issues Found
 - Pre-existing flaky Rust tests (parallel race on shared `/tmp/michi-test/music`), not caused by this slice.
 - `player_compatibility.supports_*` are misleadingly-named runtime-state booleans.
+- `rust:1.96.0` default image moved to Debian trixie (glibc 2.41) — bare-tag Docker builds now require the `-bookworm` variant to match a bookworm-slim runtime.
+- Server graceful shutdown takes ~15s (`shutdown_and_wait` timeout); default 10s `docker stop` SIGKILLs before the WAL checkpoint (use `-t 25`).
 
 ## Remaining Tasks
-Work Units 3–6 (Slices 03–05) not begun — out of scope for this slice.
+Work Units 4–6 (Slices 04a/04b/05) not begun — out of scope for this slice. Task 3.5 (ARM64 emulated boot) remains NOT EXECUTED pending a QEMU/binfmt-enabled environment.
 
 ## Workload / PR Boundary
 - Mode: chained PR slice (force-chained / feature-branch-chain)
-- Current work unit: 2 (Slice 02 — CI contract gate)
-- Boundary: `52eaf0e` (01-audit-contract) → `02-ci-contract` (contract test follow-ups + gate script + ci job + task/progress marks)
-- Review budget (exact `git diff --numstat 52eaf0e..HEAD`): 46+127+21 additions + 9 deletions in code; total changed lines = additions + deletions across all four commits (≤ 500)
+- Current work unit: 3 (Slice 03 — Docker/toolchain/ARM64)
+- Boundary: `05223f4` (02-ci-contract) → `03-build-release` (gate 4R follow-ups + Docker cache fix + toolchain pin + multiarch platforms + task/progress marks)
+- Review budget (exact `git diff --numstat 05223f4..HEAD`): additions + deletions across the five commits, ≤ 500 lines (see exact count below)
 
 ## Status
-13/13 tasks complete in Work Units 0–2 (2 + 7 + 4). Work Unit 2 (Slice 02) done. Nothing pushed; no PR created; Work Unit 3 NOT begun.
+18/19 tasks complete across Work Units 0–3 (2 + 7 + 4 + 5 done; task 3.5 NOT EXECUTED). Work Unit 3 (Slice 03) done. Nothing pushed; no PR created; Work Unit 4 NOT begun.
