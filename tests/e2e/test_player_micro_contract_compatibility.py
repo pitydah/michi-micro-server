@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
 Player-Micro Server Contract Compatibility Test — authenticated admin flow:
-(1) GET public /api/v1/server/info (no auth); (2) POST /api/auth/login with
-MICHI_AUTH_USERNAME/PASSWORD; (3) require token; (4) Bearer on protected requests
-(import preflight, queue transfer, diagnostics, playback state).
-Missing creds / login failure / invalid token / any protected 401 → FAIL + exit
-non-zero. Nothing is skipped.
+(1) GET public /api/v1/server/info (no auth); (1b) negative auth guard — a
+protected endpoint must reject a missing or invalid token with 401; (2) POST
+/api/auth/login with MICHI_AUTH_USERNAME/PASSWORD; (3) require token; (4) Bearer
+on protected requests (import preflight, queue transfer, diagnostics, playback).
+
+Exercised failure modes (each records FAIL and exits non-zero, never skips):
+missing admin credentials; login failure (no token); protected endpoint fail-open
+on a missing or invalid token; any protected request returning an unexpected status.
 
 Usage:
   MICHI_AUTH_USERNAME=admin MICHI_AUTH_PASSWORD=... \
@@ -32,6 +35,20 @@ def load_fixture(name):
         return json.load(f)
 
 
+def _safe_json_or_raw(e):
+    """Decode an HTTPError body as JSON, falling back to raw text.
+
+    Guards the error path itself from crashing on a non-JSON response body.
+    """
+    if not e.fp:
+        return {}
+    raw = e.read().decode()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
 def test(name, method, path, base_url, expected_status=200, body=None, headers=None, timeout=5):
     """Issue one request against base_url and record PASS/FAIL. Returns parsed body or None."""
     global PASS, FAIL
@@ -47,7 +64,7 @@ def test(name, method, path, base_url, expected_status=200, body=None, headers=N
         resp_body = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         status = e.code
-        resp_body = json.loads(e.read().decode()) if e.fp else {}
+        resp_body = _safe_json_or_raw(e)
     except Exception as e:
         FAIL += 1
         print(f"  ❌ {name}: connection failed — {e}")
@@ -106,6 +123,26 @@ def run_contract(base_url, username, password):
     verify(features.get("import") is True, "server info: features.import == true")
     verify(features.get("playback") is True, "server info: features.playback == true")
     verify(features.get("queue") is True, "server info: features.queue == true")
+
+    # 1b. Negative auth guard: a protected endpoint MUST reject a missing or
+    # invalid token with 401. A fail-open middleware returning 200 here records
+    # FAIL and exits non-zero; this path is never skipped.
+    print("\n[1b] Negative auth guard (protected endpoint rejects missing/invalid token)")
+    test(
+        "GET /api/v1/diagnostics (no token → 401)",
+        "GET",
+        "/api/v1/diagnostics",
+        base_url,
+        expected_status=401,
+    )
+    test(
+        "GET /api/v1/diagnostics (invalid token → 401)",
+        "GET",
+        "/api/v1/diagnostics",
+        base_url,
+        expected_status=401,
+        headers={"Authorization": "Bearer invalid-token"},
+    )
 
     # 2. Admin login
     print("\n[2] Admin Login")
@@ -168,10 +205,10 @@ def run_contract(base_url, username, password):
     else:
         verify(False, "preflight (legacy): response missing 'results'")
 
-    # 5. Queue transfer (empty body → documented 400)
-    print("\n[5] Queue Transfer (empty body → 400)")
+    # 5. Queue transfer (empty track_ids → documented 400)
+    print("\n[5] Queue Transfer (empty track_ids → 400)")
     test(
-        "POST /api/v1/queue/transfer (empty body → 400)",
+        "POST /api/v1/queue/transfer (empty track_ids → 400)",
         "POST",
         "/api/v1/queue/transfer",
         base_url,
