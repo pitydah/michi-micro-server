@@ -26,7 +26,9 @@ MUSIC_DIR="$RUN_DIR/music"
 SERVER_LOG="$RUN_DIR/server.log"
 CONTRACT_LOG="$RUN_DIR/contract.log"
 
-# Persistent failure log (survives RUN_DIR cleanup so CI can upload it).
+# Failure log: defaults to RUN_DIR/failure.log (removed together with RUN_DIR at
+# exit). Set MICHI_FAILURE_LOG to an external path when the log must outlive
+# cleanup (e.g. CI artifact upload).
 FAILURE_LOG="${MICHI_FAILURE_LOG:-$RUN_DIR/failure.log}"
 
 # Throwaway per-run admin credentials (never echoed or logged).
@@ -48,6 +50,9 @@ fail() {
 }
 
 cleanup() {
+    # Ignore further INT/TERM during teardown so a second signal cannot abort
+    # cleanup mid-way and leak the server process or temp dir.
+    trap '' INT TERM
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
         echo "ci-contract-gate: stopping server (pid $SERVER_PID)…" >&2
         kill "$SERVER_PID" 2>/dev/null || true
@@ -60,13 +65,24 @@ cleanup() {
     rm -rf "$RUN_DIR"
 }
 trap cleanup EXIT
+# Interrupt/Terminate must also tear down the booted server and temp dir, not
+# just EXIT — CI cancellation sends TERM, Ctrl-C sends INT.
+trap 'echo "ci-contract-gate: interrupted; cleaning up" >&2; exit 130' INT TERM
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required but not found on PATH"
 command -v curl >/dev/null 2>&1 || fail "curl is required but not found on PATH"
 command -v cargo >/dev/null 2>&1 || fail "cargo is required but not found on PATH"
 
+# Rebuild when the binary is missing OR any workspace source/manifest is newer
+# than it, so a stale binary can never silently gate old code.
+needs_build=0
 if [[ ! -x "$SERVER_BIN" ]]; then
-    echo "ci-contract-gate: server binary not found — building release binary…"
+    needs_build=1
+elif [[ -n "$(find apps crates Cargo.toml Cargo.lock -type f -newer "$SERVER_BIN" -print -quit 2>/dev/null)" ]]; then
+    needs_build=1
+fi
+if [[ "$needs_build" -eq 1 ]]; then
+    echo "ci-contract-gate: server binary missing or stale — building release binary…"
     cargo build --release -p michi-server
 fi
 [[ -x "$SERVER_BIN" ]] || fail "server binary missing after build at $SERVER_BIN"
@@ -92,7 +108,9 @@ echo "ci-contract-gate: waiting for /health/live on 127.0.0.1:$PORT (≤60s)…"
 deadline=$((SECONDS + 60))
 healthy=0
 while ((SECONDS < deadline)); do
-    if curl -fsS "http://127.0.0.1:$PORT/health/live" >/dev/null 2>&1; then
+    # Per-attempt timeouts keep the 60s deadline from being overrun by a
+    # hanging connection (connect 3s, total 5s).
+    if curl -fsS --connect-timeout 3 --max-time 5 "http://127.0.0.1:$PORT/health/live" >/dev/null 2>&1; then
         healthy=1
         break
     fi
