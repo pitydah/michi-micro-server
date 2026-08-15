@@ -1,8 +1,10 @@
-ARG RUST_VERSION=1.88
+ARG RUST_VERSION=1.96.0
 ARG DEBIAN_VERSION=bookworm-slim
 
-# Builder stage
-FROM rust:${RUST_VERSION} AS builder
+# Builder stage. Use the bookworm variant so the binary's glibc requirement
+# matches the bookworm-slim runtime stage below (rust:1.96.0 without a variant
+# resolves to Debian trixie / glibc 2.41, which would not run on bookworm-slim).
+FROM rust:${RUST_VERSION}-bookworm AS builder
 
 WORKDIR /app
 
