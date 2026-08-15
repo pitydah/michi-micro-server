@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
 """
-Player-Micro Server Contract Compatibility Test.
-
-Verifies every endpoint that Michi Music Player consumes against a running
-Michi Micro Server instance, following the authenticated admin flow:
-
-  1. GET  public /api/v1/server/info (no Authorization header)
-  2. POST /api/auth/login with configured throwaway admin credentials
-  3. Require the returned token
-  4. Send `Authorization: Bearer <token>` on every protected request
-     (import preflight, queue transfer, diagnostics, playback state)
-
-Missing credentials, login failure, an absent/invalid token, or any protected
-401 MUST record a FAIL and exit non-zero. Nothing is skipped.
+Player-Micro Server Contract Compatibility Test — authenticated admin flow:
+(1) GET public /api/v1/server/info (no auth); (2) POST /api/auth/login with
+MICHI_AUTH_USERNAME/PASSWORD; (3) require token; (4) Bearer on protected requests
+(import preflight, queue transfer, diagnostics, playback state).
+Missing creds / login failure / invalid token / any protected 401 → FAIL + exit
+non-zero. Nothing is skipped.
 
 Usage:
   MICHI_AUTH_USERNAME=admin MICHI_AUTH_PASSWORD=... \
