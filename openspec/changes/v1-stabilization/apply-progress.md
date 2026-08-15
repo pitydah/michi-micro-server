@@ -34,6 +34,7 @@
 - [x] 3.3 Multiarch release platforms + prerelease latest prohibition
 - [x] 3.4 Docker smoke regression (local evidence)
 - [ ] 3.5 buildx arm64 + emulated boot — NOT EXECUTED (environment limitation)
+- [x] 3.6 Healthcheck probes public liveness endpoint (P1 corrective — auth-enabled smoke)
 
 ## Work Unit Evidence
 
@@ -62,7 +63,7 @@
 | Evidence | Actual |
 |---|---|
 | Focused test | `bash -n scripts/ci_contract_gate.sh` → exit 0; `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"` → `YAML OK`; `rustc --version` → 1.96.0 (rust-toolchain.toml respected); `cargo test --workspace` → exit 0, 217 passed / 0 failed / 14 ignored (no regression) |
-| Runtime harness | `CARGO_TARGET_DIR=/home/cristian/.cache/michi-v1s/target bash scripts/ci_contract_gate.sh` → exit 0, `CONTRACT: OK`, 33/0, stale-binary rebuild triggered then PASS; forced failure (occupied port) → exit 1 with no orphan + temp dir removed; TERM mid-run → exit 130, server killed, temp dir removed. Docker smoke: `docker build` OK → container `healthy` → `/api/status` 200 `version 0.2.0`, `/health/live` 200, root 200, 37 migrations → `docker stop -t 25` → `received SIGTERM` → `WAL checkpoint complete` → `shutdown complete` (exit 0) → container + image removed. Persisted runtime evidence: `/tmp/opencode/michi-v1s/wu3-docker-run.log` (full boot log, 37 migrations, `healthy`, graceful-stop tail, ExitCode 0) sha256 `6776c1518c2fdaaf44e3e7623d3e0a02d4f89fafdb7d8b81a5c7e8af78f46e6e`; `/tmp/opencode/michi-v1s/wu3-docker-health.json` (`Status: healthy`, FailingStreak 0) sha256 `4cd83277549f622348e35e1772eb397c4437dabbbecbc66ee744bf563d003ca1` |
+| Runtime harness | `CARGO_TARGET_DIR=/home/cristian/.cache/michi-v1s/target bash scripts/ci_contract_gate.sh` → exit 0, `CONTRACT: OK`, 33/0, stale-binary rebuild triggered then PASS; forced failure (occupied port) → exit 1 with no orphan + temp dir removed; TERM mid-run → exit 130, server killed, temp dir removed. Docker smoke: `docker build` OK → container `healthy` → `/api/status` 200 `version 0.2.0`, `/health/live` 200, root 200, 37 migrations → `docker stop -t 25` → `received SIGTERM` → `WAL checkpoint complete` → `shutdown complete` (exit 0) → container + image removed. Persisted runtime evidence: `/tmp/opencode/michi-v1s/wu3-docker-run.log` (full boot log, 37 migrations, `healthy`, graceful-stop tail, ExitCode 0) sha256 `6776c1518c2fdaaf44e3e7623d3e0a02d4f89fafdb7d8b81a5c7e8af78f46e6e`; `/tmp/opencode/michi-v1s/wu3-docker-health.json` (`Status: healthy`, FailingStreak 0) sha256 `4cd83277549f622348e35e1772eb397c4437dabbbecbc66ee744bf563d003ca1`. **3.6 corrective (auth ENABLED)**: `docker build -t michi-v1s-smoke:wu3-hc .` OK; boot with `MICHI_AUTH_USERNAME`/`MICHI_AUTH_PASSWORD` (throwaway admin) on isolated port 18097 → `docker inspect … .State.Health.Status` = `healthy`; `/health/live` 200, `/api/status` 401 without token (auth active AND healthcheck public), root 200; `docker stop -t 25` → SIGTERM → WAL checkpoint → shutdown complete (ExitCode 0); container + image removed, port freed. Persisted: `/tmp/opencode/michi-v1s/wu3-docker-hc-run.log` sha256 `9c5ffae9d75dd16803d925d79511f69e659a9e004418062545a2002dec8a3892`; `/tmp/opencode/michi-v1s/wu3-docker-hc-health.json` sha256 `e2607102813ddbc88a0c0e3c60798f1c2ffb0b443fc2c1d257256fe103b1fb88` (password redacted — no secrets in logs) |
 | Rollback boundary | Revert `scripts/ci_contract_gate.sh`; revert `Dockerfile`; delete `rust-toolchain.toml`; revert `ci.yml` platform/toolchain lines; revert task/progress marks |
 
 ## Evidence Log
@@ -96,6 +97,7 @@
 - Task 3.3 (multiarch): `platforms: linux/amd64,linux/arm64`; the `latest` meta guard (`startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')`) is unchanged.
 - Task 3.4 (Docker smoke): `docker build` OK (image 178MB). Container reached `healthy`; `/api/status` 200 `version 0.2.0`, `/health/live` 200, root 200; boot log shows exactly 37 migrations (last `migration 37: server config`). Graceful stop: `docker stop -t 25` (15.7s real) → `received SIGTERM, starting graceful shutdown...` → `WAL checkpoint complete` → `shutdown complete`, ExitCode 0; container + image removed. Persisted evidence: `/tmp/opencode/michi-v1s/wu3-docker-run.log` sha256 `6776c1518c2fdaaf44e3e7623d3e0a02d4f89fafdb7d8b81a5c7e8af78f46e6e`; `/tmp/opencode/michi-v1s/wu3-docker-health.json` sha256 `4cd83277549f622348e35e1772eb397c4437dabbbecbc66ee744bf563d003ca1`. **Discovery**: graceful shutdown takes ~15s (`shutdown_and_wait(15s)`) because idle ingest/playback workers only stop at the 15s timeout; a default 10s `docker stop` SIGKILLs before `WAL checkpoint complete`.
 - Task 3.5 (ARM64): **NOT EXECUTED — ENVIRONMENT LIMITATION**. Host binfmt_misc has no QEMU arm64 handler; `docker run --rm --platform linux/arm64 alpine uname -m` and `docker buildx build --platform linux/arm64` both fail `exec /bin/sh: exec format error` at the first RUN step. No arm64 qualification is claimed.
+- Task 3.6 (healthcheck public liveness, P1 corrective): **Root cause** — `Dockerfile:91` HEALTHCHECK probed `/api/status`, which sits in the protected auth router (`crates/michi-api/src/lib.rs` `protected` router + `auth_middleware`); enabling `MICHI_AUTH_USERNAME`/`MICHI_AUTH_PASSWORD` made the probe 401 and the container permanently unhealthy. `/health/live` is in `v1_public_routes()` (public). **Fix**: one-line HEALTHCHECK change to `wget -qO- http://127.0.0.1:8096/health/live || exit 1` (interval/timeout/start-period/retries unchanged). **Proof**: `docker build -t michi-v1s-smoke:wu3-hc .` OK; boot WITH auth enabled (throwaway admin) on isolated port 18097 → `healthy`; `/health/live` 200, `/api/status` 401 without token (auth active AND healthcheck public), root 200; graceful stop (ExitCode 0); container + image removed, port freed. Persisted evidence: `/tmp/opencode/michi-v1s/wu3-docker-hc-run.log` sha256 `9c5ffae9d75dd16803d925d79511f69e659a9e004418062545a2002dec8a3892`; `/tmp/opencode/michi-v1s/wu3-docker-hc-health.json` sha256 `e2607102813ddbc88a0c0e3c60798f1c2ffb0b443fc2c1d257256fe103b1fb88` (password redacted).
 
 ## Files Changed
 | File | Action | What was done |
@@ -105,9 +107,9 @@
 | `docs/MICHI_LINK_MICRO_E2E.md` | Modified | `:10` `michi_link_version` → `api_version` |
 | `scripts/ci_contract_gate.sh` | Added | CI contract gate (health wait, isolated boot, trap cleanup, failure propagation); **WU3**: INT/TERM trap, curl timeouts, stale-binary rebuild check, failure-log comment fix |
 | `.github/workflows/ci.yml` | Modified | add `ci-python-contract` job gated on `ci-rust`; **WU3**: pin `toolchain: 1.96.0` (ci-rust + ci-python-contract), `platforms: linux/amd64,linux/arm64` |
-| `Dockerfile` | Modified | **WU3**: `find -exec touch` cache invalidation; `ARG RUST_VERSION=1.96.0` + `-bookworm` builder variant |
+| `Dockerfile` | Modified | **WU3**: `find -exec touch` cache invalidation; `ARG RUST_VERSION=1.96.0` + `-bookworm` builder variant; **3.6**: HEALTHCHECK CMD `/api/status` → `/health/live` |
 | `rust-toolchain.toml` | Added | **WU3**: `channel = "1.96.0"` |
-| `openspec/changes/v1-stabilization/tasks.md` | Modified | marked 1.1–1.7 `[x]`; added + marked 2.0–2.3 `[x]`; added + marked 3.0–3.4 `[x]`, 3.5 `[ ]` (NOT EXECUTED) |
+| `openspec/changes/v1-stabilization/tasks.md` | Modified | marked 1.1–1.7 `[x]`; added + marked 2.0–2.3 `[x]`; added + marked 3.0–3.4 `[x]`, 3.5 `[ ]` (NOT EXECUTED), 3.6 `[x]` |
 | `openspec/changes/v1-stabilization/apply-progress.md` | Modified | this artifact (WU0+WU1+WU2+WU3 merged) |
 
 ## Deviations from Design
@@ -120,6 +122,7 @@
 7. Task 3.2: CI pin uses the dtolnay action's `toolchain:` input (verified in action.yml) rather than the literal `channel:` wording in the task; the action has no `channel` input, and `channel:` would be silently ignored.
 8. Task 3.2: builder pinned to `rust:1.96.0-bookworm` (not bare `rust:1.96.0`) — bare 1.96.0 is Debian trixie/glibc 2.41, incompatible with the bookworm-slim runtime.
 9. Task 3.5: NOT EXECUTED — QEMU/binfmt arm64 unavailable (exec format error). Recorded as environment limitation; no ARM64 qualification claimed.
+10. Task 3.6 added by orchestrator as a P1 pre-review corrective: HEALTHCHECK moved from protected `/api/status` to public `/health/live`. One Dockerfile line; interval/timeout/start-period/retries unchanged.
 
 ## Issues Found
 - Pre-existing flaky Rust tests (parallel race on shared `/tmp/michi-test/music`), not caused by this slice.
@@ -133,8 +136,8 @@ Work Units 4–6 (Slices 04a/04b/05) not begun — out of scope for this slice. 
 ## Workload / PR Boundary
 - Mode: chained PR slice (force-chained / feature-branch-chain)
 - Current work unit: 3 (Slice 03 — Docker/toolchain/ARM64)
-- Boundary: `05223f4` (02-ci-contract) → `03-build-release` (gate 4R follow-ups + Docker cache fix + toolchain pin + multiarch platforms + task/progress marks)
-- Review budget (exact `git diff --numstat 05223f4..HEAD`): additions + deletions across the five commits, ≤ 500 lines (see exact count below)
+- Boundary: `05223f4` (02-ci-contract) → `03-build-release` (gate 4R follow-ups + Docker cache fix + toolchain pin + multiarch platforms + healthcheck public-liveness fix + task/progress marks)
+- Review budget (exact `git diff --numstat 05223f4..HEAD`): additions + deletions across the six commits, ≤ 500 lines (see exact count below)
 
 ## Status
-18/19 tasks complete across Work Units 0–3 (2 + 7 + 4 + 5 done; task 3.5 NOT EXECUTED). Work Unit 3 (Slice 03) done. Nothing pushed; no PR created; Work Unit 4 NOT begun.
+19/20 tasks complete across Work Units 0–3 (2 + 7 + 4 + 6 done; task 3.5 NOT EXECUTED). Work Unit 3 (Slice 03) done. Nothing pushed; no PR created; Work Unit 4 NOT begun.

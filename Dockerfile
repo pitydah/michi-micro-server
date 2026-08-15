@@ -88,6 +88,6 @@ ENV MICHI_DATABASE=sqlite:///config/michi.db
 USER michi
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -qO- http://127.0.0.1:8096/api/status || exit 1
+    CMD wget -qO- http://127.0.0.1:8096/health/live || exit 1
 
 ENTRYPOINT ["michi-server"]
