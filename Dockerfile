@@ -43,11 +43,18 @@ RUN for dir in michi-core michi-api michi-config michi-db michi-metadata michi-s
     mkdir -p apps/michi-server/src && echo "fn main() {}" > apps/michi-server/src/main.rs && \
     cargo build --release --package michi-server 2>&1 || { echo "dependency caching step completed (build may have warnings)"; }
 
-# Copy real source and rebuild
+# Copy real source and rebuild. COPY overwrites the placeholder lib.rs/main.rs
+# from the dependency-caching step (design D6), so no rm is needed (an explicit
+# rm here would delete the just-copied real sources). Refresh mtimes so cargo
+# cannot reuse the dummy-cache binary, then build the real server.
 COPY apps ./apps
 COPY crates ./crates
 
-RUN cargo build --release --package michi-server && \
+RUN find apps crates -type f \
+        \( -name '*.rs' -o -name '*.html' -o -name '*.css' -o -name '*.js' \
+           -o -name '*.json' -o -name '*.svg' -o -name '*.png' -o -name '*.webp' \) \
+        -exec touch {} + && \
+    cargo build --release --package michi-server && \
     strip target/release/michi-server
 
 # Runtime stage
