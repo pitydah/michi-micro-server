@@ -1,4 +1,4 @@
-# Apply Progress: v1-stabilization — Work Unit 0 + 1 + 2 + 3
+# Apply Progress: v1-stabilization — Work Unit 0 + 1 + 2 + 3 + 4a
 
 **Change**: v1-stabilization
 **Mode**: Standard (strict_tdd: false — characterization/regression program)
@@ -36,6 +36,11 @@
 - [ ] 3.5 buildx arm64 + emulated boot — NOT EXECUTED (environment limitation)
 - [x] 3.6 Healthcheck probes public liveness endpoint (P1 corrective — auth-enabled smoke)
 
+### Work Unit 4a — Slice 04a: Receiver dedup (pure deletion exception)
+- [x] 4.1 Delete dead duplicate `tests/receiver_simulator_integration.rs` (233 lines)
+- [x] 4.2 Delete dead duplicate `tests/e2e/test_receiver_simulator_integration.rs` (233 lines)
+- [x] 4.3 Regression: no behavior change (cargo test --workspace 217/0/14)
+
 ## Work Unit Evidence
 
 ### Work Unit 0
@@ -65,6 +70,13 @@
 | Focused test | `bash -n scripts/ci_contract_gate.sh` → exit 0; `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"` → `YAML OK`; `rustc --version` → 1.96.0 (rust-toolchain.toml respected); `cargo test --workspace` → exit 0, 217 passed / 0 failed / 14 ignored (no regression) |
 | Runtime harness | `CARGO_TARGET_DIR=/home/cristian/.cache/michi-v1s/target bash scripts/ci_contract_gate.sh` → exit 0, `CONTRACT: OK`, 33/0, stale-binary rebuild triggered then PASS; forced failure (occupied port) → exit 1 with no orphan + temp dir removed; TERM mid-run → exit 130, server killed, temp dir removed. Docker smoke: `docker build` OK → container `healthy` → `/api/status` 200 `version 0.2.0`, `/health/live` 200, root 200, 37 migrations → `docker stop -t 25` → `received SIGTERM` → `WAL checkpoint complete` → `shutdown complete` (exit 0) → container + image removed. Persisted runtime evidence: `/tmp/opencode/michi-v1s/wu3-docker-run.log` (full boot log, 37 migrations, `healthy`, graceful-stop tail, ExitCode 0) sha256 `6776c1518c2fdaaf44e3e7623d3e0a02d4f89fafdb7d8b81a5c7e8af78f46e6e`; `/tmp/opencode/michi-v1s/wu3-docker-health.json` (`Status: healthy`, FailingStreak 0) sha256 `4cd83277549f622348e35e1772eb397c4437dabbbecbc66ee744bf563d003ca1`. **3.6 corrective (auth ENABLED)**: `docker build -t michi-v1s-smoke:wu3-hc .` OK; boot with `MICHI_AUTH_USERNAME`/`MICHI_AUTH_PASSWORD` (throwaway admin) on isolated port 18097 → `docker inspect … .State.Health.Status` = `healthy`; `/health/live` 200, `/api/status` 401 without token (auth active AND healthcheck public), root 200; `docker stop -t 25` → SIGTERM → WAL checkpoint → shutdown complete (ExitCode 0); container + image removed, port freed. Persisted: `/tmp/opencode/michi-v1s/wu3-docker-hc-run.log` sha256 `9c5ffae9d75dd16803d925d79511f69e659a9e004418062545a2002dec8a3892`; `/tmp/opencode/michi-v1s/wu3-docker-hc-health.json` sha256 `e2607102813ddbc88a0c0e3c60798f1c2ffb0b443fc2c1d257256fe103b1fb88` (password redacted — no secrets in logs) |
 | Rollback boundary | Revert `scripts/ci_contract_gate.sh`; revert `Dockerfile`; delete `rust-toolchain.toml`; revert `ci.yml` platform/toolchain lines; revert task/progress marks |
+
+### Work Unit 4a
+| Evidence | Actual |
+|---|---|
+| Focused test | `CARGO_TARGET_DIR=/home/cristian/.cache/michi-v1s/target cargo test --workspace` → exit 0, 217 passed / 0 failed / 14 ignored (full log `/tmp/opencode/michi-v1s/wu4a-cargo-test.log`). The `14 ignored` remain the authoritative crate target `crates/michi-receivers/tests/receiver_simulator_integration.rs` — proof the live copy still compiles and registers its ignored tests |
+| Runtime harness | N/A — deletion-only slice: the two deleted files were never compiled (no `Cargo.toml` target or workspace member references them; `tests/` has no crate manifest; root workspace has 22 members, none is `tests/`). No runtime boundary exists for dead files |
+| Rollback boundary | Restore `tests/receiver_simulator_integration.rs` and `tests/e2e/test_receiver_simulator_integration.rs` (exact bytes recoverable from parent `355cf0c`); revert the two commits; revert tasks.md/apply-progress.md marks |
 
 ## Evidence Log
 
@@ -99,6 +111,15 @@
 - Task 3.5 (ARM64): **NOT EXECUTED — ENVIRONMENT LIMITATION**. Host binfmt_misc has no QEMU arm64 handler; `docker run --rm --platform linux/arm64 alpine uname -m` and `docker buildx build --platform linux/arm64` both fail `exec /bin/sh: exec format error` at the first RUN step. No arm64 qualification is claimed.
 - Task 3.6 (healthcheck public liveness, P1 corrective): **Root cause** — `Dockerfile:91` HEALTHCHECK probed `/api/status`, which sits in the protected auth router (`crates/michi-api/src/lib.rs` `protected` router + `auth_middleware`); enabling `MICHI_AUTH_USERNAME`/`MICHI_AUTH_PASSWORD` made the probe 401 and the container permanently unhealthy. `/health/live` is in `v1_public_routes()` (public). **Fix**: one-line HEALTHCHECK change to `wget -qO- http://127.0.0.1:8096/health/live || exit 1` (interval/timeout/start-period/retries unchanged). **Proof**: `docker build -t michi-v1s-smoke:wu3-hc .` OK; boot WITH auth enabled (throwaway admin) on isolated port 18097 → `healthy`; `/health/live` 200, `/api/status` 401 without token (auth active AND healthcheck public), root 200; graceful stop (ExitCode 0); container + image removed, port freed. Persisted evidence: `/tmp/opencode/michi-v1s/wu3-docker-hc-run.log` sha256 `9c5ffae9d75dd16803d925d79511f69e659a9e004418062545a2002dec8a3892`; `/tmp/opencode/michi-v1s/wu3-docker-hc-health.json` sha256 `e2607102813ddbc88a0c0e3c60798f1c2ffb0b443fc2c1d257256fe103b1fb88` (password redacted).
 
+### Work Unit 4a (Slice 04a)
+- Child worktree `git worktree add -b 04a-receiver-dedup /home/cristian/.cache/michi-v1s/wt-04 355cf0ce5fc904670c835611818bfc6d9fe47649` → HEAD `355cf0c`, clean. Parent ancestry exact: `355cf0c` is the `03-build-release` tip.
+- Main worktree before/after manifests (byte/path/mode identity, identical sha256 `66b631f43cd2bf22a11af2ca42c53dcf6d395a78b8868d9b0de520e251035492`, 231 entries): `/tmp/opencode/michi-v1s/main-before-wu4a.manifest`, `main-after-wu4a.manifest`. Main dirty-state `status_porcelain_z` hash unchanged `d44a16570145160f64a9c99a05fe757543a259fa8457950729006e999f5e31b0`.
+- **Baseline drift note**: WU3 recorded 228 entries / sha256 `8ab29e83…`; the WU4a baseline is 231 entries / `66b631f4…` because the WU3 native 4R review added exactly 3 gitignored `.atl/wu3-review-context/{diff.txt,manifest.json,meta.json}` scratch files AFTER the WU3 after-manifest was captured. All 228 WU3 paths are still present with byte-identical hashes; no existing file changed and this slice touched nothing in main.
+- Authoritative-copy guard: `crates/michi-receivers/tests/receiver_simulator_integration.rs` (388 lines) exists before and after, sha256 `2118d06ff3f04652719464382a24435f4cefc92172482036a2cd96937e92ea73` unchanged. The two dead duplicates are byte-identical to each other (233 lines, sha256 `2496930c…`), but differ from the authoritative copy: the difference is rustfmt formatting ONLY (authoritative is the formatted 388-line version) plus one extra `#[allow(dead_code)]` attribute in the authoritative copy. The duplicates are a strict SEMANTIC SUBSET — same 14 test functions, same 14 `#[tokio::test]` + 14 `#[ignore]` attributes, same assertions; zero unique content in the duplicates. This is NOT "deleting the only copy of live tests": the live compiled copy is the crate target and it is a superset. Proceeded after this verification (not blind deletion).
+- Never-compiled proof: `grep -rn "tests/receiver_simulator_integration\|tests/e2e/test_receiver_simulator_integration" --include='Cargo.toml'` → no matches; `tests/` has no crate manifest; root workspace `members` list = 22 entries (apps + 21 crates), none is `tests/`. `scripts/test_receiver_e2e.sh:43` and docs reference `--test receiver_simulator_integration` (the crate target name), never the dead paths.
+- Task 4.1/4.2: `git rm tests/receiver_simulator_integration.rs tests/e2e/test_receiver_simulator_integration.rs` → 2 files deleted, `git diff --cached --numstat` = `0 233` + `0 233` = 466 deletions, 0 additions. Commit `429deae`.
+- Task 4.3: `CARGO_TARGET_DIR=/home/cristian/.cache/michi-v1s/target cargo test --workspace` → exit 0, 217 passed / 0 failed / 14 ignored (full log `/tmp/opencode/michi-v1s/wu4a-cargo-test.log`). The `14 ignored` is the authoritative crate target, confirming it still registers its tests.
+
 ## Files Changed
 | File | Action | What was done |
 |---|---|---|
@@ -109,8 +130,10 @@
 | `.github/workflows/ci.yml` | Modified | add `ci-python-contract` job gated on `ci-rust`; **WU3**: pin `toolchain: 1.96.0` (ci-rust + ci-python-contract), `platforms: linux/amd64,linux/arm64` |
 | `Dockerfile` | Modified | **WU3**: `find -exec touch` cache invalidation; `ARG RUST_VERSION=1.96.0` + `-bookworm` builder variant; **3.6**: HEALTHCHECK CMD `/api/status` → `/health/live` |
 | `rust-toolchain.toml` | Added | **WU3**: `channel = "1.96.0"` |
-| `openspec/changes/v1-stabilization/tasks.md` | Modified | marked 1.1–1.7 `[x]`; added + marked 2.0–2.3 `[x]`; added + marked 3.0–3.4 `[x]`, 3.5 `[ ]` (NOT EXECUTED), 3.6 `[x]` |
-| `openspec/changes/v1-stabilization/apply-progress.md` | Modified | this artifact (WU0+WU1+WU2+WU3 merged) |
+| `tests/receiver_simulator_integration.rs` | Deleted | **WU4a**: dead duplicate (233 lines, never compiled) — authoritative copy is `crates/michi-receivers/tests/receiver_simulator_integration.rs` |
+| `tests/e2e/test_receiver_simulator_integration.rs` | Deleted | **WU4a**: dead duplicate (233 lines, never compiled) — byte-identical to the other dead duplicate |
+| `openspec/changes/v1-stabilization/tasks.md` | Modified | marked 1.1–1.7 `[x]`; added + marked 2.0–2.3 `[x]`; added + marked 3.0–3.4 `[x]`, 3.5 `[ ]` (NOT EXECUTED), 3.6 `[x]`; **WU4a**: marked 4.1–4.3 `[x]`, corrected ~305 → 233 lines |
+| `openspec/changes/v1-stabilization/apply-progress.md` | Modified | this artifact (WU0+WU1+WU2+WU3+WU4a merged) |
 
 ## Deviations from Design
 1. Tasks 1.2/1.3/1.4 landed as one atomic rewrite (same file); each acceptance individually verified.
@@ -123,21 +146,24 @@
 8. Task 3.2: builder pinned to `rust:1.96.0-bookworm` (not bare `rust:1.96.0`) — bare 1.96.0 is Debian trixie/glibc 2.41, incompatible with the bookworm-slim runtime.
 9. Task 3.5: NOT EXECUTED — QEMU/binfmt arm64 unavailable (exec format error). Recorded as environment limitation; no ARM64 qualification claimed.
 10. Task 3.6 added by orchestrator as a P1 pre-review corrective: HEALTHCHECK moved from protected `/api/status` to public `/health/live`. One Dockerfile line; interval/timeout/start-period/retries unchanged.
+11. Slice 04a (WU4a): actual deletion is 233 lines per file (466 total), not the ~305-line estimate in proposal/tasks (the estimate overshot; the live file is 233 unformatted lines). Budget recorded as exact numstat `0 233` + `0 233`.
+12. Slice 04a: the two dead duplicates differ from the authoritative crate copy, but ONLY by rustfmt formatting plus one extra `#[allow(dead_code)]` attribute in the authoritative copy — the duplicates are a strict semantic subset (same 14 tests, same assertions, zero unique content). Verified before deleting (guard satisfied: not the only copy of live tests).
 
 ## Issues Found
 - Pre-existing flaky Rust tests (parallel race on shared `/tmp/michi-test/music`), not caused by this slice.
 - `player_compatibility.supports_*` are misleadingly-named runtime-state booleans.
 - `rust:1.96.0` default image moved to Debian trixie (glibc 2.41) — bare-tag Docker builds now require the `-bookworm` variant to match a bookworm-slim runtime.
 - Server graceful shutdown takes ~15s (`shutdown_and_wait` timeout); default 10s `docker stop` SIGKILLs before the WAL checkpoint (use `-t 25`).
+- Main-worktree manifest baseline drifted from WU3's `8ab29e83…` (228 entries) to `66b631f4…` (231 entries) purely from the 3 gitignored `.atl/wu3-review-context/` files written by the WU3 review lifecycle — no source file changed; pre-existing WebUI dirty state (`d44a1657…`) unchanged.
 
 ## Remaining Tasks
-Work Units 4–6 (Slices 04a/04b/05) not begun — out of scope for this slice. Task 3.5 (ARM64 emulated boot) remains NOT EXECUTED pending a QEMU/binfmt-enabled environment.
+Work Units 4b–6 (Slices 04b/05) not begun — out of scope for this slice. Task 3.5 (ARM64 emulated boot) remains NOT EXECUTED pending a QEMU/binfmt-enabled environment. Slice 04a (this slice) is complete.
 
 ## Workload / PR Boundary
 - Mode: chained PR slice (force-chained / feature-branch-chain)
-- Current work unit: 3 (Slice 03 — Docker/toolchain/ARM64)
-- Boundary: `05223f4` (02-ci-contract) → `03-build-release` (gate 4R follow-ups + Docker cache fix + toolchain pin + multiarch platforms + healthcheck public-liveness fix + task/progress marks)
-- Review budget (exact `git diff --numstat 05223f4..HEAD`): additions + deletions across the six commits, ≤ 500 lines (see exact count below)
+- Current work unit: 4a (Slice 04a — Receiver dedup, pure deletion exception)
+- Boundary: `355cf0c` (03-build-release) → `04a-receiver-dedup` (delete two dead duplicate receiver tests + task/progress marks)
+- Review budget (exact `git diff --numstat 355cf0c..HEAD`): 0 additions + 466 deletions (deletion-only exception; 0 authored lines) + bookkeeping lines in `tasks.md`/`apply-progress.md`
 
 ## Status
-19/20 tasks complete across Work Units 0–3 (2 + 7 + 4 + 6 done; task 3.5 NOT EXECUTED). Work Unit 3 (Slice 03) done. Nothing pushed; no PR created; Work Unit 4 NOT begun.
+22/23 tasks complete across Work Units 0–4a (2 + 7 + 4 + 6 + 3 done; task 3.5 NOT EXECUTED). Work Unit 4a (Slice 04a) done. Nothing pushed; no PR created; Work Unit 4b (Slice 04b) NOT begun.

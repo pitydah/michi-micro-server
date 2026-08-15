@@ -72,9 +72,9 @@ Worktrees: `/home/cristian/.cache/michi-v1s/wt-tracker`, `wt-01`..`wt-05`, share
 
 ## Work Unit 4 — Slice 04a: Receiver dedup, pure deletion exception (PR 04a, base: 03)
 
-- [ ] **4.1** Delete dead duplicate `tests/receiver_simulator_integration.rs` — Deps: none · Files: delete `tests/receiver_simulator_integration.rs` (~305 lines) · Evidence: file gone; `git diff --stat` shows pure deletion; authoritative `crates/michi-receivers/tests/receiver_simulator_integration.rs` untouched · Rollback: restore file · ~−305 deletion · Commit: `test(receivers): remove dead duplicate receiver integration test` · Base: 04a-receiver-dedup
-- [ ] **4.2** Delete dead duplicate `tests/e2e/test_receiver_simulator_integration.rs` — Deps: 4.1 · Files: delete `tests/e2e/test_receiver_simulator_integration.rs` (~305 lines) · Evidence: file gone; diff is deletion-only; crate copy untouched · Rollback: restore file · ~−305 deletion · Commit: included in 4.1 · Base: 04a-receiver-dedup
-- [ ] **4.3** Regression: no behavior change — Deps: 4.2 · Files: none · Evidence: `cargo test --workspace` exit 0, still 217/0/14 (deleted files were never compiled); `git diff --stat` = 2 deletions only · Rollback: n/a · ~0 authored · Commit: included in 4.1 · Base: 04a-receiver-dedup
+- [x] **4.1** Delete dead duplicate `tests/receiver_simulator_integration.rs` — Deps: none · Files: delete `tests/receiver_simulator_integration.rs` (233 lines) · Evidence: file gone; `git diff --stat` shows pure deletion; authoritative `crates/michi-receivers/tests/receiver_simulator_integration.rs` untouched (sha256 `2118d06f…` unchanged) · Rollback: restore file · −233 deletion · Commit: `test(receivers): remove dead duplicate receiver integration test` · Base: 04a-receiver-dedup
+- [x] **4.2** Delete dead duplicate `tests/e2e/test_receiver_simulator_integration.rs` — Deps: 4.1 · Files: delete `tests/e2e/test_receiver_simulator_integration.rs` (233 lines) · Evidence: file gone; diff is deletion-only; crate copy untouched · Rollback: restore file · −233 deletion · Commit: included in 4.1 · Base: 04a-receiver-dedup
+- [x] **4.3** Regression: no behavior change — Deps: 4.2 · Files: none · Evidence: `cargo test --workspace` exit 0, still 217/0/14 (deleted files were never compiled); `git diff --stat` = 2 deletions only (466 deletion lines, 0 additions) · Rollback: n/a · 0 authored · Commit: included in 4.1 · Base: 04a-receiver-dedup
 
 ## Work Unit 5 — Slice 04b: Receiver runner repair (PR 04b, base: 04a)
 
