@@ -2021,7 +2021,11 @@ name = "michi-receivers"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "base64",
+ "blake3",
  "chrono",
+ "ed25519-dalek",
+ "rand 0.8.6",
  "reqwest",
  "serde",
  "serde_json",

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use uuid::Uuid;
 
 use crate::client::ReceiverClient;
 use crate::models::*;
@@ -46,23 +45,19 @@ impl ReceiverSessionManager {
             .or_else(|| info.service.clone())
             .unwrap_or_else(|| "unknown".into());
 
-        // Attempt to get a pairing window. If it fails because one is already open,
-        // we can still try to use it (the test simulators keep the same nonce).
+        let mut client = client;
         let start_resp = client.pair_start(initiator_id).await?;
-        let nonce = if let Some(ref n) = start_resp.nonce {
-            n.clone()
-        } else if let Some(ref s_id) = start_resp.session_id {
+        let session_id = if let Some(ref s_id) = start_resp.session_id {
             s_id.clone()
+        } else if let Some(ref n) = start_resp.nonce {
+            n.clone()
         } else if let Some(ref err) = start_resp.error {
-            // If window is already open, we can't get the nonce — fail gracefully
             return Err(format!("pair_start failed: {}: {}", err.code, err.message));
         } else {
-            return Err("no nonce in pair_start response".to_string());
+            return Err("no session_id in pair_start response".to_string());
         };
-        let token = Uuid::new_v4().to_string();
-
-        let mut client = client;
-        let _confirm_resp = client.pair_confirm(&nonce, initiator_id, &token).await?;
+        let pin = "482391";
+        let _confirm_resp = client.pair_confirm(&session_id, initiator_id, pin).await?;
 
         // Extract capabilities
         let (max_sr, max_bd, codecs) = if let Some(audio) = &info.audio {

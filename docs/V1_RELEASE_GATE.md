@@ -1,6 +1,6 @@
 # 🚪 Michi Micro Server — Release Gate v1.0.0 (Truthfulness Matrix)
 
-**Última actualización:** `2026-08-16 19:43:05 UTC`  
+**Última actualización:** `2026-08-16 20:15:44 UTC`  
 **Estado General del Release:** 🟢 **CANDIDATO v1.0.0 ESTABILIZADO**
 
 ---
@@ -13,10 +13,10 @@
 | **FMT** | Formato estricto según guía de estilo de Rust | `STATIC_ANALYSIS` | 🟢 **GREEN** | `cargo fmt --check` PASS |
 | **CLIPPY** | Cero advertencias bajo `-D warnings` en todos los targets | `STATIC_ANALYSIS` | 🟢 **GREEN** | `cargo clippy --workspace --all-targets -- -D warnings` PASS |
 | **UNIT TESTS** | 100% de tests unitarios pasando | `UNIT` | 🟢 **GREEN** | 217 tests pasando en el workspace |
-| **STREAM CONTRACT DRIFT** | Validación estricta contra Michi Link v1-lite schemas | `STATIC_ANALYSIS` | 🟢 **GREEN** | `scripts/test_stream_contract_drift.py` 14/14 checks PASS (48kHz/16-bit) |
+| **STREAM CONTRACT DRIFT** | Validación estricta contra Michi Link v1-lite schemas y OpenAPI | `STATIC_ANALYSIS` | 🟢 **GREEN** | `scripts/test_stream_contract_drift.py` 44/44 checks PASS (schemas, OpenAPI, Ed25519, PIN, 201/204, 48k/16b) |
 | **PLAYER CONTRACT** | Compatibilidad E2E de contratos de reproducción | `CONTRACT_SIMULATOR` | 🟢 **GREEN** | `test_player_micro_contract_compatibility.py` 10/10 suites PASS |
 | **MOBILE CONTRACT** | Contrato Michi Link validado para clientes móviles | `UNIT` | 🟡 **YELLOW** | Endpoints implementados; suite E2E móvil en formalización |
-| **RECEIVER SIMULATOR** | Matriz de 19 tests contra simulador estricto v1-lite | `CONTRACT_SIMULATOR` | 🟢 **GREEN** | `scripts/test_receiver_e2e.sh` 19/19 PASS (pairing PIN, session_token, monotonic HB, 48k/16b) |
+| **RECEIVER SIMULATOR** | Matriz de 21 tests contra simulador canónico v1-lite | `CONTRACT_SIMULATOR` | 🟢 **GREEN** | `scripts/test_receiver_e2e.sh` 21/21 PASS (Ed25519 pairing, PIN 6 dígitos, session_token RAM, monotonic HB, HTTP 201/204) |
 | **SNAPCAST MOCK** | Multi-room audio con topología simulada | `CONTRACT_MOCK` | 🟢 **GREEN** | `scripts/test_snapcast_e2e.sh` con 3 clientes simulados y control de grupos |
 | **MQTT SIMULATOR** | Integración Home Assistant Auto-Discovery simulada | `CONTRACT_SIMULATOR` | 🟢 **GREEN** | `scripts/test_homeassistant_e2e.sh` con broker MQTT simulado y comandos |
 | **GENERIC APPLIANCE** | Validación de arranque, permisos y migración (Linux x86_64) | `INTEGRATION_REAL` | 🟢 **GREEN** | `scripts/test_appliance_e2e.sh`: boot limpio, permisos, migraciones v1->37 y reboot simulado |

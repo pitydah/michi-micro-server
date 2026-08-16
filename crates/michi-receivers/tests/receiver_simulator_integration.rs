@@ -506,3 +506,56 @@ async fn test_receiver_fault_temporary_network_drop_and_recovery() {
         .expect("third request must auto-recover");
     assert_eq!(res3.service.as_deref(), Some("michi-stream-standard"));
 }
+
+#[tokio::test]
+#[ignore]
+async fn test_receiver_pairing_wrong_pin_rejected() {
+    let mut client = ReceiverClient::new(&sim_url());
+    let start = client
+        .pair_start("test-wrong-pin")
+        .await
+        .expect("pair_start failed");
+    let session_id = start.session_id.expect("session_id missing");
+
+    let confirm = client
+        .pair_confirm(&session_id, "test-wrong-pin", "000000")
+        .await;
+    assert!(confirm.is_err(), "wrong PIN must be rejected with 401");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_receiver_heartbeat_replay_rejected() {
+    let mut client = ReceiverClient::new(&sim_url());
+    let start = client
+        .pair_start("hb-replay")
+        .await
+        .expect("pair_start failed");
+    let session_id = start.session_id.expect("session_id missing");
+    client
+        .pair_confirm(&session_id, "hb-replay", "482391")
+        .await
+        .expect("pair_confirm failed");
+
+    let sess_id = format!("sess_hb_{}", uuid::Uuid::new_v4());
+    client
+        .session_start(&sess_id, "pcm_s16le", 48000, 16, 2, 55300, 120, 50)
+        .await
+        .expect("session_start failed");
+
+    // First heartbeat succeeds
+    let hb1 = client.heartbeat().await.expect("hb 1 should succeed");
+    assert_eq!(hb1.status.as_deref(), Some("alive"));
+
+    // Reset sequence counter to simulate replayed/stale sequence
+    client
+        .heartbeat_sequence
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    let hb_replayed = client.heartbeat().await;
+    assert!(
+        hb_replayed.is_err(),
+        "replayed/stale heartbeat sequence must fail with 409"
+    );
+
+    let _ = client.session_stop().await;
+}

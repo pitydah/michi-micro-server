@@ -49,6 +49,10 @@ impl ReceiverInfo {
 pub struct PairStartResponse {
     pub status: Option<String>,
     pub session_id: Option<String>,
+    pub expires_at: Option<String>,
+    pub attempts_remaining: Option<u32>,
+    pub server_michi_id: Option<String>,
+    pub server_public_key: Option<String>,
     pub device_id: Option<String>,
     pub pairing_window_seconds: Option<u64>,
     pub expires_in: Option<u64>,
@@ -59,10 +63,12 @@ pub struct PairStartResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairConfirmResponse {
     pub status: Option<String>,
-    pub device_id: Option<String>,
-    pub controller_id: Option<String>,
     pub token: Option<String>,
+    pub refresh_token: Option<String>,
     pub expires_in: Option<u64>,
+    pub device_id: Option<String>,
+    pub server_id: Option<String>,
+    pub controller_id: Option<String>,
     pub error: Option<ErrorBody>,
 }
 
@@ -72,11 +78,11 @@ pub struct SessionStartResponse {
     pub status: Option<String>,
     pub session_id: Option<String>,
     pub session_token: Option<String>,
+    pub lease_seconds: Option<u64>,
+    pub effective: Option<serde_json::Value>,
     pub device_id: Option<String>,
     pub stream_port: Option<u16>,
     pub buffer_ms: Option<u64>,
-    pub lease_seconds: Option<u64>,
-    pub effective: Option<serde_json::Value>,
     pub error: Option<ErrorBody>,
 }
 
@@ -91,6 +97,8 @@ pub struct SessionStopResponse {
 pub struct HeartbeatResponse {
     pub status: Option<String>,
     pub session_id: Option<String>,
+    pub lease_seconds: Option<u64>,
+    pub receiver_uptime_ms: Option<u64>,
     pub uptime_seconds: Option<u64>,
     pub error: Option<ErrorBody>,
 }

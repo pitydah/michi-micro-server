@@ -91,6 +91,7 @@ async fn test_receiver_info_hifi_output() {
 async fn test_receiver_pairing_flow() {
     let mut client = ReceiverClient::new(&sim_url());
 
+    // pair/start with Ed25519 challenge
     let start = client
         .pair_start("test-flow")
         .await
@@ -99,6 +100,7 @@ async fn test_receiver_pairing_flow() {
     assert!(start.pairing_window_seconds.unwrap_or(0) > 0);
     let nonce = start.nonce.expect("must have nonce");
 
+    // pair/confirm with 6-digit PIN
     let confirm = client
         .pair_confirm(&nonce, "test-flow", "482391")
         .await
@@ -117,16 +119,19 @@ async fn test_receiver_pairing_window_closed_rejected() {
         .expect("pair_start failed");
     let nonce = start.nonce.expect("must have nonce");
 
+    // First confirm succeeds
     let confirm = client
         .pair_confirm(&nonce, "test-reject", "482391")
         .await
         .expect("first confirm failed");
     assert_eq!(confirm.status.as_deref(), Some("paired"));
 
-    let confirm2 = client
-        .pair_confirm(&nonce, "test-reject", "482391")
-        .await;
-    assert!(confirm2.is_err(), "second confirm on consumed nonce must fail");
+    // Second confirm on same nonce should fail
+    let confirm2 = client.pair_confirm(&nonce, "test-reject", "482391").await;
+    assert!(
+        confirm2.is_err(),
+        "second confirm on consumed nonce must fail"
+    );
 }
 
 #[tokio::test]
@@ -139,6 +144,7 @@ async fn test_receiver_standard_full_lifecycle() {
         .await
         .expect("discover and pair failed");
 
+    // Start session
     let session_id = format!("sess_{}", uuid::Uuid::new_v4());
     let sess_resp = mgr
         .start_session(
@@ -157,15 +163,18 @@ async fn test_receiver_standard_full_lifecycle() {
     assert_eq!(sess_resp.status.as_deref(), Some("session_started"));
     assert!(sess_resp.stream_port.is_some());
 
+    // Heartbeat
     let hb = mgr.heartbeat(&device_id).await.expect("heartbeat failed");
     assert_eq!(hb.status.as_deref(), Some("alive"));
 
+    // Set volume
     let vol = mgr
         .set_volume(&device_id, 42)
         .await
         .expect("set_volume failed");
     assert_eq!(vol.volume, Some(42));
 
+    // Stop session
     let stop = mgr
         .stop_session(&device_id)
         .await
@@ -329,7 +338,10 @@ async fn test_receiver_errors_unauthenticated() {
 #[ignore]
 async fn test_receiver_heartbeat_monotonic_sequence() {
     let mut client = ReceiverClient::new(&sim_url());
-    let start = client.pair_start("hb-test").await.expect("pair_start failed");
+    let start = client
+        .pair_start("hb-test")
+        .await
+        .expect("pair_start failed");
     let nonce = start.nonce.expect("nonce missing");
     client
         .pair_confirm(&nonce, "hb-test", "482391")
@@ -342,9 +354,11 @@ async fn test_receiver_heartbeat_monotonic_sequence() {
         .await
         .expect("session_start failed");
 
+    // Heartbeat 1 (seq = 1)
     let hb1 = client.heartbeat().await.expect("hb 1 should succeed");
     assert_eq!(hb1.status.as_deref(), Some("alive"));
 
+    // Heartbeat 2 (seq = 2)
     let hb2 = client.heartbeat().await.expect("hb 2 should succeed");
     assert_eq!(hb2.status.as_deref(), Some("alive"));
 
@@ -377,9 +391,11 @@ async fn test_receiver_full_lifecycle_and_session_recovery() {
     let url = sim_url();
     let mut client = ReceiverClient::new(&url);
 
+    // 1. Discovery
     let info = client.get_info().await.expect("discovery info failed");
     let _device_id = info.device_id.expect("missing device_id");
 
+    // 2. Pairing
     let pair_start = client
         .pair_start("e2e-matrix")
         .await
@@ -392,23 +408,31 @@ async fn test_receiver_full_lifecycle_and_session_recovery() {
     assert_eq!(confirm.status.as_deref(), Some("paired"));
     assert!(client.token.is_some(), "token must be stored in client");
 
+    // 3. Start Session
     let session_id = "sess-matrix-full-1";
     let start_res = client
         .session_start(session_id, "pcm_s16le", 48000, 16, 2, 55800, 250, 75)
         .await
         .expect("session start failed");
     assert_eq!(start_res.status.as_deref(), Some("session_started"));
-    assert!(client.active_session_token.is_some(), "session_token must be retained");
+    assert!(
+        client.active_session_token.is_some(),
+        "session_token must be retained"
+    );
 
+    // 4. Playback Control & Volume
     let vol_res = client.set_volume(85).await.expect("set_volume failed");
     assert_eq!(vol_res.volume, Some(85));
 
+    // Verify current state before disconnect
     let state_before = client.get_playback_state().await.expect("get state failed");
     assert_eq!(state_before.volume, Some(85));
 
+    // 5. Heartbeat with monotonic sequence
     let hb = client.heartbeat().await.expect("heartbeat failed");
     assert_eq!(hb.status.as_deref(), Some("alive"));
 
+    // 6. Stop Session Cleanly
     let stop_res = client.session_stop().await.expect("session stop failed");
     assert_eq!(stop_res.status.as_deref(), Some("session_stopped"));
     assert!(client.active_session_token.is_none());
@@ -481,4 +505,49 @@ async fn test_receiver_fault_temporary_network_drop_and_recovery() {
         .await
         .expect("third request must auto-recover");
     assert_eq!(res3.service.as_deref(), Some("michi-stream-standard"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_receiver_pairing_wrong_pin_rejected() {
+    let mut client = ReceiverClient::new(&sim_url());
+    let start = client
+        .pair_start("test-wrong-pin")
+        .await
+        .expect("pair_start failed");
+    let session_id = start.session_id.expect("session_id missing");
+
+    let confirm = client
+        .pair_confirm(&session_id, "test-wrong-pin", "000000")
+        .await;
+    assert!(confirm.is_err(), "wrong PIN must be rejected with 401");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_receiver_heartbeat_replay_rejected() {
+    let mut client = ReceiverClient::new(&sim_url());
+    let start = client.pair_start("hb-replay").await.expect("pair_start failed");
+    let session_id = start.session_id.expect("session_id missing");
+    client
+        .pair_confirm(&session_id, "hb-replay", "482391")
+        .await
+        .expect("pair_confirm failed");
+
+    let sess_id = format!("sess_hb_{}", uuid::Uuid::new_v4());
+    client
+        .session_start(&sess_id, "pcm_s16le", 48000, 16, 2, 55300, 120, 50)
+        .await
+        .expect("session_start failed");
+
+    // First heartbeat succeeds
+    let hb1 = client.heartbeat().await.expect("hb 1 should succeed");
+    assert_eq!(hb1.status.as_deref(), Some("alive"));
+
+    // Reset sequence counter to simulate replayed/stale sequence
+    client.heartbeat_sequence.store(0, std::sync::atomic::Ordering::SeqCst);
+    let hb_replayed = client.heartbeat().await;
+    assert!(hb_replayed.is_err(), "replayed/stale heartbeat sequence must fail with 409");
+
+    let _ = client.session_stop().await;
 }

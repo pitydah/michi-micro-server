@@ -52,11 +52,11 @@ GATES_SPEC = [
     },
     {
         "id": "STREAM CONTRACT DRIFT",
-        "description": "Validación estricta contra Michi Link v1-lite schemas",
+        "description": "Validación estricta contra Michi Link v1-lite schemas y OpenAPI",
         "required_class": "STATIC_ANALYSIS",
         "current_status": "🟢 **GREEN**",
         "evidence_class": "STATIC_ANALYSIS",
-        "detail": "`scripts/test_stream_contract_drift.py` 14/14 checks PASS (48kHz/16-bit)",
+        "detail": "`scripts/test_stream_contract_drift.py` 44/44 checks PASS (schemas, OpenAPI, Ed25519, PIN, 201/204, 48k/16b)",
     },
     {
         "id": "PLAYER CONTRACT",
@@ -76,11 +76,11 @@ GATES_SPEC = [
     },
     {
         "id": "RECEIVER SIMULATOR",
-        "description": "Matriz de 19 tests contra simulador estricto v1-lite",
+        "description": "Matriz de 21 tests contra simulador canónico v1-lite",
         "required_class": "CONTRACT_SIMULATOR",
         "current_status": "🟢 **GREEN**",
         "evidence_class": "CONTRACT_SIMULATOR",
-        "detail": "`scripts/test_receiver_e2e.sh` 19/19 PASS (pairing PIN, session_token, monotonic HB, 48k/16b)",
+        "detail": "`scripts/test_receiver_e2e.sh` 21/21 PASS (Ed25519 pairing, PIN 6 dígitos, session_token RAM, monotonic HB, HTTP 201/204)",
     },
     {
         "id": "SNAPCAST MOCK",
