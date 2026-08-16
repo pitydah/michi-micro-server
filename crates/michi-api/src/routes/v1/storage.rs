@@ -14,7 +14,7 @@ fn statvfs_free_bytes(path: &std::path::Path) -> Option<u64> {
         _rest: [u64; 10],
     }
     extern "C" {
-        fn statvfs(path: *const i8, buf: *mut Statvfs) -> i32;
+        fn statvfs(path: *const std::ffi::c_char, buf: *mut Statvfs) -> i32;
     }
     let path_c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut stat: Statvfs = unsafe { std::mem::zeroed() };
