@@ -4,7 +4,7 @@
 Connects to Michi Micro Server, browses library, plays via mpv.
 
 Usage:
-    python player.py http://localhost:8096
+    python player.py http://localhost:9090
 """
 
 from __future__ import annotations

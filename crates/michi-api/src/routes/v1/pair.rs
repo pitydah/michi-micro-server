@@ -362,17 +362,44 @@ pub async fn list_devices_handler(
 // ── QR Pairing ───────────────────────────────────────────────────
 
 #[derive(Serialize)]
+#[derive(Debug, Deserialize, Default)]
+pub struct QrGenerateBody {
+    pub server_url: Option<String>,
+}
+
 pub struct QrGenerateResponse {
     pub qr_code: Uuid,
     pub expires_at: String,
     pub svg_url: String,
+    pub server_url: String,
 }
 
 pub async fn qr_generate_handler(
+    headers: axum::http::HeaderMap,
     State(state): State<AppState>,
+    body: Option<Json<QrGenerateBody>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let qr_code = Uuid::new_v4();
-    let server_url = "http://localhost:".to_string() + &state.config.port().to_string();
+    let explicit_url = body.and_then(|b| b.0.server_url).filter(|u| !u.trim().is_empty());
+
+    let host_hdr = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get("host"))
+        .and_then(|h| h.to_str().ok())
+        .filter(|h| !h.is_empty());
+
+    let server_url = if let Some(url) = explicit_url {
+        url.trim().trim_end_matches('/').to_string()
+    } else if let Some(host) = host_hdr {
+        let scheme = headers
+            .get("x-forwarded-proto")
+            .and_then(|p| p.to_str().ok())
+            .unwrap_or("http");
+        format!("{scheme}://{host}")
+    } else {
+        format!("http://localhost:{}", state.config.port())
+    };
+
     let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
     sqlx::query(
         "INSERT INTO pairing_qr_codes (id, qr_code, server_url, expires_at, created_at)
@@ -396,7 +423,58 @@ pub async fn qr_generate_handler(
     Ok(Json(serde_json::json!({
         "qr_code": qr_code,
         "expires_at": expires_at.to_rfc3339(),
+        "server_url": server_url,
         "svg_url": format!("/api/v1/pair/qr/{}/svg", qr_code),
+    })))
+}
+
+pub async fn qr_status_handler(
+    State(state): State<AppState>,
+    Path(qr_code): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let qr_str = qr_code.to_string();
+    let row = sqlx::query_as::<_, (String, String, i64, Option<String>)>(
+        "SELECT server_url, expires_at, claimed, claimed_at FROM pairing_qr_codes WHERE qr_code = ?"
+    )
+    .bind(&qr_str)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string()))?;
+
+    let (server_url, expires_at_str, claimed, claimed_at) =
+        row.ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "QR code not found"))?;
+
+    if claimed != 0 {
+        return Ok(Json(serde_json::json!({
+            "status": "claimed",
+            "claimed": true,
+            "claimed_at": claimed_at,
+            "qr_code": qr_str,
+        })));
+    }
+
+    let expires_at = chrono::DateTime::parse_from_rfc3339(&expires_at_str).map_err(|_| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "PARSE_ERROR",
+            "invalid expiry",
+        )
+    })?;
+
+    if expires_at < chrono::Utc::now() {
+        return Ok(Json(serde_json::json!({
+            "status": "expired",
+            "claimed": false,
+            "qr_code": qr_str,
+        })));
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "waiting_for_scan",
+        "claimed": false,
+        "expires_at": expires_at_str,
+        "server_url": server_url,
+        "qr_code": qr_str,
     })))
 }
 
@@ -631,15 +709,8 @@ pub async fn qr_claim_handler(
             )
         })?;
 
-    // Delete the QR code (self-destruct)
-    sqlx::query("DELETE FROM pairing_qr_codes WHERE id = ?")
-        .bind(&db_id)
-        .execute(&state.db)
-        .await
-        .ok();
-
     // Generate device token for the claimer
-    let _device_name = body.device_name.unwrap_or_else(|| "QR-Paired".into());
+    let device_name = body.device_name.unwrap_or_else(|| "QR-Paired Device".into());
     let device_id = Uuid::new_v4();
     let token = generate_device_token();
 
@@ -647,6 +718,30 @@ pub async fn qr_claim_handler(
         .token_store
         .store(&token, TokenType::Device, device_id)
         .await;
+
+    // Register device in canonical link_devices registry
+    let core_device = michi_core::LinkDevice {
+        device_id,
+        alias: device_name.clone(),
+        device_type: body.device_type.unwrap_or_else(|| "mobile".into()),
+        device_model: None,
+        token_hash: hash_token(&token),
+        permissions_json: r#"{"playback":true,"queue":true,"library_read":true,"settings":false}"#.into(),
+        created_at: chrono::Utc::now(),
+        last_seen: Some(chrono::Utc::now().to_rfc3339()),
+        revoked: false,
+    };
+    let _ = michi_db::create_link_device(&state.db, &core_device).await;
+
+    // Broadcast device paired event
+    let _ = state.tx.send(
+        serde_json::json!({
+            "type": "device_paired",
+            "device_id": device_id,
+            "alias": device_name,
+        })
+        .to_string(),
+    );
 
     Ok(Json(serde_json::json!({
         "status": "claimed",

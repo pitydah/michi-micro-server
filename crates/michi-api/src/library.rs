@@ -880,6 +880,8 @@ pub async fn set_playback_state_handler(
         playlist_id: None,
         queue_position: None,
         device_id: None,
+        shuffle: false,
+        repeat: "none".into(),
     };
 
     {

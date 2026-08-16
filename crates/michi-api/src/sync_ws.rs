@@ -80,6 +80,8 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                     playlist_id: *playlist_id,
                                     queue_position: *queue_position,
                                     device_id: None,
+                                    shuffle: false,
+                                    repeat: "none".into(),
                                 };
                                 {
                                     let mut current = state_clone.playback_state.write().await;
@@ -139,6 +141,8 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                         playlist_id: session.playlist_id,
                                         queue_position: session.queue_position,
                                         device_id: Some("server".into()),
+                                        shuffle: false,
+                                        repeat: "none".into(),
                                     };
                                     {
                                         let mut current = state_clone.playback_state.write().await;

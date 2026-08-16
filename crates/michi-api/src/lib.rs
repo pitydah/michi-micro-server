@@ -806,6 +806,8 @@ pub fn start_sync_peers(state: &AppState) {
                                                                     playlist_id: None,
                                                                     queue_position: None,
                                                                     device_id: None,
+                                                                    shuffle: false,
+                                                                    repeat: "none".into(),
                                                                 };
                                                                 {
                                                                     let mut current = recv_playback.write().await;
@@ -871,6 +873,10 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/pair/qr/:qr_code/claim",
             post(routes::v1::pair::qr_claim_handler),
+        )
+        .route(
+            "/api/v1/pair/qr/:qr_code/status",
+            get(routes::v1::pair::qr_status_handler),
         )
         .route(
             "/api/v1/devices/revoke",
@@ -1140,7 +1146,17 @@ fn v1_link_routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/health/verify",
-            get(routes::v1::backup::verify_integrity_handler),
+            get(routes::v1::backup::verify_integrity_handler)
+                .post(routes::v1::backup::verify_integrity_handler),
+        )
+        .route(
+            "/api/v1/backup/verify",
+            get(routes::v1::backup::verify_integrity_handler)
+                .post(routes::v1::backup::verify_integrity_handler),
+        )
+        .route(
+            "/api/v1/backup/download",
+            get(routes::v1::backup::download_backup_handler),
         )
         .route(
             "/api/v1/health/mounts",

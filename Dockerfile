@@ -70,11 +70,11 @@ RUN mkdir -p /config /cache /music && \
 
 COPY --from=builder /app/target/release/michi-server /usr/local/bin/michi-server
 
-EXPOSE 8096
+EXPOSE 9090
 
 VOLUME ["/config", "/cache", "/music"]
 
-ENV MICHI_PORT=8096
+ENV MICHI_PORT=9090
 ENV MICHI_MUSIC_PATH=/music
 ENV MICHI_CONFIG_PATH=/config
 ENV MICHI_CACHE_PATH=/cache
@@ -83,6 +83,6 @@ ENV MICHI_DATABASE=sqlite:///config/michi.db
 USER michi
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -qO- http://127.0.0.1:8096/health/live || exit 1
+    CMD wget -qO- http://127.0.0.1:9090/health/live || exit 1
 
 ENTRYPOINT ["michi-server"]

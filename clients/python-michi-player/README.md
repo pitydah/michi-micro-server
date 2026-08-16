@@ -21,18 +21,20 @@ pip install -r requirements.txt
 
 ```bash
 # Connect without auth
-python player.py http://192.168.1.50:8096
+python player.py http://192.168.1.50:9090
 
-# Connect with auth token
-python player.py http://192.168.1.50:8096 --token abc123
+# With auth token
+python player.py http://192.168.1.50:9090 --token abc123
 ```
 
-## Desktop GUI Usage
+### Desktop Player (GUI)
 
 ```bash
-# Requires PySide6
+# Install PySide6
 pip install PySide6
-python desktop_player.py http://192.168.1.50:8096
+
+# Run
+python desktop_player.py http://192.168.1.50:9090
 ```
 
 ## CLI Commands

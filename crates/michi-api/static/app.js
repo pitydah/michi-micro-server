@@ -286,15 +286,24 @@ function showSection(section) {
   toggleNavigation(false);
 }
 
-// ── Init ────────────────────────────────────────────────────────
 async function init() {
   setTheme(localStorage.getItem('michi_theme') || 'dark', false);
   await loadI18n();
+  updateServerUrlDisplay();
   showSection('dashboard');
   await Promise.all([loadStatus(), loadServerInfo(), loadDashboard(), loadTracks()]);
+  await Promise.all([loadCanonicalPlaybackState(), loadCanonicalQueue()]);
+
   State.polling = setInterval(function () {
     if (!document.hidden) { loadStatus(); loadDashboard(); }
   }, 60000);
+
+  ServerPlayback.pollTimer = setInterval(function () {
+    if (!document.hidden && ServerPlayback.outputTarget === 'server') {
+      loadCanonicalPlaybackState();
+    }
+  }, 3000);
+
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(function () {});
   }
@@ -589,7 +598,32 @@ async function handleScan() {
   } catch (e) { showToast(e.message, true); }
 }
 
-// ── Playback ────────────────────────────────────────────────────
+// ── Playback & Canonical State Authority ─────────────────────────
+var ServerPlayback = {
+  state: 'paused',
+  track_id: null,
+  current_track: null,
+  position_ms: 0,
+  duration_ms: 0,
+  volume: 80,
+  shuffle: false,
+  repeat: 'none',
+  playing: false,
+  outputTarget: 'server', // 'server' | 'browser'
+  pollTimer: null,
+  eventWs: null,
+};
+
+function toggleOutputTarget() {
+  ServerPlayback.outputTarget = ServerPlayback.outputTarget === 'server' ? 'browser' : 'server';
+  var badge = $('#np-target-badge');
+  if (badge) {
+    badge.textContent = 'Target: ' + (ServerPlayback.outputTarget === 'server' ? 'Server' : 'Browser');
+    badge.className = 'badge ' + (ServerPlayback.outputTarget === 'server' ? 'stable' : 'format');
+  }
+  showToast('Playback target: ' + (ServerPlayback.outputTarget === 'server' ? 'Server (Canonical Authority)' : 'Browser (Local Preview)'));
+}
+
 function getAudio() {
   if (!State.audio) {
     State.audio = document.getElementById('audio-player');
@@ -607,29 +641,143 @@ function getAudio() {
   return State.audio;
 }
 
-function playTrack(idx) {
+async function playTrack(idx) {
   const tracks = State.tracks;
   if (!tracks || idx < 0 || idx >= tracks.length) return;
   const t = tracks[idx];
-  State.currentTrack = t;
-  updateNowPlaying(t);
-  updateMiniPlayer(t);
 
-  const audio = getAudio();
-  audio.src = MichiAPI.streamUrl(t.id);
-  audio.play().catch(function (err) {
-    showToast(t('error.could_not_play', {msg: err.message}), true);
-  });
-  updatePlayButtons();
+  if (ServerPlayback.outputTarget === 'browser') {
+    State.currentTrack = t;
+    updateNowPlaying(t);
+    updateMiniPlayer(t);
+    const audio = getAudio();
+    audio.src = MichiAPI.streamUrl(t.id);
+    audio.play().catch(function (err) {
+      showToast(t('error.could_not_play', {msg: err.message}), true);
+    });
+    updatePlayButtons();
+    return;
+  }
+
+  // Canonical server playback
+  try {
+    await MichiAPI.request('/api/v1/playback/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        command: 'play',
+        value: { track_id: t.id, position_ms: 0 }
+      })
+    });
+    await loadCanonicalPlaybackState();
+  } catch (err) {
+    showToast('Failed to start server playback: ' + err.message, true);
+  }
 }
 
-function addToQueue(idx) {
+async function playPause() {
+  if (ServerPlayback.outputTarget === 'browser') {
+    const audio = getAudio();
+    if (audio.paused) {
+      if (!audio.src && State.currentTrack) {
+        playTrack(State.tracks.indexOf(State.currentTrack));
+        return;
+      }
+      audio.play().catch(function () {});
+    } else {
+      audio.pause();
+    }
+    updatePlayButtons();
+    return;
+  }
+
+  // Canonical server toggle
+  try {
+    await MichiAPI.request('/api/v1/playback/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'toggle' })
+    });
+    await loadCanonicalPlaybackState();
+  } catch (err) {
+    showToast('Server playback control failed: ' + err.message, true);
+  }
+}
+
+async function toggleShuffle() {
+  try {
+    var resp = await MichiAPI.request('/api/v1/playback/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'shuffle' })
+    });
+    ServerPlayback.shuffle = !!resp.shuffle;
+    updatePlaybackControlsUI();
+    showToast('Shuffle ' + (ServerPlayback.shuffle ? 'ON' : 'OFF'));
+  } catch (e) {
+    showToast('Failed to toggle shuffle: ' + e.message, true);
+  }
+}
+
+async function toggleRepeat() {
+  try {
+    var resp = await MichiAPI.request('/api/v1/playback/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'repeat' })
+    });
+    ServerPlayback.repeat = resp.repeat || 'none';
+    updatePlaybackControlsUI();
+    showToast('Repeat mode: ' + ServerPlayback.repeat.toUpperCase());
+  } catch (e) {
+    showToast('Failed to toggle repeat: ' + e.message, true);
+  }
+}
+
+function updatePlaybackControlsUI() {
+  var shuffleBtn = $('#btn-shuffle');
+  if (shuffleBtn) {
+    shuffleBtn.style.color = ServerPlayback.shuffle ? 'var(--primary)' : 'var(--text-3)';
+  }
+  var repeatBtn = $('#btn-repeat');
+  if (repeatBtn) {
+    repeatBtn.style.color = (ServerPlayback.repeat && ServerPlayback.repeat !== 'none') ? 'var(--primary)' : 'var(--text-3)';
+  }
+}
+
+async function addToQueue(idx) {
   const tracks = State.tracks;
   if (!tracks || idx < 0 || idx >= tracks.length) return;
   const t = tracks[idx];
-  State.queue.push(t);
+  try {
+    await MichiAPI.request('/api/v1/queue/items', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ track_ids: [t.id] })
+    });
+    showToast(t('toast.added_to_queue', {title: t.title || 'Unknown'}));
+    await loadCanonicalQueue();
+  } catch (e) {
+    // Fallback local queue
+    State.queue.push(t);
+    renderQueue();
+    showToast(t('toast.added_to_queue', {title: t.title || 'Unknown'}));
+  }
+}
+
+async function loadCanonicalQueue() {
+  try {
+    const q = await MichiAPI.request('/api/v1/queue/saved');
+    if (q && q.found && q.items && q.items.length > 0) {
+      State.queue = q.items.map(function (it, i) {
+        const found = (State.allTracks || State.tracks || []).find(function (tr) { return tr.id === it.track_id; });
+        return found || { id: it.track_id, title: 'Track ' + (i + 1), duration_ms: 0 };
+      });
+    }
+  } catch (e) {
+    // keep current queue
+  }
   renderQueue();
-  showToast(t('toast.added_to_queue', {title: t.title || 'Unknown'}));
 }
 
 function renderQueue() {
@@ -648,18 +796,30 @@ function renderQueue() {
   }).join('');
 }
 
-function playPause() {
-  const audio = getAudio();
-  if (audio.paused) {
-    if (!audio.src && State.currentTrack) {
-      playTrack(State.tracks.indexOf(State.currentTrack));
-      return;
+async function loadCanonicalPlaybackState() {
+  try {
+    const st = await MichiAPI.request('/api/v1/playback/state');
+    ServerPlayback.state = st.state;
+    ServerPlayback.playing = st.playing;
+    ServerPlayback.track_id = st.track_id;
+    ServerPlayback.current_track = st.current_track;
+    ServerPlayback.position_ms = st.position_ms || 0;
+    ServerPlayback.duration_ms = st.duration_ms || 0;
+    ServerPlayback.volume = st.volume || 80;
+    ServerPlayback.shuffle = !!st.shuffle;
+    ServerPlayback.repeat = st.repeat || 'none';
+
+    if (st.current_track) {
+      State.currentTrack = st.current_track;
+      updateNowPlaying(st.current_track);
+      updateMiniPlayer(st.current_track);
     }
-    audio.play().catch(function () {});
-  } else {
-    audio.pause();
+    updatePlaybackControlsUI();
+    updatePlayButtons();
+    updatePlaybackProgress();
+  } catch (e) {
+    // silent
   }
-  updatePlayButtons();
 }
 
 function onTrackEnd() {
@@ -667,6 +827,19 @@ function onTrackEnd() {
 }
 
 function updatePlaybackProgress() {
+  if (ServerPlayback.outputTarget === 'server') {
+    if (!ServerPlayback.duration_ms) return;
+    const pct = (ServerPlayback.position_ms / ServerPlayback.duration_ms) * 100;
+    const fill1 = $('#np-progress-fill');
+    const fill2 = $('#mini-progress-fill');
+    if (fill1) fill1.style.width = pct + '%';
+    if (fill2) fill2.style.width = pct + '%';
+
+    const cur = $('#np-current');
+    if (cur) cur.textContent = fmtDur(ServerPlayback.position_ms);
+    return;
+  }
+
   const audio = getAudio();
   if (!audio || !audio.duration) return;
 
@@ -681,8 +854,10 @@ function updatePlaybackProgress() {
 }
 
 function updatePlayButtons() {
-  const audio = getAudio();
-  const isPlaying = !audio.paused;
+  const isPlaying = ServerPlayback.outputTarget === 'server'
+    ? ServerPlayback.playing
+    : !getAudio().paused;
+
   const playBtns = $$('[data-play-icon]');
   playBtns.forEach(btn => {
     btn.innerHTML = isPlaying
@@ -755,11 +930,34 @@ function updateMiniPlayer(t) {
 }
 
 // ── Michi Link panel ────────────────────────────────────────────
-function testMichiLink() {
-  loadStatus();
-  loadServerInfo();
-  loadEcosystemDevices();
-  showToast(t('common.ok'));
+async function testMichiLink() {
+  const btn = $('#page-michilink button[onclick="testMichiLink()"]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Testing...'; }
+  try {
+    const [liveRes, infoRes, capsRes] = await Promise.allSettled([
+      fetch('/health/live'),
+      MichiAPI.request('/api/v1/server/info'),
+      MichiAPI.request('/api/v1/capabilities'),
+    ]);
+
+    const liveOk = liveRes.status === 'fulfilled' && liveRes.value.ok;
+    const infoOk = infoRes.status === 'fulfilled' && infoRes.value && !infoRes.value.error;
+    const capsOk = capsRes.status === 'fulfilled' && capsRes.value && !capsRes.value.error;
+
+    if (liveOk && infoOk && capsOk) {
+      showToast('Connection verified: CONNECTED / HEALTHY');
+      await Promise.allSettled([loadStatus(), loadServerInfo(), loadEcosystemDevices()]);
+    } else if (liveOk || infoOk) {
+      showToast('Connection degraded: DEGRADED', true);
+      await Promise.allSettled([loadStatus(), loadServerInfo(), loadEcosystemDevices()]);
+    } else {
+      showToast('Connection test failed: FAILED', true);
+    }
+  } catch (err) {
+    showToast('Connection test failed: ' + (err.message || 'Error'), true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Test Connection'; }
+  }
 }
 
 // ── Ecosystem ────────────────────────────────────────────────────
@@ -792,22 +990,33 @@ async function loadEcosystemDevices() {
 var _qrCode = null;
 var _qrExpiresAt = null;
 var _qrTimer = null;
+var _qrState = 'IDLE'; // IDLE, GENERATING, WAITING_FOR_SCAN, CLAIMED, EXPIRED, ERROR
 
 async function generateQR() {
+  _qrState = 'GENERATING';
   try {
-    var resp = await MichiAPI.request('/api/v1/pair/qr', { method: 'POST', timeout: 10000 });
+    var originUrl = window.location.origin;
+    var resp = await MichiAPI.request('/api/v1/pair/qr', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server_url: originUrl }),
+      timeout: 10000
+    });
     _qrCode = resp.qr_code;
     _qrExpiresAt = new Date(resp.expires_at);
+    _qrState = 'WAITING_FOR_SCAN';
     renderQR(resp);
     pollQRStatus();
-  } catch (e) { showToast(e.message, true); }
+  } catch (e) {
+    _qrState = 'ERROR';
+    showToast(e.message, true);
+  }
 }
 
 function renderQR(resp) {
   var container = $('#qr-code-container');
   var empty = $('#qr-empty');
   var svgEl = $('#qr-svg');
-  var countdown = $('#qr-countdown');
   var connected = $('#qr-connected');
   if (container) container.classList.remove('hidden');
   if (empty) empty.classList.add('hidden');
@@ -837,23 +1046,42 @@ function updateQRCountdown() {
 function pollQRStatus() {
   if (_qrTimer) clearInterval(_qrTimer);
   _qrTimer = setInterval(async function () {
-    if (!_qrCode) { clearInterval(_qrTimer); return; }
+    if (!_qrCode || _qrState !== 'WAITING_FOR_SCAN') { clearInterval(_qrTimer); return; }
     updateQRCountdown();
     // Check if expired
     if (_qrExpiresAt && new Date() > _qrExpiresAt) {
       clearInterval(_qrTimer);
+      _qrState = 'EXPIRED';
       var el = $('#qr-countdown');
       if (el) el.textContent = 'Expired';
       showToast(t('error.qr_expired'), true);
-      resetQR();
       return;
     }
-  }, 1000);
+
+    try {
+      var st = await MichiAPI.request('/api/v1/pair/qr/' + _qrCode + '/status');
+      if (st.status === 'claimed' || st.claimed === true) {
+        clearInterval(_qrTimer);
+        _qrState = 'CLAIMED';
+        var connected = $('#qr-connected');
+        var svgEl = $('#qr-svg');
+        var countdown = $('#qr-countdown');
+        if (svgEl) svgEl.innerHTML = '';
+        if (countdown) countdown.textContent = 'Paired successfully';
+        if (connected) connected.classList.remove('hidden');
+        showToast('Device paired successfully');
+        loadEcosystemDevices();
+      }
+    } catch (e) {
+      // transient poll error
+    }
+  }, 1500);
 }
 
 function resetQR() {
   _qrCode = null;
   _qrExpiresAt = null;
+  _qrState = 'IDLE';
   if (_qrTimer) { clearInterval(_qrTimer); _qrTimer = null; }
   var container = $('#qr-code-container');
   var empty = $('#qr-empty');
@@ -863,12 +1091,23 @@ function resetQR() {
   if (connected) connected.classList.add('hidden');
 }
 
+function updateServerUrlDisplay() {
+  const inp = $('#server-url-input');
+  if (!inp) return;
+  inp.value = window.location.origin;
+}
+
 function copyServerUrl() {
   const inp = $('#server-url-input');
   if (!inp) return;
-  inp.select();
-  document.execCommand('copy');
-  showToast(t('toast.copied'));
+  if (!inp.value) updateServerUrlDisplay();
+  navigator.clipboard.writeText(inp.value).then(() => {
+    showToast(t('toast.copied'));
+  }).catch(() => {
+    inp.select();
+    document.execCommand('copy');
+    showToast(t('toast.copied'));
+  });
 }
 
 // ── Playlists ────────────────────────────────────────────────────
@@ -1149,8 +1388,19 @@ async function activateRoomGroup(id) {
   try {
     var resp = await MichiAPI.request('/api/v1/rooms/groups/' + id + '/activate', { method: 'POST' });
     loadRoomGroups();
-    showToast(t('toast.activated'));
-  } catch (e) { showToast(e.message, true); }
+    if (resp.status === 'already_active') {
+      showToast('Room group is already active');
+    } else if (resp.status === 'active') {
+      showToast('Room group active (' + resp.successful_receivers + '/' + resp.total_receivers + ' receivers)');
+    } else if (resp.status === 'partial') {
+      showToast('Room group partially active (' + resp.successful_receivers + '/' + resp.total_receivers + ' receivers)', true);
+    } else {
+      showToast('Failed to activate receivers in room group', true);
+    }
+  } catch (e) {
+    showToast('Failed to activate room group: ' + e.message, true);
+    loadRoomGroups();
+  }
 }
 
 async function deactivateRoomGroup(id) {
@@ -1383,12 +1633,16 @@ async function saveSetting(key, value) {
   var body = {};
   body[key] = value;
   try {
-    await MichiAPI.request('/api/v1/settings', {
+    var res = await MichiAPI.request('/api/v1/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    showToast(t('toast.updated'));
+    if (res && res.restart_required) {
+      showToast('Settings saved. ⚠ Server restart required for changes to take effect.');
+    } else {
+      showToast(t('toast.updated'));
+    }
     loadSettings();
   } catch (e) { showToast(e.message, true); }
 }
@@ -1549,12 +1803,22 @@ async function setWebhook() {
 }
 
 async function testWebhook() {
+  var el = $('#webhook-status');
+  if (el) el.innerHTML = '<span style="color:var(--text-dim)">Testing webhook...</span>';
   try {
-    await MichiAPI.request('/api/v1/webhook/test', { method: 'POST', timeout: 10000 });
-    var el = $('#webhook-status');
-    if (el) el.innerHTML = '<span style="color:var(--online)">✓ Webhook fired</span>';
-    showToast(t('toast.webhook_tested'));
-  } catch (e) { showToast(e.message, true); }
+    var resp = await MichiAPI.request('/api/v1/webhook/test', { method: 'POST', timeout: 10000 });
+    if (resp && resp.status === 'success') {
+      var msg = '✓ HTTP ' + resp.status_code + ' (' + resp.elapsed_ms + 'ms)';
+      if (el) el.innerHTML = '<span style="color:var(--online)">' + msg + '</span>';
+      showToast('Webhook test passed: HTTP ' + resp.status_code);
+    } else {
+      if (el) el.innerHTML = '<span style="color:var(--online)">✓ Webhook fired</span>';
+      showToast(t('toast.webhook_tested'));
+    }
+  } catch (e) {
+    if (el) el.innerHTML = '<span style="color:var(--error)">✗ ' + esc(e.message) + '</span>';
+    showToast('Webhook test failed: ' + e.message, true);
+  }
 }
 
 async function deleteWebhook() {
@@ -1567,33 +1831,46 @@ async function deleteWebhook() {
   } catch (e) { showToast(e.message, true); }
 }
 
-// Backup
+// Backup & Snapshot
 async function createSnapshot() {
+  var el = $('#snapshot-result');
+  if (el) el.innerHTML = '<span style="color:var(--text-dim)">Creating library statistics snapshot...</span>';
   try {
     var resp = await MichiAPI.request('/api/v1/backup/snapshot', { method: 'POST' });
-    var el = $('#snapshot-result');
     if (el) {
       var s = resp.snapshot || {};
-      el.innerHTML = '<span style="color:var(--online)">✓ Snapshot: ' +
-        (s.stats?.tracks || 0) + ' tracks, ' +
-        (s.stats?.albums || 0) + ' albums, ' +
-        (s.stats?.artists || 0) + ' artists</span>';
+      var st = s.stats || {};
+      el.innerHTML = '<span style="color:var(--online)">✓ Snapshot recorded: ' +
+        (st.tracks || 0) + ' tracks, ' +
+        (st.albums || 0) + ' albums, ' +
+        (st.artists || 0) + ' artists</span>';
     }
     showToast(t('toast.snapshot_created'));
-  } catch (e) { showToast(e.message, true); }
+  } catch (e) {
+    if (el) el.innerHTML = '<span style="color:var(--error)">Failed: ' + esc(e.message) + '</span>';
+    showToast(e.message, true);
+  }
+}
+
+function downloadBackup() {
+  window.open('/api/v1/backup/download', '_blank');
 }
 
 async function verifyIntegrity() {
+  var el = $('#integrity-result');
+  if (el) el.innerHTML = '<span style="color:var(--text-dim)">Checking file availability...</span>';
   try {
-    var resp = await MichiAPI.request('/api/v1/health/verify', { timeout: 30000 });
-    var el = $('#integrity-result');
+    var resp = await MichiAPI.request('/api/v1/backup/verify', { timeout: 30000 });
     if (el) {
-      var ok = resp.status === 'ok';
+      var ok = resp.status === 'ok' || resp.missing === 0;
       el.innerHTML = '<span style="color:' + (ok ? 'var(--online)' : 'var(--error)') + '">' +
-        (ok ? '✓ All OK' : '⚠ Issues found') + ' — ' +
-        resp.verified + ' verified, ' + resp.missing + ' missing, ' + resp.corrupt + ' corrupt</span>';
+        (ok ? '✓ Files verified' : '⚠ Missing files') + ' — ' +
+        resp.available + ' available, ' + resp.missing + ' missing (Total: ' + resp.total + ')</span>';
     }
-  } catch (e) { showToast(e.message, true); }
+  } catch (e) {
+    if (el) el.innerHTML = '<span style="color:var(--error)">Check failed: ' + esc(e.message) + '</span>';
+    showToast(e.message, true);
+  }
 }
 
 // ── Chains ───────────────────────────────────────────────────────
@@ -1810,9 +2087,17 @@ async function setChainTrack() {
 async function playChain() {
   if (!_currentChainId) return;
   try {
-    await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/play', { method: 'POST' });
-        showToast(t('toast.activated'));
-      } catch (e) { showToast(t('error.could_not_play', {msg: e.message}), true); }
+    var resp = await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/play', { method: 'POST' });
+    if (resp && resp.links_active > 0) {
+      showToast('Chain playing on ' + resp.links_active + ' active receiver(s)');
+    } else {
+      showToast('Chain started without active receiver links', true);
+    }
+    loadChains();
+  } catch (e) {
+    showToast(t('error.could_not_play', {msg: e.message}), true);
+    loadChains();
+  }
 }
 
 async function stopChain() {
@@ -1820,20 +2105,28 @@ async function stopChain() {
   try {
     await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/stop', { method: 'POST' });
     showToast(t('toast.deactivated'));
+    loadChains();
   } catch (e) { showToast(e.message, true); }
 }
 
-async function setChainVolume(val) {
+var _chainVolTimeout = null;
+function setChainVolume(val) {
   var label = $('#chain-master-vol-label');
   if (label) label.textContent = val;
   if (!_currentChainId) return;
-  try {
-    await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/volume', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ volume: parseInt(val) }),
-    });
-  } catch (e) { /* silent */ }
+
+  if (_chainVolTimeout) clearTimeout(_chainVolTimeout);
+  _chainVolTimeout = setTimeout(async function () {
+    try {
+      await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/volume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ volume: parseInt(val) }),
+      });
+    } catch (e) {
+      showToast('Failed to set chain volume: ' + e.message, true);
+    }
+  }, 200);
 }
 
 // ── Keyboard shortcuts ─────────────────────────────────────────

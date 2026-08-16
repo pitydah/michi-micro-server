@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=michi
 Group=michi
-Environment=MICHI_PORT=8096
+Environment=MICHI_PORT=9090
 Environment=MICHI_MUSIC_PATH=/music
 Environment=MICHI_CONFIG_PATH=/etc/michi
 Environment=MICHI_CACHE_PATH=/var/cache/michi

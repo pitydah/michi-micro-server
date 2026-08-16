@@ -256,37 +256,46 @@ pub async fn play_chain_handler(
     }
 
     // Start receiver sessions for each link
+    let mut active_sessions_count = 0usize;
     for link in &links {
         let reg = state.receiver_manager.registry().await;
         let reg_read = reg.read().await;
         if let Some(entry) = reg_read.get(&link.receiver_id) {
-            if entry.paired && entry.active_session_id.is_none() {
-                let _ = state
-                    .receiver_manager
-                    .start_session(
-                        &link.receiver_id,
-                        &id.to_string(),
-                        "pcm",
-                        48000,
-                        24,
-                        2,
-                        0,
-                        200,
-                        link.volume as u32,
-                    )
-                    .await;
-            }
-            // Set volume per receiver
-            if link.muted {
-                let _ = state
-                    .receiver_manager
-                    .set_volume(&link.receiver_id, 0)
-                    .await;
-            } else {
-                let _ = state
-                    .receiver_manager
-                    .set_volume(&link.receiver_id, link.volume as u32)
-                    .await;
+            if entry.paired {
+                let session_ok = if entry.active_session_id.is_none() {
+                    state
+                        .receiver_manager
+                        .start_session(
+                            &link.receiver_id,
+                            &id.to_string(),
+                            "pcm_s16le",
+                            48000,
+                            16,
+                            2,
+                            0,
+                            200,
+                            link.volume as u32,
+                        )
+                        .await
+                        .is_ok()
+                } else {
+                    true
+                };
+
+                if session_ok {
+                    active_sessions_count += 1;
+                    if link.muted {
+                        let _ = state
+                            .receiver_manager
+                            .set_volume(&link.receiver_id, 0)
+                            .await;
+                    } else {
+                        let _ = state
+                            .receiver_manager
+                            .set_volume(&link.receiver_id, link.volume as u32)
+                            .await;
+                    }
+                }
             }
         }
     }
@@ -304,7 +313,7 @@ pub async fn play_chain_handler(
     Ok(Json(serde_json::json!({
         "status": "playing",
         "chain_id": id,
-        "links_active": links.len(),
+        "links_active": active_sessions_count,
     })))
 }
 

@@ -5,7 +5,7 @@ from michi_client import MichiServerClient
 
 
 async def main() -> None:
-    client = MichiServerClient("http://localhost:8096")
+    client = MichiServerClient("http://localhost:9090")
 
     # Discover server
     info = await client.connect()

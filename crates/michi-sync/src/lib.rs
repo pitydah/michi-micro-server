@@ -118,6 +118,14 @@ pub struct PlaybackState {
     pub playlist_id: Option<Uuid>,
     pub queue_position: Option<u32>,
     pub device_id: Option<String>,
+    #[serde(default)]
+    pub shuffle: bool,
+    #[serde(default = "default_repeat_mode")]
+    pub repeat: String,
+}
+
+fn default_repeat_mode() -> String {
+    "none".to_string()
 }
 
 impl Default for PlaybackState {
@@ -131,6 +139,8 @@ impl Default for PlaybackState {
             playlist_id: None,
             queue_position: None,
             device_id: None,
+            shuffle: false,
+            repeat: "none".into(),
         }
     }
 }
@@ -437,6 +447,8 @@ impl SyncManager {
                 playlist_id: None,
                 queue_position: None,
                 device_id: Some("server".into()),
+                shuffle: false,
+                repeat: "none".into(),
             }),
             None => Ok(PlaybackState::default()),
         }

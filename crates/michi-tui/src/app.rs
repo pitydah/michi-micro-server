@@ -313,7 +313,7 @@ mod tests {
     use crate::api::ApiClient;
 
     fn test_app() -> App {
-        let client = ApiClient::new("http://localhost:8096".into(), None);
+        let client = ApiClient::new("http://localhost:9090".into(), None);
         App {
             api: client,
             screen: Screen::Tracks,

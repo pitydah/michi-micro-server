@@ -56,7 +56,7 @@ pub struct Config {
 
 #[allow(dead_code)]
 fn default_port() -> u16 {
-    8096
+    9090
 }
 #[allow(dead_code)]
 fn default_music_paths() -> Vec<PathBuf> {
@@ -84,7 +84,7 @@ impl Config {
         let port = env::var("MICHI_PORT")
             .ok()
             .and_then(|v| v.parse::<u16>().ok())
-            .unwrap_or(8096);
+            .unwrap_or(9090);
 
         let music_paths = {
             let paths: Vec<PathBuf> = env::var("MICHI_MUSIC_PATH")
@@ -298,6 +298,7 @@ impl Config {
     }
 
     pub fn save_to_file(&self) -> Result<(), String> {
+        let _ = std::fs::create_dir_all(&self.config_path);
         let path = self.config_path.join("config.json");
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(&path, &json).map_err(|e| e.to_string())?;
@@ -436,7 +437,7 @@ impl<'de> Deserialize<'de> for Config {
         // Build directly from defaults to avoid recursion:
         // from_env() -> load_file_overrides() -> Deserialize -> from_env() -> ...
         let mut cfg = Config {
-            port: 8096,
+            port: 9090,
             music_paths: vec![PathBuf::from("/music")],
             config_path: PathBuf::from("/config"),
             cache_path: PathBuf::from("/cache"),

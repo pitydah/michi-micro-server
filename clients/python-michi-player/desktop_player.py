@@ -5,7 +5,7 @@ Connects to Michi Micro Server via Michi Link v1.
 Requires: PySide6, aiohttp, qasync
 
 Usage:
-    python desktop_player.py http://localhost:8096
+    python desktop_player.py http://localhost:9090
 """
 
 from __future__ import annotations
@@ -288,7 +288,7 @@ def main() -> None:
         print("Install: pip install PySide6 aiohttp")
         sys.exit(1)
 
-    server_url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8096"
+    server_url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:9090"
     token = None
     if "--token" in sys.argv:
         token = sys.argv[sys.argv.index("--token") + 1]

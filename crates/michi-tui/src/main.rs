@@ -6,7 +6,7 @@ use michi_tui::app::App;
 struct Args {
     #[arg(long, default_value = "localhost")]
     host: String,
-    #[arg(long, default_value_t = 8096)]
+    #[arg(long, default_value_t = 9090)]
     port: u16,
     #[arg(long)]
     token: Option<String>,

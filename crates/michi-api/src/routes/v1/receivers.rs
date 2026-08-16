@@ -288,7 +288,7 @@ async fn discover_mdns_receivers() -> Result<Vec<serde_json::Value>, String> {
     use std::time::Duration;
 
     let daemon = ServiceDaemon::new().map_err(|e| format!("mDNS daemon: {e}"))?;
-    let service_type = "_michi-receiver._tcp.local.";
+    let service_type = "_michi-link._tcp.local.";
     let receiver = daemon
         .browse(service_type)
         .map_err(|e| format!("mDNS browse: {e}"))?;
@@ -449,9 +449,9 @@ pub async fn activate_room_group_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let (recv_ids, vols, mode, group_clone, _was_active) = {
-        let mut groups = ROOM_GROUPS.write().await;
-        let group = groups.iter_mut().find(|g| g.id == id);
+    let (recv_ids, vols, mode) = {
+        let groups = ROOM_GROUPS.read().await;
+        let group = groups.iter().find(|g| g.id == id);
         match group {
             Some(g) => {
                 if g.active {
@@ -459,13 +459,10 @@ pub async fn activate_room_group_handler(
                         serde_json::json!({ "status": "already_active", "group": g.clone() }),
                     ));
                 }
-                g.active = true;
                 (
                     g.receiver_ids.clone(),
                     g.volumes.clone(),
                     g.mode,
-                    g.clone(),
-                    false,
                 )
             }
             None => {
@@ -477,6 +474,9 @@ pub async fn activate_room_group_handler(
             }
         }
     };
+
+    let mut receiver_results = Vec::new();
+    let mut success_count = 0usize;
 
     for recv_id in &recv_ids {
         let vol = vols.get(recv_id).copied().unwrap_or(match mode {
@@ -496,29 +496,91 @@ pub async fn activate_room_group_handler(
         let reg_b = state.receiver_manager.registry().await;
         let reg_read_b = reg_b.read().await;
         if let Some(entry) = reg_read_b.get(recv_id) {
-            if entry.paired && entry.active_session_id.is_none() {
-                let _ = state
+            if !entry.paired {
+                receiver_results.push(serde_json::json!({
+                    "receiver_id": recv_id,
+                    "status": "failed",
+                    "error": { "code": "NOT_PAIRED", "message": "receiver is not paired" }
+                }));
+                continue;
+            }
+            let session_ok = if entry.active_session_id.is_none() {
+                state
                     .receiver_manager
                     .start_session(
                         recv_id,
                         &id.to_string(),
-                        "pcm",
+                        "pcm_s16le",
                         48000,
-                        24,
+                        16,
                         2,
                         0,
                         200,
                         capped_vol,
                     )
-                    .await;
+                    .await
+                    .is_ok()
+            } else {
+                true
+            };
+
+            if session_ok {
+                let _ = state.receiver_manager.set_volume(recv_id, capped_vol).await;
+                success_count += 1;
+                receiver_results.push(serde_json::json!({
+                    "receiver_id": recv_id,
+                    "status": "active",
+                    "volume": capped_vol,
+                }));
+            } else {
+                receiver_results.push(serde_json::json!({
+                    "receiver_id": recv_id,
+                    "status": "failed",
+                    "error": { "code": "SESSION_FAILED", "message": "Failed to start receiver session" }
+                }));
             }
-            let _ = state.receiver_manager.set_volume(recv_id, capped_vol).await;
+        } else {
+            receiver_results.push(serde_json::json!({
+                "receiver_id": recv_id,
+                "status": "failed",
+                "error": { "code": "NOT_FOUND", "message": "receiver not found in registry" }
+            }));
         }
     }
 
-    Ok(Json(
-        serde_json::json!({ "status": "activated", "group": group_clone }),
-    ))
+    let overall_status = if recv_ids.is_empty() {
+        "active"
+    } else if success_count == recv_ids.len() {
+        "active"
+    } else if success_count > 0 {
+        "partial"
+    } else {
+        "failed"
+    };
+
+    {
+        let mut groups = ROOM_GROUPS.write().await;
+        if let Some(group) = groups.iter_mut().find(|g| g.id == id) {
+            group.active = success_count > 0;
+        }
+    }
+
+    if overall_status == "failed" && !recv_ids.is_empty() {
+        return Err(v1_error(
+            StatusCode::BAD_GATEWAY,
+            "ROOM_ACTIVATION_FAILED",
+            "failed to activate any receivers in room group",
+        ));
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": overall_status,
+        "group_id": id,
+        "active": success_count > 0,
+        "successful_receivers": success_count,
+        "total_receivers": recv_ids.len(),
+        "receivers": receiver_results,
+    })))
 }
 
 pub async fn deactivate_room_group_handler(

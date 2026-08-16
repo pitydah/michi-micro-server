@@ -378,9 +378,41 @@ pub async fn queue_saved_handler(
                 })).collect::<Vec<_>>(),
             })))
         }
-        None => Ok(Json(serde_json::json!({
-            "found": false,
-            "queue_id": null,
-        }))),
+        None => {
+            let latest_queue = sqlx::query_as::<_, (String, String)>(
+                "SELECT id, name FROM queues ORDER BY datetime(created_at) DESC LIMIT 1"
+            )
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+
+            if let Some((qid_str, _)) = latest_queue {
+                if let Ok(qid) = Uuid::parse_str(&qid_str) {
+                    let queue_items = michi_db::get_queue_items(&state.db, &qid)
+                        .await
+                        .ok()
+                        .unwrap_or_default();
+
+                    return Ok(Json(serde_json::json!({
+                        "found": true,
+                        "session_id": serde_json::Value::Null,
+                        "queue_id": qid,
+                        "current_index": 0,
+                        "position_ms": 0,
+                        "source": "queue",
+                        "items": queue_items.iter().map(|(tid, pos)| serde_json::json!({
+                            "track_id": tid,
+                            "position": pos,
+                        })).collect::<Vec<_>>(),
+                    })));
+                }
+            }
+
+            Ok(Json(serde_json::json!({
+                "found": false,
+                "queue_id": null,
+            })))
+        }
     }
 }

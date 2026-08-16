@@ -4,7 +4,7 @@ Reference implementation for Michi Music Player integration.
 Uses only the /api/v1 contract. No legacy endpoints.
 
 Usage:
-    client = MichiServerClient("http://192.168.1.50:8096")
+    client = MichiServerClient("http://192.168.1.50:9090")
     info = await client.connect()
     tracks = await client.get_tracks()
     results = await client.search_tracks("pink floyd")

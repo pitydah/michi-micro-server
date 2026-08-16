@@ -88,7 +88,7 @@ pub struct UpdateSettingsBody {
 }
 
 pub async fn update_settings_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(body): Json<UpdateSettingsBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     // We need a mutable reference to config. Since AppState stores Config immutably,
@@ -147,8 +147,8 @@ pub async fn update_settings_handler(
         tracing::info!("settings: sync_peers -> {:?}", v);
     }
 
-    // Build a fresh config from env + current state + body overrides, persist
-    let mut cfg = michi_config::Config::from_env();
+    // Build a fresh config from current state + body overrides, persist
+    let mut cfg = state.config.clone();
     if let Some(ref v) = body.resource_profile {
         cfg.resource_profile = michi_core::ResourceProfile::from_config_str(v);
     }

@@ -83,7 +83,7 @@ cd michi-micro-server
 cargo build --release --package michi-server
 
 # Run with defaults
-MICHI_PORT=8096 MICHI_MUSIC_PATH=/path/to/music ./target/release/michi-server
+MICHI_PORT=9090 MICHI_MUSIC_PATH=/path/to/music ./target/release/michi-server
 ```
 
 ### Docker
@@ -92,7 +92,7 @@ MICHI_PORT=8096 MICHI_MUSIC_PATH=/path/to/music ./target/release/michi-server
 docker build -t michi-server .
 docker run -d \
   --name michi \
-  -p 8096:8096 \
+  -p 9090:9090 \
   -v /path/to/music:/music:ro \
   -v ./config:/config \
   -v ./cache:/cache \
@@ -103,7 +103,7 @@ docker run -d \
 
 ```bash
 docker compose up -d
-# Server available at http://localhost:8096
+# Server available at http://localhost:9090
 ```
 
 ## Configuration
@@ -112,7 +112,7 @@ All configuration via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MICHI_PORT` | `8096` | HTTP port |
+| `MICHI_PORT` | `9090` | HTTP port |
 | `MICHI_MUSIC_PATH` | `/music` | Comma-separated library paths |
 | `MICHI_CONFIG_PATH` | `/config` | Config directory |
 | `MICHI_CACHE_PATH` | `/cache` | Cache directory |
@@ -129,7 +129,7 @@ See [docs/API.md](docs/API.md) for the complete API reference.
 
 ### Web UI
 
-Open `http://localhost:8096` in your browser to access the premium Web UI:
+Open `http://localhost:9090` in your browser to access the premium Web UI:
 - **Dashboard** — Library stats, playback status, health, recent tracks
 - **Library** — Browse tracks with search, sort, format badges
 - **Scan** — Start library scan, view progress and results

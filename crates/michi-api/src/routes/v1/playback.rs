@@ -72,8 +72,8 @@ pub async fn playback_state_handler(
         "position_ms": current.position_ms,
         "duration_ms": current_track.as_ref().and_then(|t| t.get("duration_ms")).and_then(|v| v.as_u64()),
         "volume": (current.volume * 100.0) as u32,
-        "shuffle": false,
-        "repeat": "none",
+        "shuffle": current.shuffle,
+        "repeat": current.repeat,
         "playing": current.playing,
         "restored": false,
     })))
@@ -172,12 +172,38 @@ pub async fn playback_control_handler(
             }
         }
         "shuffle" => {
-            // Toggle shuffle — no state to persist in-memory yet
-            // Player expects ok response
+            if let Some(val) = &body.value {
+                if let Some(shuf) = val.get("shuffle").and_then(|v| v.as_bool()) {
+                    current.shuffle = shuf;
+                } else if let Some(shuf) = val.as_bool() {
+                    current.shuffle = shuf;
+                } else {
+                    current.shuffle = !current.shuffle;
+                }
+            } else {
+                current.shuffle = !current.shuffle;
+            }
         }
         "repeat" => {
-            // Player sends repeat mode — no state to persist yet
-            // Accept "none", "one", "all" but don't error
+            if let Some(val) = &body.value {
+                if let Some(rep) = val.get("repeat").and_then(|v| v.as_str()) {
+                    current.repeat = rep.to_string();
+                } else if let Some(rep) = val.as_str() {
+                    current.repeat = rep.to_string();
+                } else {
+                    current.repeat = match current.repeat.as_str() {
+                        "none" => "all".into(),
+                        "all" => "one".into(),
+                        _ => "none".into(),
+                    };
+                }
+            } else {
+                current.repeat = match current.repeat.as_str() {
+                    "none" => "all".into(),
+                    "all" => "one".into(),
+                    _ => "none".into(),
+                };
+            }
         }
         _ => {
             return Err(v1_error(
@@ -192,7 +218,7 @@ pub async fn playback_control_handler(
     let state_clone = current.clone();
     drop(current);
 
-    let _ = state.sync_tx.send(state_clone.into());
+    let _ = state.sync_tx.send(state_clone.clone().into());
     let _ = state.tx.send(
         serde_json::json!({
             "type": "playback_state_changed", "command": cmd,
@@ -200,7 +226,13 @@ pub async fn playback_control_handler(
         .to_string(),
     );
 
-    Ok(Json(serde_json::json!({ "status": "ok" })))
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "state": if state_clone.playing { "playing" } else { "paused" },
+        "position_ms": state_clone.position_ms,
+        "shuffle": state_clone.shuffle,
+        "repeat": state_clone.repeat,
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -451,6 +483,8 @@ pub async fn handoff_handler(
         playlist_id: body.playlist_id,
         queue_position: body.queue_position,
         device_id: Some("server".into()),
+        shuffle: false,
+        repeat: "none".into(),
     };
 
     {

@@ -77,7 +77,7 @@ impl MichiClient {
             .state
             .as_ref()
             .map(|s| s.server_url.as_str())
-            .unwrap_or("http://localhost:8096");
+            .unwrap_or("http://localhost:9090");
         format!("{base}{path}")
     }
 

@@ -2,7 +2,7 @@
 
 ## Interactive Docs
 
-Open `http://<server>:8096/api/docs` for the full Swagger UI with all endpoints.
+Open `http://<server>:9090/api/docs` for the full Swagger UI with all endpoints.
 
 ## Versioned API (v1)
 
@@ -41,7 +41,7 @@ V1 error format:
 ## Base URL
 
 ```
-http://<server>:8096
+http://<server>:9090
 ```
 
 ## Endpoints Summary
@@ -131,7 +131,7 @@ All API responses use JSON. Errors follow:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MICHI_PORT` | `8096` | HTTP port |
+| `MICHI_PORT` | `9090` | HTTP port |
 | `MICHI_MUSIC_PATH` | `/music` | Music path(s), comma-separated |
 | `MICHI_CONFIG_PATH` | `/config` | Config dir |
 | `MICHI_CACHE_PATH` | `/cache` | Cache dir |

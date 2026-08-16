@@ -217,7 +217,7 @@
                 <div class="panel-header">Connection</div>
                 <div class="panel-row">
                     <span class="panel-label">Server URL</span>
-                    <div class="copy-field" style="flex:1;max-width:360px"><input id="server-url-input" value="http://localhost:8096" readonly><button class="btn btn-sm btn-ghost" onclick="copyServerUrl()">Copy</button></div>
+                    <div class="copy-field" style="flex:1;max-width:360px"><input id="server-url-input" value="" placeholder="Deriving server URL..." readonly><button class="btn btn-sm btn-ghost" onclick="copyServerUrl()">Copy</button></div>
                 </div>
                 <div class="panel-row">
                     <span class="panel-label">Server ID</span>
@@ -443,7 +443,7 @@
                 </div>
                 <div class="panel">
                     <div class="panel-header">Scan</div>
-                    <div class="panel-row"><span class="panel-label">Watcher</span><span id="settings-watcher-status" class="badge stable">Active</span></div>
+                    <div class="panel-row"><span class="panel-label">Watcher</span><span id="settings-watcher-status" class="badge disabled">Manual Scan Only</span></div>
                     <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="handleScan()">Start Scan Now</button></div>
                 </div>
                 <div class="panel">
@@ -526,11 +526,11 @@
             <!-- Handoff -->
             <div class="stab-content hidden" id="stab-handoff">
                 <div class="panel">
-                    <div class="panel-header">Transfer Playback</div>
+                    <div class="panel-header">Transfer Playback State</div>
                     <div class="panel-row"><span class="panel-label">Track ID</span><input type="text" id="handoff-track-id" class="panel-input" placeholder="UUID"></div>
                     <div class="panel-row"><span class="panel-label">Position</span><input type="number" id="handoff-position" class="panel-input" value="0" style="width:120px"></div>
                     <div class="panel-row"><span class="panel-label">Playing</span><input type="checkbox" id="handoff-playing" checked style="accent-color:var(--primary);width:18px;height:18px"></div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="transferHandoff()">Transfer to Server</button></div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="transferHandoff()">Transfer State to Server</button></div>
                     <div id="handoff-result" class="panel-result"></div>
                 </div>
                 <div class="panel">
@@ -590,13 +590,15 @@
             <!-- Backup -->
             <div class="stab-content hidden" id="stab-backup">
                 <div class="panel">
-                    <div class="panel-header">Snapshot</div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="createSnapshot()">Create Snapshot</button><button class="btn btn-ghost btn-sm" onclick="downloadBackup()">Download Backup</button></div>
+                    <div class="panel-header">Library Snapshot</div>
+                    <p style="color:var(--text-3);font-size:.78rem;margin-bottom:8px">Records catalog statistics snapshot (tracks, albums, artists counts).</p>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="createSnapshot()">Create Library Snapshot</button><button class="btn btn-ghost btn-sm" onclick="downloadBackup()">Download Full Backup</button></div>
                     <div id="snapshot-result" class="panel-result"></div>
                 </div>
                 <div class="panel">
-                    <div class="panel-header">Integrity Check</div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="verifyIntegrity()">Verify Files</button></div>
+                    <div class="panel-header">File Availability Check</div>
+                    <p style="color:var(--text-3);font-size:.78rem;margin-bottom:8px">Checks track file existence on local storage.</p>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="verifyIntegrity()">Check Files</button></div>
                     <div id="integrity-result" class="panel-result"></div>
                 </div>
             </div>
@@ -689,19 +691,22 @@
         <div class="np-info">
             <h4 id="np-title">Stopped</h4>
             <p id="np-artist">—</p>
-            <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+            <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center">
                 <span class="badge disabled" id="np-format-badge" style="display:none">--</span>
                 <span class="badge disabled" id="np-source-badge" style="display:none">--</span>
+                <span class="badge stable" id="np-target-badge" style="font-size:.65rem;cursor:pointer" onclick="toggleOutputTarget()" title="Toggle playback target (Server canonical / Local preview)">Target: Server</span>
             </div>
         </div>
         <div class="np-progress">
             <div class="progress-bar"><div class="fill" id="np-progress-fill"></div></div>
             <div class="progress-labels"><span id="np-current">0:00</span><span id="np-duration">--:--</span></div>
         </div>
-        <div class="np-controls">
+        <div class="np-controls" style="display:flex;align-items:center;justify-content:center;gap:12px;margin:12px 0">
+            <button class="btn btn-ghost btn-sm" id="btn-shuffle" onclick="toggleShuffle()" title="Shuffle" style="font-size:1rem;color:var(--text-3)">🔀</button>
             <button class="btn-circle" onclick="playPause()" title="Play/Pause" data-play-icon>
                 <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>
             </button>
+            <button class="btn btn-ghost btn-sm" id="btn-repeat" onclick="toggleRepeat()" title="Repeat" style="font-size:1rem;color:var(--text-3)">🔁</button>
         </div>
         <div class="np-queue">
             <h4>Up Next</h4>

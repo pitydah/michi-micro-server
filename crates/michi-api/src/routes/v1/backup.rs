@@ -137,7 +137,94 @@ pub async fn backup_handler(
         server_name,
     };
 
-    Ok(Json(serde_json::json!(backup)))
+    Ok(Json(serde_json::to_value(&backup).unwrap()))
+}
+
+pub async fn download_backup_handler(
+    State(state): State<AppState>,
+) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    let tracks = michi_db::list_tracks(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    let playlists_raw = michi_db::list_playlists(&state.db, None)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+    let mut playlists = Vec::new();
+    for pl in playlists_raw {
+        let pl_tracks = michi_db::get_playlist_tracks(&state.db, &pl.id)
+            .await
+            .unwrap_or_default();
+        playlists.push(BackupPlaylist {
+            name: pl.name,
+            description: pl.description,
+            tracks: pl_tracks.into_iter().map(|(_, t)| t).collect(),
+        });
+    }
+
+    let starred_tracks = michi_db::get_starred_tracks(&state.db)
+        .await
+        .unwrap_or_default();
+
+    let history_rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT track_id, played_at FROM play_history ORDER BY played_at DESC",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let play_history = history_rows
+        .into_iter()
+        .map(|(track_id, played_at)| BackupHistoryEntry {
+            timestamp: played_at.clone(),
+            track_id,
+            played_at,
+        })
+        .collect();
+
+    let payload = BackupPayload {
+        version: 1,
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        tracks,
+        playlists,
+        starred_tracks,
+        play_history,
+        server_id: state.server_id().to_string(),
+        server_name: state.config.sync_name.clone(),
+    };
+
+    let json_bytes = serde_json::to_vec_pretty(&payload).unwrap_or_default();
+    let filename = format!(
+        "michi-backup-{}.json",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .header(
+            "Content-Disposition",
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .body(Body::from(json_bytes))
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RESPONSE_ERROR",
+                &e.to_string(),
+            )
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -361,21 +448,78 @@ pub async fn delete_webhook_handler(State(state): State<AppState>) -> Json<serde
 pub async fn test_webhook_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let has_url = michi_db::get_server_config(&state.db, "webhook_url")
+    let url = michi_db::get_server_config(&state.db, "webhook_url")
         .await
         .ok()
         .flatten()
-        .map(|u| !u.is_empty())
-        .unwrap_or(false);
-    if has_url {
-        fire_sync_webhook(&state).await;
-        Ok(Json(serde_json::json!({ "status": "webhook_fired" })))
-    } else {
-        Err(v1_error(
+        .unwrap_or_default();
+
+    if url.trim().is_empty() {
+        return Err(v1_error(
             StatusCode::BAD_REQUEST,
             "NO_WEBHOOK_CONFIGURED",
             "set a webhook URL first",
-        ))
+        ));
+    }
+
+    let track_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks")
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+
+    let payload = serde_json::json!({
+        "event": "webhook_test",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "stats": { "tracks": track_count },
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "CLIENT_ERROR", &e.to_string()))?;
+
+    let start = std::time::Instant::now();
+    match client.post(&url).json(&payload).send().await {
+        Ok(resp) => {
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            let status = resp.status();
+            if status.is_success() {
+                Ok(Json(serde_json::json!({
+                    "status": "success",
+                    "status_code": status.as_u16(),
+                    "elapsed_ms": elapsed_ms,
+                })))
+            } else {
+                Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": {
+                            "code": "WEBHOOK_REMOTE_ERROR",
+                            "message": format!("Webhook target responded with HTTP {}", status.as_u16()),
+                            "details": {
+                                "status_code": status.as_u16(),
+                                "elapsed_ms": elapsed_ms,
+                            }
+                        }
+                    })),
+                ))
+            }
+        }
+        Err(e) => {
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            Err((
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": {
+                        "code": "WEBHOOK_FAILED",
+                        "message": format!("Webhook connection failed: {e}"),
+                        "details": {
+                            "elapsed_ms": elapsed_ms,
+                        }
+                    }
+                })),
+            ))
+        }
     }
 }
 
@@ -400,14 +544,18 @@ pub async fn fire_sync_webhook(state: &AppState) {
         "stats": { "tracks": track_count },
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
     match client.post(&url).json(&payload).send().await {
         Ok(resp) => tracing::info!("webhook sent: HTTP {}", resp.status()),
         Err(e) => tracing::warn!("webhook failed: {}", e),
     }
 }
 
-// ── Integrity verification ──────────────────────────────────────
+// ── Integrity / Availability verification ──────────────────────
 
 pub async fn verify_integrity_handler(
     State(state): State<AppState>,
@@ -420,9 +568,8 @@ pub async fn verify_integrity_handler(
         )
     })?;
 
-    let mut verified = 0u64;
+    let mut available = 0u64;
     let mut missing = 0u64;
-    let corrupt = 0u64;
     let mut errors: Vec<String> = Vec::new();
 
     for track in &tracks {
@@ -436,14 +583,13 @@ pub async fn verify_integrity_handler(
             ));
             continue;
         }
-        verified += 1;
+        available += 1;
     }
 
     Ok(Json(serde_json::json!({
-        "status": if missing == 0 && corrupt == 0 { "ok" } else { "issues_found" },
-        "verified": verified,
+        "status": if missing == 0 { "ok" } else { "issues_found" },
+        "available": available,
         "missing": missing,
-        "corrupt": corrupt,
         "total": tracks.len(),
         "errors": errors,
     })))

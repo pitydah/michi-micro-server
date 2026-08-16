@@ -4,7 +4,7 @@ slug: michi-micro-server
 description: Lightweight, robust home music server. Stream your local music library over your home network or Tailscale.
 developer: pitydah
 license: GPL-3.0
-port_map: 8096
+port_map: 9090
 categories:
   - music
   - media
@@ -28,6 +28,6 @@ more_info: |
 
   ## Quick Start
   1. Set your music path volume
-  2. Open http://<your-server-ip>:8096
+  2. Open http://<your-server-ip>:9090
   3. Click "Scan" to import your library
   4. Browse and play your music

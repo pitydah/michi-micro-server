@@ -15,7 +15,7 @@ a running Michi Micro Server instance:
 9. Server diagnostics & player compatibility matrix
 
 Usage:
-  python3 test_player_micro_contract_compatibility.py [--url http://localhost:8096] [--username admin] [--password admin]
+  python3 test_player_micro_contract_compatibility.py [--url http://localhost:9090] [--username admin] [--password admin]
 """
 
 import argparse
@@ -26,7 +26,7 @@ import sys
 import urllib.request
 import urllib.error
 
-DEFAULT_URL = "http://127.0.0.1:8096"
+DEFAULT_URL = "http://127.0.0.1:9090"
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "..", "fixtures", "micro_contract")
 
 PASS = 0

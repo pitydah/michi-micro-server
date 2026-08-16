@@ -4,7 +4,7 @@ services:
     image: ghcr.io/pitydah/michi-micro-server:latest
     container_name: michi-micro-server
     ports:
-      - "8096:8096"
+      - "9090:9090"
     volumes:
       - type: bind
         source: ${CONFIG_PATH:-/DATA/AppData/michi/config}
@@ -17,7 +17,7 @@ services:
         target: /music
     environment:
       - TZ=${TZ:-UTC}
-      - MICHI_PORT=8096
+      - MICHI_PORT=9090
       - MICHI_MUSIC_PATH=/music
       - MICHI_CONFIG_PATH=/config
       - MICHI_CACHE_PATH=/cache
@@ -45,4 +45,4 @@ x-casaos:
   title:
     en_us: Michi Micro Server
   index: /
-  port_map: "8096"
+  port_map: "9090"
