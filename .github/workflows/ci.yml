@@ -73,9 +73,37 @@ jobs:
       - name: Run Home Assistant & MQTT Real E2E Integration Tests
         run: bash scripts/test_homeassistant_e2e.sh 18883 18884 9098
 
+  ci-appliance:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config sqlite3
+      - name: Run Appliance Qualification E2E (RPi 4/5, CasaOS, ZimaOS)
+        run: bash scripts/test_appliance_e2e.sh 9092
+
+  ci-reliability:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config sqlite3
+      - name: Run Master Reliability & Stability Qualification Battery
+        run: bash scripts/test_reliability_qualification.sh 9089
+
   ci-docker:
     runs-on: ubuntu-latest
-    needs: [ci-rust, ci-receivers, ci-snapcast, ci-homeassistant]
+    needs: [ci-rust, ci-receivers, ci-snapcast, ci-homeassistant, ci-appliance, ci-reliability]
     steps:
       - uses: actions/checkout@v4
       - name: Set up QEMU
@@ -106,7 +134,7 @@ jobs:
 
   ci-arm64:
     runs-on: ubuntu-latest
-    needs: [ci-rust, ci-receivers, ci-snapcast, ci-homeassistant]
+    needs: [ci-rust, ci-receivers, ci-snapcast, ci-homeassistant, ci-appliance, ci-reliability]
     steps:
       - uses: actions/checkout@v4
       - name: Set up QEMU for ARM64
@@ -137,7 +165,7 @@ jobs:
           docker rm michi-arm64
 
   release-ghcr:
-    needs: [ci-rust, ci-receivers, ci-snapcast, ci-homeassistant, ci-docker, ci-arm64]
+    needs: [ci-rust, ci-receivers, ci-snapcast, ci-homeassistant, ci-appliance, ci-reliability, ci-docker, ci-arm64]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

@@ -88,6 +88,7 @@ impl Config {
 
         let music_paths = {
             let paths: Vec<PathBuf> = env::var("MICHI_MUSIC_PATH")
+                .or_else(|_| env::var("MICHI_MUSIC_PATHS"))
                 .unwrap_or_else(|_| "/music".to_string())
                 .split(',')
                 .map(|s| PathBuf::from(s.trim()))

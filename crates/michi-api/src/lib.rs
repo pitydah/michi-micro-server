@@ -691,18 +691,16 @@ pub async fn init_admin_user(config: &Config, db: &SqlitePool) -> Option<Uuid> {
         None => {
             let id = Uuid::new_v4();
             match auth::hash_password(password) {
-                Ok(hash) => {
-                    if michi_db::create_user(db, &id, username, &hash, true)
-                        .await
-                        .is_ok()
-                    {
+                Ok(hash) => match michi_db::create_user(db, &id, username, &hash, true).await {
+                    Ok(_) => {
                         info!("created admin user: {}", username);
                         Some(id)
-                    } else {
-                        warn!("failed to create admin user");
+                    }
+                    Err(e) => {
+                        warn!("failed to create admin user: {e}");
                         None
                     }
-                }
+                },
                 Err(e) => {
                     warn!("failed to hash admin password: {}", e);
                     None

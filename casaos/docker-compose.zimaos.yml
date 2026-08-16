@@ -1,0 +1,48 @@
+name: michi-micro-server
+services:
+  michi-micro-server:
+    image: ghcr.io/pitydah/michi-micro-server:latest
+    container_name: michi-micro-server
+    ports:
+      - "8096:8096"
+    volumes:
+      - type: bind
+        source: ${CONFIG_PATH:-/DATA/AppData/michi/config}
+        target: /config
+      - type: bind
+        source: ${CACHE_PATH:-/DATA/AppData/michi/cache}
+        target: /cache
+      - type: bind
+        source: ${MUSIC_PATH:-/DATA/Media/Music}
+        target: /music
+    environment:
+      - TZ=${TZ:-UTC}
+      - MICHI_PORT=8096
+      - MICHI_MUSIC_PATH=/music
+      - MICHI_CONFIG_PATH=/config
+      - MICHI_CACHE_PATH=/cache
+      - MICHI_DATABASE=sqlite:///config/michi.db
+    restart: unless-stopped
+    devices: []
+    cap_add: []
+    network_mode: bridge
+
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main_app: michi-micro-server
+  author: pitydah
+  category: Music
+  description:
+    en_us: Lightweight, robust home music server. Stream your local music library over your home network, Tailscale, or CasaOS/ZimaOS.
+  developer: pitydah
+  icon: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/docs/assets/icon.png"
+  screenshot_link: []
+  tagline:
+    en_us: High-fidelity personal music streaming appliance.
+  thumbnail: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/docs/assets/icon.png"
+  title:
+    en_us: Michi Micro Server
+  index: /
+  port_map: "8096"

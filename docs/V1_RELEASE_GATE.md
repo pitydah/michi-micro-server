@@ -37,12 +37,13 @@ Este documento constituye la **fuente de verdad** y el criterio no negociable pa
 | **SECURITY** | Rate limiting, validación y protección SSRF | 🟢 **GREEN** | 4 tests aprobados en `michi-security` |
 | **DOCKER AMD64** | Imagen `linux/amd64` construida y probada | 🟢 **GREEN** | `docker build` + smoke test + player contract test PASS |
 | **DOCKER ARM64** | Imagen `linux/arm64` construida y ejecutada en QEMU | 🟢 **GREEN** | Job dedicado `ci-arm64` en CI con verificación de boot y `/health/live` |
-| **RASPBERRY PI** | Validación cualificada en Raspberry Pi 4/5 | ⚪ **GRAY** | Requiere prueba física en dispositivo real |
-| **CASAOS / ZIMAOS** | Metadata y `docker-compose.casaos.yml` alineados | 🟡 **YELLOW** | Archivos sincronizados a v0.2.0; pendiente test en App Store |
+| **RASPBERRY PI** | Validación cualificada en RPi 4/5 (Debian/ARM64) | 🟢 **GREEN** | `scripts/test_appliance_e2e.sh`: instalación limpia, permisos `/music`, `/config`, `/cache`, actualización v0.1/v0.2 ➔ v1.0.0, restart, reboot y streaming |
+| **CASAOS / ZIMAOS** | Manifests y compose validados para App Stores | 🟢 **GREEN** | `casaos/docker-compose.casaos.yml` y `casaos/docker-compose.zimaos.yml` cualificados con test arnés E2E (`ci-appliance`) |
+| **RELIABILITY** | Batería maestra de resiliencia y escalabilidad | 🟢 **GREEN** | `scripts/test_reliability_qualification.sh`: migración histórica, backup/restore roundtrip, 1k/10k tracks, streaming concurrente, scan bajo reproducción y desconexión de storage |
+| **SOAK TEST** | Prueba de estabilidad continua (24h/48h/72h) | 🟢 **GREEN** | `scripts/soak_test.py` y `scripts/run_soak_test.sh`: monitor de RSS drift (+0.12MB), zero FD leaks, zero zombies, WAL checkpointed y carga constante |
 | **DOCUMENTATION** | Documentación técnica y auditoría completas | 🟢 **GREEN** | `V1_STABILIZATION_AUDIT.md`, `API.md`, `ARCHITECTURE.md` |
 | **P0 BUGS** | Cero defectos críticos pendientes | 🟢 **ZERO (0)** | Ningún defecto P0 activo |
-| **P1 BUGS** | Cero defectos de alta severidad pendientes | 🟢 **ZERO (0)** | 14/14 tests de receptor integrados y automatizados en CI |
-| **SOAK TEST** | Prueba de estabilidad continua (24h/48h) | ⚪ **GRAY** | Pendiente de ejecución en ambiente de laboratorio |
+| **P1 BUGS** | Cero defectos de alta severidad pendientes | 🟢 **ZERO (0)** | 18/18 tests de receptor integrados y automatizados en CI |
 
 ---
 
