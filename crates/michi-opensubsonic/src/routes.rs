@@ -323,7 +323,7 @@ async fn download(
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", filename),
+            format!("attachment; filename=\"{filename}\""),
         )
         .header(header::CONTENT_LENGTH, file_size.to_string())
         .body(axum::body::Body::from_stream(stream))

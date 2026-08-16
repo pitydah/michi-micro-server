@@ -179,7 +179,7 @@ async fn publish_states(
     ];
 
     for (object_id, value) in &states {
-        let topic = format!("michi/{}/state", object_id);
+        let topic = format!("michi/{object_id}/state");
         if let Err(e) = client
             .publish(&topic, QoS::AtLeastOnce, true, value.clone())
             .await
@@ -308,7 +308,7 @@ pub async fn run(config: Config, playback_state: Arc<RwLock<PlaybackState>>, db:
         publish_discovery(&client).await;
 
         for cmd in &["play_pause", "next_track", "previous_track"] {
-            let topic = format!("michi/{}/cmd", cmd);
+            let topic = format!("michi/{cmd}/cmd");
             if let Err(e) = client.subscribe(&topic, QoS::AtLeastOnce).await {
                 warn!("failed to subscribe to {}: {}", topic, e);
             }

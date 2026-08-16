@@ -319,7 +319,7 @@ impl AppState {
                             drop(reg_write);
 
                             if should_ping {
-                                let url = format!("{}/api/v1/receivers/{}/heartbeat", base_url, recv_id);
+                                let url = format!("{base_url}/api/v1/receivers/{recv_id}/heartbeat");
                                 match reqwest::Client::new()
                                     .post(&url)
                                     .timeout(Duration::from_secs(5))
@@ -599,7 +599,7 @@ async fn run_job_worker(
                 let _ = michi_db::update_job_progress(db, job_id, progress).await;
             }
             record_audit(db, "scan_completed", Some("library"), None, None).await;
-            Ok(format!("scanned {} tracks", total))
+            Ok(format!("scanned {total} tracks"))
         }
         "sync" => {
             tracing::info!("job {}: triggering sync", job_id);
@@ -616,10 +616,10 @@ async fn run_job_worker(
             tracing::info!("job {}: running backup", job_id);
             let tracks = michi_db::list_tracks(db)
                 .await
-                .map_err(|e| format!("list tracks error: {}", e))?;
+                .map_err(|e| format!("list tracks error: {e}"))?;
             let playlists = michi_db::list_playlists(db, None)
                 .await
-                .map_err(|e| format!("list playlists error: {}", e))?;
+                .map_err(|e| format!("list playlists error: {e}"))?;
             let output = serde_json::json!({
                 "exported_at": Utc::now().to_rfc3339(),
                 "tracks_count": tracks.len(),
@@ -640,11 +640,11 @@ async fn run_job_worker(
             tracing::info!("job {}: running cleanup", job_id);
             michi_db::run_hourly_maintenance(db)
                 .await
-                .map_err(|e| format!("cleanup error: {}", e))?;
+                .map_err(|e| format!("cleanup error: {e}"))?;
             sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
                 .execute(db)
                 .await
-                .map_err(|e| format!("checkpoint error: {}", e))?;
+                .map_err(|e| format!("checkpoint error: {e}"))?;
             let _ = michi_db::update_job_progress(db, job_id, 0.5).await;
             // Clean stale jobs older than 7 days
             sqlx::query(
@@ -657,7 +657,7 @@ async fn run_job_worker(
             record_audit(db, "cleanup_completed", Some("system"), None, None).await;
             Ok("cleanup complete".to_string())
         }
-        _ => Err(format!("unknown job kind: {}", kind)),
+        _ => Err(format!("unknown job kind: {kind}")),
     }
 }
 
@@ -747,7 +747,7 @@ pub fn start_sync_peers(state: &AppState) {
                     let peer_dm = dm.clone();
 
                     tokio::spawn(async move {
-                        let url = format!("ws://{}/api/sync", peer);
+                        let url = format!("ws://{peer}/api/sync");
                         let mut attempt = 0u64;
 
                         loop {
@@ -814,17 +814,14 @@ pub fn start_sync_peers(state: &AppState) {
                                                                     *current = new_state;
                                                                 }
                                                                 let tid = track_id
-                                                                    .map(|id| format!("\"{}\"", id))
+                                                                    .map(|id| format!("\"{id}\""))
                                                                     .unwrap_or_else(|| "null".into());
                                                                 let msg = format!(
                                                                     "{{\"type\":\"sync_state\",\
                                                                      \"track_id\":{tid},\
-                                                                     \"position_ms\":{pos},\
-                                                                     \"playing\":{play},\
-                                                                     \"volume\":{vol}}}",
-                                                                    pos = position_ms,
-                                                                    play = playing,
-                                                                    vol = volume,
+                                                                     \"position_ms\":{position_ms},\
+                                                                     \"playing\":{playing},\
+                                                                     \"volume\":{volume}}}",
                                                                 );
                                                                 let _ = recv_tx.send(msg);
                                                             }

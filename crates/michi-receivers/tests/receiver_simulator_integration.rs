@@ -388,3 +388,157 @@ async fn test_receiver_registry_tracks_state() {
     assert!(entry.active_session_id.is_none());
     assert!(entry.max_sample_rate >= 48000);
 }
+
+#[tokio::test]
+#[ignore]
+async fn test_receiver_full_lifecycle_and_session_recovery() {
+    let url = sim_url();
+    let mut client = ReceiverClient::new(&url);
+
+    // 1. Discovery
+    let info = client.get_info().await.expect("discovery info failed");
+    let _device_id = info.device_id.expect("missing device_id");
+
+    // 2. Pairing
+    let pair_start = client
+        .pair_start("e2e-matrix")
+        .await
+        .expect("pair start failed");
+    let nonce = pair_start.nonce.expect("missing nonce");
+    let token_val = uuid::Uuid::new_v4().to_string();
+    let confirm = client
+        .pair_confirm(&nonce, "e2e-matrix", &token_val)
+        .await
+        .expect("pair confirm failed");
+    assert_eq!(confirm.status.as_deref(), Some("paired"));
+    assert!(client.token.is_some(), "token must be stored in client");
+
+    // 3. Start Session
+    let session_id = "sess-matrix-full-1";
+    let start_res = client
+        .session_start(session_id, "pcm_s16le", 48000, 16, 2, 55800, 250, 75)
+        .await
+        .expect("session start failed");
+    assert_eq!(start_res.status.as_deref(), Some("session_started"));
+
+    // 4. Playback Control: Play -> Seek -> Volume
+    let play_res = client
+        .playback_control("play", None)
+        .await
+        .expect("play failed");
+    assert_eq!(play_res.playing, Some(true));
+
+    let seek_res = client
+        .playback_control("seek", Some(45000))
+        .await
+        .expect("seek failed");
+    assert_eq!(seek_res.position_ms, Some(45000));
+
+    let vol_res = client.set_volume(85).await.expect("set_volume failed");
+    assert_eq!(vol_res.volume, Some(85));
+
+    // Verify current state before disconnect
+    let state_before = client.get_playback_state().await.expect("get state failed");
+    assert_eq!(state_before.playing, Some(true));
+    assert_eq!(state_before.position_ms, Some(45000));
+    assert_eq!(state_before.volume, Some(85));
+
+    // 5. Disconnect (simulate network loss / receiver power cycle)
+    client.disconnect().await.expect("disconnect failed");
+
+    // 6. Reconnect & Session Recovery
+    let rec_res = client
+        .session_recover(session_id, 45000, 85, true)
+        .await
+        .expect("session recovery failed");
+    assert_eq!(rec_res.status.as_deref(), Some("session_recovered"));
+    assert_eq!(rec_res.position_ms, Some(45000));
+
+    let state_after = client
+        .get_playback_state()
+        .await
+        .expect("get state after recover failed");
+    assert_eq!(state_after.playing, Some(true));
+    assert_eq!(state_after.position_ms, Some(45000));
+
+    // 7. Stop Session Cleanly
+    let stop_res = client.session_stop().await.expect("session stop failed");
+    assert_eq!(stop_res.status.as_deref(), Some("session_stopped"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_receiver_fault_slow_response() {
+    let client = ReceiverClient::new(&sim_url());
+    // Inject 100ms latency
+    client
+        .fault_latency(100)
+        .await
+        .expect("inject latency failed");
+
+    let t0 = std::time::Instant::now();
+    let info = client
+        .get_info()
+        .await
+        .expect("info with latency should succeed");
+    let elapsed = t0.elapsed();
+    assert!(
+        elapsed >= std::time::Duration::from_millis(90),
+        "response should have delayed at least ~100ms, took {elapsed:?}"
+    );
+    assert_eq!(info.service.as_deref(), Some("michi-stream-standard"));
+
+    // Reset faults
+    client.fault_reset().await.expect("reset faults failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_receiver_fault_offline_error() {
+    let client = ReceiverClient::new(&sim_url());
+    // Inject offline state
+    client
+        .fault_offline(true)
+        .await
+        .expect("inject offline failed");
+
+    let info_res = client.get_info().await;
+    assert!(info_res.is_err(), "offline receiver must fail requests");
+
+    // Reset offline fault
+    client.fault_reset().await.expect("reset faults failed");
+    let info_recovered = client
+        .get_info()
+        .await
+        .expect("info after reset should succeed");
+    assert_eq!(
+        info_recovered.service.as_deref(),
+        Some("michi-stream-standard")
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_receiver_fault_temporary_network_drop_and_recovery() {
+    let client = ReceiverClient::new(&sim_url());
+    // Drop the next 2 requests
+    client
+        .fault_network_drop(2)
+        .await
+        .expect("inject network drop failed");
+
+    // Request 1 fails (dropped)
+    let res1 = client.get_info().await;
+    assert!(res1.is_err(), "first dropped request must fail");
+
+    // Request 2 fails (dropped)
+    let res2 = client.get_info().await;
+    assert!(res2.is_err(), "second dropped request must fail");
+
+    // Request 3 succeeds (network automatically restored)
+    let res3 = client
+        .get_info()
+        .await
+        .expect("third request must auto-recover");
+    assert_eq!(res3.service.as_deref(), Some("michi-stream-standard"));
+}

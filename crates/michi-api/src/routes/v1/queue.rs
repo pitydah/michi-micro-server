@@ -148,7 +148,7 @@ pub async fn queue_transfer_handler(
         return Err(v1_error(
             StatusCode::BAD_REQUEST,
             "UNKNOWN_TRACKS",
-            &format!("tracks not found: {:?}", unknown_tracks),
+            &format!("tracks not found: {unknown_tracks:?}"),
         ));
     }
 

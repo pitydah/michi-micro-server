@@ -66,7 +66,7 @@ pub fn check_auth_with_config(
 
     // Check token auth: ?t=<md5(password+salt)>&s=<salt>
     if let (Some(token), Some(salt)) = (&query.t, &query.s) {
-        let expected = format!("{}{}", password, salt);
+        let expected = format!("{password}{salt}");
         let expected_hash = format!("{:x}", md5::compute(expected.as_bytes()));
         if *token == expected_hash {
             return Ok(());

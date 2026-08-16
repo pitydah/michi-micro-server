@@ -24,19 +24,19 @@ Este documento constituye la **fuente de verdad** y el criterio no negociable pa
 | **API TESTS** | Cobertura de endpoints en `michi-api` | 🟢 **GREEN** | Tests de integración en `crates/michi-api/tests/api.rs` |
 | **PLAYER CONTRACT** | `test_player_micro_contract_compatibility.py` | 🟢 **GREEN** | 10/10 suites completas (import, stream range, queue transfer, play/pause/seek/vol, handoff, diagnostics) |
 | **MOBILE CONTRACT** | Contrato Michi Link validado para clientes móviles | 🟡 **YELLOW** | Endpoints implementados; pendiente arnés E2E móvil |
-| **STREAM/RECEIVER** | Pruebas de integración de receptor con simulador | 🟢 **GREEN** | 14/14 tests automatizados con `scripts/receiver_sim.py` |
+| **STREAM/RECEIVER** | Matriz de ciclo de vida + Inyección de fallas | 🟢 **GREEN** | 18/18 tests: discovery ➔ pairing ➔ token ➔ session ➔ playback ➔ seek ➔ volume ➔ disconnect ➔ reconnect ➔ recovery + receptor lento, offline, codec/SR incompatibles, caída de red |
 | **DATABASE MIGRATION**| Pruebas de migración SQLite limpias (1 a 35) | 🟢 **GREEN** | Migraciones automáticas validadas en tests |
 | **BACKUP / RESTORE** | Verificación de roundtrip completo con SHA-256 | 🟢 **GREEN** | Módulos y rutas de backup validados en tests |
 | **SCANNER** | Tolerancia a metadatos corruptos y symlinks | 🟢 **GREEN** | 6 tests aprobados en `michi-scanner` |
 | **STREAMING** | HTTP Range Requests (206, 416, multi-range) | 🟢 **GREEN** | 26 tests aprobados en `michi-streaming` |
 | **QUEUE** | Persistencia y recuperación del estado de cola | 🟢 **GREEN** | Rutas de cola y migraciones operativas |
 | **HANDOFF** | Transferencia fluida de reproducción vía WebSockets | 🟢 **GREEN** | 5 tests aprobados en `michi-sync` |
-| **RECEIVER E2E** | Suite de 14 tests ejecutada contra simulador | 🟢 **GREEN** | `scripts/test_receiver_e2e.sh` integrado en job `ci-receivers` |
-| **SNAPCAST E2E** | Multi-room audio con degradación limpia | 🟡 **YELLOW** | `michi-rooms` probado unitariamente; pendiente E2E con Snapserver |
-| **HOME ASSISTANT** | Integración MQTT opcional sin bloqueo | 🟡 **YELLOW** | `michi-homeassistant` implementado; pendiente broker en CI |
+| **RECEIVER E2E** | Matriz extendida de 18 tests contra simulador | 🟢 **GREEN** | `scripts/test_receiver_e2e.sh` integrado en job `ci-receivers` |
+| **SNAPCAST E2E** | Multi-room audio con topología multi-cliente | 🟢 **GREEN** | `scripts/test_snapcast_e2e.sh` con 3 clientes, grupos, mute/volumen, caída/reconexión y recuperación |
+| **HOME ASSISTANT** | Integración MQTT Auto-Discovery y control bidireccional | 🟢 **GREEN** | `scripts/test_homeassistant_e2e.sh` con MQTT discovery, estados, comandos `play_pause`, y reconexión automática |
 | **SECURITY** | Rate limiting, validación y protección SSRF | 🟢 **GREEN** | 4 tests aprobados en `michi-security` |
-| **DOCKER AMD64** | Imagen `linux/amd64` construida y probada | 🟢 **GREEN** | `docker build` + smoke test + liveness HTTP 200 PASS |
-| **DOCKER ARM64** | Imagen `linux/arm64` construida en multi-arch | ⚪ **GRAY** | Declarada en CI; no ejecutada localmente por host AMD64 |
+| **DOCKER AMD64** | Imagen `linux/amd64` construida y probada | 🟢 **GREEN** | `docker build` + smoke test + player contract test PASS |
+| **DOCKER ARM64** | Imagen `linux/arm64` construida y ejecutada en QEMU | 🟢 **GREEN** | Job dedicado `ci-arm64` en CI con verificación de boot y `/health/live` |
 | **RASPBERRY PI** | Validación cualificada en Raspberry Pi 4/5 | ⚪ **GRAY** | Requiere prueba física en dispositivo real |
 | **CASAOS / ZIMAOS** | Metadata y `docker-compose.casaos.yml` alineados | 🟡 **YELLOW** | Archivos sincronizados a v0.2.0; pendiente test en App Store |
 | **DOCUMENTATION** | Documentación técnica y auditoría completas | 🟢 **GREEN** | `V1_STABILIZATION_AUDIT.md`, `API.md`, `ARCHITECTURE.md` |

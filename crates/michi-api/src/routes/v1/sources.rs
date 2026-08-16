@@ -258,7 +258,7 @@ pub async fn proxy_stream_handler(
         Err(e) => Err(v1_error(
             StatusCode::BAD_GATEWAY,
             "PROXY_ERROR",
-            &format!("failed to connect: {}", e),
+            &format!("failed to connect: {e}"),
         )),
     }
 }

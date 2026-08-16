@@ -99,7 +99,7 @@ pub async fn scan_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -107,8 +107,7 @@ pub async fn scan_handler(
     info!("scan complete: {} tracks scanned, {} saved", scanned, saved);
 
     let _ = state.tx.send(format!(
-        r#"{{"type":"scan_done","scanned":{},"saved":{}}}"#,
-        scanned, saved
+        r#"{{"type":"scan_done","scanned":{scanned},"saved":{saved}}}"#
     ));
 
     Ok(Json(ScanResponse {
@@ -153,7 +152,7 @@ pub async fn tracks_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 status: "error".to_string(),
-                message: format!("database error: {}", e),
+                message: format!("database error: {e}"),
             }),
         )
     })?;
@@ -193,7 +192,7 @@ pub async fn search_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -218,7 +217,7 @@ pub async fn stats_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 status: "error".to_string(),
-                message: format!("database error: {}", e),
+                message: format!("database error: {e}"),
             }),
         )
     })?;
@@ -250,7 +249,7 @@ pub async fn track_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?
@@ -259,7 +258,7 @@ pub async fn track_handler(
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("track not found: {}", id),
+                    message: format!("track not found: {id}"),
                 }),
             )
         })?;
@@ -289,7 +288,7 @@ pub async fn delete_track_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 status: "error".to_string(),
-                message: format!("database error: {}", e),
+                message: format!("database error: {e}"),
             }),
         )
     })?;
@@ -301,7 +300,7 @@ pub async fn delete_track_handler(
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 status: "error".to_string(),
-                message: format!("track not found: {}", id),
+                message: format!("track not found: {id}"),
             }),
         ))
     }
@@ -333,7 +332,7 @@ pub async fn update_track_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -343,7 +342,7 @@ pub async fn update_track_handler(
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 status: "error".to_string(),
-                message: format!("track not found: {}", id),
+                message: format!("track not found: {id}"),
             }),
         ));
     }
@@ -355,7 +354,7 @@ pub async fn update_track_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?
@@ -389,7 +388,7 @@ pub async fn delete_all_tracks_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 status: "error".to_string(),
-                message: format!("database error: {}", e),
+                message: format!("database error: {e}"),
             }),
         )
     })?;
@@ -418,7 +417,7 @@ pub async fn albums_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 status: "error".to_string(),
-                message: format!("database error: {}", e),
+                message: format!("database error: {e}"),
             }),
         )
     })?;
@@ -442,7 +441,7 @@ pub async fn artists_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 status: "error".to_string(),
-                message: format!("database error: {}", e),
+                message: format!("database error: {e}"),
             }),
         )
     })?;
@@ -472,7 +471,7 @@ pub async fn album_tracks_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -502,7 +501,7 @@ pub async fn artist_tracks_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -533,7 +532,7 @@ pub async fn artwork_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?
@@ -542,7 +541,7 @@ pub async fn artwork_handler(
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("track not found: {}", id),
+                    message: format!("track not found: {id}"),
                 }),
             )
         })?;
@@ -556,7 +555,7 @@ pub async fn artwork_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("failed to read artwork: {}", e),
+                    message: format!("failed to read artwork: {e}"),
                 }),
             )
         })?;
@@ -640,7 +639,7 @@ pub async fn playlists_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -680,7 +679,7 @@ pub async fn create_playlist_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -712,7 +711,7 @@ pub async fn get_playlist_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?
@@ -721,7 +720,7 @@ pub async fn get_playlist_handler(
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("playlist not found: {}", id),
+                    message: format!("playlist not found: {id}"),
                 }),
             )
         })?;
@@ -752,7 +751,7 @@ pub async fn delete_playlist_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -764,7 +763,7 @@ pub async fn delete_playlist_handler(
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 status: "error".to_string(),
-                message: format!("playlist not found: {}", id),
+                message: format!("playlist not found: {id}"),
             }),
         ))
     }
@@ -794,7 +793,7 @@ pub async fn add_playlist_track_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -826,7 +825,7 @@ pub async fn remove_playlist_track_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -917,7 +916,7 @@ pub async fn export_playlist_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -937,7 +936,7 @@ pub async fn export_playlist_handler(
     headers.insert(header::CONTENT_TYPE, "audio/x-mpegurl".parse().unwrap());
     headers.insert(
         header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"playlist-{}.m3u\"", id)
+        format!("attachment; filename=\"playlist-{id}.m3u\"")
             .parse()
             .unwrap(),
     );
@@ -989,7 +988,7 @@ pub async fn import_playlist_handler(
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
                 status: "error".to_string(),
-                message: format!("invalid M3U file: {}", e),
+                message: format!("invalid M3U file: {e}"),
             }),
         )
     })?;
@@ -1002,7 +1001,7 @@ pub async fn import_playlist_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -1024,7 +1023,7 @@ pub async fn import_playlist_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -1072,7 +1071,7 @@ pub async fn reorder_playlist_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -1103,7 +1102,7 @@ pub async fn get_playlist_tracks_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -1154,7 +1153,7 @@ pub async fn get_share_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?
@@ -1205,7 +1204,7 @@ pub async fn enable_share_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?
@@ -1227,7 +1226,7 @@ pub async fn enable_share_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -1266,7 +1265,7 @@ pub async fn disable_share_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?
@@ -1287,7 +1286,7 @@ pub async fn disable_share_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -1309,7 +1308,7 @@ pub async fn shared_playlist_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;

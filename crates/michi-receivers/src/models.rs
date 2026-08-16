@@ -153,3 +153,32 @@ pub struct PlaybackPosition {
     pub duration_ms: u64,
     pub playing: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackControlResponse {
+    pub status: Option<String>,
+    pub command: Option<String>,
+    pub playing: Option<bool>,
+    pub position_ms: Option<u64>,
+    pub error: Option<ErrorBody>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiverPlaybackState {
+    pub status: Option<String>,
+    pub session_id: Option<String>,
+    pub playing: Option<bool>,
+    pub position_ms: Option<u64>,
+    pub volume: Option<u32>,
+    pub error: Option<ErrorBody>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecoverResponse {
+    pub status: Option<String>,
+    pub session_id: Option<String>,
+    pub position_ms: Option<u64>,
+    pub volume: Option<u32>,
+    pub playing: Option<bool>,
+    pub error: Option<ErrorBody>,
+}

@@ -60,6 +60,12 @@ pub struct AuthState {
     pub sessions: Arc<RwLock<std::collections::HashMap<String, SessionData>>>,
 }
 
+impl Default for AuthState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuthState {
     pub fn new() -> Self {
         Self {

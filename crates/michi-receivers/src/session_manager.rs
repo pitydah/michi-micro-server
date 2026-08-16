@@ -117,7 +117,7 @@ impl ReceiverSessionManager {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
         }
-        .ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
+        .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
 
         let base_url = entry.base_url.clone();
         let token = entry.token.clone();
@@ -138,10 +138,9 @@ impl ReceiverSessionManager {
             .await?;
 
         if let Some(err) = &resp.error {
-            return Err(format!(
-                "session_start failed: {}: {}",
-                err.code, err.message
-            ));
+            let code = &err.code;
+            let message = &err.message;
+            return Err(format!("session_start failed: {code}: {message}"));
         }
 
         {
@@ -160,7 +159,7 @@ impl ReceiverSessionManager {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
         }
-        .ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
+        .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
 
         let mut client = ReceiverClient::new(&entry.base_url);
         client.token = entry.token.clone();
@@ -186,7 +185,7 @@ impl ReceiverSessionManager {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
         }
-        .ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
+        .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
 
         let mut client = ReceiverClient::new(&entry.base_url);
         client.token = entry.token.clone();
@@ -198,7 +197,7 @@ impl ReceiverSessionManager {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
         }
-        .ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
+        .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
 
         let mut client = ReceiverClient::new(&entry.base_url);
         client.token = entry.token.clone();
@@ -219,7 +218,7 @@ impl ReceiverSessionManager {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
         }
-        .ok_or_else(|| format!("receiver not found: {}", receiver_id))?;
+        .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
 
         let client = ReceiverClient::new(&entry.base_url);
         client.get_info().await

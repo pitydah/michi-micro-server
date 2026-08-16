@@ -19,7 +19,7 @@ pub struct MichiConnect {
 impl MichiConnect {
     pub fn new(identity: MichiIdentity, port: u16, host: Option<String>) -> Self {
         let host = host.unwrap_or_else(|| "localhost".to_string());
-        let server_url = format!("http://{}:{}", host, port);
+        let server_url = format!("http://{host}:{port}");
         Self {
             identity,
             server_url: Arc::new(RwLock::new(server_url)),
@@ -30,16 +30,13 @@ impl MichiConnect {
     /// Generate a QR code link string: michi://connect?id=XYZ&host=IP&port=PORT
     pub async fn qr_link(&self, host: &str, port: u16) -> String {
         let michi_id = self.identity.get_id().await;
-        format!(
-            "michi://connect?id={}&host={}&port={}",
-            michi_id, host, port
-        )
+        format!("michi://connect?id={michi_id}&host={host}&port={port}")
     }
 
     /// Generate QR SVG
     pub async fn qr_svg(&self, host: &str, port: u16) -> Result<String, String> {
         let link = self.qr_link(host, port).await;
-        let code = qrcode::QrCode::new(link.as_bytes()).map_err(|e| format!("QR error: {}", e))?;
+        let code = qrcode::QrCode::new(link.as_bytes()).map_err(|e| format!("QR error: {e}"))?;
         let svg = code
             .render()
             .min_dimensions(300, 300)
@@ -52,7 +49,7 @@ impl MichiConnect {
     /// Update the server URL (when IP changes)
     pub async fn update_url(&self, host: &str, port: u16) {
         let mut url = self.server_url.write().await;
-        *url = format!("http://{}:{}", host, port);
+        *url = format!("http://{host}:{port}");
         info!("connect: server URL updated to {}", url);
         // Re-announce mDNS
         let _ = self.announce_mdns().await;
@@ -79,11 +76,11 @@ impl MichiConnect {
             .parse()
             .unwrap_or(9090);
 
-        let daemon = mdns_sd::ServiceDaemon::new().map_err(|e| format!("mdns daemon: {}", e))?;
+        let daemon = mdns_sd::ServiceDaemon::new().map_err(|e| format!("mdns daemon: {e}"))?;
 
         let service_type = "_michi._tcp.local.";
         let instance_name = format!("Michi Micro Server ({})", &michi_id[..8]);
-        let service_hostname = format!("{}.local.", hostname);
+        let service_hostname = format!("{hostname}.local.");
 
         let properties = [
             ("michi_id", michi_id.as_str()),
@@ -98,12 +95,12 @@ impl MichiConnect {
             port,
             &properties[..],
         )
-        .map_err(|e| format!("service info: {}", e))?
+        .map_err(|e| format!("service info: {e}"))?
         .enable_addr_auto();
 
         daemon
             .register(service_info)
-            .map_err(|e| format!("mdns register: {}", e))?;
+            .map_err(|e| format!("mdns register: {e}"))?;
 
         let name = instance_name;
         *self.service_name.write().await = name.clone();
@@ -174,7 +171,7 @@ mod tests {
         let link = conn.qr_link("10.0.0.1", 5000).await;
         assert!(link.starts_with("michi://connect?id="));
         assert!(link.contains("&host=10.0.0.1&port=5000"));
-        let expected = format!("michi://connect?id={}&host=10.0.0.1&port=5000", michi_id);
+        let expected = format!("michi://connect?id={michi_id}&host=10.0.0.1&port=5000");
         assert_eq!(link, expected);
     }
 

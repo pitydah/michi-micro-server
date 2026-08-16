@@ -60,8 +60,7 @@ pub async fn library_scan_handler(
         })?;
 
     let _ = state.tx.send(format!(
-        r#"{{"type":"scan_done","scanned":{},"saved":{}}}"#,
-        scanned, saved
+        r#"{{"type":"scan_done","scanned":{scanned},"saved":{saved}}}"#
     ));
 
     Ok(Json(serde_json::json!({

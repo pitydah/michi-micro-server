@@ -84,7 +84,7 @@ async fn stream_file(
                 if let Some(d) = disposition {
                     builder = builder.header(
                         header::CONTENT_DISPOSITION,
-                        format!("{}; filename=\"{}\"", d, filename),
+                        format!("{d}; filename=\"{filename}\""),
                     );
                 }
                 return Ok(builder
@@ -111,7 +111,7 @@ async fn stream_file(
     if let Some(d) = disposition {
         builder = builder.header(
             header::CONTENT_DISPOSITION,
-            format!("{}; filename=\"{}\"", d, filename),
+            format!("{d}; filename=\"{filename}\""),
         );
     }
     Ok(builder.body(Body::from_stream(stream)).unwrap())
@@ -136,7 +136,7 @@ pub async fn stream_handler(
             v1_error(
                 StatusCode::NOT_FOUND,
                 "TRACK_NOT_FOUND",
-                &format!("track not found: {}", id),
+                &format!("track not found: {id}"),
             )
         })?;
 
@@ -199,7 +199,7 @@ pub async fn download_handler(
             v1_error(
                 StatusCode::NOT_FOUND,
                 "TRACK_NOT_FOUND",
-                &format!("track not found: {}", id),
+                &format!("track not found: {id}"),
             )
         })?;
 

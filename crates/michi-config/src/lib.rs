@@ -108,8 +108,9 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/cache"));
 
-        let database_url =
-            env::var("MICHI_DATABASE").unwrap_or_else(|_| "sqlite:///config/michi.db".to_string());
+        let database_url = env::var("MICHI_DATABASE")
+            .or_else(|_| env::var("MICHI_DATABASE_URL"))
+            .unwrap_or_else(|_| "sqlite:///config/michi.db".to_string());
 
         let sync_peers = env::var("MICHI_SYNC_PEERS")
             .unwrap_or_default()

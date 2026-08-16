@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Self-contained Michi Music Stream Receiver Simulator.
+Self-contained Michi Music Stream Receiver Simulator with Fault Injection and Extended Lifecycle.
 
 Provides standard and hifi receiver endpoints for both canonical v1-lite
 and legacy /api/v1/receiver/* routes for integration testing.
@@ -39,7 +39,14 @@ class ReceiverState:
         self.tokens = set()
         self.active_session_id = None
         self.volume = 50
+        self.playing = False
+        self.position_ms = 0
         self.start_time = time.time()
+
+        # Fault injection state
+        self.latency_s = 0.0
+        self.offline = False
+        self.network_drop_remaining = 0
 
 class ReceiverHandler(BaseHTTPRequestHandler):
     state: ReceiverState = None
@@ -68,9 +75,34 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             return auth[7:].strip()
         return None
 
+    def check_faults(self, path):
+        # Fault configuration endpoints are immune to faults
+        if path.startswith("/api/v1/receiver/fault"):
+            return False
+        st = self.state
+        if st.offline:
+            self.send_json(503, {
+                "status": "error",
+                "error": {"code": "receiver_offline", "message": "receiver is currently offline (fault injected)"}
+            })
+            return True
+        if st.network_drop_remaining > 0:
+            st.network_drop_remaining -= 1
+            self.send_json(504, {
+                "status": "error",
+                "error": {"code": "network_timeout", "message": "network packet dropped (fault injected)"}
+            })
+            return True
+        if st.latency_s > 0:
+            time.sleep(st.latency_s)
+        return False
+
     def do_GET(self):
         st = self.state
         path = self.path.split("?")[0]
+
+        if self.check_faults(path):
+            return
 
         if path in ("/api/v1/receiver/info", "/api/v1/server/info"):
             self.send_json(200, {
@@ -92,7 +124,19 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                     "volume": True,
                     "heartbeat": True,
                     "ota_update": True,
+                    "playback_control": True,
+                    "session_recovery": True,
                 },
+            })
+            return
+
+        if path in ("/api/v1/receiver/playback/state",):
+            self.send_json(200, {
+                "status": "ok",
+                "session_id": st.active_session_id,
+                "playing": st.playing,
+                "position_ms": st.position_ms,
+                "volume": st.volume,
             })
             return
 
@@ -103,6 +147,35 @@ class ReceiverHandler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         body = self.read_body()
         token = self.get_token()
+
+        # Fault Injection Admin Endpoints
+        if path == "/api/v1/receiver/fault/latency":
+            latency_ms = body.get("latency_ms", 200)
+            st.latency_s = float(latency_ms) / 1000.0
+            self.send_json(200, {"status": "fault_injected", "type": "latency", "latency_ms": latency_ms})
+            return
+
+        if path == "/api/v1/receiver/fault/offline":
+            st.offline = body.get("offline", True)
+            self.send_json(200, {"status": "fault_injected", "type": "offline", "offline": st.offline})
+            return
+
+        if path == "/api/v1/receiver/fault/network_drop":
+            drop_count = body.get("drop_count", 1)
+            st.network_drop_remaining = drop_count
+            self.send_json(200, {"status": "fault_injected", "type": "network_drop", "drop_count": drop_count})
+            return
+
+        if path == "/api/v1/receiver/fault/reset":
+            st.latency_s = 0.0
+            st.offline = False
+            st.network_drop_remaining = 0
+            self.send_json(200, {"status": "faults_cleared"})
+            return
+
+        # Check faults for regular endpoints
+        if self.check_faults(path):
+            return
 
         if path in ("/api/v1/receiver/pair/start", "/api/v1/pair/start"):
             nonce = str(uuid.uuid4())
@@ -176,6 +249,8 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 return
             st.active_session_id = body.get("session_id", str(uuid.uuid4()))
             st.volume = min(100, body.get("volume", 70))
+            st.playing = True
+            st.position_ms = 0
             self.send_json(200, {
                 "status": "session_started",
                 "session_id": st.active_session_id,
@@ -187,9 +262,31 @@ class ReceiverHandler(BaseHTTPRequestHandler):
 
         if path in ("/api/v1/receiver/session/stop",):
             st.active_session_id = None
+            st.playing = False
             self.send_json(200, {
                 "status": "session_stopped",
                 "session_id": None,
+            })
+            return
+
+        if path in ("/api/v1/receiver/session/recover",):
+            if not token or token not in st.tokens:
+                self.send_json(401, {
+                    "status": "error",
+                    "error": {"code": "invalid_token", "message": "unauthenticated"},
+                })
+                return
+            sess_id = body.get("session_id", str(uuid.uuid4()))
+            st.active_session_id = sess_id
+            st.position_ms = body.get("position_ms", st.position_ms)
+            st.volume = body.get("volume", st.volume)
+            st.playing = body.get("playing", True)
+            self.send_json(200, {
+                "status": "session_recovered",
+                "session_id": st.active_session_id,
+                "position_ms": st.position_ms,
+                "volume": st.volume,
+                "playing": st.playing,
             })
             return
 
@@ -200,6 +297,32 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "status": "volume_updated",
                 "volume": st.volume,
             })
+            return
+
+        if path in ("/api/v1/receiver/playback/control",):
+            cmd = body.get("command", "")
+            if cmd == "play":
+                st.playing = True
+            elif cmd == "pause":
+                st.playing = False
+            elif cmd == "seek":
+                st.position_ms = body.get("position_ms", 0)
+            elif cmd == "stop":
+                st.playing = False
+                st.position_ms = 0
+            self.send_json(200, {
+                "status": "ok",
+                "command": cmd,
+                "playing": st.playing,
+                "position_ms": st.position_ms,
+            })
+            return
+
+        if path in ("/api/v1/receiver/disconnect",):
+            # Emulate receiver going temporarily unreachable / resetting active connections
+            st.active_session_id = None
+            st.playing = False
+            self.send_json(200, {"status": "disconnected"})
             return
 
         self.send_json(404, {"error": {"code": "NOT_FOUND", "message": "not found"}})

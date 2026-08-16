@@ -255,17 +255,14 @@ pub async fn import_upload_handler(
         return Err(v1_error(
             StatusCode::BAD_REQUEST,
             "FILE_TOO_LARGE",
-            &format!("file exceeds max size of {} bytes", MAX_FILE_SIZE),
+            &format!("file exceeds max size of {MAX_FILE_SIZE} bytes"),
         ));
     }
     if session_state.total_size_bytes + data.len() as u64 > MAX_SESSION_SIZE {
         return Err(v1_error(
             StatusCode::BAD_REQUEST,
             "SESSION_SIZE_EXCEEDED",
-            &format!(
-                "session exceeds max total size of {} bytes",
-                MAX_SESSION_SIZE
-            ),
+            &format!("session exceeds max total size of {MAX_SESSION_SIZE} bytes"),
         ));
     }
 

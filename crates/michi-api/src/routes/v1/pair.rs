@@ -61,7 +61,7 @@ pub async fn link_pair_start(
         let mut entry = state
             .security_state
             .pairing_attempts
-            .entry(format!("start:{}", client_ip))
+            .entry(format!("start:{client_ip}"))
             .or_insert((0u32, now));
         let (count, last_reset) = entry.value();
         let elapsed = now.duration_since(*last_reset);
@@ -503,10 +503,7 @@ pub async fn qr_svg_handler(
                 let cx = padding + x as f64 * cell_size + cell_size / 2.0;
                 let cy = padding + y as f64 * cell_size + cell_size / 2.0;
                 svg.push_str(&format!(
-                    r##"<circle cx="{cx}" cy="{cy}" r="{r}" fill="url(#qrGrad)"/>"##,
-                    cx = cx,
-                    cy = cy,
-                    r = radius
+                    r##"<circle cx="{cx}" cy="{cy}" r="{radius}" fill="url(#qrGrad)"/>"##
                 ));
             }
         }
@@ -520,11 +517,7 @@ pub async fn qr_svg_handler(
         let f_size = 7.0 * cell_size;
         // Outer
         svg.push_str(&format!(
-            r##"<rect x="{x}" y="{y}" width="{s}" height="{s}" rx="{cr}" fill="url(#qrGrad)"/>"##,
-            x = fx,
-            y = fy,
-            s = f_size,
-            cr = corner_radius
+            r##"<rect x="{fx}" y="{fy}" width="{f_size}" height="{f_size}" rx="{corner_radius}" fill="url(#qrGrad)"/>"##
         ));
         // Inner
         svg.push_str(&format!(

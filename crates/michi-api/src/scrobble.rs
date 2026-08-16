@@ -68,7 +68,7 @@ pub async fn record_play_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(crate::library::ErrorResponse {
                 status: "error".to_string(),
-                message: format!("database error: {}", e),
+                message: format!("database error: {e}"),
             }),
         )
     })?;
@@ -141,7 +141,7 @@ pub async fn history_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(crate::library::ErrorResponse {
                     status: "error".to_string(),
-                    message: format!("database error: {}", e),
+                    message: format!("database error: {e}"),
                 }),
             )
         })?;
@@ -198,7 +198,7 @@ async fn submit_listenbrainz(
     let client = reqwest::Client::new();
     match client
         .post("https://api.listenbrainz.org/1/submit-listens")
-        .header("Authorization", format!("Token {}", token))
+        .header("Authorization", format!("Token {token}"))
         .json(&payload)
         .send()
         .await

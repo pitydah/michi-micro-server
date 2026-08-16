@@ -54,7 +54,7 @@ pub fn serialize_m3u(entries: &[M3uEntry]) -> String {
         if entry.duration.is_some() || entry.title.is_some() {
             let dur = entry.duration.unwrap_or(0);
             let title = entry.title.as_deref().unwrap_or("");
-            output.push_str(&format!("#EXTINF:{},{}\n", dur, title));
+            output.push_str(&format!("#EXTINF:{dur},{title}\n"));
         }
         output.push_str(&format!("{}\n", entry.path));
     }

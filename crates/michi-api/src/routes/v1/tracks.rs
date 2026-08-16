@@ -99,7 +99,7 @@ pub async fn track_handler(
             v1_error(
                 StatusCode::NOT_FOUND,
                 "TRACK_NOT_FOUND",
-                &format!("track not found: {}", id),
+                &format!("track not found: {id}"),
             )
         })?;
 

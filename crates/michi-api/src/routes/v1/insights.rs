@@ -101,8 +101,8 @@ pub async fn artist_insights_handler(
         .unwrap_or_default();
 
     let active_years = match (earliest_year, latest_year) {
-        (Some(e), Some(l)) if e != l => format!("{}–{}", e, l),
-        (Some(e), _) => format!("{}", e),
+        (Some(e), Some(l)) if e != l => format!("{e}–{l}"),
+        (Some(e), _) => format!("{e}"),
         _ => "Unknown".to_string(),
     };
 
@@ -215,10 +215,10 @@ pub async fn album_health_handler(
     let issues: Vec<String> = {
         let mut v = Vec::new();
         if missing_cover > 0 {
-            v.push(format!("{} tracks missing cover art", missing_cover));
+            v.push(format!("{missing_cover} tracks missing cover art"));
         }
         if missing_year > 0 {
-            v.push(format!("{} tracks missing year", missing_year));
+            v.push(format!("{missing_year} tracks missing year"));
         }
         v
     };

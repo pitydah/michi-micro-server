@@ -256,7 +256,7 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
         match michi_db::library_stats(&state.db).await {
             Ok(s) => (s.tracks, s.albums, s.artists),
             Err(e) => {
-                warnings.push(format!("library_stats failed: {}", e));
+                warnings.push(format!("library_stats failed: {e}"));
                 (0, 0, 0)
             }
         };

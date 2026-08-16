@@ -87,7 +87,7 @@ pub async fn get_playlist_handler(
             v1_error(
                 StatusCode::NOT_FOUND,
                 "NOT_FOUND",
-                &format!("playlist not found: {}", id),
+                &format!("playlist not found: {id}"),
             )
         })?;
     Ok(Json(serde_json::json!({ "playlist": playlist })))
@@ -117,7 +117,7 @@ pub async fn update_playlist_handler(
             v1_error(
                 StatusCode::NOT_FOUND,
                 "NOT_FOUND",
-                &format!("playlist not found: {}", id),
+                &format!("playlist not found: {id}"),
             )
         })?;
     Ok(Json(serde_json::json!({ "status": "ok" })))
@@ -140,7 +140,7 @@ pub async fn delete_playlist_handler(
         return Err(v1_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
-            &format!("playlist not found: {}", id),
+            &format!("playlist not found: {id}"),
         ));
     }
     let _ = state.tx.send(r#"{"type":"playlist_updated"}"#.to_string());
@@ -331,7 +331,7 @@ pub async fn export_playlist_m3u_handler(
             v1_error(
                 StatusCode::NOT_FOUND,
                 "NOT_FOUND",
-                &format!("playlist not found: {}", id),
+                &format!("playlist not found: {id}"),
             )
         })?;
 
@@ -361,7 +361,7 @@ pub async fn export_playlist_m3u_handler(
         .header(header::CONTENT_TYPE, "audio/x-mpegurl")
         .header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", filename),
+            format!("attachment; filename=\"{filename}\""),
         )
         .body(Body::from(m3u))
         .unwrap();

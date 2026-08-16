@@ -183,7 +183,7 @@ pub async fn playback_control_handler(
             return Err(v1_error(
                 StatusCode::BAD_REQUEST,
                 "INVALID_COMMAND",
-                &format!("unknown command: {}", cmd),
+                &format!("unknown command: {cmd}"),
             ));
         }
     }

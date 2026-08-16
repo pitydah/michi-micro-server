@@ -477,8 +477,8 @@ pub async fn backup_bundle_handler(
     State(state): State<AppState>,
 ) -> Result<Response<Body>, (StatusCode, Json<serde_json::Value>)> {
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
-    let bundle_path = std::env::temp_dir().join(format!("michi-backup-{}.tar.gz", timestamp));
-    let temp_dir = std::env::temp_dir().join(format!("michi-bundle-{}", timestamp));
+    let bundle_path = std::env::temp_dir().join(format!("michi-backup-{timestamp}.tar.gz"));
+    let temp_dir = std::env::temp_dir().join(format!("michi-bundle-{timestamp}"));
 
     std::fs::create_dir_all(&temp_dir).map_err(|e| {
         v1_error(
@@ -599,12 +599,12 @@ pub async fn backup_bundle_handler(
     let _ = std::fs::remove_file(&bundle_path);
     let _ = std::fs::remove_dir_all(&temp_dir);
 
-    let filename = format!("michi-backup-{}.tar.gz", timestamp);
+    let filename = format!("michi-backup-{timestamp}.tar.gz");
     Response::builder()
         .header("Content-Type", "application/gzip")
         .header(
             "Content-Disposition",
-            format!("attachment; filename=\"{}\"", filename),
+            format!("attachment; filename=\"{filename}\""),
         )
         .body(Body::from(bundle_data))
         .map_err(|e| {

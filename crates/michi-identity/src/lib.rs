@@ -82,7 +82,7 @@ impl MichiIdentity {
         if key_path.exists() {
             let data = tokio::fs::read(&key_path).await?;
             let file: EncryptedKeyFile = rmp_serde::from_slice(&data)
-                .map_err(|e| IdentityError::InvalidKey(format!("msgpack: {}", e)))?;
+                .map_err(|e| IdentityError::InvalidKey(format!("msgpack: {e}")))?;
 
             let wrap_key = Self::derive_wrap_key(&file.salt);
             let cipher = ChaCha20Poly1305::new(Key::from_slice(&wrap_key));
@@ -97,7 +97,7 @@ impl MichiIdentity {
                 .try_into()
                 .map_err(|_| IdentityError::InvalidKey("key length invalid".into()))?;
             let signing_key = SigningKey::from_keypair_bytes(&arr)
-                .map_err(|e| IdentityError::InvalidKey(format!("dalek: {}", e)))?;
+                .map_err(|e| IdentityError::InvalidKey(format!("dalek: {e}")))?;
             let verifying_key = signing_key.verifying_key();
             let michi_id = hash_public_key(&verifying_key);
 
@@ -147,7 +147,7 @@ impl MichiIdentity {
         };
 
         let encoded = rmp_serde::to_vec(&file)
-            .map_err(|e| IdentityError::InvalidKey(format!("msgpack encode: {}", e)))?;
+            .map_err(|e| IdentityError::InvalidKey(format!("msgpack encode: {e}")))?;
         tokio::fs::write(&key_path, &encoded).await?;
 
         // Set file permissions to 600 (owner only)
@@ -201,11 +201,11 @@ impl MichiIdentity {
             .try_into()
             .map_err(|_| IdentityError::Signature("invalid public key length".into()))?;
         let verifying_key = VerifyingKey::from_bytes(&arr)
-            .map_err(|e| IdentityError::Signature(format!("invalid key: {}", e)))?;
+            .map_err(|e| IdentityError::Signature(format!("invalid key: {e}")))?;
 
         let sig_bytes = BASE64
             .decode(signature_b64.as_bytes())
-            .map_err(|e| IdentityError::Signature(format!("base64: {}", e)))?;
+            .map_err(|e| IdentityError::Signature(format!("base64: {e}")))?;
         let sig_arr: [u8; 64] = sig_bytes
             .as_slice()
             .try_into()

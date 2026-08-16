@@ -38,7 +38,7 @@ pub async fn artwork_handler(
             v1_error(
                 StatusCode::NOT_FOUND,
                 "TRACK_NOT_FOUND",
-                &format!("track not found: {}", id),
+                &format!("track not found: {id}"),
             )
         })?;
 
@@ -50,7 +50,7 @@ pub async fn artwork_handler(
             v1_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "IO_ERROR",
-                &format!("failed to read artwork: {}", e),
+                &format!("failed to read artwork: {e}"),
             )
         })?;
         let mime = infer::get(&data)

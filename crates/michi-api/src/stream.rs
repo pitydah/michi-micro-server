@@ -45,13 +45,8 @@ async fn track_from_db(
 ) -> Result<michi_core::Track, (StatusCode, Json<ErrorResponse>)> {
     michi_db::get_track(&state.db, id)
         .await
-        .map_err(|e| {
-            err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("db error: {}", e),
-            )
-        })?
-        .ok_or_else(|| err_response(StatusCode::NOT_FOUND, &format!("track not found: {}", id)))
+        .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("db error: {e}")))?
+        .ok_or_else(|| err_response(StatusCode::NOT_FOUND, &format!("track not found: {id}")))
 }
 
 pub async fn stream_range_async(
@@ -237,7 +232,7 @@ pub async fn stream_handler(
             }
             Err(StreamError::InvalidRange(msg)) => Err(err_response(
                 StatusCode::RANGE_NOT_SATISFIABLE,
-                &format!("range not satisfiable: {}", msg),
+                &format!("range not satisfiable: {msg}"),
             )),
             Err(_) => Err(err_response(
                 StatusCode::INTERNAL_SERVER_ERROR,

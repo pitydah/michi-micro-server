@@ -33,20 +33,20 @@ pub fn validate_url(url_str: &str) -> Result<String, String> {
         return Err("only http and https are allowed".into());
     }
 
-    let parsed = url::Url::parse(url_str).map_err(|e| format!("invalid URL: {}", e))?;
+    let parsed = url::Url::parse(url_str).map_err(|e| format!("invalid URL: {e}"))?;
 
     let host = parsed.host_str().ok_or("URL has no host")?;
 
     // Resolve DNS and check every address
-    let addr_str = format!("{}:80", host);
+    let addr_str = format!("{host}:80");
     let addrs = addr_str
         .to_socket_addrs()
-        .map_err(|e| format!("DNS resolution failed: {}", e))?;
+        .map_err(|e| format!("DNS resolution failed: {e}"))?;
 
     for addr in addrs {
         let ip = addr.ip();
         if is_private_or_link_local(&ip) {
-            return Err(format!("blocked address: {}", ip));
+            return Err(format!("blocked address: {ip}"));
         }
     }
 
@@ -92,14 +92,14 @@ pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
-        .map_err(|e| format!("client: {}", e))?;
+        .map_err(|e| format!("client: {e}"))?;
 
     // Try HEAD first
     let resp = client
         .head(url)
         .send()
         .await
-        .map_err(|e| format!("head: {}", e))?;
+        .map_err(|e| format!("head: {e}"))?;
 
     let headers = resp.headers();
     let ct = headers
@@ -169,7 +169,7 @@ pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
             .header("Range", "bytes=0-4095")
             .send()
             .await
-            .map_err(|e| format!("get: {}", e))?;
+            .map_err(|e| format!("get: {e}"))?;
         let body = body_resp.text().await.unwrap_or_default();
         if body.contains("<rss") || body.contains("<feed") || body.contains("<channel>") {
             let name = extract_rss_title(&body);
@@ -206,7 +206,7 @@ pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
         .header("Range", "bytes=0-2047")
         .send()
         .await
-        .map_err(|e| format!("fallback: {}", e))?;
+        .map_err(|e| format!("fallback: {e}"))?;
     let fb_ct = fallback_resp
         .headers()
         .get("content-type")
@@ -322,8 +322,8 @@ pub fn parse_rss_episodes(body: &str) -> Vec<PodcastEpisode> {
 }
 
 fn extract_tag(body: &str, tag: &str) -> Option<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
     if let Some(s) = body.find(&open) {
         let start = s + open.len();
         if let Some(e) = body[start..].find(&close) {
@@ -334,10 +334,10 @@ fn extract_tag(body: &str, tag: &str) -> Option<String> {
 }
 
 fn extract_attr(body: &str, tag: &str, attr: &str) -> Option<String> {
-    let search = format!("<{} ", tag);
+    let search = format!("<{tag} ");
     if let Some(s) = body.find(&search) {
         let fragment = &body[s..];
-        let attr_search = format!("{}=\"", attr);
+        let attr_search = format!("{attr}=\"");
         if let Some(a) = fragment.find(&attr_search) {
             let start = a + attr_search.len();
             if let Some(end) = fragment[start..].find('"') {

@@ -44,7 +44,7 @@ fn ensure_db_parent_dir(database_url: &str) -> Result<(), DbError> {
     if let Some(parent) = db_path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| DbError::Migration(format!("failed to create db dir: {}", e)))?;
+                .map_err(|e| DbError::Migration(format!("failed to create db dir: {e}")))?;
         }
     }
     Ok(())
@@ -63,7 +63,7 @@ pub async fn init_pool_with_size(
     ensure_db_parent_dir(database_url)?;
 
     let opts = SqliteConnectOptions::from_str(database_url)
-        .map_err(|e| DbError::Migration(format!("invalid database URL: {}", e)))?
+        .map_err(|e| DbError::Migration(format!("invalid database URL: {e}")))?
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
@@ -1534,7 +1534,7 @@ pub async fn get_chain(pool: &SqlitePool, id: &Uuid) -> Result<Option<PlaybackCh
 
     Ok(Some(PlaybackChain {
         id: Uuid::parse_str(id_str)
-            .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+            .map_err(|e| DbError::InvalidData(format!("invalid uuid: {e}")))?,
         name: name.to_string(),
         track_id: track_id_str.and_then(|s| Uuid::parse_str(s).ok()),
         position_ms: pos as u64,
@@ -1572,7 +1572,7 @@ pub async fn list_chains(pool: &SqlitePool) -> Result<Vec<PlaybackChain>, DbErro
             let updated_str: &str = r.try_get("updated_at")?;
             Ok(PlaybackChain {
                 id: Uuid::parse_str(id_str)
-                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {e}")))?,
                 name: name.to_string(),
                 track_id: track_id_str.and_then(|s| Uuid::parse_str(s).ok()),
                 position_ms: pos as u64,
@@ -1742,9 +1742,9 @@ pub async fn get_chain_links(
             let delay: i64 = r.try_get("delay_ms")?;
             Ok(ChainLink {
                 id: Uuid::parse_str(id_str)
-                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {e}")))?,
                 chain_id: Uuid::parse_str(cid_str)
-                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {e}")))?,
                 position: pos,
                 receiver_id: recv_id.to_string(),
                 receiver_name: None,
@@ -2324,7 +2324,7 @@ pub async fn list_tracks(pool: &SqlitePool) -> Result<Vec<Track>, DbError> {
 }
 
 pub async fn search_tracks(pool: &SqlitePool, q: &str) -> Result<Vec<Track>, DbError> {
-    let pattern = format!("%{}%", q);
+    let pattern = format!("%{q}%");
     let rows = sqlx::query(
         "SELECT id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, starred, rating, starred_at, replaygain_track_gain, replaygain_track_peak, created_at, updated_at FROM tracks WHERE title LIKE ? OR artist LIKE ? OR album LIKE ? OR album_artist LIKE ? OR format LIKE ? ORDER BY title ASC",
     )
@@ -2353,15 +2353,15 @@ pub async fn search_tracks_advanced(pool: &SqlitePool, query: &str) -> Result<Ve
         if let Some((key, val)) = token.split_once(':') {
             match key.to_lowercase().as_str() {
                 "artist" => {
-                    params.push(format!("%{}%", val));
+                    params.push(format!("%{val}%"));
                     sql.push_str(&format!(" AND artist LIKE ?{}", params.len()));
                 }
                 "album" => {
-                    params.push(format!("%{}%", val));
+                    params.push(format!("%{val}%"));
                     sql.push_str(&format!(" AND album LIKE ?{}", params.len()));
                 }
                 "genre" => {
-                    params.push(format!("%{}%", val));
+                    params.push(format!("%{val}%"));
                     sql.push_str(&format!(" AND genre LIKE ?{}", params.len()));
                 }
                 "format" => {
@@ -2406,11 +2406,11 @@ pub async fn search_tracks_advanced(pool: &SqlitePool, query: &str) -> Result<Ve
                     }
                 }
                 _ => {
-                    fulltext_parts.push(format!("%{}%", token));
+                    fulltext_parts.push(format!("%{token}%"));
                 }
             }
         } else {
-            fulltext_parts.push(format!("%{}%", token));
+            fulltext_parts.push(format!("%{token}%"));
         }
     }
 
@@ -3717,9 +3717,9 @@ pub async fn get_bookmark(
         let fin: i64 = r.try_get("finished")?;
         Ok(Bookmark {
             id: Uuid::parse_str(id_str)
-                .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+                .map_err(|e| DbError::InvalidData(format!("invalid uuid: {e}")))?,
             track_id: Uuid::parse_str(tid_str)
-                .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+                .map_err(|e| DbError::InvalidData(format!("invalid uuid: {e}")))?,
             user_id: uid.to_string(),
             device_id: did.map(|s| s.to_string()),
             position_ms: pos,
@@ -3759,9 +3759,9 @@ pub async fn list_bookmarks(
             let fin: i64 = r.try_get("finished")?;
             Ok(Bookmark {
                 id: Uuid::parse_str(id_str)
-                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {e}")))?,
                 track_id: Uuid::parse_str(tid_str)
-                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {e}")))?,
                 user_id: uid.to_string(),
                 device_id: did.map(|s| s.to_string()),
                 position_ms: pos,
@@ -4114,7 +4114,7 @@ pub async fn list_radio_stations(
             let fav: i64 = r.try_get("favorite")?;
             Ok(michi_core::RadioStation {
                 id: Uuid::parse_str(id_str)
-                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {e}")))?,
                 name: name.to_string(),
                 stream_url: url.to_string(),
                 homepage: homepage.map(|s| s.to_string()),
@@ -4239,7 +4239,7 @@ pub async fn list_stream_sources(
             let enabled: i64 = r.try_get("enabled")?;
             Ok(michi_core::StreamSource {
                 id: Uuid::parse_str(id_str)
-                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {e}")))?,
                 url: url.to_string(),
                 stream_type: st.to_string(),
                 name: name.map(|s| s.to_string()),
@@ -4325,7 +4325,7 @@ pub async fn list_podcast_episodes(
             let pos: i64 = r.try_get("position_ms")?;
             Ok(michi_core::PodcastEpisodeDb {
                 id: Uuid::parse_str(id_str)
-                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {}", e)))?,
+                    .map_err(|e| DbError::InvalidData(format!("invalid uuid: {e}")))?,
                 source_id: *source_id,
                 title: title.to_string(),
                 audio_url: url_str.to_string(),

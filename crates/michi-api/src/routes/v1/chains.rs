@@ -76,7 +76,7 @@ pub async fn get_chain_handler(
         None => Err(v1_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
-            &format!("chain not found: {}", id),
+            &format!("chain not found: {id}"),
         )),
     }
 }
@@ -99,7 +99,7 @@ pub async fn update_chain_handler(
         return Err(v1_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
-            &format!("chain not found: {}", id),
+            &format!("chain not found: {id}"),
         ));
     }
     Ok(Json(serde_json::json!({ "status": "updated" })))
@@ -120,7 +120,7 @@ pub async fn delete_chain_handler(
         return Err(v1_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
-            &format!("chain not found: {}", id),
+            &format!("chain not found: {id}"),
         ));
     }
     Ok(Json(serde_json::json!({ "status": "deleted" })))
@@ -170,7 +170,7 @@ pub async fn update_link_handler(
         return Err(v1_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
-            &format!("link not found: {}", link_id),
+            &format!("link not found: {link_id}"),
         ));
     }
     Ok(Json(serde_json::json!({ "status": "updated" })))
@@ -193,7 +193,7 @@ pub async fn delete_link_handler(
         return Err(v1_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
-            &format!("link not found: {}", link_id),
+            &format!("link not found: {link_id}"),
         ));
     }
     Ok(Json(serde_json::json!({ "status": "deleted" })))
@@ -241,7 +241,7 @@ pub async fn play_chain_handler(
         v1_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
-            &format!("chain not found: {}", id),
+            &format!("chain not found: {id}"),
         )
     })?;
 

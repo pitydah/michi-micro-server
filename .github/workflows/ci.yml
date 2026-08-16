@@ -21,8 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.88.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
@@ -41,30 +42,54 @@ jobs:
     needs: ci-rust
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
-      - name: Run Receiver Simulator E2E Integration Tests
+      - name: Run Receiver Simulator E2E Integration Tests (Matrix & Fault Injection)
         run: bash scripts/test_receiver_e2e.sh 8080 8081
+
+  ci-snapcast:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Snapcast Multi-Client Real E2E Integration Tests
+        run: bash scripts/test_snapcast_e2e.sh 1780
+
+  ci-homeassistant:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
+      - name: Run Home Assistant & MQTT Real E2E Integration Tests
+        run: bash scripts/test_homeassistant_e2e.sh 18883 18884 9098
 
   ci-docker:
     runs-on: ubuntu-latest
-    needs: [ci-rust, ci-receivers]
+    needs: [ci-rust, ci-receivers, ci-snapcast, ci-homeassistant]
     steps:
       - uses: actions/checkout@v4
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Build Docker image
+      - name: Build Docker image (amd64)
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
           load: true
           tags: michi-server:test
-      - name: Smoke test and Contract verification
+      - name: Smoke test and Player Contract verification
         run: |
           docker run -d --name michi-test -p 9090:9090 \
             -e MICHI_PORT=9090 \
@@ -79,8 +104,40 @@ jobs:
           docker stop michi-test
           docker rm michi-test
 
+  ci-arm64:
+    runs-on: ubuntu-latest
+    needs: [ci-rust, ci-receivers, ci-snapcast, ci-homeassistant]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU for ARM64
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm64
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build ARM64 Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: michi-server:arm64
+      - name: Verify ARM64 boot under QEMU
+        run: |
+          docker run -d --name michi-arm64 -p 9091:9091 \
+            -e MICHI_PORT=9091 \
+            -e MICHI_AUTH_USERNAME=admin \
+            -e MICHI_AUTH_PASSWORD=admin \
+            michi-server:arm64
+          sleep 10
+          curl -f http://127.0.0.1:9091/health/live || exit 1
+          curl -f http://127.0.0.1:9091/api/v1/status || exit 1
+          docker stop michi-arm64
+          docker rm michi-arm64
+
   release-ghcr:
-    needs: [ci-rust, ci-receivers, ci-docker]
+    needs: [ci-rust, ci-receivers, ci-snapcast, ci-homeassistant, ci-docker, ci-arm64]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -104,7 +161,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
-      - name: Build and push
+      - name: Build and push multi-arch release
         uses: docker/build-push-action@v6
         with:
           context: .

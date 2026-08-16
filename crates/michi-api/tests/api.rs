@@ -221,7 +221,7 @@ async fn test_get_track_by_id() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/tracks/{}", id))
+                .uri(format!("/api/tracks/{id}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -242,7 +242,7 @@ async fn test_get_track_not_found() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/tracks/{}", fake_id))
+                .uri(format!("/api/tracks/{fake_id}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -286,7 +286,7 @@ async fn test_update_track_handler() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/tracks/{}", id))
+                .uri(format!("/api/tracks/{id}"))
                 .method("PUT")
                 .header("content-type", "application/json")
                 .body(Body::from(body))
@@ -309,7 +309,7 @@ async fn test_delete_track_handler() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/tracks/{}", id))
+                .uri(format!("/api/tracks/{id}"))
                 .method("DELETE")
                 .body(Body::empty())
                 .unwrap(),
@@ -449,7 +449,7 @@ async fn test_stream_full_file() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/stream/{}", id))
+                .uri(format!("/api/stream/{id}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -486,7 +486,7 @@ async fn test_stream_range_request() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/stream/{}", id))
+                .uri(format!("/api/stream/{id}"))
                 .header("Range", "bytes=0-1023")
                 .body(Body::empty())
                 .unwrap(),
@@ -524,7 +524,7 @@ async fn test_stream_range_from_offset() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/stream/{}", id))
+                .uri(format!("/api/stream/{id}"))
                 .header("Range", "bytes=100-")
                 .body(Body::empty())
                 .unwrap(),
@@ -553,7 +553,7 @@ async fn test_stream_range_not_satisfiable() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/stream/{}", id))
+                .uri(format!("/api/stream/{id}"))
                 .header("Range", "bytes=50000-60000")
                 .body(Body::empty())
                 .unwrap(),
@@ -570,7 +570,7 @@ async fn test_stream_track_not_found() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/stream/{}", fake_id))
+                .uri(format!("/api/stream/{fake_id}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -664,7 +664,7 @@ async fn test_stream_file_not_on_disk() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/stream/{}", id))
+                .uri(format!("/api/stream/{id}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -783,8 +783,8 @@ async fn test_search_empty_query() {
 async fn test_tracks_pagination_limit_offset() {
     let (app, pool) = make_app().await;
     for i in 0..10 {
-        let path = format!("/music/song_{}.flac", i);
-        let title = format!("Track {}", i);
+        let path = format!("/music/song_{i}.flac");
+        let title = format!("Track {i}");
         seed_track(&pool, &path, &title).await;
     }
 
@@ -808,8 +808,8 @@ async fn test_tracks_pagination_limit_offset() {
 async fn test_tracks_limit_max() {
     let (app, pool) = make_app().await;
     for i in 0..20 {
-        let path = format!("/music/song_{}.flac", i);
-        let title = format!("Track {}", i);
+        let path = format!("/music/song_{i}.flac");
+        let title = format!("Track {i}");
         seed_track(&pool, &path, &title).await;
     }
 
@@ -1135,7 +1135,7 @@ async fn test_websocket_connect() {
     let (port, _pool) = run_test_server().await;
     use futures_util::StreamExt;
 
-    let url = format!("ws://127.0.0.1:{}/api/ws", port);
+    let url = format!("ws://127.0.0.1:{port}/api/ws");
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("WebSocket connection should succeed");
@@ -1149,7 +1149,7 @@ async fn test_websocket_connect() {
             // Should be valid JSON
             let _v: serde_json::Value = serde_json::from_str(text).unwrap();
         }
-        Ok(Some(Err(e))) => panic!("WebSocket error: {}", e),
+        Ok(Some(Err(e))) => panic!("WebSocket error: {e}"),
         Ok(None) => panic!("WebSocket closed unexpectedly"),
         Err(_) => { /* timeout is OK - server might not send initial message */ }
     }
@@ -1161,7 +1161,7 @@ async fn test_websocket_receives_events() {
     use futures_util::StreamExt;
 
     // Connect WebSocket
-    let url = format!("ws://127.0.0.1:{}/api/ws", port);
+    let url = format!("ws://127.0.0.1:{port}/api/ws");
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("WebSocket should connect");
@@ -1170,7 +1170,7 @@ async fn test_websocket_receives_events() {
     // Trigger a library clear (which sends library_updated event)
     let client = reqwest::Client::new();
     let resp = client
-        .delete(format!("http://127.0.0.1:{}/api/library/tracks", port))
+        .delete(format!("http://127.0.0.1:{port}/api/library/tracks"))
         .send()
         .await
         .unwrap();
@@ -1184,7 +1184,7 @@ async fn test_websocket_receives_events() {
             let v: serde_json::Value = serde_json::from_str(text).unwrap();
             assert_eq!(v["type"], "library_updated");
         }
-        Ok(Some(Err(e))) => panic!("WS error: {}", e),
+        Ok(Some(Err(e))) => panic!("WS error: {e}"),
         Ok(None) => panic!("WS closed"),
         Err(_) => panic!("Timeout - no library_updated event received"),
     }
@@ -1222,8 +1222,7 @@ async fn test_m3u_export_empty_playlist() {
     let text = body_text(response).await;
     assert!(
         text.starts_with("#EXTM3U\n"),
-        "M3U should start with #EXTM3U: {}",
-        text
+        "M3U should start with #EXTM3U: {text}"
     );
 }
 
@@ -1394,7 +1393,7 @@ async fn test_full_pipeline_scan_and_stream() {
     let response = test_app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/stream/{}", id))
+                .uri(format!("/api/stream/{id}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1425,8 +1424,8 @@ async fn test_full_pipeline_scan_and_stream() {
 async fn test_tracks_still_works_without_params() {
     let (app, pool) = make_app().await;
     for i in 0..3 {
-        let path = format!("/music/song_{}.flac", i);
-        let title = format!("Track {}", i);
+        let path = format!("/music/song_{i}.flac");
+        let title = format!("Track {i}");
         seed_track(&pool, &path, &title).await;
     }
 
@@ -1982,13 +1981,11 @@ async fn test_v1_pair_confirm_returns_canonical_permissions() {
     for p in &perm_strings {
         assert!(
             !p.contains('{'),
-            "permission {:?} contains debug formatting",
-            p
+            "permission {p:?} contains debug formatting"
         );
         assert!(
             !p.contains('('),
-            "permission {:?} contains debug formatting",
-            p
+            "permission {p:?} contains debug formatting"
         );
     }
 }
@@ -3749,7 +3746,7 @@ async fn test_v1_auth_real_pair_and_use_token() {
                 .uri("/api/v1/playback/control")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", device_token))
+                .header("Authorization", format!("Bearer {device_token}"))
                 .body(Body::from(r#"{"command":"play"}"#))
                 .unwrap(),
         )
@@ -3763,7 +3760,7 @@ async fn test_v1_auth_real_pair_and_use_token() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/playback/state")
-                .header("Authorization", format!("Bearer {}", device_token))
+                .header("Authorization", format!("Bearer {device_token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3978,8 +3975,7 @@ async fn test_version_consistency() {
 
     assert_eq!(
         status_version, info_version,
-        "status version {} must match server info version {}",
-        status_version, info_version
+        "status version {status_version} must match server info version {info_version}"
     );
     assert!(!status_version.is_empty(), "version must not be empty");
 }
@@ -4006,7 +4002,7 @@ async fn test_static_content_types() {
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "expected 200 for {}", path);
+        assert_eq!(resp.status(), StatusCode::OK, "expected 200 for {path}");
         let content_type = resp
             .headers()
             .get("content-type")
@@ -4014,10 +4010,7 @@ async fn test_static_content_types() {
             .unwrap_or("");
         assert!(
             content_type.starts_with(expected_type),
-            "expected {} to start with '{}', got '{}'",
-            path,
-            expected_type,
-            content_type
+            "expected {path} to start with '{expected_type}', got '{content_type}'"
         );
     }
 }

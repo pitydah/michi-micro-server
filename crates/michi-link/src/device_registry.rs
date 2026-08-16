@@ -61,8 +61,7 @@ impl DeviceEntry {
         }
         if !self.permissions.has(permission) {
             return Err(LinkError::InsufficientPermissions(format!(
-                "{:?}",
-                permission
+                "{permission:?}"
             )));
         }
         Ok(())

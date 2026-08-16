@@ -95,7 +95,7 @@ pub async fn sync_group_handler(
         None => Err(v1_error(
             StatusCode::NOT_FOUND,
             "GROUP_NOT_FOUND",
-            &format!("group {} not found", group_id),
+            &format!("group {group_id} not found"),
         )),
     }
 }
@@ -139,7 +139,7 @@ pub async fn get_receiver_handler(
         v1_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
-            &format!("receiver not found: {}", id),
+            &format!("receiver not found: {id}"),
         )
     })?;
     Ok(Json(serde_json::json!({
@@ -287,11 +287,11 @@ async fn discover_mdns_receivers() -> Result<Vec<serde_json::Value>, String> {
     use mdns_sd::{ServiceDaemon, ServiceEvent};
     use std::time::Duration;
 
-    let daemon = ServiceDaemon::new().map_err(|e| format!("mDNS daemon: {}", e))?;
+    let daemon = ServiceDaemon::new().map_err(|e| format!("mDNS daemon: {e}"))?;
     let service_type = "_michi-receiver._tcp.local.";
     let receiver = daemon
         .browse(service_type)
-        .map_err(|e| format!("mDNS browse: {}", e))?;
+        .map_err(|e| format!("mDNS browse: {e}"))?;
 
     let result: Vec<serde_json::Value> = Vec::new();
     let discovered = std::sync::Mutex::new(result);

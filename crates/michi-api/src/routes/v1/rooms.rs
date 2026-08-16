@@ -72,7 +72,7 @@ pub async fn create_room_handler(
         return Err(v1_error(
             StatusCode::BAD_REQUEST,
             "UNKNOWN_RECEIVERS",
-            &format!("{:?}", unknown),
+            &format!("{unknown:?}"),
         ));
     }
     Ok(Json(serde_json::json!({

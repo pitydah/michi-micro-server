@@ -87,17 +87,14 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                 }
                                 // Notify local UI clients
                                 let tid = track_id
-                                    .map(|id| format!("\"{}\"", id))
+                                    .map(|id| format!("\"{id}\""))
                                     .unwrap_or_else(|| "null".into());
                                 let msg = format!(
                                     "{{\"type\":\"sync_state\",\
                                      \"track_id\":{tid},\
-                                     \"position_ms\":{pos},\
-                                     \"playing\":{play},\
-                                     \"volume\":{vol}}}",
-                                    pos = position_ms,
-                                    play = playing,
-                                    vol = volume,
+                                     \"position_ms\":{position_ms},\
+                                     \"playing\":{playing},\
+                                     \"volume\":{volume}}}",
                                 );
                                 let _ = state_clone.tx.send(msg);
                             }
