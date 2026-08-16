@@ -5,15 +5,16 @@ use axum::{
     Json,
 };
 
-const CSS: &str = concat!(
-    include_str!("../static/styles.css"),
-    "\n",
-    include_str!("../static/hero-cat.css")
-);
+const CSS: &str = include_str!("../static/styles.css");
+const HERO_CAT_CSS: &str = include_str!("../static/hero-cat.css");
 const JS: &str = include_str!("../static/app.js");
 const LOGO: &[u8] = include_bytes!("../static/assets/michi-logo.svg");
 const FAVICON_SVG: &[u8] = include_bytes!("../static/assets/michi-micro-server.svg");
 const FAVICON_PNG: &[u8] = include_bytes!("../static/assets/michi-micro-server.png");
+const ICON_180_PNG: &[u8] = include_bytes!("../static/assets/michi-micro-server-180.png");
+const ICON_192_PNG: &[u8] = include_bytes!("../static/assets/michi-micro-server-192.png");
+const ICON_512_PNG: &[u8] = include_bytes!("../static/assets/michi-micro-server-512.png");
+const HERO_CAT: &[u8] = include_bytes!("../static/assets/michi-hero-cat.webp");
 
 const I18N_EN: &str = include_str!("../static/i18n/en.json");
 const I18N_ES: &str = include_str!("../static/i18n/es.json");
@@ -29,6 +30,13 @@ pub async fn styles_css() -> impl IntoResponse {
     Response::builder()
         .header("content-type", "text/css; charset=utf-8")
         .body(axum::body::Body::from(CSS))
+        .unwrap()
+}
+
+pub async fn hero_cat_css() -> impl IntoResponse {
+    Response::builder()
+        .header("content-type", "text/css; charset=utf-8")
+        .body(axum::body::Body::from(HERO_CAT_CSS))
         .unwrap()
 }
 
@@ -60,6 +68,34 @@ pub async fn favicon_png() -> impl IntoResponse {
         .header("content-type", "image/png")
         .header("cache-control", "public, max-age=86400")
         .body(axum::body::Body::from(FAVICON_PNG))
+        .unwrap()
+}
+
+fn png_response(bytes: &'static [u8]) -> Response {
+    Response::builder()
+        .header("content-type", "image/png")
+        .header("cache-control", "public, max-age=86400")
+        .body(axum::body::Body::from(bytes))
+        .unwrap()
+}
+
+pub async fn icon_180_png() -> impl IntoResponse {
+    png_response(ICON_180_PNG)
+}
+
+pub async fn icon_192_png() -> impl IntoResponse {
+    png_response(ICON_192_PNG)
+}
+
+pub async fn icon_512_png() -> impl IntoResponse {
+    png_response(ICON_512_PNG)
+}
+
+pub async fn hero_cat_webp() -> impl IntoResponse {
+    Response::builder()
+        .header("content-type", "image/webp")
+        .header("cache-control", "public, max-age=86400")
+        .body(axum::body::Body::from(HERO_CAT))
         .unwrap()
 }
 

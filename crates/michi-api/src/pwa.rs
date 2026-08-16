@@ -11,24 +11,40 @@ const MANIFEST_JSON: &str = r##"{
   "short_name": "Michi",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#08070d",
-  "theme_color": "#090711",
+  "background_color": "#090B10",
+  "theme_color": "#090B10",
   "icons": [
     {
-      "src": "/static/assets/michi-logo.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "src": "/static/assets/michi-micro-server-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/assets/michi-micro-server-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
     }
   ]
 }"##;
 
-const SW_JS: &str = r#"const CACHE = 'michi-v4';
+const SW_JS: &str = r#"const CACHE = 'michi-v8';
 
 self.addEventListener('install', function(e) {
   e.waitUntil(
     caches.open(CACHE).then(function(c) {
-      return c.addAll(['/']);
+      return c.addAll([
+        '/',
+        '/static/styles.css?v=9',
+        '/static/hero-cat.css?v=4',
+        '/static/app.js?v=9',
+        '/static/assets/michi-hero-cat.webp?v=1',
+        '/static/assets/michi-micro-server.svg',
+        '/static/assets/michi-micro-server-180.png',
+        '/static/assets/michi-micro-server-192.png',
+        '/static/assets/michi-micro-server-512.png'
+      ]);
     })
   );
 });

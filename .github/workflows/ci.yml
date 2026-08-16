@@ -52,14 +52,18 @@ jobs:
           push: false
           load: true
           tags: michi-server:test
-      - name: Smoke test
+      - name: Smoke test and Contract verification
         run: |
           docker run -d --name michi-test -p 9090:9090 \
             -e MICHI_PORT=9090 \
+            -e MICHI_AUTH_USERNAME=admin \
+            -e MICHI_AUTH_PASSWORD=admin \
             michi-server:test
           sleep 5
-          curl -f http://127.0.0.1:9090/api/status || exit 1
+          curl -f http://127.0.0.1:9090/health/live || exit 1
+          curl -f http://127.0.0.1:9090/api/v1/status || exit 1
           curl -f http://127.0.0.1:9090/ || exit 1
+          python3 tests/e2e/test_player_micro_contract_compatibility.py --url http://127.0.0.1:9090 --username admin --password admin || exit 1
           docker stop michi-test
           docker rm michi-test
 
@@ -92,7 +96,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

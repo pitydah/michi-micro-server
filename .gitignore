@@ -1,8 +1,13 @@
-```
 # Rust/Cargo
 target/
-Cargo.lock
 **/*.rs.bk
+
+# Local runtime & database
+config/
+cache/
+*.db
+*.db-shm
+*.db-wal
 
 # Dependencies
 **/node_modules/
@@ -49,4 +54,7 @@ htmlcov/
 *.Z
 *.lz
 *.lzo
-```
+
+# Local AI runtime state
+.atl/
+.impeccable/

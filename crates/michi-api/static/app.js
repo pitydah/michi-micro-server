@@ -151,7 +151,7 @@ function renderLoading(container, lines) {
 function renderEmpty(container, icon, title, msg) {
   if (!container) return;
   container.innerHTML =
-    '<div class="empty-state">' +
+    '<div class="empty-state mascot">' +
     '<div class="icon">' + (icon || '📭') + '</div>' +
     '<p><strong>' + esc(title || 'Nothing here') + '</strong></p>' +
     '<p style="font-size:.78rem;margin-top:4px">' + esc(msg || '') + '</p>' +
@@ -233,7 +233,7 @@ function setTheme(theme, persist) {
   document.documentElement.dataset.themePreference = selected;
   document.querySelector('meta[name="theme-color"]')?.setAttribute(
     'content',
-    resolvedTheme(selected) === 'light' ? '#f4f1f7' : '#090711'
+    resolvedTheme(selected) === 'light' ? '#EFF2F4' : '#090B10'
   );
   $$('.theme-options [data-theme-option]').forEach(function (button) {
     button.classList.toggle('active', button.dataset.themeOption === selected);
@@ -450,8 +450,14 @@ function renderDashboard() {
 
   const lib = d.library || {};
   const health = d.health || {};
-  const eco = d.ecosystem || {};
   const play = d.playback || {};
+
+  const nowTitle = $('#dashboard-now-title');
+  const nowDetail = $('#dashboard-now-detail');
+  const nowState = $('#dashboard-now-state');
+  if (nowTitle) nowTitle.textContent = play.has_current ? (play.title || 'Playing') : 'No track selected';
+  if (nowDetail) nowDetail.textContent = play.has_current ? (play.artist || play.album || '') : 'Choose a track from your library to begin.';
+  if (nowState) nowState.textContent = play.has_current ? (play.state || 'Playing') : 'Ready to listen';
 
   function fmtDur(ms) {
     if (!ms) return '0h';
@@ -466,9 +472,7 @@ function renderDashboard() {
     '<div class="card" style="animation-delay:40ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h18"/><rect x="3" y="8" width="18" height="12" rx="2"/></svg></div><div class="card-value">' + val(lib.albums, 'N/D') + '</div><div class="card-label">Albums</div></div>' +
     '<div class="card" style="animation-delay:80ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + val(lib.artists, 'N/D') + '</div><div class="card-label">Artists</div></div>' +
     '<div class="card" style="animation-delay:120ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="card-value">' + fmtDur(lib.total_duration_ms) + '</div><div class="card-label">Duration</div></div>' +
-    '<div class="card" style="animation-delay:160ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg></div><div class="card-value">' + (play.has_current ? (play.title || 'Playing') : '--') + '</div><div class="card-label">Now Playing ' + (play.has_current ? '<span class="badge stable">' + (play.state || 'playing') + '</span>' : '<span class="badge disabled">stopped</span>') + '</div></div>' +
-    '<div class="card" style="animation-delay:200ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + val(health.missing_files, 0) + '</div><div class="card-label">Missing Files ' + (health.is_healthy ? '<span class="badge stable">OK</span>' : '<span class="badge error">issues</span>') + '</div></div>' +
-    '<div class="card" style="animation-delay:240ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><div class="card-value">' + val(eco.receivers_online, 0) + '</div><div class="card-label">Receivers ' + (eco.receivers_online > 0 ? '<span class="badge stable">Online</span>' : '<span class="badge disabled">offline</span>') + '</div></div>';
+    '<div class="card" style="animation-delay:160ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + val(health.missing_files, 0) + '</div><div class="card-label">Missing files ' + (health.is_healthy ? '<span class="badge stable">Healthy</span>' : '<span class="badge error">Needs attention</span>') + '</div></div>';
 
   // Update meta
   var meta = $('#dashboard-meta');
@@ -632,14 +636,14 @@ function renderQueue() {
   const container = $('#queue-content');
   if (!container) return;
   if (State.queue.length === 0) {
-    container.innerHTML = '<p style="color:var(--text-dim);font-size:.78rem">Queue empty</p>';
+    container.innerHTML = '<p class="queue-empty">' + t('queue_empty') + '</p>';
     return;
   }
   container.innerHTML = State.queue.map(function (t, i) {
-    return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:.75rem">' +
-      '<span style="color:var(--text-dim);min-width:16px">' + (i + 1) + '</span>' +
-      '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(t.title || 'Unknown') + '</span>' +
-      '<span style="color:var(--text-dim);font-size:.65rem">' + fmtDur(t.duration_ms) + '</span>' +
+    return '<div class="queue-row">' +
+      '<span class="queue-index">' + String(i + 1).padStart(2, '0') + '</span>' +
+      '<span class="queue-title">' + esc(t.title || 'Unknown') + '</span>' +
+      '<span class="queue-duration">' + fmtDur(t.duration_ms) + '</span>' +
       '</div>';
   }).join('');
 }
@@ -718,6 +722,20 @@ function updateNowPlaying(t) {
   }
   const dur = $('#np-duration');
   if (dur) dur.textContent = fmtDur(t.duration_ms);
+  animateNowPlaying();
+}
+
+function animateNowPlaying() {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  [$('#np-cover'), $('.np-info')].forEach(function (element) {
+    if (!element) return;
+    element.classList.remove('material-handoff');
+    void element.offsetWidth;
+    element.classList.add('material-handoff');
+    element.addEventListener('animationend', function () {
+      element.classList.remove('material-handoff');
+    }, { once: true });
+  });
 }
 
 function updateMiniPlayer(t) {
@@ -1830,4 +1848,3 @@ document.addEventListener('keydown', function (e) {
     playPause();
   }
 });
-

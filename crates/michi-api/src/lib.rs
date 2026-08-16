@@ -1508,6 +1508,7 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(root::root_handler))
         .route("/static/styles.css", get(static_files::styles_css))
+        .route("/static/hero-cat.css", get(static_files::hero_cat_css))
         .route("/static/app.js", get(static_files::app_js))
         .route("/static/assets/michi-logo.svg", get(static_files::logo_svg))
         .route(
@@ -1517,6 +1518,22 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/static/assets/michi-micro-server.png",
             get(static_files::favicon_png),
+        )
+        .route(
+            "/static/assets/michi-micro-server-180.png",
+            get(static_files::icon_180_png),
+        )
+        .route(
+            "/static/assets/michi-micro-server-192.png",
+            get(static_files::icon_192_png),
+        )
+        .route(
+            "/static/assets/michi-micro-server-512.png",
+            get(static_files::icon_512_png),
+        )
+        .route(
+            "/static/assets/michi-hero-cat.webp",
+            get(static_files::hero_cat_webp),
         )
         .route("/static/i18n/:lang", get(static_files::i18n_handler))
         .route("/manifest.json", get(pwa::manifest_json))

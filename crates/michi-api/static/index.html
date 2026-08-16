@@ -4,18 +4,20 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Michi Micro Server - Control panel for your home music server">
-    <meta name="theme-color" content="#090711">
+    <meta name="theme-color" content="#090B10">
     <link rel="manifest" href="/manifest.json">
-    <link rel="icon" type="image/svg+xml" href="/static/assets/michi-logo.svg">
+    <link rel="icon" type="image/svg+xml" href="/static/assets/michi-micro-server.svg">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/assets/michi-micro-server-192.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/michi-micro-server-180.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=4">
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css?v=9">
+    <link rel="stylesheet" href="/static/hero-cat.css?v=4">
     <title>Michi Micro Server</title>
 </head>
 <body>
     <a class="skip-link" href="#main-content">Skip to content</a>
-    <div class="ambient-canvas" aria-hidden="true"><span></span><span></span><span></span></div>
     <div class="toast" id="toast" role="alert" aria-live="assertive"></div>
     <audio id="audio-player" preload="none"></audio>
     <button class="nav-backdrop" id="nav-backdrop" type="button" aria-label="Close navigation" onclick="toggleNavigation(false)"></button>
@@ -23,7 +25,7 @@
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar" role="navigation" aria-label="Main navigation">
         <div class="sidebar-header">
-            <div class="brand-mark"><img src="/static/assets/michi-logo.svg" alt="" class="sidebar-logo-img"></div>
+            <div class="brand-mark"><img src="/static/assets/michi-micro-server.svg" alt="" class="sidebar-logo-img"></div>
             <div class="sidebar-brand">
                 <h1>Michi</h1>
                 <span class="sub">Micro Server</span>
@@ -32,7 +34,7 @@
         </div>
         <nav class="sidebar-nav" aria-label="Sections">
             <div class="nav-section">
-                <h3 data-i18n="nav_section.main">Main</h3>
+                <h3 data-i18n="nav_section.main">Listen</h3>
                 <button class="nav-item active" data-section="dashboard" onclick="showSection('dashboard')" aria-current="page">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="4" rx="1"/>
@@ -46,20 +48,27 @@
                     </svg>
                     <span data-i18n="nav.library">Library</span>
                 </button>
-                <button class="nav-item" data-section="scan" onclick="showSection('scan')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/>
-                    </svg>
-                    <span data-i18n="nav.scan">Scan</span>
-                </button>
-            </div>
-            <div class="nav-section">
-                <h3 data-i18n="nav_section.server">Server</h3>
                 <button class="nav-item" data-section="playlists" onclick="showSection('playlists')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
                     </svg>
                     <span data-i18n="nav.playlists">Playlists</span>
+                </button>
+                <button class="nav-item" data-section="broadcast" onclick="showSection('broadcast')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 2a14.5 14.5 0 0 0 0 20"/><path d="M12 6a10.5 10.5 0 0 0 0 12"/>
+                        <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>
+                    </svg>
+                    <span data-i18n="nav.broadcast">Broadcast</span>
+                </button>
+            </div>
+            <div class="nav-section">
+                <h3 data-i18n="nav_section.server">Server</h3>
+                <button class="nav-item" data-section="scan" onclick="showSection('scan')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/>
+                    </svg>
+                    <span data-i18n="nav.scan">Scan</span>
                 </button>
                 <button class="nav-item" data-section="michilink" onclick="showSection('michilink')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -96,13 +105,6 @@
                     </svg>
                     <span data-i18n="nav.chains">Chains</span>
                 </button>
-                <button class="nav-item" data-section="broadcast" onclick="showSection('broadcast')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M12 2a14.5 14.5 0 0 0 0 20" stroke="currentColor"/><path d="M12 6a10.5 10.5 0 0 0 0 12" stroke="currentColor"/>
-                        <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>
-                    </svg>
-                    <span data-i18n="nav.broadcast">Broadcast</span>
-                </button>
             </div>
         </nav>
         <div class="sidebar-footer">
@@ -123,14 +125,15 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
         </button>
         <div class="topbar-context">
-            <span>Control room</span>
+            <span>Private library</span>
             <strong id="current-section-title">Dashboard</strong>
         </div>
         <div class="search-wrap">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
             </svg>
-            <input class="topbar-search" id="search-input" type="text" placeholder="Search tracks..." aria-label="Search">
+            <label class="search-label" for="search-input">Search your library</label>
+            <input class="topbar-search" id="search-input" type="text" placeholder="Search your library" aria-label="Search your library" data-i18n="search_placeholder">
         </div>
         <div class="topbar-actions">
             <span class="status-pill" id="status-pill"><span class="server-status-dot"></span>Online</span>
@@ -148,16 +151,33 @@
 
         <!-- Dashboard -->
         <section class="section-page" id="page-dashboard">
-            <div class="hero hero-dashboard">
-                <div class="hero-kicker"><span class="live-beacon"></span> Live system overview</div>
-                <h2>Your music, <span>perfectly orchestrated.</span></h2>
-                <p>One refined control room for your library, devices and listening sessions.</p>
-                <div class="hero-meta" id="dashboard-meta"></div>
-                <div class="hero-signal" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="hero hero-dashboard listening-stage">
+                <div class="hero-atmosphere" aria-hidden="true">
+                    <div class="hero-equalizer">
+                        <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+                    </div>
+                    <div class="hero-rings"><span></span><span></span><span></span></div>
+                </div>
+                <picture class="hero-cat-media">
+                    <img src="/static/assets/michi-hero-cat.webp?v=1" alt="Orange tabby cat wearing headphones, illuminated by warm audio light." width="1600" height="800" fetchpriority="high" decoding="async">
+                </picture>
+                <div class="listening-copy" aria-live="polite">
+                    <div class="listening-meta"><span class="live-beacon"></span><span id="dashboard-now-state">Ready to listen</span></div>
+                    <h2 id="dashboard-now-title">Your music, at home</h2>
+                    <p id="dashboard-now-detail">Choose a track from your library to begin.</p>
+                    <div class="listening-actions">
+                        <button class="btn btn-primary" onclick="showSection('library')">Browse library</button>
+                        <button class="btn btn-ghost" onclick="playPause()">Play or pause</button>
+                    </div>
+                    <span class="dashboard-meta" id="dashboard-meta"></span>
+                </div>
             </div>
-            <div class="card-grid" id="dashboard-cards"></div>
+            <div class="library-health">
+                <div class="section-header"><h3>Library health</h3><span class="sub">At a glance</span></div>
+                <div class="card-grid" id="dashboard-cards"></div>
+            </div>
             <div class="section">
-                <div class="section-header"><h3>Recent Tracks</h3><span class="sub" id="tracks-count">--</span></div>
+                <div class="section-header"><h3 data-i18n="recent_tracks">Recent Tracks</h3><span class="sub" id="tracks-count">--</span></div>
                 <div class="table-wrap" id="tracks-table"></div>
             </div>
         </section>
@@ -224,6 +244,7 @@
                     </div>
                 </div>
                 <div id="qr-empty" class="qr-empty">
+                    <div class="station-cat" aria-hidden="true"></div>
                     <button class="btn btn-primary" onclick="generateQR()">Generate QR Code</button>
                 </div>
             </div>
@@ -303,6 +324,7 @@
                             <button class="btn btn-primary" onclick="downloadBackup()">Download Backup</button>
                         </div>
                         <p style="color:var(--text-3);font-size:.78rem;margin-top:8px">Export all tracks, playlists, stars, and play history as a JSON file.</p>
+                    </div>
                 </div>
             </div>
         </section>
@@ -542,6 +564,13 @@
                     <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="createGroup()">Create Group</button></div>
                     <div id="groups-list" class="panel-result"></div>
                 </div>
+                <div class="panel">
+                    <div class="panel-header">Room Groups</div>
+                    <div class="panel-row"><span class="panel-label">Name</span><input type="text" id="rg-name" class="panel-input" placeholder="Downstairs"></div>
+                    <div class="panel-row"><span class="panel-label">Mode</span><select id="rg-mode" class="panel-input"><option value="relax">Relax</option><option value="party">Party</option><option value="custom">Custom</option></select></div>
+                    <div class="panel-row"><span class="panel-label">Receivers</span><input type="text" id="rg-receivers" class="panel-input" placeholder="comma-separated IDs"></div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="createRoomGroup()">Create Room Group</button></div>
+                </div>
                 <div class="section">
                     <div class="section-header"><h3>Room Groups</h3></div>
                     <div id="room-groups-list"></div>
@@ -649,7 +678,7 @@
 
     <!-- Right panel: Now Playing -->
     <aside class="now-playing" role="complementary" aria-label="Now playing">
-        <h3>Now Playing</h3>
+        <div class="rail-heading"><span>Listening now</span><h3 data-i18n="now_playing">Now Playing</h3></div>
         <div class="np-cover" id="np-cover">
             <div class="np-cover-placeholder">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" width="64" height="64">
@@ -675,8 +704,8 @@
             </button>
         </div>
         <div class="np-queue">
-            <h4>Queue</h4>
-            <div id="queue-content"><p style="color:var(--text-dim);font-size:.78rem">Queue empty</p></div>
+            <h4>Up Next</h4>
+            <div id="queue-content"><p class="queue-empty" data-i18n="queue_empty">Queue empty</p></div>
         </div>
     </aside>
 
@@ -708,6 +737,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=5"></script>
+    <script src="/static/app.js?v=9"></script>
 </body>
 </html>

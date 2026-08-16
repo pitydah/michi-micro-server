@@ -1,0 +1,50 @@
+schema: spec-driven
+
+context: |
+  Rust 2021 Cargo workspace, v0.2.0, GPL-3.0-only. Binary: apps/michi-server.
+  21 crates: michi-api, client, config, connect, core, db, homeassistant,
+  identity, ingest, link, m3u, metadata, onboard, opensubsonic, receivers,
+  rooms, scanner, security, streaming, sync, tui. Stack: axum 0.7, tokio,
+  sqlx/sqlite, utoipa, rustls. WebUI: static assets served by michi-api.
+  Python sidecars: clients/python-michi-*.
+  Program: v1-stabilization toward v1.0.0 — no mass rewrite, feature freeze,
+  small reversible slices, audio-only scope, amd64+arm64, Phase 0/1 first.
+
+rules:
+  proposal:
+    - Each change MUST be a small reversible slice; no mass rewrite.
+    - MUST state rollback plan and feature-freeze impact (audio-only scope).
+  spec:
+    - Use Given/When/Then for scenarios.
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY).
+    - Scope to audio pipeline and stabilization; no new user features.
+  design:
+    - Prefer small reversible changes over architectural rewrites.
+    - Document architecture decisions with rationale.
+    - Consider amd64+arm64 portability in every design.
+  tasks:
+    - Group by phase (Phase 0/1 first), use hierarchical numbering.
+    - Keep tasks completable in one session and reversible.
+  apply:
+    guidelines:
+      - Follow existing crate patterns; do not touch uncommitted WebUI work.
+      - Do not commit or push during init; slice commits per work unit.
+    tdd: false           # stabilization: characterization + regression focus
+    test_command: "cargo test --workspace"
+  verify:
+    test_command: "cargo test --workspace"
+    build_command: "cargo check --workspace && cargo clippy --workspace --all-targets -- -D warnings"
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas.
+
+testing:
+  strict_tdd: false
+  runner: cargo
+  unit: cargo test --workspace
+  integration: cargo test --workspace --test api --test receiver_simulator_integration -- --ignored
+  e2e: python3 tests/e2e/test_player_micro_contract_compatibility.py [--url http://127.0.0.1:8096]
+  coverage: cargo tarpaulin --workspace --out html (tool not installed locally)
+  linter: cargo clippy --workspace --all-targets -- -D warnings
+  formatter: cargo fmt --check
+  typecheck: cargo check --workspace (RUSTFLAGS="-D warnings" in CI)

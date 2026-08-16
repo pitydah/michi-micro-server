@@ -3990,6 +3990,12 @@ async fn test_static_content_types() {
         ("/static/styles.css", "text/css"),
         ("/static/app.js", "application/javascript"),
         ("/static/assets/michi-micro-server.svg", "image/svg+xml"),
+        ("/static/assets/michi-micro-server.png", "image/png"),
+        ("/static/assets/michi-micro-server-180.png", "image/png"),
+        ("/static/assets/michi-micro-server-192.png", "image/png"),
+        ("/static/assets/michi-micro-server-512.png", "image/png"),
+        ("/static/assets/michi-hero-cat.webp", "image/webp"),
+        ("/manifest.json", "application/json"),
     ];
 
     for (path, expected_type) in tests {
@@ -4012,6 +4018,57 @@ async fn test_static_content_types() {
             content_type
         );
     }
+}
+
+#[tokio::test]
+async fn test_pwa_manifest_uses_official_png_icons() {
+    let (app, _pool) = make_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/manifest.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let manifest: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let icons = manifest["icons"].as_array().unwrap();
+
+    assert_eq!(icons.len(), 2);
+    assert_eq!(icons[0]["src"], "/static/assets/michi-micro-server-192.png");
+    assert_eq!(icons[0]["sizes"], "192x192");
+    assert_eq!(icons[0]["type"], "image/png");
+    assert_eq!(icons[0]["purpose"], "any");
+    assert_eq!(icons[1]["src"], "/static/assets/michi-micro-server-512.png");
+    assert_eq!(icons[1]["sizes"], "512x512");
+    assert_eq!(icons[1]["type"], "image/png");
+    assert_eq!(icons[1]["purpose"], "any");
+}
+
+#[tokio::test]
+async fn test_root_references_official_browser_icons() {
+    let (app, _pool) = make_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = body_text(resp).await;
+
+    assert!(html.contains(
+        "rel=\"icon\" type=\"image/svg+xml\" href=\"/static/assets/michi-micro-server.svg\""
+    ));
+    assert!(html.contains("rel=\"icon\" type=\"image/png\" sizes=\"192x192\" href=\"/static/assets/michi-micro-server-192.png\""));
+    assert!(html.contains("rel=\"apple-touch-icon\" sizes=\"180x180\" href=\"/static/assets/michi-micro-server-180.png\""));
+    assert!(html.contains(
+        "src=\"/static/assets/michi-micro-server.svg\" alt=\"\" class=\"sidebar-logo-img\""
+    ));
 }
 
 #[tokio::test]
