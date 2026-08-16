@@ -5,6 +5,18 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerState {
+    Starting,
+    Running,
+    Idle,
+    Waiting,
+    Blocked,
+    Stopped,
+    Failed,
+}
+
 struct Watchdog {
     health: Arc<RwLock<Vec<WorkerHealth>>>,
 }
@@ -13,6 +25,7 @@ struct Watchdog {
 struct WorkerHealth {
     name: &'static str,
     last_heartbeat: Arc<RwLock<tokio::time::Instant>>,
+    state: Arc<RwLock<WorkerState>>,
 }
 
 impl WorkerHealth {
@@ -20,7 +33,14 @@ impl WorkerHealth {
         Self {
             name,
             last_heartbeat: Arc::new(RwLock::new(tokio::time::Instant::now())),
+            state: Arc::new(RwLock::new(WorkerState::Idle)),
         }
+    }
+
+    #[allow(dead_code)]
+    async fn set_state(&self, new_state: WorkerState) {
+        *self.state.write().await = new_state;
+        *self.last_heartbeat.write().await = tokio::time::Instant::now();
     }
 
     async fn tick(&self) {
@@ -50,13 +70,17 @@ impl Watchdog {
                 let now = tokio::time::Instant::now();
                 let workers = health.read().await;
                 for w in workers.iter() {
-                    let last = *w.last_heartbeat.read().await;
-                    if now.duration_since(last) > Duration::from_secs(15) {
-                        warn!(
-                            "watchdog: worker '{}' last heartbeat {}s ago, may be hung",
-                            w.name,
-                            now.duration_since(last).as_secs()
-                        );
+                    let st = *w.state.read().await;
+                    if st == WorkerState::Running {
+                        let last = *w.last_heartbeat.read().await;
+                        if now.duration_since(last) > Duration::from_secs(15) {
+                            warn!(
+                                "watchdog: worker '{}' in state {:?} last heartbeat {}s ago, may be hung",
+                                w.name,
+                                st,
+                                now.duration_since(last).as_secs()
+                            );
+                        }
                     }
                 }
             }

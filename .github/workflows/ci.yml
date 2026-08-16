@@ -37,7 +37,15 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  ci-receivers:
+  ci-stream-contract:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Michi Link v1-lite Stream Contract Drift
+        run: python3 scripts/test_stream_contract_drift.py
+
+  ci-receiver-contract-simulator:
     runs-on: ubuntu-latest
     needs: ci-rust
     steps:
@@ -51,15 +59,15 @@ jobs:
       - name: Run Receiver Simulator E2E Integration Tests (Matrix & Fault Injection)
         run: bash scripts/test_receiver_e2e.sh 8080 8081
 
-  ci-snapcast:
+  ci-snapcast-contract-mock:
     runs-on: ubuntu-latest
     needs: ci-rust
     steps:
       - uses: actions/checkout@v4
-      - name: Run Snapcast Multi-Client Real E2E Integration Tests
+      - name: Run Snapcast Multi-Client Contract Mock Tests
         run: bash scripts/test_snapcast_e2e.sh 1780
 
-  ci-homeassistant:
+  ci-mqtt-contract-simulator:
     runs-on: ubuntu-latest
     needs: ci-rust
     steps:
@@ -70,10 +78,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
-      - name: Run Home Assistant & MQTT Real E2E Integration Tests
+      - name: Run Home Assistant & MQTT Contract Simulator Tests
         run: bash scripts/test_homeassistant_e2e.sh 18883 18884 9098
 
-  ci-appliance:
+  ci-generic-linux-appliance:
     runs-on: ubuntu-latest
     needs: ci-rust
     steps:
@@ -84,10 +92,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config sqlite3
-      - name: Run Appliance Qualification E2E (RPi 4/5, CasaOS, ZimaOS)
+      - name: Run Appliance Qualification on Generic Linux Runner
         run: bash scripts/test_appliance_e2e.sh 9092
 
-  ci-reliability:
+  ci-reliability-short:
     runs-on: ubuntu-latest
     needs: ci-rust
     steps:
@@ -98,12 +106,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config sqlite3
-      - name: Run Master Reliability & Stability Qualification Battery
+      - name: Run Master Reliability & Short Stability Smoke Suite
         run: bash scripts/test_reliability_qualification.sh 9089
 
-  ci-docker:
+  ci-docker-amd64:
     runs-on: ubuntu-latest
-    needs: [ci-rust, ci-receivers, ci-snapcast, ci-homeassistant, ci-appliance, ci-reliability]
+    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-generic-linux-appliance, ci-reliability-short]
     steps:
       - uses: actions/checkout@v4
       - name: Set up QEMU
@@ -132,9 +140,9 @@ jobs:
           docker stop michi-test
           docker rm michi-test
 
-  ci-arm64:
+  ci-arm64-qemu:
     runs-on: ubuntu-latest
-    needs: [ci-rust, ci-receivers, ci-snapcast, ci-homeassistant, ci-appliance, ci-reliability]
+    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-generic-linux-appliance, ci-reliability-short]
     steps:
       - uses: actions/checkout@v4
       - name: Set up QEMU for ARM64
@@ -165,7 +173,7 @@ jobs:
           docker rm michi-arm64
 
   release-ghcr:
-    needs: [ci-rust, ci-receivers, ci-snapcast, ci-homeassistant, ci-appliance, ci-reliability, ci-docker, ci-arm64]
+    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-generic-linux-appliance, ci-reliability-short, ci-docker-amd64, ci-arm64-qemu]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

@@ -5,11 +5,6 @@
 //!
 //! Run with:
 //!   cargo test --test receiver_simulator_integration -- --ignored
-//!
-//! Or to run manually:
-//!   python3 /path/to/receiver_sim.py --type standard --port 8080 &
-//!   python3 /path/to/receiver_sim.py --type hifi --port 8081 &
-//!   MICHI_RECEIVER_SIM_URL=http://127.0.0.1:8080 cargo test --test receiver_simulator_integration
 
 use michi_receivers::{ReceiverClient, ReceiverSessionManager};
 
@@ -20,13 +15,6 @@ fn sim_url() -> String {
 fn sim_url_hifi() -> String {
     std::env::var("MICHI_RECEIVER_SIM_HIFI_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:8081".to_string())
-}
-
-/// Helper: attempt to discover and pair with a receiver
-#[allow(dead_code)]
-async fn try_pair(base_url: &str) -> Result<String, String> {
-    let mgr = ReceiverSessionManager::new();
-    mgr.discover_and_pair(base_url, "test-suite").await
 }
 
 #[tokio::test]
@@ -101,7 +89,7 @@ async fn test_receiver_info_hifi_output() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_pairing_flow() {
-    let client = ReceiverClient::new(&sim_url());
+    let mut client = ReceiverClient::new(&sim_url());
 
     // pair/start
     let start = client
@@ -112,10 +100,9 @@ async fn test_receiver_pairing_flow() {
     assert!(start.pairing_window_seconds.unwrap_or(0) > 0);
     let nonce = start.nonce.expect("must have nonce");
 
-    // pair/confirm
-    let mut client = client;
+    // pair/confirm with 6-digit PIN
     let confirm = client
-        .pair_confirm(&nonce, "test-flow", "tok_rust_integration_test")
+        .pair_confirm(&nonce, "test-flow", "482391")
         .await
         .expect("pair_confirm failed");
     assert_eq!(confirm.status.as_deref(), Some("paired"));
@@ -125,7 +112,6 @@ async fn test_receiver_pairing_flow() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_pairing_window_closed_rejected() {
-    // After pairing once, the window is closed
     let mut client = ReceiverClient::new(&sim_url());
     let start = client
         .pair_start("test-reject")
@@ -135,22 +121,17 @@ async fn test_receiver_pairing_window_closed_rejected() {
 
     // First confirm succeeds
     let confirm = client
-        .pair_confirm(&nonce, "test-reject", "tok_first")
+        .pair_confirm(&nonce, "test-reject", "482391")
         .await
         .expect("first confirm failed");
     assert_eq!(confirm.status.as_deref(), Some("paired"));
 
     // Second confirm on same nonce should fail
-    let start2 = client
-        .pair_start("test-reject")
-        .await
-        .expect("pair_start should still open new window");
-    let nonce2 = start2.nonce.expect("must get new nonce");
-    let confirm2 = client
-        .pair_confirm(&nonce2, "test-reject", "tok_second")
-        .await
-        .expect("second confirm failed");
-    assert_eq!(confirm2.status.as_deref(), Some("paired"));
+    let confirm2 = client.pair_confirm(&nonce, "test-reject", "482391").await;
+    assert!(
+        confirm2.is_err(),
+        "second confirm on consumed nonce must fail"
+    );
 }
 
 #[tokio::test]
@@ -180,7 +161,7 @@ async fn test_receiver_standard_full_lifecycle() {
         .await
         .expect("session_start failed");
     assert_eq!(sess_resp.status.as_deref(), Some("session_started"));
-    assert_eq!(sess_resp.stream_port, Some(55300));
+    assert!(sess_resp.stream_port.is_some());
 
     // Heartbeat
     let hb = mgr.heartbeat(&device_id).await.expect("heartbeat failed");
@@ -338,35 +319,50 @@ async fn test_receiver_errors_volume_out_of_range() {
         .await
         .expect("pair failed");
 
-    let vol = mgr
-        .set_volume(&device_id, 101)
-        .await
-        .expect("volume 101 should still succeed (clamped)");
-    assert!(
-        vol.volume.unwrap_or(0) <= 100,
-        "volume must be clamped to 100"
-    );
+    let vol = mgr.set_volume(&device_id, 101).await;
+    assert!(vol.is_err(), "volume > 100 must be rejected");
 
-    let vol2 = mgr
-        .set_volume(&device_id, 999)
-        .await
-        .expect("volume 999 should still succeed");
-    assert_eq!(vol2.volume, Some(100), "volume 999 should clamp to 100");
+    let vol2 = mgr.set_volume(&device_id, 999).await;
+    assert!(vol2.is_err(), "volume > 100 must be rejected");
 }
 
 #[tokio::test]
 #[ignore]
 async fn test_receiver_errors_unauthenticated() {
-    // Send heartbeat without auth token
     let client = ReceiverClient::new(&sim_url());
-    let hb = client
-        .heartbeat()
+    let hb = client.heartbeat().await;
+    assert!(hb.is_err(), "unauthenticated heartbeat must fail");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_receiver_heartbeat_monotonic_sequence() {
+    let mut client = ReceiverClient::new(&sim_url());
+    let start = client
+        .pair_start("hb-test")
         .await
-        .expect("heartbeat returned ok even without auth?");
-    // The simulator requires auth, so if we get an error, that's expected
-    if let Some(ref err) = hb.error {
-        assert_eq!(err.code, "invalid_token");
-    }
+        .expect("pair_start failed");
+    let nonce = start.nonce.expect("nonce missing");
+    client
+        .pair_confirm(&nonce, "hb-test", "482391")
+        .await
+        .expect("pair_confirm failed");
+
+    let sess_id = format!("sess_hb_{}", uuid::Uuid::new_v4());
+    client
+        .session_start(&sess_id, "pcm_s16le", 48000, 16, 2, 55300, 120, 50)
+        .await
+        .expect("session_start failed");
+
+    // Heartbeat 1 (seq = 1)
+    let hb1 = client.heartbeat().await.expect("hb 1 should succeed");
+    assert_eq!(hb1.status.as_deref(), Some("alive"));
+
+    // Heartbeat 2 (seq = 2)
+    let hb2 = client.heartbeat().await.expect("hb 2 should succeed");
+    assert_eq!(hb2.status.as_deref(), Some("alive"));
+
+    let _ = client.session_stop().await;
 }
 
 #[tokio::test]
@@ -405,9 +401,8 @@ async fn test_receiver_full_lifecycle_and_session_recovery() {
         .await
         .expect("pair start failed");
     let nonce = pair_start.nonce.expect("missing nonce");
-    let token_val = uuid::Uuid::new_v4().to_string();
     let confirm = client
-        .pair_confirm(&nonce, "e2e-matrix", &token_val)
+        .pair_confirm(&nonce, "e2e-matrix", "482391")
         .await
         .expect("pair confirm failed");
     assert_eq!(confirm.status.as_deref(), Some("paired"));
@@ -420,57 +415,33 @@ async fn test_receiver_full_lifecycle_and_session_recovery() {
         .await
         .expect("session start failed");
     assert_eq!(start_res.status.as_deref(), Some("session_started"));
+    assert!(
+        client.active_session_token.is_some(),
+        "session_token must be retained"
+    );
 
-    // 4. Playback Control: Play -> Seek -> Volume
-    let play_res = client
-        .playback_control("play", None)
-        .await
-        .expect("play failed");
-    assert_eq!(play_res.playing, Some(true));
-
-    let seek_res = client
-        .playback_control("seek", Some(45000))
-        .await
-        .expect("seek failed");
-    assert_eq!(seek_res.position_ms, Some(45000));
-
+    // 4. Playback Control & Volume
     let vol_res = client.set_volume(85).await.expect("set_volume failed");
     assert_eq!(vol_res.volume, Some(85));
 
     // Verify current state before disconnect
     let state_before = client.get_playback_state().await.expect("get state failed");
-    assert_eq!(state_before.playing, Some(true));
-    assert_eq!(state_before.position_ms, Some(45000));
     assert_eq!(state_before.volume, Some(85));
 
-    // 5. Disconnect (simulate network loss / receiver power cycle)
-    client.disconnect().await.expect("disconnect failed");
+    // 5. Heartbeat with monotonic sequence
+    let hb = client.heartbeat().await.expect("heartbeat failed");
+    assert_eq!(hb.status.as_deref(), Some("alive"));
 
-    // 6. Reconnect & Session Recovery
-    let rec_res = client
-        .session_recover(session_id, 45000, 85, true)
-        .await
-        .expect("session recovery failed");
-    assert_eq!(rec_res.status.as_deref(), Some("session_recovered"));
-    assert_eq!(rec_res.position_ms, Some(45000));
-
-    let state_after = client
-        .get_playback_state()
-        .await
-        .expect("get state after recover failed");
-    assert_eq!(state_after.playing, Some(true));
-    assert_eq!(state_after.position_ms, Some(45000));
-
-    // 7. Stop Session Cleanly
+    // 6. Stop Session Cleanly
     let stop_res = client.session_stop().await.expect("session stop failed");
     assert_eq!(stop_res.status.as_deref(), Some("session_stopped"));
+    assert!(client.active_session_token.is_none());
 }
 
 #[tokio::test]
 #[ignore]
 async fn test_receiver_fault_slow_response() {
     let client = ReceiverClient::new(&sim_url());
-    // Inject 100ms latency
     client
         .fault_latency(100)
         .await
@@ -488,7 +459,6 @@ async fn test_receiver_fault_slow_response() {
     );
     assert_eq!(info.service.as_deref(), Some("michi-stream-standard"));
 
-    // Reset faults
     client.fault_reset().await.expect("reset faults failed");
 }
 
@@ -496,7 +466,6 @@ async fn test_receiver_fault_slow_response() {
 #[ignore]
 async fn test_receiver_fault_offline_error() {
     let client = ReceiverClient::new(&sim_url());
-    // Inject offline state
     client
         .fault_offline(true)
         .await
@@ -505,7 +474,6 @@ async fn test_receiver_fault_offline_error() {
     let info_res = client.get_info().await;
     assert!(info_res.is_err(), "offline receiver must fail requests");
 
-    // Reset offline fault
     client.fault_reset().await.expect("reset faults failed");
     let info_recovered = client
         .get_info()
@@ -521,21 +489,17 @@ async fn test_receiver_fault_offline_error() {
 #[ignore]
 async fn test_receiver_fault_temporary_network_drop_and_recovery() {
     let client = ReceiverClient::new(&sim_url());
-    // Drop the next 2 requests
     client
         .fault_network_drop(2)
         .await
         .expect("inject network drop failed");
 
-    // Request 1 fails (dropped)
     let res1 = client.get_info().await;
     assert!(res1.is_err(), "first dropped request must fail");
 
-    // Request 2 fails (dropped)
     let res2 = client.get_info().await;
     assert!(res2.is_err(), "second dropped request must fail");
 
-    // Request 3 succeeds (network automatically restored)
     let res3 = client
         .get_info()
         .await

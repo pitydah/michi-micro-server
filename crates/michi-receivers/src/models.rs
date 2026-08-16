@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReceiverInfo {
@@ -10,7 +9,7 @@ pub struct ReceiverInfo {
     #[serde(default)]
     pub server_id: Option<String>,
     #[serde(default)]
-    pub id: Option<Uuid>,
+    pub id: Option<String>,
     pub version: Option<String>,
     pub api_version: Option<String>,
     pub firmware: Option<String>,
@@ -25,6 +24,25 @@ pub struct ReceiverInfo {
     pub audio: Option<serde_json::Value>,
     pub supported_codecs: Option<Vec<String>>,
     pub features: Option<serde_json::Value>,
+}
+
+impl ReceiverInfo {
+    pub fn get_codecs(&self) -> Vec<String> {
+        if let Some(ref sc) = self.supported_codecs {
+            if !sc.is_empty() {
+                return sc.clone();
+            }
+        }
+        if let Some(ref audio) = self.audio {
+            if let Some(arr) = audio.get("codecs").and_then(|v| v.as_array()) {
+                return arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+            }
+        }
+        vec!["pcm_s16le".to_string()]
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
