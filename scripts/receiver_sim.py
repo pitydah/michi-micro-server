@@ -30,10 +30,10 @@ class ReceiverState:
         self.type_name = "michi_stream_hifi" if self.is_hifi else "michi_stream_standard"
         self.device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{self.service}:{port}"))
         self.name = f"Michi Stream {'Hi-Fi' if self.is_hifi else 'Standard'} Test"
-        self.max_sample_rate = 96000 if self.is_hifi else 48000
-        self.max_bit_depth = 24 if self.is_hifi else 16
+        self.max_sample_rate = 48000
+        self.max_bit_depth = 16
         self.connector = "rca_stereo" if self.is_hifi else "jack_3_5"
-        self.supported_codecs = ["pcm_s24le", "pcm_s16le"] if self.is_hifi else ["pcm_s16le"]
+        self.supported_codecs = ["pcm_s16le"]
         
         self.nonces = {} # nonce -> expires_at
         self.tokens = set()
@@ -323,6 +323,61 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             st.active_session_id = None
             st.playing = False
             self.send_json(200, {"status": "disconnected"})
+            return
+
+        self.send_json(404, {"error": {"code": "NOT_FOUND", "message": "not found"}})
+
+    def do_PATCH(self):
+        st = self.state
+        path = self.path.split("?")[0]
+        body = self.read_body()
+        token = self.get_token()
+
+        if self.check_faults(path):
+            return
+
+        if path in ("/api/v1/receiver-lite/session", "/api/v1/receiver/volume"):
+            if not token or token not in st.tokens:
+                self.send_json(401, {
+                    "status": "error",
+                    "error": {"code": "invalid_token", "message": "unauthenticated"},
+                })
+                return
+            if "volume" in body:
+                vol = body.get("volume", 50)
+                st.volume = min(100, max(0, vol))
+            if "paused" in body:
+                st.playing = not body["paused"]
+            self.send_json(200, {
+                "status": "ok",
+                "volume": st.volume,
+                "paused": not st.playing,
+            })
+            return
+
+        self.send_json(404, {"error": {"code": "NOT_FOUND", "message": "not found"}})
+
+    def do_DELETE(self):
+        st = self.state
+        path = self.path.split("?")[0]
+        token = self.get_token()
+
+        if self.check_faults(path):
+            return
+
+        if path in ("/api/v1/receiver-lite/session", "/api/v1/receiver/session/stop"):
+            if not token or token not in st.tokens:
+                self.send_json(401, {
+                    "status": "error",
+                    "error": {"code": "invalid_token", "message": "unauthenticated"},
+                })
+                return
+            st.active_session_id = None
+            st.playing = False
+            self.send_json(200, {
+                "status": "session_stopped",
+                "session_id": None,
+            })
             return
 
         self.send_json(404, {"error": {"code": "NOT_FOUND", "message": "not found"}})

@@ -85,16 +85,16 @@ async fn test_receiver_info_hifi_output() {
     );
     assert_eq!(
         output.get("max_sample_rate").and_then(|v| v.as_u64()),
-        Some(96000)
+        Some(48000)
     );
     assert_eq!(
         output.get("max_bit_depth").and_then(|v| v.as_u64()),
-        Some(24)
+        Some(16)
     );
     assert!(info
         .supported_codecs
         .as_ref()
-        .map(|c| c.contains(&"pcm_s24le".to_string()))
+        .map(|c| c.contains(&"pcm_s16le".to_string()))
         .unwrap_or(false));
 }
 
@@ -216,9 +216,9 @@ async fn test_receiver_hifi_full_lifecycle() {
         .start_session(
             &device_id,
             &session_id,
-            "pcm_s24le",
-            96000,
-            24,
+            "pcm_s16le",
+            48000,
+            16,
             2,
             55301,
             100,

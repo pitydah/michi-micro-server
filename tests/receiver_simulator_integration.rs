@@ -67,9 +67,9 @@ async fn test_receiver_info_hifi_output() {
     let info = client.get_info().await.expect("get_info failed");
     let output = info.output.expect("hifi must have output");
     assert_eq!(output.get("connector").and_then(|v| v.as_str()), Some("rca_stereo"));
-    assert_eq!(output.get("max_sample_rate").and_then(|v| v.as_u64()), Some(96000));
-    assert_eq!(output.get("max_bit_depth").and_then(|v| v.as_u64()), Some(24));
-    assert!(info.supported_codecs.as_ref().map(|c| c.contains(&"pcm_s24le".to_string())).unwrap_or(false));
+    assert_eq!(output.get("max_sample_rate").and_then(|v| v.as_u64()), Some(48000));
+    assert_eq!(output.get("max_bit_depth").and_then(|v| v.as_u64()), Some(16));
+    assert!(info.supported_codecs.as_ref().map(|c| c.contains(&"pcm_s16le".to_string())).unwrap_or(false));
 }
 
 #[tokio::test]
@@ -143,7 +143,7 @@ async fn test_receiver_hifi_full_lifecycle() {
     let device_id = mgr.discover_and_pair(&base_url, "test-hifi").await.expect("discover and pair failed");
 
     let session_id = format!("sess_hifi_{}", uuid::Uuid::new_v4());
-    let sess_resp = mgr.start_session(&device_id, &session_id, "pcm_s24le", 96000, 24, 2, 55301, 100, 80).await.expect("session_start failed");
+    let sess_resp = mgr.start_session(&device_id, &session_id, "pcm_s16le", 48000, 16, 2, 55301, 100, 80).await.expect("session_start failed");
     assert_eq!(sess_resp.status.as_deref(), Some("session_started"));
 
     let hb = mgr.heartbeat(&device_id).await.expect("heartbeat failed");

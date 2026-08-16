@@ -34,17 +34,25 @@ impl ReceiverSessionManager {
         let client = ReceiverClient::new(base_url);
         let info = client.get_info().await?;
         let device_id = info
-            .device_id
+            .michi_id
             .clone()
+            .or_else(|| info.server_id.clone())
+            .or_else(|| info.device_id.clone())
             .unwrap_or_else(|| base_url.to_string());
         let name = info.name.clone().unwrap_or_else(|| device_id.clone());
-        let device_type = info.device_type.clone().unwrap_or_else(|| "unknown".into());
+        let device_type = info
+            .device_type
+            .clone()
+            .or_else(|| info.service.clone())
+            .unwrap_or_else(|| "unknown".into());
 
         // Attempt to get a pairing window. If it fails because one is already open,
         // we can still try to use it (the test simulators keep the same nonce).
         let start_resp = client.pair_start(initiator_id).await?;
         let nonce = if let Some(ref n) = start_resp.nonce {
             n.clone()
+        } else if let Some(ref s_id) = start_resp.session_id {
+            s_id.clone()
         } else if let Some(ref err) = start_resp.error {
             // If window is already open, we can't get the nonce — fail gracefully
             return Err(format!("pair_start failed: {}: {}", err.code, err.message));
@@ -57,14 +65,42 @@ impl ReceiverSessionManager {
         let _confirm_resp = client.pair_confirm(&nonce, initiator_id, &token).await?;
 
         // Extract capabilities
-        let output = info.output.as_ref();
-        let max_sr = output
-            .and_then(|o| o.get("max_sample_rate").and_then(|v| v.as_u64()))
-            .unwrap_or(48000) as u32;
-        let max_bd = output
-            .and_then(|o| o.get("max_bit_depth").and_then(|v| v.as_u64()))
-            .unwrap_or(16) as u32;
-        let codecs = info.supported_codecs.clone().unwrap_or_default();
+        let (max_sr, max_bd, codecs) = if let Some(audio) = &info.audio {
+            let max_sr = audio
+                .get("sample_rates")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.iter().filter_map(|x| x.as_u64()).max())
+                .unwrap_or(48000) as u32;
+            let max_bd = audio
+                .get("bit_depths")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.iter().filter_map(|x| x.as_u64()).max())
+                .unwrap_or(16) as u32;
+            let codecs = audio
+                .get("codecs")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_else(|| vec!["pcm_s16le".to_string()]);
+            (max_sr, max_bd, codecs)
+        } else if let Some(output) = &info.output {
+            let max_sr = output
+                .get("max_sample_rate")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(48000) as u32;
+            let max_bd = output
+                .get("max_bit_depth")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(16) as u32;
+            let codecs = info.supported_codecs.clone().unwrap_or_default();
+            (max_sr, max_bd, codecs)
+        } else {
+            (48000, 16, vec!["pcm_s16le".to_string()])
+        };
+
         let mut caps = vec![
             "stream".to_string(),
             "volume".to_string(),
@@ -74,6 +110,7 @@ impl ReceiverSessionManager {
             if feats
                 .get("ota_update")
                 .and_then(|v| v.as_bool())
+                .or_else(|| feats.get("ota").and_then(|v| v.as_bool()))
                 .unwrap_or(false)
             {
                 caps.push("ota_update".to_string());

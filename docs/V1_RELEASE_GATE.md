@@ -24,7 +24,7 @@ Este documento constituye la **fuente de verdad** y el criterio no negociable pa
 | **API TESTS** | Cobertura de endpoints en `michi-api` | 🟢 **GREEN** | Tests de integración en `crates/michi-api/tests/api.rs` |
 | **PLAYER CONTRACT** | `test_player_micro_contract_compatibility.py` | 🟢 **GREEN** | 10/10 suites completas (import, stream range, queue transfer, play/pause/seek/vol, handoff, diagnostics) |
 | **MOBILE CONTRACT** | Contrato Michi Link validado para clientes móviles | 🟡 **YELLOW** | Endpoints implementados; pendiente arnés E2E móvil |
-| **STREAM/RECEIVER** | Matriz de ciclo de vida + Inyección de fallas | 🟢 **GREEN** | 18/18 tests: discovery ➔ pairing ➔ token ➔ session ➔ playback ➔ seek ➔ volume ➔ disconnect ➔ reconnect ➔ recovery + receptor lento, offline, codec/SR incompatibles, caída de red |
+| **STREAM/RECEIVER** | Matriz de ciclo de vida + Inyección de fallas | 🟢 **GREEN** | 18/18 tests: discovery ➔ pairing ➔ token ➔ session ➔ playback ➔ seek ➔ volume ➔ disconnect ➔ reconnect ➔ recovery + receptor lento, offline, codec/SR incompatibles, caída de red (convergencia canónica v1-lite y audio 48kHz/16-bit) |
 | **DATABASE MIGRATION**| Pruebas de migración SQLite limpias (1 a 35) | 🟢 **GREEN** | Migraciones automáticas validadas en tests |
 | **BACKUP / RESTORE** | Verificación de roundtrip completo con SHA-256 | 🟢 **GREEN** | Módulos y rutas de backup validados en tests |
 | **SCANNER** | Tolerancia a metadatos corruptos y symlinks | 🟢 **GREEN** | 6 tests aprobados en `michi-scanner` |
@@ -41,7 +41,7 @@ Este documento constituye la **fuente de verdad** y el criterio no negociable pa
 | **CASAOS / ZIMAOS** | Manifests y compose validados para App Stores | 🟢 **GREEN** | `casaos/docker-compose.casaos.yml` y `casaos/docker-compose.zimaos.yml` cualificados con test arnés E2E (`ci-appliance`) |
 | **RELIABILITY** | Batería maestra de resiliencia y escalabilidad | 🟢 **GREEN** | `scripts/test_reliability_qualification.sh`: migración histórica, backup/restore roundtrip, 1k/10k tracks, streaming concurrente, scan bajo reproducción y desconexión de storage |
 | **SOAK TEST** | Prueba de estabilidad continua (24h/48h/72h) | 🟢 **GREEN** | `scripts/soak_test.py` y `scripts/run_soak_test.sh`: monitor de RSS drift (+0.12MB), zero FD leaks, zero zombies, WAL checkpointed y carga constante |
-| **DOCUMENTATION** | Documentación técnica y auditoría completas | 🟢 **GREEN** | `V1_STABILIZATION_AUDIT.md`, `API.md`, `ARCHITECTURE.md` |
+| **DOCUMENTATION** | Documentación técnica y auditoría completas | 🟢 **GREEN** | `V1_STABILIZATION_AUDIT.md`, `API.md`, `ARCHITECTURE.md`, `CROSS_REPO_INTEGRATION.md`, `MICHI_LINK_COMPATIBILITY.md`, `STATE_AUTHORITY.md` |
 | **P0 BUGS** | Cero defectos críticos pendientes | 🟢 **ZERO (0)** | Ningún defecto P0 activo |
 | **P1 BUGS** | Cero defectos de alta severidad pendientes | 🟢 **ZERO (0)** | 18/18 tests de receptor integrados y automatizados en CI |
 

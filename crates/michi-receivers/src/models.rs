@@ -8,14 +8,21 @@ pub struct ReceiverInfo {
     pub name: Option<String>,
     pub device_id: Option<String>,
     #[serde(default)]
+    pub server_id: Option<String>,
+    #[serde(default)]
     pub id: Option<Uuid>,
+    pub version: Option<String>,
     pub api_version: Option<String>,
     pub firmware: Option<String>,
     #[serde(rename = "type")]
     pub device_type: Option<String>,
     pub roles: Option<Vec<String>>,
+    pub identity_scheme: Option<String>,
+    pub michi_id: Option<String>,
+    pub public_key: Option<String>,
     pub auth: Option<serde_json::Value>,
     pub output: Option<serde_json::Value>,
+    pub audio: Option<serde_json::Value>,
     pub supported_codecs: Option<Vec<String>>,
     pub features: Option<serde_json::Value>,
 }
@@ -23,8 +30,10 @@ pub struct ReceiverInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairStartResponse {
     pub status: Option<String>,
+    pub session_id: Option<String>,
     pub device_id: Option<String>,
     pub pairing_window_seconds: Option<u64>,
+    pub expires_in: Option<u64>,
     pub nonce: Option<String>,
     pub error: Option<ErrorBody>,
 }
@@ -35,16 +44,21 @@ pub struct PairConfirmResponse {
     pub device_id: Option<String>,
     pub controller_id: Option<String>,
     pub token: Option<String>,
+    pub expires_in: Option<u64>,
     pub error: Option<ErrorBody>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionStartResponse {
+    #[serde(default)]
     pub status: Option<String>,
     pub session_id: Option<String>,
+    pub session_token: Option<String>,
     pub device_id: Option<String>,
     pub stream_port: Option<u16>,
     pub buffer_ms: Option<u64>,
+    pub lease_seconds: Option<u64>,
+    pub effective: Option<serde_json::Value>,
     pub error: Option<ErrorBody>,
 }
 
