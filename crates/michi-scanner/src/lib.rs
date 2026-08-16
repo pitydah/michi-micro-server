@@ -80,6 +80,14 @@ fn scan_directory_sync(library_root: &Path, path: &Path, cancel: &CancellationTo
         }
 
         if entry_path.is_dir() {
+            if entry_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.starts_with('.'))
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let sub_tracks = scan_directory_sync(library_root, &entry_path, cancel);
             tracks.extend(sub_tracks);
         } else if let Some(track) = track_from_file(library_root, &entry_path) {

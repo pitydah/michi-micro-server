@@ -137,6 +137,13 @@ impl ReceiverSessionManager {
             )
             .await?;
 
+        if let Some(err) = &resp.error {
+            return Err(format!(
+                "session_start failed: {}: {}",
+                err.code, err.message
+            ));
+        }
+
         {
             let mut reg = self.registry.write().await;
             if let Some(e) = reg.get_mut(receiver_id) {

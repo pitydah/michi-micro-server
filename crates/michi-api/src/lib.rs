@@ -899,6 +899,14 @@ fn v1_link_routes() -> Router<AppState> {
         )
         .route("/api/v1/tracks", get(routes::v1::tracks::tracks_handler))
         .route("/api/v1/tracks/:id", get(routes::v1::tracks::track_handler))
+        .route(
+            "/api/v1/tracks/:id/stream",
+            get(routes::v1::stream::stream_handler),
+        )
+        .route(
+            "/api/v1/tracks/:id/download",
+            get(routes::v1::stream::download_handler),
+        )
         .route("/api/v1/search", get(routes::v1::tracks::search_handler))
         .route(
             "/api/v1/search/advanced",
@@ -1037,6 +1045,10 @@ fn v1_link_routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/import/upload/:session_id",
+            post(routes::v1::import::import_upload_handler),
+        )
+        .route(
+            "/api/v1/import/session/:session_id/upload",
             post(routes::v1::import::import_upload_handler),
         )
         .route(
@@ -1195,6 +1207,10 @@ fn v1_link_routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/player/handoff",
+            post(routes::v1::playback::handoff_handler),
+        )
+        .route(
+            "/api/v1/playback/handoff",
             post(routes::v1::playback::handoff_handler),
         )
         .route(

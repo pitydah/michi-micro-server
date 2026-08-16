@@ -348,40 +348,14 @@ pub async fn import_upload_handler(
         .to_lowercase();
 
     let remote_track_id = if ALLOWED_AUDIO_EXTS.contains(&ext.as_str()) {
-        let metadata = tokio::task::spawn_blocking({
-            let fp = file_path.clone();
-            move || michi_metadata::read_metadata_safe(&fp)
-        })
-        .await
-        .unwrap_or_default();
-        let tid = michi_core::track_id_from_path(file_path.to_str().unwrap_or(""));
-        let track = michi_core::Track {
-            id: tid,
-            title: metadata.title,
-            artist: metadata.artist,
-            album: metadata.album,
-            album_artist: metadata.album_artist,
-            duration_ms: metadata.duration_ms,
-            file_path: file_path.to_string_lossy().to_string(),
-            format: metadata.format,
-            sample_rate: metadata.sample_rate,
-            bit_depth: metadata.bit_depth,
-            channels: metadata.channels,
-            artwork_id: None,
-            genre: metadata.genre,
-            year: metadata.year,
-            track_number: metadata.track_number,
-            disc_number: metadata.disc_number,
-            content_hash: Some(data_hash.clone()),
-            starred: false,
-            rating: 0,
-            starred_at: None,
-            replaygain_track_gain: None,
-            replaygain_track_peak: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        michi_db::upsert_track(&state.db, &track).await.ok();
+        let final_dir = state
+            .config
+            .music_paths
+            .first()
+            .cloned()
+            .unwrap_or_else(|| import_dir.clone());
+        let final_path = final_dir.join(&safe_name);
+        let tid = michi_core::track_id_from_path(final_path.to_str().unwrap_or(""));
         Some(tid)
     } else {
         None
@@ -626,6 +600,7 @@ pub async fn import_commit_handler(
             }
         }
     }
+    cleanup_session_dir(&staging_dir).await;
 
     let concurrency = state.config.resource_profile.scan_concurrency();
     let tracks = michi_scanner::scan_directories_with_concurrency(&[final_dir], concurrency).await;

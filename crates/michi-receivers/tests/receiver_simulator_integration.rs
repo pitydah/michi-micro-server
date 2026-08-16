@@ -325,6 +325,8 @@ async fn test_receiver_errors_duplicate_session() {
         )
         .await;
     assert!(second.is_err(), "duplicate session should fail with 409");
+
+    let _ = mgr.stop_session(&device_id).await;
 }
 
 #[tokio::test]

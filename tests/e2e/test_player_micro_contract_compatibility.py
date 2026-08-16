@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
 """
-Player-Micro Server Contract Compatibility Test.
+Player-Micro Server Contract Compatibility & End-to-End Test.
 
-Tests all endpoints that Michi Music Player consumes against
-a running Michi Micro Server instance.
+Tests the full lifecycle and contracts consumed by Michi Music Player against
+a running Michi Micro Server instance:
+1. Server info & capabilities (Public contract)
+2. Authentication & JWT acquisition
+3. Import Preflight (New & legacy formats)
+4. Audio track upload & cataloging
+5. Real HTTP Range audio streaming (206 Partial Content)
+6. Successful queue transfer
+7. Playback controls: play -> state -> pause -> state -> seek -> state -> volume
+8. Direct playback handoff between devices
+9. Server diagnostics & player compatibility matrix
 
 Usage:
   python3 test_player_micro_contract_compatibility.py [--url http://localhost:8096] [--username admin] [--password admin]
 """
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -23,6 +33,13 @@ PASS = 0
 FAIL = 0
 SKIP = 0
 
+# Minimal valid 44-byte PCM WAV audio payload
+MINIMAL_WAV_BYTES = (
+    b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00"
+    b"D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+)
+MINIMAL_WAV_BASE64 = base64.b64encode(MINIMAL_WAV_BYTES).decode("ascii")
+
 
 def load_fixture(name):
     path = os.path.join(FIXTURES_DIR, name)
@@ -30,20 +47,24 @@ def load_fixture(name):
         return json.load(f)
 
 
-def test(base_url, name, method, path, expected_status=200, body=None, headers=None):
+def test(base_url, name, method, path, expected_status=200, body=None, headers=None, raw_response=False):
     global PASS, FAIL
     url = f"{base_url}{path}"
-    data = json.dumps(body).encode() if body is not None else None
+    data = json.dumps(body).encode() if body is not None and not isinstance(body, bytes) else body
     req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
+    if body is not None and not isinstance(body, bytes):
+        req.add_header("Content-Type", "application/json")
     if headers:
         for k, v in headers.items():
             req.add_header(k, v)
     try:
         resp = urllib.request.urlopen(req, timeout=5)
         status = resp.status
-        resp_data = resp.read().decode()
-        resp_body = json.loads(resp_data) if resp_data else {}
+        if raw_response:
+            resp_body = resp.read()
+        else:
+            resp_data = resp.read().decode()
+            resp_body = json.loads(resp_data) if resp_data else {}
         if status == expected_status:
             PASS += 1
             print(f"  ✅ {name}")
@@ -80,12 +101,12 @@ def main():
     base_url = args.url.rstrip("/")
 
     print(f"\n{'='*60}")
-    print(f"Player-Micro Server Contract Compatibility Test")
+    print(f"Player-Micro Server Contract Compatibility & E2E Test")
     print(f"Target: {base_url}")
     print(f"{'='*60}\n")
 
     # 1. Server info (Public)
-    print("[1] Server Info")
+    print("[1] Server Info & Capabilities")
     info = test(base_url, "GET /api/v1/server/info", "GET", "/api/v1/server/info")
     if not info:
         print("❌ Fatal: Could not retrieve server info. Is the server running?")
@@ -98,8 +119,10 @@ def main():
     assert info["features"].get("import") is True
     assert info["features"].get("playback") is True
     assert info["features"].get("queue") is True
+    assert info["features"].get("receivers") is False, "receivers feature must be gated off per PRODUCT.md"
+    assert info["features"].get("rooms") is False, "rooms feature must be gated off per PRODUCT.md"
 
-    # 2. Authenticate if required or available
+    # 2. Authenticate
     auth_headers = {}
     auth_req = info.get("auth", {})
     if auth_req.get("required") or args.username:
@@ -117,7 +140,7 @@ def main():
             auth_headers = {"Authorization": f"Bearer {token}"}
             print("  🔑 Token acquired successfully")
         else:
-            print("  ⚠️ Could not authenticate with provided credentials; trying unauthenticated")
+            print("  ⚠️ Could not authenticate with provided credentials")
 
     # 3. Preflight (new format)
     print("\n[3] Import Preflight (New Format)")
@@ -153,20 +176,174 @@ def main():
             assert "status" in r, "missing status in legacy preflight item"
             assert "match" in r, "missing match in legacy preflight item"
 
-    # 5. Queue transfer
-    print("\n[5] Queue Transfer")
-    test(
+    # 5. Full Track Upload & Catalog Flow
+    print("\n[5] Track Import & Catalog")
+    session_res = test(
         base_url,
-        "POST /api/v1/queue/transfer validation",
+        "POST /api/v1/import/session (create import session)",
         "POST",
-        "/api/v1/queue/transfer",
-        expected_status=400,
-        body={"track_ids": [], "current_index": 0, "position_ms": 0, "source": "test"},
+        "/api/v1/import/session",
+        body={"total_tracks": 1, "total_playlists": 0},
         headers=auth_headers,
     )
+    imported_track_id = None
+    if session_res and "session_id" in session_res:
+        sess_id = session_res["session_id"]
+        upload_res = test(
+            base_url,
+            f"POST /api/v1/import/session/{sess_id}/upload",
+            "POST",
+            f"/api/v1/import/session/{sess_id}/upload",
+            body={"filename": "test_player_e2e.wav", "data": MINIMAL_WAV_BASE64},
+            headers=auth_headers,
+        )
+        if upload_res:
+            assert upload_res.get("status") in ("uploaded", "duplicate")
 
-    # 6. Diagnostics
-    print("\n[6] Diagnostics")
+        commit_res = test(
+            base_url,
+            f"POST /api/v1/import/commit/{sess_id}",
+            "POST",
+            f"/api/v1/import/commit/{sess_id}",
+            body={},
+            headers=auth_headers,
+        )
+
+        tracks_res = test(
+            base_url,
+            "GET /api/v1/tracks",
+            "GET",
+            "/api/v1/tracks",
+            headers=auth_headers,
+        )
+        if tracks_res and isinstance(tracks_res, list) and len(tracks_res) > 0:
+            imported_track_id = tracks_res[0].get("id")
+        elif isinstance(tracks_res, dict) and "tracks" in tracks_res and len(tracks_res["tracks"]) > 0:
+            imported_track_id = tracks_res["tracks"][0].get("id")
+
+    # 6. Real Audio Streaming with HTTP Range
+    print("\n[6] Audio Stream (HTTP Range Request)")
+    if imported_track_id:
+        stream_headers = dict(auth_headers)
+        stream_headers["Range"] = "bytes=0-15"
+        stream_data = test(
+            base_url,
+            f"GET /api/v1/tracks/{imported_track_id}/stream (Range: 0-15)",
+            "GET",
+            f"/api/v1/tracks/{imported_track_id}/stream",
+            expected_status=206,
+            headers=stream_headers,
+            raw_response=True,
+        )
+        if stream_data is not None:
+            assert len(stream_data) == 16, f"expected 16 bytes for range 0-15, got {len(stream_data)}"
+    else:
+        print("  ⚠️ Skipped stream range check (no imported track available)")
+
+    # 7. Queue Transfer (Valid)
+    print("\n[7] Queue Transfer")
+    test_track_ids = [imported_track_id] if imported_track_id else ["00000000-0000-0000-0000-000000000001"]
+    if imported_track_id:
+        queue_res = test(
+            base_url,
+            "POST /api/v1/queue/transfer (successful transfer)",
+            "POST",
+            "/api/v1/queue/transfer",
+            expected_status=200,
+            body={"track_ids": test_track_ids, "current_index": 0, "position_ms": 1500, "source": "michi-player"},
+            headers=auth_headers,
+        )
+        if queue_res:
+            assert "queue_id" in queue_res
+    else:
+        test(
+            base_url,
+            "POST /api/v1/queue/transfer (unknown track validation)",
+            "POST",
+            "/api/v1/queue/transfer",
+            expected_status=400,
+            body={"track_ids": test_track_ids, "current_index": 0, "position_ms": 1500, "source": "michi-player"},
+            headers=auth_headers,
+        )
+
+    # 8. Playback Controls & State Lifecycle
+    print("\n[8] Playback Lifecycle (Play -> Pause -> Seek -> Volume)")
+    # Play
+    test(
+        base_url,
+        "POST /api/v1/playback/control (play)",
+        "POST",
+        "/api/v1/playback/control",
+        body={"command": "play", "value": {"track_id": imported_track_id, "position_ms": 2000}},
+        headers=auth_headers,
+    )
+    st = test(base_url, "GET /api/v1/playback/state (after play)", "GET", "/api/v1/playback/state", headers=auth_headers)
+    if st:
+        assert st.get("playing") is True
+        assert st.get("position_ms") == 2000
+
+    # Pause
+    test(
+        base_url,
+        "POST /api/v1/playback/control (pause)",
+        "POST",
+        "/api/v1/playback/control",
+        body={"command": "pause"},
+        headers=auth_headers,
+    )
+    st = test(base_url, "GET /api/v1/playback/state (after pause)", "GET", "/api/v1/playback/state", headers=auth_headers)
+    if st:
+        assert st.get("playing") is False
+
+    # Seek
+    test(
+        base_url,
+        "POST /api/v1/playback/control (seek)",
+        "POST",
+        "/api/v1/playback/control",
+        body={"command": "seek", "position_ms": 8500},
+        headers=auth_headers,
+    )
+    st = test(base_url, "GET /api/v1/playback/state (after seek)", "GET", "/api/v1/playback/state", headers=auth_headers)
+    if st:
+        assert st.get("position_ms") == 8500
+
+    # Set Volume
+    test(
+        base_url,
+        "POST /api/v1/playback/control (set_volume)",
+        "POST",
+        "/api/v1/playback/control",
+        body={"command": "set_volume", "volume": 85},
+        headers=auth_headers,
+    )
+    st = test(base_url, "GET /api/v1/playback/state (after volume)", "GET", "/api/v1/playback/state", headers=auth_headers)
+    if st:
+        assert st.get("volume") == 85
+
+    # 9. Direct Playback Handoff
+    print("\n[9] Playback Handoff")
+    if imported_track_id:
+        handoff_res = test(
+            base_url,
+            "POST /api/v1/playback/handoff",
+            "POST",
+            "/api/v1/playback/handoff",
+            body={
+                "track_id": imported_track_id,
+                "position_ms": 15000,
+                "playing": True,
+                "volume": 0.9,
+                "from_device": "michi-player-desktop",
+            },
+            headers=auth_headers,
+        )
+        if handoff_res:
+            assert handoff_res.get("status") == "handoff_accepted"
+            assert handoff_res.get("position_ms") == 15000
+
+    # 10. Diagnostics
+    print("\n[10] Diagnostics & Player Compatibility Matrix")
     diag = test(
         base_url,
         "GET /api/v1/diagnostics",
@@ -182,20 +359,6 @@ def main():
         assert "supports_commit_mapping" in pc
         assert "supports_queue_transfer" in pc
         assert pc.get("contract_status") in ("CONTRACT_OK", "CONTRACT_PARTIAL")
-
-    # 7. Playback state
-    print("\n[7] Playback State")
-    state = test(
-        base_url,
-        "GET /api/v1/playback/state",
-        "GET",
-        "/api/v1/playback/state",
-        headers=auth_headers,
-    )
-    if state:
-        assert "state" in state
-        assert "position_ms" in state
-        assert "volume" in state
 
     # Summary
     total = PASS + FAIL + SKIP

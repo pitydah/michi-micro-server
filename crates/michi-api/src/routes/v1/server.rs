@@ -43,6 +43,7 @@ pub struct V1Features {
 }
 
 pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1ServerInfo> {
+    let disabled = state.disabled_modules.read().await;
     Json(V1ServerInfo {
         service: "michi-micro-server".into(),
         name: "Michi Micro Server".into(),
@@ -58,24 +59,24 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
             "multiroom_host".into(),
         ],
         features: V1Features {
-            library: true,
+            library: !disabled.contains("scan"),
             search: true,
-            streaming: true,
+            streaming: !disabled.contains("stream"),
             download: true,
             artwork: true,
             playlists: true,
-            sync_manifest: true,
+            sync_manifest: !disabled.contains("sync"),
             import: true,
-            playback: true,
+            playback: !disabled.contains("playback"),
             queue: true,
-            receivers: true,
-            rooms: true,
+            receivers: false,
+            rooms: false,
             events: true,
             transcoding: michi_streaming::check_ffmpeg(),
             token_refresh: true,
         },
         auth: V1AuthInfo {
-            required: true,
+            required: state.auth_enabled,
             strategy: "SERVER_CODE".into(),
             token_refresh: true,
         },

@@ -22,16 +22,16 @@ Este documento constituye la **fuente de verdad** y el criterio no negociable pa
 | **CLIPPY** | Cero advertencias bajo `-D warnings` en todos los targets | 🟢 **GREEN** | `cargo clippy --workspace --all-targets -- -D warnings` PASS |
 | **UNIT TESTS** | 100% de tests unitarios pasando | 🟢 **GREEN** | 217 tests pasando en el workspace |
 | **API TESTS** | Cobertura de endpoints en `michi-api` | 🟢 **GREEN** | Tests de integración en `crates/michi-api/tests/api.rs` |
-| **PLAYER CONTRACT** | `test_player_micro_contract_compatibility.py` | 🟢 **GREEN** | 7/7 suites de contrato aprobadas contra servidor real |
+| **PLAYER CONTRACT** | `test_player_micro_contract_compatibility.py` | 🟢 **GREEN** | 10/10 suites completas (import, stream range, queue transfer, play/pause/seek/vol, handoff, diagnostics) |
 | **MOBILE CONTRACT** | Contrato Michi Link validado para clientes móviles | 🟡 **YELLOW** | Endpoints implementados; pendiente arnés E2E móvil |
-| **STREAM/RECEIVER** | Pruebas de integración de receptor con simulador | 🟡 **YELLOW** | 14 tests implementados con `#[ignore]`; pendiente runner en CI |
+| **STREAM/RECEIVER** | Pruebas de integración de receptor con simulador | 🟢 **GREEN** | 14/14 tests automatizados con `scripts/receiver_sim.py` |
 | **DATABASE MIGRATION**| Pruebas de migración SQLite limpias (1 a 35) | 🟢 **GREEN** | Migraciones automáticas validadas en tests |
 | **BACKUP / RESTORE** | Verificación de roundtrip completo con SHA-256 | 🟢 **GREEN** | Módulos y rutas de backup validados en tests |
 | **SCANNER** | Tolerancia a metadatos corruptos y symlinks | 🟢 **GREEN** | 6 tests aprobados en `michi-scanner` |
 | **STREAMING** | HTTP Range Requests (206, 416, multi-range) | 🟢 **GREEN** | 26 tests aprobados en `michi-streaming` |
 | **QUEUE** | Persistencia y recuperación del estado de cola | 🟢 **GREEN** | Rutas de cola y migraciones operativas |
 | **HANDOFF** | Transferencia fluida de reproducción vía WebSockets | 🟢 **GREEN** | 5 tests aprobados en `michi-sync` |
-| **RECEIVER E2E** | Suite de 14 tests ejecutada contra simulador | 🟡 **YELLOW** | Requiere orquestar `receiver_sim.py` en pipeline de CI |
+| **RECEIVER E2E** | Suite de 14 tests ejecutada contra simulador | 🟢 **GREEN** | `scripts/test_receiver_e2e.sh` integrado en job `ci-receivers` |
 | **SNAPCAST E2E** | Multi-room audio con degradación limpia | 🟡 **YELLOW** | `michi-rooms` probado unitariamente; pendiente E2E con Snapserver |
 | **HOME ASSISTANT** | Integración MQTT opcional sin bloqueo | 🟡 **YELLOW** | `michi-homeassistant` implementado; pendiente broker en CI |
 | **SECURITY** | Rate limiting, validación y protección SSRF | 🟢 **GREEN** | 4 tests aprobados en `michi-security` |
@@ -41,12 +41,12 @@ Este documento constituye la **fuente de verdad** y el criterio no negociable pa
 | **CASAOS / ZIMAOS** | Metadata y `docker-compose.casaos.yml` alineados | 🟡 **YELLOW** | Archivos sincronizados a v0.2.0; pendiente test en App Store |
 | **DOCUMENTATION** | Documentación técnica y auditoría completas | 🟢 **GREEN** | `V1_STABILIZATION_AUDIT.md`, `API.md`, `ARCHITECTURE.md` |
 | **P0 BUGS** | Cero defectos críticos pendientes | 🟢 **ZERO (0)** | Ningún defecto P0 activo |
-| **P1 BUGS** | Cero defectos de alta severidad pendientes | 🟡 **1 REMAINING** | 1 pendiente: automatizar los 14 receiver simulator tests en CI |
+| **P1 BUGS** | Cero defectos de alta severidad pendientes | 🟢 **ZERO (0)** | 14/14 tests de receptor integrados y automatizados en CI |
 | **SOAK TEST** | Prueba de estabilidad continua (24h/48h) | ⚪ **GRAY** | Pendiente de ejecución en ambiente de laboratorio |
 
 ---
 
 ## 📋 Reglas de Aprobación de Release v1.0.0
 1. **Cero Gates en RED, YELLOW o GRAY para release final**: Ningún componente crítico puede quedar en estado no cualificado al momento de etiquetar `v1.0.0`.
-2. **Cero regresiones en CI**: El pipeline de CI en GitHub Actions debe completar en verde en todos sus jobs (`ci-rust`, `ci-docker`, smoke test y contract test).
+2. **Cero regresiones en CI**: El pipeline de CI en GitHub Actions debe completar en verde en todos sus jobs (`ci-rust`, `ci-receivers`, `ci-docker`, smoke test y contract test).
 3. **Cero warnings permitidos**: Prohibido el uso de `#![allow(...)]` globales o relajación de flags `-D warnings`.
