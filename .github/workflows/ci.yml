@@ -42,7 +42,7 @@ jobs:
     needs: ci-rust
     steps:
       - uses: actions/checkout@v4
-      - name: Validate Michi Link v1-lite Stream Contract Drift
+      - name: Validate Michi Link v1-lite Stream Contract Drift & Full OpenAPI
         run: python3 scripts/test_stream_contract_drift.py
 
   ci-receiver-contract-simulator:
@@ -56,7 +56,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
-      - name: Run Receiver Simulator E2E Integration Tests (Matrix & Fault Injection)
+      - name: Run Receiver Simulator E2E Integration Tests (Matrix, PIN & Fault Injection)
         run: bash scripts/test_receiver_e2e.sh 8080 8081
 
   ci-snapcast-contract-mock:
@@ -80,6 +80,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
       - name: Run Home Assistant & MQTT Contract Simulator Tests
         run: bash scripts/test_homeassistant_e2e.sh 18883 18884 9098
+
+  ci-mosquitto-real:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies & Mosquitto broker
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config mosquitto
+      - name: Run Mosquitto Real Integration Tests
+        run: bash scripts/test_mosquitto_real_e2e.sh 18885 9098
 
   ci-generic-linux-appliance:
     runs-on: ubuntu-latest
@@ -109,9 +123,23 @@ jobs:
       - name: Run Master Reliability & Short Stability Smoke Suite
         run: bash scripts/test_reliability_qualification.sh 9089
 
+  ci-three-way-ecosystem:
+    runs-on: ubuntu-latest
+    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
+      - name: Run Three-Way Ecosystem E2E Integration Suite (Mobile -> Micro -> Stream)
+        run: bash scripts/test_three_way_ecosystem.sh 9099 55438 55439
+
   ci-docker-amd64:
     runs-on: ubuntu-latest
-    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-generic-linux-appliance, ci-reliability-short]
+    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-mosquitto-real, ci-generic-linux-appliance, ci-reliability-short, ci-three-way-ecosystem]
     steps:
       - uses: actions/checkout@v4
       - name: Set up QEMU
@@ -142,7 +170,7 @@ jobs:
 
   ci-arm64-qemu:
     runs-on: ubuntu-latest
-    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-generic-linux-appliance, ci-reliability-short]
+    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-mosquitto-real, ci-generic-linux-appliance, ci-reliability-short, ci-three-way-ecosystem]
     steps:
       - uses: actions/checkout@v4
       - name: Set up QEMU for ARM64
@@ -173,7 +201,7 @@ jobs:
           docker rm michi-arm64
 
   release-ghcr:
-    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-generic-linux-appliance, ci-reliability-short, ci-docker-amd64, ci-arm64-qemu]
+    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-mosquitto-real, ci-generic-linux-appliance, ci-reliability-short, ci-three-way-ecosystem, ci-docker-amd64, ci-arm64-qemu]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

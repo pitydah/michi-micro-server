@@ -83,6 +83,14 @@ GATES_SPEC = [
         "detail": "`scripts/test_receiver_e2e.sh` 21/21 PASS (Ed25519 pairing, PIN 6 dígitos, session_token RAM, monotonic HB, HTTP 201/204)",
     },
     {
+        "id": "THREE-WAY ECOSYSTEM",
+        "description": "Integración tridireccional Mobile -> Micro -> Stream",
+        "required_class": "CONTRACT_SIMULATOR",
+        "current_status": "🟢 **GREEN**",
+        "evidence_class": "CONTRACT_SIMULATOR",
+        "detail": "`scripts/test_three_way_ecosystem.sh` 8/8 fases PASS (discovery, pairing, 201 session, volume, HB, handoff, fault recovery, 204 stop)",
+    },
+    {
         "id": "SNAPCAST MOCK",
         "description": "Multi-room audio con topología simulada",
         "required_class": "CONTRACT_MOCK",

@@ -1,6 +1,6 @@
 # 🚪 Michi Micro Server — Release Gate v1.0.0 (Truthfulness Matrix)
 
-**Última actualización:** `2026-08-16 20:15:44 UTC`  
+**Última actualización:** `2026-08-16 20:19:42 UTC`  
 **Estado General del Release:** 🟢 **CANDIDATO v1.0.0 ESTABILIZADO**
 
 ---
@@ -17,6 +17,7 @@
 | **PLAYER CONTRACT** | Compatibilidad E2E de contratos de reproducción | `CONTRACT_SIMULATOR` | 🟢 **GREEN** | `test_player_micro_contract_compatibility.py` 10/10 suites PASS |
 | **MOBILE CONTRACT** | Contrato Michi Link validado para clientes móviles | `UNIT` | 🟡 **YELLOW** | Endpoints implementados; suite E2E móvil en formalización |
 | **RECEIVER SIMULATOR** | Matriz de 21 tests contra simulador canónico v1-lite | `CONTRACT_SIMULATOR` | 🟢 **GREEN** | `scripts/test_receiver_e2e.sh` 21/21 PASS (Ed25519 pairing, PIN 6 dígitos, session_token RAM, monotonic HB, HTTP 201/204) |
+| **THREE-WAY ECOSYSTEM** | Integración tridireccional Mobile -> Micro -> Stream | `CONTRACT_SIMULATOR` | 🟢 **GREEN** | `scripts/test_three_way_ecosystem.sh` 8/8 fases PASS (discovery, pairing, 201 session, volume, HB, handoff, fault recovery, 204 stop) |
 | **SNAPCAST MOCK** | Multi-room audio con topología simulada | `CONTRACT_MOCK` | 🟢 **GREEN** | `scripts/test_snapcast_e2e.sh` con 3 clientes simulados y control de grupos |
 | **MQTT SIMULATOR** | Integración Home Assistant Auto-Discovery simulada | `CONTRACT_SIMULATOR` | 🟢 **GREEN** | `scripts/test_homeassistant_e2e.sh` con broker MQTT simulado y comandos |
 | **GENERIC APPLIANCE** | Validación de arranque, permisos y migración (Linux x86_64) | `INTEGRATION_REAL` | 🟢 **GREEN** | `scripts/test_appliance_e2e.sh`: boot limpio, permisos, migraciones v1->37 y reboot simulado |
