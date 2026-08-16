@@ -575,7 +575,7 @@ pub async fn set_room_mode_handler(
                 michi_core::RoomMode::Relax => 40,
                 michi_core::RoomMode::Custom => 60,
             };
-            for (_, vol) in g.volumes.iter_mut() {
+            for vol in g.volumes.values_mut() {
                 *vol = default_vol;
             }
             Ok(Json(

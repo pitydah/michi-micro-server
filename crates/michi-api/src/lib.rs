@@ -319,7 +319,7 @@ impl AppState {
                             drop(reg_write);
 
                             if should_ping {
-                                let url = format!("{}/api/v1/receivers/{}/heartbeat", base_url, &recv_id);
+                                let url = format!("{}/api/v1/receivers/{}/heartbeat", base_url, recv_id);
                                 match reqwest::Client::new()
                                     .post(&url)
                                     .timeout(Duration::from_secs(5))

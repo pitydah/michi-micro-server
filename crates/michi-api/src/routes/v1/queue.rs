@@ -154,7 +154,7 @@ pub async fn queue_transfer_handler(
 
     // Create new queue
     let queue_id = Uuid::new_v4();
-    let name = format!("transfer-{}", &body.source);
+    let name = format!("transfer-{}", body.source);
     let now = chrono::Utc::now().to_rfc3339();
 
     sqlx::query("INSERT INTO queues (id, name, source_device_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
