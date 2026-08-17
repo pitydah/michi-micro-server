@@ -131,12 +131,100 @@ pub async fn playback_control_handler(
             current.playing = !current.playing;
         }
         "next" => {
-            current.track_id = None;
-            current.position_ms = 0;
-            current.playing = false;
+            let active_queue_id = crate::routes::v1::queue::get_or_create_active_queue(&state.db)
+                .await
+                .ok();
+            let items = if let Some(qid) = active_queue_id {
+                sqlx::query_as::<_, (String, String, i64)>(
+                    "SELECT id, track_id, position FROM queue_items WHERE queue_id = ? ORDER BY position ASC"
+                )
+                .bind(qid.to_string())
+                .fetch_all(&state.db)
+                .await
+                .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+            if items.is_empty() {
+                current.track_id = None;
+                current.position_ms = 0;
+                current.playing = false;
+            } else if current.repeat == "one" {
+                current.position_ms = 0;
+            } else {
+                let cur_idx = if let Some(cur_id) = current.track_id {
+                    items.iter().position(|it| it.1 == cur_id.to_string())
+                } else {
+                    None
+                };
+
+                let next_idx = match cur_idx {
+                    Some(idx) => {
+                        if current.shuffle {
+                            (idx + 1) % items.len()
+                        } else if idx + 1 < items.len() {
+                            idx + 1
+                        } else if current.repeat == "all" {
+                            0
+                        } else {
+                            items.len()
+                        }
+                    }
+                    None => 0,
+                };
+
+                if next_idx < items.len() {
+                    if let Ok(tid) = Uuid::parse_str(&items[next_idx].1) {
+                        current.track_id = Some(tid);
+                        current.position_ms = 0;
+                    }
+                } else {
+                    current.playing = false;
+                    current.position_ms = 0;
+                }
+            }
         }
         "previous" => {
-            current.position_ms = 0;
+            if current.position_ms > 3000 {
+                current.position_ms = 0;
+            } else {
+                let active_queue_id =
+                    crate::routes::v1::queue::get_or_create_active_queue(&state.db)
+                        .await
+                        .ok();
+                let items = if let Some(qid) = active_queue_id {
+                    sqlx::query_as::<_, (String, String, i64)>(
+                        "SELECT id, track_id, position FROM queue_items WHERE queue_id = ? ORDER BY position ASC"
+                    )
+                    .bind(qid.to_string())
+                    .fetch_all(&state.db)
+                    .await
+                    .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                if !items.is_empty() {
+                    let cur_idx = if let Some(cur_id) = current.track_id {
+                        items.iter().position(|it| it.1 == cur_id.to_string())
+                    } else {
+                        None
+                    };
+
+                    let prev_idx = match cur_idx {
+                        Some(idx) if idx > 0 => idx - 1,
+                        _ => 0,
+                    };
+
+                    if let Ok(tid) = Uuid::parse_str(&items[prev_idx].1) {
+                        current.track_id = Some(tid);
+                        current.position_ms = 0;
+                    }
+                } else {
+                    current.position_ms = 0;
+                }
+            }
         }
         "stop" => {
             current.playing = false;
@@ -159,8 +247,24 @@ pub async fn playback_control_handler(
                         .map(|v| v as u32)
                 })
             });
-            if let Some(v) = vol {
-                current.volume = (v.min(100) as f64) / 100.0;
+            match vol {
+                Some(v) if v <= 100 => {
+                    current.volume = (v as f64) / 100.0;
+                }
+                Some(_) => {
+                    return Err(v1_error(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_REQUEST",
+                        "volume must be between 0 and 100",
+                    ));
+                }
+                None => {
+                    return Err(v1_error(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_REQUEST",
+                        "volume is required",
+                    ));
+                }
             }
         }
         "mute" => {

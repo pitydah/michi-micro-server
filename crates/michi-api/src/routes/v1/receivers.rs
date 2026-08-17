@@ -111,15 +111,18 @@ pub async fn receivers_handler(
         .list()
         .iter()
         .map(|e| {
+            let online = e
+                .last_seen
+                .map(|ls| (chrono::Utc::now() - ls).num_seconds() < 180)
+                .unwrap_or(false);
             serde_json::json!({
                 "id": e.receiver_id,
                 "name": e.name,
                 "device_type": e.device_type,
                 "host": e.base_url,
                 "paired": e.paired,
-                "online": e.active_session_id.is_none() && e.last_seen.map(|ls| {
-                    (chrono::Utc::now() - ls).num_seconds() < 180
-                }).unwrap_or(false),
+                "online": online,
+                "session_active": e.active_session_id.is_some(),
                 "capabilities": e.capabilities,
                 "active_session_id": e.active_session_id,
                 "last_seen": e.last_seen,
@@ -142,12 +145,18 @@ pub async fn get_receiver_handler(
             &format!("receiver not found: {id}"),
         )
     })?;
+    let online = entry
+        .last_seen
+        .map(|ls| (chrono::Utc::now() - ls).num_seconds() < 180)
+        .unwrap_or(false);
     Ok(Json(serde_json::json!({
         "id": entry.receiver_id,
         "name": entry.name,
         "device_type": entry.device_type,
         "host": entry.base_url,
         "paired": entry.paired,
+        "online": online,
+        "session_active": entry.active_session_id.is_some(),
         "capabilities": entry.capabilities,
         "max_sample_rate": entry.max_sample_rate,
         "max_bit_depth": entry.max_bit_depth,
@@ -325,15 +334,52 @@ async fn discover_mdns_receivers() -> Result<Vec<serde_json::Value>, String> {
     Ok(discovered.into_inner().unwrap())
 }
 
-// ── Room Groups ──────────────────────────────────────────────────
+// ── Room Groups (Persistent) ─────────────────────────────────────
 
-lazy_static::lazy_static! {
-    static ref ROOM_GROUPS: Arc<RwLock<Vec<michi_core::RoomGroup>>> = Arc::new(RwLock::new(Vec::new()));
-}
+pub async fn list_room_groups_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let rows = michi_db::list_room_groups_db(&state.db)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
-pub async fn list_room_groups_handler() -> Json<serde_json::Value> {
-    let groups = ROOM_GROUPS.read().await;
-    Json(serde_json::json!({ "groups": groups.clone() }))
+    let reg = state.receiver_manager.registry().await;
+    let reg_read = reg.read().await;
+
+    let mut groups = Vec::new();
+    for (id, name, mode_str, receiver_ids, volumes, created_at_str) in rows {
+        let mode = michi_core::RoomMode::from_config_str(&mode_str);
+        let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+
+        // Check if any receiver in this room has an active session
+        let has_active_session = receiver_ids.iter().any(|rid| {
+            reg_read
+                .get(rid)
+                .and_then(|e| e.active_session_id.as_ref())
+                .is_some()
+        });
+
+        groups.push(michi_core::RoomGroup {
+            id,
+            name,
+            mode,
+            receiver_ids,
+            volumes,
+            active: has_active_session,
+            chain_id: None,
+            created_at,
+        });
+    }
+
+    Ok(Json(serde_json::json!({ "groups": groups })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -344,6 +390,7 @@ pub struct CreateRoomGroupBody {
 }
 
 pub async fn create_room_group_handler(
+    State(state): State<AppState>,
     Json(body): Json<CreateRoomGroupBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if body.name.trim().is_empty() {
@@ -365,8 +412,32 @@ pub async fn create_room_group_handler(
         .map(|id| (id.clone(), default_vol))
         .collect();
 
+    let new_id = Uuid::new_v4();
+    let mode_str = match mode {
+        michi_core::RoomMode::Party => "party",
+        michi_core::RoomMode::Relax => "relax",
+        michi_core::RoomMode::Custom => "custom",
+    };
+
+    michi_db::save_room_group_db(
+        &state.db,
+        &new_id,
+        body.name.trim(),
+        mode_str,
+        &body.receiver_ids,
+        &volumes,
+    )
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
     let group = michi_core::RoomGroup {
-        id: Uuid::new_v4(),
+        id: new_id,
         name: body.name.trim().to_string(),
         mode,
         receiver_ids: body.receiver_ids,
@@ -375,17 +446,52 @@ pub async fn create_room_group_handler(
         chain_id: None,
         created_at: chrono::Utc::now(),
     };
-    ROOM_GROUPS.write().await.push(group.clone());
     Ok(Json(serde_json::json!({ "group": group })))
 }
 
 pub async fn get_room_group_handler(
+    State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let groups = ROOM_GROUPS.read().await;
-    let group = groups.iter().find(|g| g.id == id).cloned();
-    match group {
-        Some(g) => Ok(Json(serde_json::json!({ "group": g }))),
+    let rows = michi_db::list_room_groups_db(&state.db)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+    let found = rows.into_iter().find(|(gid, _, _, _, _, _)| *gid == id);
+    match found {
+        Some((gid, name, mode_str, receiver_ids, volumes, created_at_str)) => {
+            let mode = michi_core::RoomMode::from_config_str(&mode_str);
+            let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+
+            let reg = state.receiver_manager.registry().await;
+            let reg_read = reg.read().await;
+            let active = receiver_ids.iter().any(|rid| {
+                reg_read
+                    .get(rid)
+                    .and_then(|e| e.active_session_id.as_ref())
+                    .is_some()
+            });
+
+            let group = michi_core::RoomGroup {
+                id: gid,
+                name,
+                mode,
+                receiver_ids,
+                volumes,
+                active,
+                chain_id: None,
+                created_at,
+            };
+            Ok(Json(serde_json::json!({ "group": group })))
+        }
         None => Err(v1_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
@@ -402,24 +508,70 @@ pub struct UpdateRoomGroupBody {
 }
 
 pub async fn update_room_group_handler(
+    State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateRoomGroupBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let mut groups = ROOM_GROUPS.write().await;
-    let group = groups.iter_mut().find(|g| g.id == id);
-    match group {
-        Some(g) => {
-            if let Some(name) = body.name {
-                g.name = name;
+    let rows = michi_db::list_room_groups_db(&state.db)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+    let found = rows.into_iter().find(|(gid, _, _, _, _, _)| *gid == id);
+    match found {
+        Some((gid, mut name, mut mode_str, mut receiver_ids, mut volumes, _)) => {
+            if let Some(n) = body.name {
+                name = n;
             }
-            if let Some(mode_str) = body.mode {
-                let new_mode = michi_core::RoomMode::from_config_str(&mode_str);
-                g.mode = new_mode;
+            if let Some(m) = body.mode {
+                mode_str = m;
             }
-            if let Some(ids) = body.receiver_ids {
-                g.receiver_ids = ids;
+            if let Some(rids) = body.receiver_ids {
+                receiver_ids = rids;
+                let default_vol = match mode_str.as_str() {
+                    "party" => 80,
+                    "relax" => 40,
+                    _ => 60,
+                };
+                volumes = receiver_ids
+                    .iter()
+                    .map(|rid| (rid.clone(), default_vol))
+                    .collect();
             }
-            Ok(Json(serde_json::json!({ "group": g.clone() })))
+
+            michi_db::save_room_group_db(
+                &state.db,
+                &gid,
+                &name,
+                &mode_str,
+                &receiver_ids,
+                &volumes,
+            )
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
+
+            let group = michi_core::RoomGroup {
+                id: gid,
+                name,
+                mode: michi_core::RoomMode::from_config_str(&mode_str),
+                receiver_ids,
+                volumes,
+                active: false,
+                chain_id: None,
+                created_at: chrono::Utc::now(),
+            };
+            Ok(Json(serde_json::json!({ "group": group })))
         }
         None => Err(v1_error(
             StatusCode::NOT_FOUND,
@@ -430,12 +582,20 @@ pub async fn update_room_group_handler(
 }
 
 pub async fn delete_room_group_handler(
+    State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let mut groups = ROOM_GROUPS.write().await;
-    let len_before = groups.len();
-    groups.retain(|g| g.id != id);
-    if groups.len() == len_before {
+    let deleted = michi_db::delete_room_group_db(&state.db, &id)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+    if !deleted {
         return Err(v1_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
@@ -449,32 +609,29 @@ pub async fn activate_room_group_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let (recv_ids, vols, mode) = {
-        let groups = ROOM_GROUPS.read().await;
-        let group = groups.iter().find(|g| g.id == id);
-        match group {
-            Some(g) => {
-                if g.active {
-                    return Ok(Json(
-                        serde_json::json!({ "status": "already_active", "group": g.clone() }),
-                    ));
-                }
-                (
-                    g.receiver_ids.clone(),
-                    g.volumes.clone(),
-                    g.mode,
-                )
-            }
-            None => {
-                return Err(v1_error(
-                    StatusCode::NOT_FOUND,
-                    "NOT_FOUND",
-                    "group not found",
-                ))
-            }
-        }
-    };
+    let rows = michi_db::list_room_groups_db(&state.db)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
+    let found = rows.into_iter().find(|(gid, _, _, _, _, _)| *gid == id);
+    let (_gid, name, mode_str, recv_ids, vols, _) =
+        found.ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found"))?;
+
+    if recv_ids.is_empty() {
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ROOM",
+            "cannot activate an empty room group with 0 receivers",
+        ));
+    }
+
+    let mode = michi_core::RoomMode::from_config_str(&mode_str);
     let mut receiver_results = Vec::new();
     let mut success_count = 0usize;
 
@@ -484,19 +641,24 @@ pub async fn activate_room_group_handler(
             michi_core::RoomMode::Relax => 40,
             michi_core::RoomMode::Custom => 60,
         });
-        // Apply maximum safe volume per receiver
+
         let capped_vol = {
             let reg_a = state.receiver_manager.registry().await;
             let reg_read_a = reg_a.read().await;
             let max_safe = reg_read_a.get(recv_id).and_then(|e| e.maximum_safe_volume);
-            std::mem::drop(reg_read_a);
-            std::mem::drop(reg_a);
             max_safe.map(|max| vol.min(max)).unwrap_or(vol)
         };
-        let reg_b = state.receiver_manager.registry().await;
-        let reg_read_b = reg_b.read().await;
-        if let Some(entry) = reg_read_b.get(recv_id) {
-            if !entry.paired {
+
+        let entry_info = {
+            let reg_b = state.receiver_manager.registry().await;
+            let reg_read_b = reg_b.read().await;
+            reg_read_b
+                .get(recv_id)
+                .map(|e| (e.paired, e.active_session_id.is_none()))
+        };
+
+        if let Some((paired, session_is_none)) = entry_info {
+            if !paired {
                 receiver_results.push(serde_json::json!({
                     "receiver_id": recv_id,
                     "status": "failed",
@@ -504,7 +666,8 @@ pub async fn activate_room_group_handler(
                 }));
                 continue;
             }
-            let session_ok = if entry.active_session_id.is_none() {
+
+            let session_ok = if session_is_none {
                 state
                     .receiver_manager
                     .start_session(
@@ -548,24 +711,7 @@ pub async fn activate_room_group_handler(
         }
     }
 
-    let overall_status = if recv_ids.is_empty() {
-        "active"
-    } else if success_count == recv_ids.len() {
-        "active"
-    } else if success_count > 0 {
-        "partial"
-    } else {
-        "failed"
-    };
-
-    {
-        let mut groups = ROOM_GROUPS.write().await;
-        if let Some(group) = groups.iter_mut().find(|g| g.id == id) {
-            group.active = success_count > 0;
-        }
-    }
-
-    if overall_status == "failed" && !recv_ids.is_empty() {
+    if success_count == 0 {
         return Err(v1_error(
             StatusCode::BAD_GATEWAY,
             "ROOM_ACTIVATION_FAILED",
@@ -573,10 +719,17 @@ pub async fn activate_room_group_handler(
         ));
     }
 
+    let overall_status = if success_count == recv_ids.len() {
+        "active"
+    } else {
+        "partial"
+    };
+
     Ok(Json(serde_json::json!({
         "status": overall_status,
         "group_id": id,
-        "active": success_count > 0,
+        "group_name": name,
+        "active": true,
         "successful_receivers": success_count,
         "total_receivers": recv_ids.len(),
         "receivers": receiver_results,
@@ -587,34 +740,67 @@ pub async fn deactivate_room_group_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let mut groups = ROOM_GROUPS.write().await;
-    let group = groups.iter_mut().find(|g| g.id == id);
-    match group {
-        Some(g) => {
-            if !g.active {
-                return Ok(Json(serde_json::json!({ "status": "already_inactive" })));
-            }
-            let recv_ids = g.receiver_ids.clone();
-            g.active = false;
-            drop(groups);
+    let rows = michi_db::list_room_groups_db(&state.db)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
-            for recv_id in &recv_ids {
-                let reg = state.receiver_manager.registry().await;
-                let reg_read = reg.read().await;
-                if let Some(entry) = reg_read.get(recv_id) {
-                    if entry.active_session_id.is_some() {
-                        let _ = state.receiver_manager.stop_session(recv_id).await;
+    let found = rows.into_iter().find(|(gid, _, _, _, _, _)| *gid == id);
+    let (_gid, _name, _mode_str, recv_ids, _, _) =
+        found.ok_or_else(|| v1_error(StatusCode::NOT_FOUND, "NOT_FOUND", "group not found"))?;
+
+    let mut stopped_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut per_link = Vec::new();
+
+    for recv_id in &recv_ids {
+        let reg = state.receiver_manager.registry().await;
+        let reg_read = reg.read().await;
+        if let Some(entry) = reg_read.get(recv_id) {
+            if entry.active_session_id.is_some() {
+                drop(reg_read);
+                drop(reg);
+                match state.receiver_manager.stop_session(recv_id).await {
+                    Ok(_) => {
+                        stopped_count += 1;
+                        per_link.push(
+                            serde_json::json!({ "receiver_id": recv_id, "status": "stopped" }),
+                        );
+                    }
+                    Err(e) => {
+                        failed_count += 1;
+                        per_link.push(serde_json::json!({ "receiver_id": recv_id, "status": "failed", "error": e.to_string() }));
                     }
                 }
+            } else {
+                stopped_count += 1;
+                per_link.push(
+                    serde_json::json!({ "receiver_id": recv_id, "status": "already_inactive" }),
+                );
             }
-            Ok(Json(serde_json::json!({ "status": "deactivated" })))
         }
-        None => Err(v1_error(
-            StatusCode::NOT_FOUND,
-            "NOT_FOUND",
-            "group not found",
-        )),
     }
+
+    let status = if failed_count == 0 {
+        "deactivated"
+    } else if stopped_count > 0 {
+        "partial"
+    } else {
+        "failed"
+    };
+
+    Ok(Json(serde_json::json!({
+        "status": status,
+        "group_id": id,
+        "stopped_count": stopped_count,
+        "failed_count": failed_count,
+        "receivers": per_link,
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -623,25 +809,61 @@ pub struct SetRoomModeBody {
 }
 
 pub async fn set_room_mode_handler(
+    State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(body): Json<SetRoomModeBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let new_mode = michi_core::RoomMode::from_config_str(&body.mode);
-    let mut groups = ROOM_GROUPS.write().await;
-    let group = groups.iter_mut().find(|g| g.id == id);
-    match group {
-        Some(g) => {
-            g.mode = new_mode;
-            let default_vol = match g.mode {
+    let mode_str = match new_mode {
+        michi_core::RoomMode::Party => "party",
+        michi_core::RoomMode::Relax => "relax",
+        michi_core::RoomMode::Custom => "custom",
+    };
+
+    let rows = michi_db::list_room_groups_db(&state.db)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+    let found = rows.into_iter().find(|(gid, _, _, _, _, _)| *gid == id);
+    match found {
+        Some((gid, name, _, receiver_ids, mut volumes, _)) => {
+            let default_vol = match new_mode {
                 michi_core::RoomMode::Party => 80,
                 michi_core::RoomMode::Relax => 40,
                 michi_core::RoomMode::Custom => 60,
             };
-            for vol in g.volumes.values_mut() {
+            for vol in volumes.values_mut() {
                 *vol = default_vol;
             }
+
+            michi_db::save_room_group_db(&state.db, &gid, &name, mode_str, &receiver_ids, &volumes)
+                .await
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &e.to_string(),
+                    )
+                })?;
+
+            let group = michi_core::RoomGroup {
+                id: gid,
+                name,
+                mode: new_mode,
+                receiver_ids,
+                volumes,
+                active: false,
+                chain_id: None,
+                created_at: chrono::Utc::now(),
+            };
             Ok(Json(
-                serde_json::json!({ "status": "mode_updated", "group": g.clone() }),
+                serde_json::json!({ "status": "mode_updated", "group": group }),
             ))
         }
         None => Err(v1_error(

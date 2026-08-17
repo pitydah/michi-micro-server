@@ -130,6 +130,10 @@ fn auth_error(status: StatusCode, message: &str) -> Response {
 }
 
 fn is_admin_route(path: &str) -> bool {
+    if path.starts_with("/api/v1/pair/qr/") && (path.ends_with("/claim") || path.ends_with("/svg"))
+    {
+        return false;
+    }
     [
         "/api/v1/audit",
         "/api/v1/backup",

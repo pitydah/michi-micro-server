@@ -758,10 +758,7 @@ async function addToQueue(idx) {
     showToast(t('toast.added_to_queue', {title: t.title || 'Unknown'}));
     await loadCanonicalQueue();
   } catch (e) {
-    // Fallback local queue
-    State.queue.push(t);
-    renderQueue();
-    showToast(t('toast.added_to_queue', {title: t.title || 'Unknown'}));
+    showToast('Failed to add track to queue: ' + (e.message || 'Server error'), 'error');
   }
 }
 
@@ -1482,13 +1479,14 @@ async function deleteSource(id) {
 function playSource(id) {
   var audio = getAudio();
   audio.src = '/api/v1/stream/proxy/' + id;
-  audio.play().catch(function (err) {
+  audio.play().then(function() {
+    State.currentTrack = { title: 'Radio Stream (This Browser)', artist: 'Broadcast', id: id, duration_ms: 0 };
+    updateNowPlaying(State.currentTrack);
+    updateMiniPlayer(State.currentTrack);
+    updatePlayButtons();
+  }).catch(function (err) {
     showToast(t('error.could_not_play', {msg: err.message}), true);
   });
-  State.currentTrack = { title: 'Radio Stream', artist: 'Broadcast', id: id, duration_ms: 0 };
-  updateNowPlaying(State.currentTrack);
-  updateMiniPlayer(State.currentTrack);
-  updatePlayButtons();
 }
 
 var _currentSourceId = null;
@@ -1514,7 +1512,7 @@ async function showEpisodes(sourceId, sourceName) {
         '<div style="font-size:1rem">🎙️</div>' +
         '<div class="info"><div class="name">' + esc(ep.title) + '</div>' +
         '<div class="meta">' + dur + (ep.played ? ' · Played' : '') + '</div></div>' +
-        '<button class="btn btn-sm btn-ghost" onclick="playEpisode(\'' + ep.id + '\')">▶</button>' +
+        '<button class="btn btn-sm btn-ghost" title="Play in Browser" onclick="playEpisode(\'' + ep.id + '\')">▶ Browser</button>' +
         '</div>';
     }).join('');
   } catch (e) { showToast(e.message, true); }
@@ -1523,19 +1521,21 @@ async function showEpisodes(sourceId, sourceName) {
 function playEpisode(episodeId) {
   var audio = getAudio();
   audio.src = '/api/v1/stream/proxy/episode/' + episodeId;
-  audio.play().catch(function (err) {
+  audio.play().then(function() {
+    State.currentTrack = { title: 'Podcast Episode (This Browser)', artist: 'Podcast', id: episodeId, duration_ms: 0 };
+    updateNowPlaying(State.currentTrack);
+    updateMiniPlayer(State.currentTrack);
+    updatePlayButtons();
+
+    // Mark as played only after playback successfully starts
+    MichiAPI.request('/api/v1/sources/episodes/' + episodeId, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ played: true }),
+    }).catch(function () {});
+  }).catch(function (err) {
     showToast(t('error.could_not_play', {msg: err.message}), true);
   });
-  State.currentTrack = { title: 'Podcast Episode', artist: 'Podcast', id: episodeId, duration_ms: 0 };
-  updateNowPlaying(State.currentTrack);
-  updateMiniPlayer(State.currentTrack);
-  updatePlayButtons();
-  // Mark as played
-  MichiAPI.request('/api/v1/sources/episodes/' + episodeId, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ played: true }),
-  }).catch(function () {});
 }
 
 // Extend init to load playlists when navigating to playlists page
@@ -1620,14 +1620,17 @@ async function loadSettings() {
     $('#settings-scrobble').innerHTML = s.scrobble_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
     var savedTheme = localStorage.getItem('michi_theme');
     if (!savedTheme && s.theme) setTheme(s.theme, false);
-    // Profile details
-    var profileMap = { eco: { scan: 1, tc: 0, db: 4 }, balanced: { scan: 2, tc: 2, db: 8 }, performance: { scan: 4, tc: 4, db: 16 } };
-    var p = profileMap[s.resource_profile] || profileMap.balanced;
-    $('#settings-scan-concurrency').textContent = p.scan + ' worker(s)';
-    $('#settings-max-transcodes').textContent = p.tc + ' simultaneous';
-    $('#settings-db-pool').textContent = p.db + ' connections';
+    // Effective profile details from server
+    var scanWorkers = s.effective_scan_workers !== undefined ? s.effective_scan_workers : (s.resource_profile === 'eco' ? 1 : (s.resource_profile === 'performance' ? 4 : 2));
+    var maxTc = s.effective_transcode_workers !== undefined ? s.effective_transcode_workers : (s.resource_profile === 'eco' ? 0 : (s.resource_profile === 'performance' ? 4 : 2));
+    var dbPool = s.effective_db_pool !== undefined ? s.effective_db_pool : (s.resource_profile === 'eco' ? 4 : (s.resource_profile === 'performance' ? 16 : 8));
+    if ($('#settings-scan-concurrency')) $('#settings-scan-concurrency').textContent = scanWorkers + ' worker(s)';
+    if ($('#settings-max-transcodes')) $('#settings-max-transcodes').textContent = maxTc + ' simultaneous';
+    if ($('#settings-db-pool')) $('#settings-db-pool').textContent = dbPool + ' connections';
   } catch (e) { console.warn('settings:', e.message); }
 }
+
+var _settingsRestartRequired = false;
 
 async function saveSetting(key, value) {
   var body = {};
@@ -1639,6 +1642,25 @@ async function saveSetting(key, value) {
       body: JSON.stringify(body),
     });
     if (res && res.restart_required) {
+      _settingsRestartRequired = true;
+      var banner = $('#settings-restart-banner');
+      if (!banner) {
+        var sHeader = document.querySelector('.settings-section-title') || document.querySelector('#view-settings');
+        if (sHeader) {
+          var div = document.createElement('div');
+          div.id = 'settings-restart-banner';
+          div.className = 'panel';
+          div.style.backgroundColor = 'rgba(234, 179, 8, 0.15)';
+          div.style.borderColor = 'rgba(234, 179, 8, 0.4)';
+          div.style.color = '#fef08a';
+          div.style.padding = '12px 16px';
+          div.style.marginBottom = '16px';
+          div.style.borderRadius = '8px';
+          div.style.fontWeight = '500';
+          div.innerHTML = '⚠ <strong>Restart Required:</strong> Changes have been saved to disk, but require a server restart to take effect.';
+          sHeader.parentNode.insertBefore(div, sHeader.nextSibling);
+        }
+      }
       showToast('Settings saved. ⚠ Server restart required for changes to take effect.');
     } else {
       showToast(t('toast.updated'));

@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::AppState;
@@ -21,12 +22,86 @@ fn v1_error(
     )
 }
 
+/// Helper to get or create the single canonical active queue
+pub async fn get_or_create_active_queue(pool: &SqlitePool) -> Result<Uuid, sqlx::Error> {
+    let row = sqlx::query_as::<_, (String,)>(
+        "SELECT id FROM queues WHERE name = 'active-queue' ORDER BY datetime(created_at) DESC LIMIT 1"
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some((id_str,)) = row {
+        if let Ok(id) = Uuid::parse_str(&id_str) {
+            return Ok(id);
+        }
+    }
+
+    let new_id = Uuid::new_v4();
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, 'active-queue', ?, ?)",
+    )
+    .bind(new_id.to_string())
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+
+    Ok(new_id)
+}
+
 pub async fn queue_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let current = state.playback_state.read().await;
+    let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    let items_rows = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT id, track_id, position FROM queue_items WHERE queue_id = ? ORDER BY position ASC",
+    )
+    .bind(active_queue_id.to_string())
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    let items = items_rows
+        .into_iter()
+        .map(|(id, track_id, pos)| {
+            serde_json::json!({
+                "id": id,
+                "track_id": track_id,
+                "position": pos,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let current_index = if let Some(ref cur_tid) = current.track_id {
+        items
+            .iter()
+            .position(|it| it["track_id"] == cur_tid.to_string())
+            .unwrap_or(0) as u32
+    } else {
+        0
+    };
+
     Ok(Json(serde_json::json!({
+        "queue_id": active_queue_id,
+        "items_count": items.len(),
+        "items": items,
         "current_track_id": current.track_id,
+        "current_index": current_index,
         "position_ms": current.position_ms,
         "playing": current.playing,
         "volume": (current.volume * 100.0) as u32,
@@ -43,16 +118,105 @@ pub async fn queue_items_handler(
     State(state): State<AppState>,
     Json(body): Json<QueueItemsBody>,
 ) -> Result<Json<serde_json::value::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let queue_id = Uuid::new_v4();
-    let now = chrono::Utc::now().to_rfc3339();
-    let name = body.name.unwrap_or_else(|| "v1-queue".into());
+    if body.track_ids.is_empty() {
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "track_ids cannot be empty",
+        ));
+    }
 
-    sqlx::query("INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
-        .bind(queue_id.to_string())
-        .bind(&name)
+    let mut tx = state.db.begin().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    // Validate all track_ids exist
+    for tid in &body.track_ids {
+        let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tracks WHERE id = ?")
+            .bind(tid.to_string())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
+        if exists == 0 {
+            return Err(v1_error(
+                StatusCode::NOT_FOUND,
+                "TRACK_NOT_FOUND",
+                &format!("track {tid} not found"),
+            ));
+        }
+    }
+
+    let active_queue_id = {
+        let row = sqlx::query_as::<_, (String,)>(
+            "SELECT id FROM queues WHERE name = 'active-queue' ORDER BY datetime(created_at) DESC LIMIT 1"
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+
+        if let Some((id_str,)) = row {
+            Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4())
+        } else {
+            let new_id = Uuid::new_v4();
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query("INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, 'active-queue', ?, ?)")
+                .bind(new_id.to_string())
+                .bind(&now)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+            new_id
+        }
+    };
+
+    let max_pos: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(position), -1) FROM queue_items WHERE queue_id = ?",
+    )
+    .bind(active_queue_id.to_string())
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap_or(-1);
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut current_pos = max_pos + 1;
+    for track_id in &body.track_ids {
+        let item_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(item_id.to_string())
+        .bind(active_queue_id.to_string())
+        .bind(track_id.to_string())
+        .bind(current_pos)
         .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+        current_pos += 1;
+    }
+
+    // Update queue updated_at
+    sqlx::query("UPDATE queues SET updated_at = ? WHERE id = ?")
         .bind(&now)
-        .execute(&state.db)
+        .bind(active_queue_id.to_string())
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             v1_error(
@@ -62,18 +226,35 @@ pub async fn queue_items_handler(
             )
         })?;
 
-    for (i, track_id) in body.track_ids.iter().enumerate() {
-        let item_id = Uuid::new_v4();
-        let _ = sqlx::query(
-            "INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
+    tx.commit().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
         )
-        .bind(item_id.to_string()).bind(queue_id.to_string())
-        .bind(track_id.to_string()).bind(i as i64).bind(&now)
-        .execute(&state.db).await;
-    }
+    })?;
+
+    let total_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM queue_items WHERE queue_id = ?")
+            .bind(active_queue_id.to_string())
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
+
+    let _ = state.tx.send(
+        serde_json::json!({
+            "type": "queue_changed",
+            "queue_id": active_queue_id,
+            "items_count": total_count,
+        })
+        .to_string(),
+    );
 
     Ok(Json(serde_json::json!({
-        "queue_id": queue_id, "items_count": body.track_ids.len(),
+        "status": "items_added",
+        "queue_id": active_queue_id,
+        "items_count": total_count,
+        "added_count": body.track_ids.len(),
     })))
 }
 
@@ -87,17 +268,83 @@ pub async fn queue_jump_handler(
     State(state): State<AppState>,
     Json(body): Json<QueueJumpBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let queue_id = if let Some(qid) = body.queue_id {
+        qid
+    } else {
+        get_or_create_active_queue(&state.db).await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?
+    };
+
+    let items = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT id, track_id, position FROM queue_items WHERE queue_id = ? ORDER BY position ASC",
+    )
+    .bind(queue_id.to_string())
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    if items.is_empty() {
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "QUEUE_EMPTY",
+            "queue has no items",
+        ));
+    }
+
+    if body.index as usize >= items.len() {
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_INDEX",
+            &format!(
+                "index {} out of bounds for queue length {}",
+                body.index,
+                items.len()
+            ),
+        ));
+    }
+
+    let target_track_id_str = &items[body.index as usize].1;
+    let target_track_id = Uuid::parse_str(target_track_id_str).map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INVALID_TRACK_ID",
+            &e.to_string(),
+        )
+    })?;
+
     let mut current = state.playback_state.write().await;
+    current.track_id = Some(target_track_id);
     current.position_ms = 0;
     current.updated_at = chrono::Utc::now();
+    let state_clone = current.clone();
     drop(current);
 
-    let _ = state
-        .tx
-        .send(serde_json::json!({ "type": "queue_jumped", "index": body.index }).to_string());
-    Ok(Json(
-        serde_json::json!({ "status": "ok", "index": body.index }),
-    ))
+    let _ = state.sync_tx.send(state_clone.into());
+    let _ = state.tx.send(
+        serde_json::json!({
+            "type": "playback_state_changed",
+            "track_id": target_track_id,
+            "index": body.index,
+        })
+        .to_string(),
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "index": body.index,
+        "track_id": target_track_id,
+    })))
 }
 
 // ── Queue Transfer (Player → Server) ───────────────────────
@@ -148,68 +395,33 @@ pub async fn queue_transfer_handler(
         return Err(v1_error(
             StatusCode::BAD_REQUEST,
             "UNKNOWN_TRACKS",
-            &format!("tracks not found: {unknown_tracks:?}"),
+            &format!("tracks not in library: {unknown_tracks:?}"),
         ));
     }
 
-    // Create new queue
-    let queue_id = Uuid::new_v4();
-    let name = format!("transfer-{}", body.source);
-    let now = chrono::Utc::now().to_rfc3339();
-
-    sqlx::query("INSERT INTO queues (id, name, source_device_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
-        .bind(queue_id.to_string()).bind(&name).bind(&body.source).bind(&now).bind(&now)
-        .execute(&state.db)
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
-
-    for (i, track_id) in body.track_ids.iter().enumerate() {
-        let item_id = Uuid::new_v4();
-        let _ = sqlx::query(
-            "INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
+    let queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
         )
-        .bind(item_id.to_string()).bind(queue_id.to_string())
-        .bind(track_id.to_string()).bind(i as i64).bind(&now)
-        .execute(&state.db).await;
-    }
+    })?;
 
-    // Update playback state
-    {
-        let mut current = state.playback_state.write().await;
-        current.track_id = body.track_ids.get(body.current_index as usize).copied();
-        current.position_ms = body.position_ms;
-        current.playing = true;
-        current.updated_at = chrono::Utc::now();
-    }
-
-    // Create playback session
-    let session_id = Uuid::new_v4();
-    let queue_json = serde_json::to_string(&body.track_ids).unwrap_or_default();
-    let db_session = michi_core::PlaybackSessionDb {
-        id: session_id,
-        device_id: Uuid::nil(),
-        queue_id: Some(queue_id),
-        queue_state_json: queue_json,
-        current_index: body.current_index as i32,
-        current_track_id: body.track_ids.get(body.current_index as usize).copied(),
-        position_ms: body.position_ms,
-        playing: true,
-        repeat_mode: "none".into(),
-        shuffle: false,
-        volume: 0.8,
-        source: body.source.clone(),
-        resume_policy: "manual".into(),
-        restored: false,
-    };
-    michi_db::create_playback_session(&state.db, &db_session)
-        .await
-        .map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "DATABASE_ERROR",
-                &e.to_string(),
-            )
-        })?;
+    let session_id = michi_db::save_queue_state(
+        &state.db,
+        &body.source,
+        &body.track_ids,
+        body.current_index as i32,
+        body.position_ms,
+    )
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     let _ = state.tx.send(
         serde_json::json!({
@@ -237,15 +449,18 @@ pub async fn queue_reorder_handler(
     State(state): State<AppState>,
     Json(body): Json<QueueReorderBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let queue_id = body.queue_id.ok_or_else(|| {
-        v1_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_REQUEST",
-            "queue_id is required",
-        )
-    })?;
+    let queue_id = if let Some(qid) = body.queue_id {
+        qid
+    } else {
+        get_or_create_active_queue(&state.db).await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?
+    };
 
-    let now = chrono::Utc::now().to_rfc3339();
     let mut tx = state.db.begin().await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -254,20 +469,82 @@ pub async fn queue_reorder_handler(
         )
     })?;
 
-    sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
+    let existing_items = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, track_id FROM queue_items WHERE queue_id = ?",
+    )
+    .bind(queue_id.to_string())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    if existing_items.len() != body.item_ids.len() {
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "COUNT_MISMATCH",
+            &format!(
+                "expected {} items, got {}",
+                existing_items.len(),
+                body.item_ids.len()
+            ),
+        ));
+    }
+
+    let existing_id_set: std::collections::HashSet<String> =
+        existing_items.iter().map(|(id, _)| id.clone()).collect();
+    for i_id in &body.item_ids {
+        if !existing_id_set.contains(&i_id.to_string()) {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "UNKNOWN_ITEM_ID",
+                &format!("item {i_id} does not belong to queue {queue_id}"),
+            ));
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for (pos, item_id) in body.item_ids.iter().enumerate() {
+        let updated =
+            sqlx::query("UPDATE queue_items SET position = ? WHERE id = ? AND queue_id = ?")
+                .bind(pos as i64)
+                .bind(item_id.to_string())
+                .bind(queue_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &e.to_string(),
+                    )
+                })?;
+
+        if updated.rows_affected() == 0 {
+            return Err(v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "REORDER_FAILED",
+                &format!("failed to update position for item {item_id}"),
+            ));
+        }
+    }
+
+    sqlx::query("UPDATE queues SET updated_at = ? WHERE id = ?")
+        .bind(&now)
         .bind(queue_id.to_string())
         .execute(&mut *tx)
         .await
-        .ok();
-
-    for (i, item_id) in body.item_ids.iter().enumerate() {
-        sqlx::query("INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)")
-            .bind(Uuid::new_v4().to_string()).bind(queue_id.to_string())
-            .bind(item_id.to_string()).bind(i as i64).bind(&now)
-            .execute(&mut *tx)
-            .await
-            .ok();
-    }
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     tx.commit().await.map_err(|e| {
         v1_error(
@@ -276,6 +553,14 @@ pub async fn queue_reorder_handler(
             &e.to_string(),
         )
     })?;
+
+    let _ = state.tx.send(
+        serde_json::json!({
+            "type": "queue_reordered",
+            "queue_id": queue_id,
+        })
+        .to_string(),
+    );
 
     Ok(Json(
         serde_json::json!({ "status": "ok", "reordered": body.item_ids.len() }),
@@ -291,18 +576,69 @@ pub async fn queue_delete_handler(
     State(state): State<AppState>,
     Path(queue_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let mut tx = state.db.begin().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM queues WHERE id = ?")
+        .bind(queue_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+    if exists == 0 {
+        return Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "queue not found",
+        ));
+    }
+
     sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
         .bind(queue_id.to_string())
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
-        .ok();
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
     sqlx::query("DELETE FROM queues WHERE id = ?")
         .bind(queue_id.to_string())
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
-        .ok();
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
-    Ok(Json(serde_json::json!({ "status": "deleted" })))
+    tx.commit().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    Ok(Json(
+        serde_json::json!({ "status": "deleted", "queue_id": queue_id }),
+    ))
 }
 
 // ── Queue Save/Load (cross-device) ─────────────────────────────
@@ -379,40 +715,39 @@ pub async fn queue_saved_handler(
             })))
         }
         None => {
-            let latest_queue = sqlx::query_as::<_, (String, String)>(
-                "SELECT id, name FROM queues ORDER BY datetime(created_at) DESC LIMIT 1"
-            )
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+            let active_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
 
-            if let Some((qid_str, _)) = latest_queue {
-                if let Ok(qid) = Uuid::parse_str(&qid_str) {
-                    let queue_items = michi_db::get_queue_items(&state.db, &qid)
-                        .await
-                        .ok()
-                        .unwrap_or_default();
+            let queue_items = michi_db::get_queue_items(&state.db, &active_id)
+                .await
+                .ok()
+                .unwrap_or_default();
 
-                    return Ok(Json(serde_json::json!({
-                        "found": true,
-                        "session_id": serde_json::Value::Null,
-                        "queue_id": qid,
-                        "current_index": 0,
-                        "position_ms": 0,
-                        "source": "queue",
-                        "items": queue_items.iter().map(|(tid, pos)| serde_json::json!({
-                            "track_id": tid,
-                            "position": pos,
-                        })).collect::<Vec<_>>(),
-                    })));
-                }
+            if queue_items.is_empty() {
+                Ok(Json(serde_json::json!({
+                    "found": false,
+                    "queue_id": active_id,
+                    "items": [],
+                })))
+            } else {
+                Ok(Json(serde_json::json!({
+                    "found": true,
+                    "session_id": serde_json::Value::Null,
+                    "queue_id": active_id,
+                    "current_index": 0,
+                    "position_ms": 0,
+                    "source": "queue",
+                    "items": queue_items.iter().map(|(tid, pos)| serde_json::json!({
+                        "track_id": tid,
+                        "position": pos,
+                    })).collect::<Vec<_>>(),
+                })))
             }
-
-            Ok(Json(serde_json::json!({
-                "found": false,
-                "queue_id": null,
-            })))
         }
     }
 }

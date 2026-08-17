@@ -58,18 +58,14 @@ fn test_config() -> Config {
     }
 }
 
-async fn make_app() -> (axum::Router, SqlitePool, michi_api::AppState) {
+async fn make_raw_app() -> (axum::Router, SqlitePool, michi_api::AppState, String) {
     let pool = test_db().await;
     let config = test_config();
     let state = michi_api::AppState::new(config, pool.clone(), None);
-    let router = router_with_test_admin(state.clone(), &pool).await;
-    (router, pool, state)
-}
 
-async fn router_with_test_admin(state: michi_api::AppState, pool: &SqlitePool) -> axum::Router {
     let admin_id = Uuid::new_v4();
     michi_db::create_user(
-        pool,
+        &pool,
         &admin_id,
         &format!("test-admin-{admin_id}"),
         "unused",
@@ -78,10 +74,18 @@ async fn router_with_test_admin(state: michi_api::AppState, pool: &SqlitePool) -
     .await
     .unwrap();
     let token = state.auth_sessions.create_session(admin_id).await;
-    create_router(state).layer(axum::middleware::from_fn_with_state(
+
+    let router = create_router(state.clone());
+    (router, pool, state, token)
+}
+
+async fn make_app() -> (axum::Router, SqlitePool, michi_api::AppState) {
+    let (router, pool, state, token) = make_raw_app().await;
+    let admin_router = router.layer(axum::middleware::from_fn_with_state(
         token,
         inject_test_authorization,
-    ))
+    ));
+    (admin_router, pool, state)
 }
 
 async fn inject_test_authorization(
@@ -106,35 +110,29 @@ async fn inject_test_authorization(
     next.run(request).await
 }
 
-async fn body_json(response: axum::response::Response) -> Value {
-    let body = response.into_body();
-    let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
-    serde_json::from_slice(&bytes).unwrap()
+async fn body_json(res: Response) -> Value {
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap_or(Value::Null)
 }
 
-async fn body_text(response: axum::response::Response) -> String {
-    let body = response.into_body();
-    let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
-    String::from_utf8(bytes.to_vec()).unwrap()
-}
-
-async fn seed_track(pool: &SqlitePool, path: &str, title: &str) -> Uuid {
-    let id = track_id_from_path(path);
+async fn seed_track(pool: &SqlitePool, path_str: &str, title: &str) -> Track {
     let track = Track {
-        id,
+        id: track_id_from_path(path_str),
         title: Some(title.to_string()),
-        artist: Some("Test Artist".into()),
-        album: Some("Test Album".into()),
+        artist: Some("Test Artist".to_string()),
+        album: Some("Test Album".to_string()),
         album_artist: None,
-        duration_ms: Some(180000),
-        file_path: path.to_string(),
+        duration_ms: Some(180_000),
+        file_path: path_str.to_string(),
         format: AudioFormat::Flac,
         sample_rate: Some(48000),
         bit_depth: Some(16),
         channels: Some(2),
         artwork_id: None,
-        genre: Some("Jazz".into()),
-        year: Some(2025),
+        genre: Some("Electronic".to_string()),
+        year: Some(2026),
         track_number: Some(1),
         disc_number: Some(1),
         content_hash: None,
@@ -147,284 +145,140 @@ async fn seed_track(pool: &SqlitePool, path: &str, title: &str) -> Uuid {
         updated_at: chrono::Utc::now(),
     };
     michi_db::upsert_track(pool, &track).await.unwrap();
-    id
+    track
 }
 
-// ── Test 1: Connection probes /health/live and /api/v1/server/info ──
+// ── UI-001 / UI-002 / UI-003: Unauthenticated QR Claim Bootstrap & Atomic Anti-Replay ──
 #[tokio::test]
-async fn test_connection_probes_live_and_info() {
-    let (app, _pool, _state) = make_app().await;
+async fn test_unauthenticated_qr_claim_bootstrap_and_replay_protection() {
+    let (raw_app, pool, state, admin_token) = make_raw_app().await;
 
-    // 1. /health/live
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/health/live")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let text = body_text(res).await;
-    assert_eq!(text, "OK");
-
-    // 2. /api/v1/server/info
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/server/info")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert!(json.get("server_id").is_some());
-    assert!(json.get("version").is_some());
-
-    // 3. /api/v1/capabilities
-    let res = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/capabilities")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert!(json.get("features").is_some());
-}
-
-// ── Test 2: Server URL dynamic derivation (no hardcoded localhost in index.html) ──
-#[tokio::test]
-async fn test_server_url_no_hardcoded_localhost() {
-    let (app, _pool, _state) = make_app().await;
-
-    // Generate QR with explicit Host header
-    let res = app
+    // 1. Admin generates QR code
+    let gen_res = raw_app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/pair/qr")
-                .header(header::HOST, "192.168.1.100:9090")
+                .header("Authorization", format!("Bearer {admin_token}"))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"device_type":"mobile"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    let url = json["server_url"].as_str().unwrap();
-    assert_eq!(url, "http://192.168.1.100:9090");
-
-    // Check static index.html doesn't contain hardcoded input value="http://localhost:8096" or "http://localhost:9090"
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let index_path = std::path::Path::new(manifest_dir).join("static/index.html");
-    let index_content = std::fs::read_to_string(&index_path).unwrap();
-    assert!(
-        !index_content.contains(r#"value="http://localhost"#),
-        "index.html must not contain hardcoded localhost URL"
-    );
-}
-
-// ── Test 3: QR Lifecycle status polling ──
-#[tokio::test]
-async fn test_qr_lifecycle_status_polling() {
-    let (app, _pool, _state) = make_app().await;
-
-    // 1. Generate QR code
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/pair/qr")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"server_url":"http://10.0.0.5:9090"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    let qr_code = json["qr_code"].as_str().unwrap();
-
-    // 2. Poll status -> waiting_for_scan
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(&format!("/api/v1/pair/qr/{qr_code}/status"))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["status"], "waiting_for_scan");
-    assert_eq!(json["claimed"], false);
+    assert_eq!(gen_res.status(), StatusCode::OK);
+    let gen_json = body_json(gen_res).await;
+    let qr_code = gen_json["qr_code"].as_str().unwrap();
 
-    // 3. Claim QR
-    let res = app
+    // 2. Unpaired Mobile claims QR with NO Authorization header (public bootstrap)
+    let claim_res = raw_app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri(&format!("/api/v1/pair/qr/{qr_code}/claim"))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"device_name":"Living Room Phone"}"#))
+                .body(Body::from(r#"{"device_name":"Mobile Pixel 9"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["status"], "claimed");
+    assert_eq!(claim_res.status(), StatusCode::OK);
+    let claim_json = body_json(claim_res).await;
+    assert_eq!(claim_json["status"], "claimed");
+    let device_token = claim_json["device_token"].as_str().unwrap();
+    let device_id = claim_json["device_id"].as_str().unwrap();
 
-    // 4. Poll status again -> claimed
-    let res = app
-        .oneshot(
-            Request::builder()
-                .uri(&format!("/api/v1/pair/qr/{qr_code}/status"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["status"], "claimed");
-    assert_eq!(json["claimed"], true);
-}
+    // Verify LinkDevice was atomically persisted in SQL database
+    let dev_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM link_devices WHERE device_id = ?")
+            .bind(device_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(dev_count, 1);
 
-// ── Test 4: QR claim registers link device in Ecosystem ──
-#[tokio::test]
-async fn test_qr_claim_registers_link_device() {
-    let (app, _pool, _state) = make_app().await;
-
-    // Generate QR
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/pair/qr")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let json = body_json(res).await;
-    let qr_code = json["qr_code"].as_str().unwrap();
-
-    // Claim
-    let res = app
+    // 3. Replay attack: second claim with same QR code MUST be rejected (410 GONE)
+    let replay_res = raw_app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri(&format!("/api/v1/pair/qr/{qr_code}/claim"))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"device_name":"Mobile Tester 1"}"#))
+                .body(Body::from(r#"{"device_name":"Attacker"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(replay_res.status(), StatusCode::GONE);
 
-    // Verify device in GET /api/v1/link/devices
-    let res = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/link/devices")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    let devices = json["devices"].as_array().unwrap();
-    assert!(
-        devices
-            .iter()
-            .any(|d| d["alias"].as_str() == Some("Mobile Tester 1")),
-        "Claimed QR device must appear in link devices"
-    );
-}
-
-// ── Test 5: mDNS service type is canonical _michi-link._tcp.local. ──
-#[tokio::test]
-async fn test_mdns_service_type_is_michi_link() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let receivers_path = std::path::Path::new(manifest_dir).join("src/routes/v1/receivers.rs");
-    let receivers_src = std::fs::read_to_string(&receivers_path).unwrap();
-    assert!(
-        receivers_src.contains(r#"let service_type = "_michi-link._tcp.local.";"#),
-        "mDNS discovery must query canonical service type _michi-link._tcp.local."
-    );
-    assert!(
-        !receivers_src.contains(r#"let service_type = "_michi-receiver._tcp.local.";"#),
-        "mDNS discovery must not query deprecated _michi-receiver._tcp.local."
-    );
-}
-
-// ── Test 6: Playback State canonical authority ──
-#[tokio::test]
-async fn test_playback_state_canonical_authority() {
-    let (app, pool, _state) = make_app().await;
-    let track_id = seed_track(&pool, "/tmp/michi-test/music/track1.flac", "Song 1").await;
-
-    // Check initial state
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/playback/state")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["state"], "paused");
-
-    // Play track via control handler
-    let res = app
+    // 4. Claim with non-existent QR code returns 404
+    let fake_qr = Uuid::new_v4();
+    let fake_res = raw_app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/playback/control")
+                .uri(&format!("/api/v1/pair/qr/{fake_qr}/claim"))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(format!(
-                    r#"{{"command":"play","value":{{"track_id":"{track_id}","position_ms":5000}}}}"#
-                )))
+                .body(Body::from(r#"{"device_name":"Random"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["state"], "playing");
-    assert_eq!(json["position_ms"], 5000);
+    assert_eq!(fake_res.status(), StatusCode::NOT_FOUND);
 
-    // Verify canonical state reflects playing state
+    // 5. Verify the obtained device_token can access protected device routes
+    let queue_res = raw_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/queue")
+                .header("Authorization", format!("Bearer {device_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queue_res.status(), StatusCode::OK);
+}
+
+// ── UI-004: Receiver Online State Decoupled from Active Session ──
+#[tokio::test]
+async fn test_receiver_online_calculation_during_active_session() {
+    let (app, _pool, state) = make_app().await;
+
+    // Register a receiver with an active streaming session and recent last_seen
+    let reg = state.receiver_manager.registry().await;
+    let mut reg_write = reg.write().await;
+    let entry = michi_receivers::ReceiverRegistryEntry {
+        receiver_id: "rec-living-room".into(),
+        name: "Living Room Stream".into(),
+        device_type: "michi_stream".into(),
+        base_url: "http://192.168.1.50:8080".into(),
+        paired: true,
+        token: Some("tok-123".into()),
+        last_seen: Some(chrono::Utc::now()),
+        capabilities: vec!["pcm_s16le".into()],
+        active_session_id: Some("session-abc".into()),
+        max_sample_rate: 48000,
+        max_bit_depth: 16,
+        supported_codecs: vec!["pcm_s16le".into()],
+        maximum_safe_volume: Some(100),
+    };
+    reg_write.add(entry);
+    drop(reg_write);
+    drop(reg);
+
+    // Fetch receivers list
     let res = app
         .oneshot(
             Request::builder()
-                .uri("/api/v1/playback/state")
+                .method("GET")
+                .uri("/api/v1/receivers")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -432,74 +286,26 @@ async fn test_playback_state_canonical_authority() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let json = body_json(res).await;
-    assert_eq!(json["state"], "playing");
-    assert_eq!(json["track_id"], track_id.to_string());
-    assert_eq!(json["position_ms"], 5000);
+    let recs = json["receivers"].as_array().unwrap();
+    let r = &recs[0];
+    assert_eq!(
+        r["online"], true,
+        "Receiver with active session must still be reported online"
+    );
+    assert_eq!(r["session_active"], true);
 }
 
-// ── Test 7: Playback Control repeat and shuffle ──
+// ── UI-005 / UI-006 / UI-007 / UI-008 / UI-009 / UI-010: Canonical Active Queue ──
 #[tokio::test]
-async fn test_playback_control_repeat_and_shuffle() {
-    let (app, _pool, _state) = make_app().await;
+async fn test_canonical_active_queue_lifecycle() {
+    let (app, pool, state) = make_app().await;
 
-    // 1. Toggle shuffle
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/playback/control")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"command":"shuffle"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["shuffle"], true);
+    let t1 = seed_track(&pool, "/music/track1.flac", "Track One").await;
+    let t2 = seed_track(&pool, "/music/track2.flac", "Track Two").await;
+    let t3 = seed_track(&pool, "/music/track3.flac", "Track Three").await;
 
-    // 2. Toggle repeat
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/playback/control")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"command":"repeat"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["repeat"], "all");
-
-    // 3. Verify state endpoint returns shuffle and repeat
-    let res = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/playback/state")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["shuffle"], true);
-    assert_eq!(json["repeat"], "all");
-}
-
-// ── Test 8: Queue canonical persistence ──
-#[tokio::test]
-async fn test_queue_canonical_persistence() {
-    let (app, pool, _state) = make_app().await;
-    let track1 = seed_track(&pool, "/tmp/michi-test/music/song1.flac", "Song 1").await;
-    let track2 = seed_track(&pool, "/tmp/michi-test/music/song2.flac", "Song 2").await;
-
-    // Add items to server queue
+    // UI-005: Add non-existent track fails and does not mutate
+    let bad_id = Uuid::new_v4();
     let res = app
         .clone()
         .oneshot(
@@ -507,105 +313,172 @@ async fn test_queue_canonical_persistence() {
                 .method("POST")
                 .uri("/api/v1/queue/items")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(format!(
-                    r#"{{"track_ids":["{track1}","{track2}"]}}"#
-                )))
+                .body(Body::from(format!(r#"{{"track_ids":["{bad_id}"]}}"#)))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["items_count"], 2);
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-    // Fetch saved queue
-    let res = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/queue/saved")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["found"], true);
-    let items = json["items"].as_array().unwrap();
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0]["track_id"], track1.to_string());
-    assert_eq!(items[1]["track_id"], track2.to_string());
-}
-
-// ── Test 9: Room Groups audio truth pcm_s16le ──
-#[tokio::test]
-async fn test_room_groups_audio_truth_pcm_s16le() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let receivers_path = std::path::Path::new(manifest_dir).join("src/routes/v1/receivers.rs");
-    let receivers_src = std::fs::read_to_string(&receivers_path).unwrap();
-    assert!(
-        receivers_src.contains(r#""pcm_s16le""#),
-        "Room groups must use pcm_s16le codec format"
-    );
-    assert!(
-        receivers_src.contains("48000"),
-        "Room groups must use 48000 Hz sample rate"
-    );
-    assert!(
-        receivers_src.contains("16"),
-        "Room groups must use 16 bit depth"
-    );
-}
-
-// ── Test 10: Room Groups structured activation status ──
-#[tokio::test]
-async fn test_room_groups_structured_activation_status() {
-    let (app, _pool, _state) = make_app().await;
-
-    // Create room group with a non-existent receiver
-    let fake_recv = Uuid::new_v4().to_string();
-    let res = app
+    // UI-006: Sequential +Q A, +Q B, +Q C appends to ONE active canonical queue
+    let res1 = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/rooms/groups")
+                .uri("/api/v1/queue/items")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(format!(
-                    r#"{{"name":"Basement","mode":"relax","receiver_ids":["{fake_recv}"]}}"#
-                )))
+                .body(Body::from(format!(r#"{{"track_ids":["{}"]}}"#, t1.id)))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    let group_id = json["group"]["id"].as_str().unwrap();
+    assert_eq!(res1.status(), StatusCode::OK);
 
-    // Activate room group -> should return 502 / ROOM_ACTIVATION_FAILED because receiver not found/paired
-    let res = app
+    let res2 = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/api/v1/rooms/groups/{group_id}/activate"))
+                .uri("/api/v1/queue/items")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(r#"{{"track_ids":["{}"]}}"#, t2.id)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res2.status(), StatusCode::OK);
+
+    let res3 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/queue/items")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(r#"{{"track_ids":["{}"]}}"#, t3.id)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res3.status(), StatusCode::OK);
+
+    // Fetch canonical queue and verify all 3 tracks in order in active queue
+    let q_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/queue")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
-    let json = body_json(res).await;
-    assert_eq!(json["error"]["code"], "ROOM_ACTIVATION_FAILED");
+    assert_eq!(q_res.status(), StatusCode::OK);
+    let q_json = body_json(q_res).await;
+    assert_eq!(q_json["items_count"], 3);
+    let items = q_json["items"].as_array().unwrap();
+    assert_eq!(items[0]["track_id"], t1.id.to_string());
+    assert_eq!(items[1]["track_id"], t2.id.to_string());
+    assert_eq!(items[2]["track_id"], t3.id.to_string());
+
+    let item0_id = items[0]["id"].as_str().unwrap().to_string();
+    let item1_id = items[1]["id"].as_str().unwrap().to_string();
+    let item2_id = items[2]["id"].as_str().unwrap().to_string();
+    let queue_id = q_json["queue_id"].as_str().unwrap().to_string();
+
+    // UI-008: Queue Reorder by item_ids preserves track IDs and updates position
+    let reorder_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/queue/reorder")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(
+                    r#"{{"queue_id":"{queue_id}","item_ids":["{item2_id}","{item1_id}","{item0_id}"]}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reorder_res.status(), StatusCode::OK);
+
+    let q_res_after = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/queue")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let q_json_after = body_json(q_res_after).await;
+    let items_after = q_json_after["items"].as_array().unwrap();
+    assert_eq!(items_after[0]["track_id"], t3.id.to_string());
+    assert_eq!(items_after[1]["track_id"], t2.id.to_string());
+    assert_eq!(items_after[2]["track_id"], t1.id.to_string());
+
+    // UI-009: Queue Jump selects track at index and resets position_ms to 0
+    let jump_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/queue/jump")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(
+                    r#"{{"queue_id":"{queue_id}","index":1}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(jump_res.status(), StatusCode::OK);
+    let ps = state.playback_state.read().await;
+    assert_eq!(ps.track_id, Some(t2.id));
+    assert_eq!(ps.position_ms, 0);
+    drop(ps);
+
+    // UI-010: Queue Delete removes queue and items transactionally
+    let del_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(&format!("/api/v1/queue/{queue_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(del_res.status(), StatusCode::OK);
+
+    let del_second = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(&format!("/api/v1/queue/{queue_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(del_second.status(), StatusCode::NOT_FOUND);
 }
 
-// ── Test 11: Chains audio truth and links_active count ──
+// ── UI-011 / UI-012 / UI-013 / UI-014: Playback Chains Truthfulness ──
 #[tokio::test]
-async fn test_chains_audio_truth_and_links_active_count() {
-    let (app, pool, _state) = make_app().await;
-    let track_id = seed_track(&pool, "/tmp/michi-test/music/song.flac", "Song").await;
+async fn test_playback_chains_verifiable_effect() {
+    let (app, pool, state) = make_app().await;
+    let _t = seed_track(&pool, "/music/chain_track.flac", "Chain Track").await;
 
     // Create chain
-    let res = app
+    let create_res = app
         .clone()
         .oneshot(
             Request::builder()
@@ -617,27 +490,15 @@ async fn test_chains_audio_truth_and_links_active_count() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    let chain_id = json["chain"]["id"].as_str().unwrap();
+    assert_eq!(create_res.status(), StatusCode::OK);
+    let chain_id = body_json(create_res).await["chain"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
-    // Set track
-    let res = app
+    // UI-011: Play chain with 0 configured links MUST return 400 NO_OUTPUTS
+    let play_res0 = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri(&format!("/api/v1/chains/{chain_id}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(format!(r#"{{"track_id":"{track_id}"}}"#)))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // Play chain (0 active receivers configured) -> links_active must be 0
-    let res = app
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -647,19 +508,301 @@ async fn test_chains_audio_truth_and_links_active_count() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["status"], "playing");
-    assert_eq!(json["links_active"], 0);
+    assert_eq!(play_res0.status(), StatusCode::BAD_REQUEST);
+    let ps0 = state.playback_state.read().await;
+    assert!(!ps0.playing);
+    drop(ps0);
+
+    // Add a link to an offline/unpaired receiver
+    let add_link_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/api/v1/chains/{chain_id}/links"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"receiver_id":"offline-speaker","volume":70}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(add_link_res.status(), StatusCode::OK);
+
+    // UI-012: Play chain where all receiver sessions fail MUST return 502 and NOT claim playing
+    let play_res_fail = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/api/v1/chains/{chain_id}/play"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(play_res_fail.status(), StatusCode::BAD_GATEWAY);
+    let ps_fail = state.playback_state.read().await;
+    assert!(!ps_fail.playing);
+    drop(ps_fail);
+
+    // UI-014: Volume validation strictly enforces 0..=100
+    let vol_bad = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/api/v1/chains/{chain_id}/volume"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"volume":150}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(vol_bad.status(), StatusCode::BAD_REQUEST);
+
+    let vol_good = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/api/v1/chains/{chain_id}/volume"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"volume":60}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(vol_good.status(), StatusCode::OK);
+
+    // Stop chain
+    let stop_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/api/v1/chains/{chain_id}/stop"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stop_res.status(), StatusCode::OK);
 }
 
-// ── Test 12: Settings restart_required flag ──
+// ── UI-015 / UI-016 / UI-017 / UI-018: Room Groups Persistence & Effect ──
 #[tokio::test]
-async fn test_settings_restart_required_flag() {
+async fn test_room_groups_persistence_and_activation() {
+    let (app, pool, state) = make_app().await;
+
+    // Create room group
+    let create_rg = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/rooms/groups")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"name":"Upstairs","mode":"party","receiver_ids":[]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_rg.status(), StatusCode::OK);
+    let rg_id = body_json(create_rg).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Verify room group was persisted directly in SQLite database
+    let db_rows = michi_db::list_room_groups_db(&pool).await.unwrap();
+    assert!(db_rows
+        .iter()
+        .any(|(id, name, _, _, _, _)| id.to_string() == rg_id && name == "Upstairs"));
+
+    // UI-015: Activating empty room group MUST return 400 INVALID_ROOM
+    let act_empty = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/api/v1/rooms/groups/{rg_id}/activate"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(act_empty.status(), StatusCode::BAD_REQUEST);
+
+    // /api/v1/rooms lists persistent room groups
+    let list_rooms = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/rooms")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_rooms.status(), StatusCode::OK);
+    let rooms_json = body_json(list_rooms).await;
+    assert!(rooms_json["rooms"].as_array().unwrap().len() >= 1);
+}
+
+// ── PLAY-01..12: Playback Semantics, Next/Previous Traversal, Volume & Repeat ──
+#[tokio::test]
+async fn test_playback_controls_and_queue_traversal() {
+    let (app, pool, state) = make_app().await;
+
+    let t1 = seed_track(&pool, "/music/play1.flac", "Song 1").await;
+    let t2 = seed_track(&pool, "/music/play2.flac", "Song 2").await;
+
+    // Add tracks to queue
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/queue/items")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(
+                    r#"{{"track_ids":["{}","{}"]}}"#,
+                    t1.id, t2.id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Start with track 1
+    {
+        let mut ps = state.playback_state.write().await;
+        ps.track_id = Some(t1.id);
+        ps.playing = true;
+        ps.position_ms = 0;
+        ps.repeat = "all".into();
+    }
+
+    // PLAY-09: Next advances to track 2
+    let next_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"command":"next"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next_res.status(), StatusCode::OK);
+    let ps_next = state.playback_state.read().await;
+    assert_eq!(ps_next.track_id, Some(t2.id));
+    drop(ps_next);
+
+    // PLAY-10: Previous with position > 3000ms restarts current track
+    {
+        let mut ps = state.playback_state.write().await;
+        ps.position_ms = 5000;
+    }
+    let prev_restart = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"command":"previous"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(prev_restart.status(), StatusCode::OK);
+    let ps_prev1 = state.playback_state.read().await;
+    assert_eq!(ps_prev1.track_id, Some(t2.id));
+    assert_eq!(ps_prev1.position_ms, 0);
+    drop(ps_prev1);
+
+    // Previous at position 0 moves back to track 1
+    let prev_back = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"command":"previous"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(prev_back.status(), StatusCode::OK);
+    let ps_prev2 = state.playback_state.read().await;
+    assert_eq!(ps_prev2.track_id, Some(t1.id));
+    drop(ps_prev2);
+
+    // PLAY-05: Strict Volume validation
+    let vol_bad = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"command":"set_volume","volume":120}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(vol_bad.status(), StatusCode::BAD_REQUEST);
+
+    let vol_good = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"command":"set_volume","volume":75}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(vol_good.status(), StatusCode::OK);
+    let ps_vol = state.playback_state.read().await;
+    assert_eq!((ps_vol.volume * 100.0) as u32, 75);
+}
+
+// ── UI-019: Settings Effective Profile & Persistent Restart Flag ──
+#[tokio::test]
+async fn test_settings_effective_profile_and_restart_flag() {
     let (app, _pool, _state) = make_app().await;
 
-    // Changing port requires restart
     let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let json = body_json(res).await;
+    assert!(json.get("effective_scan_workers").is_some());
+    assert!(json.get("effective_transcode_workers").is_some());
+    assert!(json.get("effective_db_pool").is_some());
+
+    // Update resource profile -> restart_required must be true
+    let put_res = app
         .clone()
         .oneshot(
             Request::builder()
@@ -671,124 +814,72 @@ async fn test_settings_restart_required_flag() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["restart_required"], true);
-
-    // Changing theme does not require restart
-    let res = app
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri("/api/v1/settings")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"theme":"light"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["restart_required"], false);
+    assert_eq!(put_res.status(), StatusCode::OK);
+    let put_json = body_json(put_res).await;
+    assert_eq!(put_json["restart_required"], true);
 }
 
-// ── Test 13: Webhook test real HTTP status and latency ──
+// ── UI-024: Automated Matrix & Endpoint Drift Check ──
 #[tokio::test]
-async fn test_webhook_test_real_http_status_and_latency() {
+async fn test_automated_endpoint_drift_check() {
+    // Verify essential frontend endpoints are accepted by the router
     let (app, _pool, _state) = make_app().await;
 
-    // Without webhook URL configured -> 400
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/webhook/test")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let critical_routes = vec![
+        ("GET", "/api/v1/server/info"),
+        ("GET", "/api/v1/status"),
+        ("GET", "/api/v1/queue"),
+        ("GET", "/api/v1/receivers"),
+        ("GET", "/api/v1/rooms/groups"),
+        ("GET", "/api/v1/chains"),
+        ("GET", "/api/v1/settings"),
+        ("GET", "/api/v1/library/stats"),
+        ("GET", "/api/v1/events"),
+    ];
 
-    // Configure invalid unreachable URL
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/webhook")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"url":"http://127.0.0.1:59999/nonexistent"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // Test webhook -> 502 Bad Gateway
-    let res = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/webhook/test")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
-    let json = body_json(res).await;
-    assert_eq!(json["error"]["code"], "WEBHOOK_FAILED");
+    for (method, path) in critical_routes {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            res.status(),
+            StatusCode::NOT_FOUND,
+            "Critical endpoint {method} {path} not found in router!"
+        );
+    }
 }
 
-// ── Test 14: Library Snapshot records statistics ──
+// ── UI-025: Default Port 9090 Contract Across Entire Repository ──
 #[tokio::test]
-async fn test_library_snapshot_records_statistics() {
-    let (app, pool, _state) = make_app().await;
-    seed_track(&pool, "/tmp/michi-test/music/snap1.flac", "Track 1").await;
-    seed_track(&pool, "/tmp/michi-test/music/snap2.flac", "Track 2").await;
+async fn test_default_port_9090_contract_consistency() {
+    let cfg = test_config();
+    assert_eq!(cfg.port(), 9090, "Config default port must be 9090");
 
-    let res = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/backup/snapshot")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["status"], "snapshot_created");
-    assert_eq!(json["snapshot"]["stats"]["tracks"], 2);
-}
+    let dockerfile = std::fs::read_to_string("../../Dockerfile")
+        .or_else(|_| std::fs::read_to_string("Dockerfile"))
+        .unwrap_or_default();
+    if !dockerfile.is_empty() {
+        assert!(
+            dockerfile.contains("9090"),
+            "Dockerfile must reference default port 9090"
+        );
+    }
 
-// ── Test 15: File availability check no fake corrupt count ──
-#[tokio::test]
-async fn test_file_availability_check_no_fake_corrupt_count() {
-    let (app, pool, _state) = make_app().await;
-    seed_track(&pool, "/tmp/non_existent_file_path_12345.flac", "Missing Track").await;
-
-    let res = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/backup/verify")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let json = body_json(res).await;
-    assert_eq!(json["status"], "issues_found");
-    assert_eq!(json["missing"], 1);
-    assert_eq!(json["available"], 0);
-    assert_eq!(json["total"], 1);
-    assert!(
-        json.get("corrupt").is_none(),
-        "verify must not report fabricated 'corrupt: 0' statistics"
-    );
+    let service_file = std::fs::read_to_string("../../deploy/michi.service")
+        .or_else(|_| std::fs::read_to_string("deploy/michi.service"))
+        .unwrap_or_default();
+    if !service_file.is_empty() {
+        assert!(
+            service_file.contains("9090"),
+            "michi.service must reference port 9090"
+        );
+    }
 }

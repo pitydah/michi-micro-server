@@ -476,7 +476,13 @@ pub async fn test_webhook_handler(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "CLIENT_ERROR", &e.to_string()))?;
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "CLIENT_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     let start = std::time::Instant::now();
     match client.post(&url).json(&payload).send().await {

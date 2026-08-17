@@ -871,10 +871,6 @@ fn v1_link_routes() -> Router<AppState> {
             post(routes::v1::pair::qr_generate_handler),
         )
         .route(
-            "/api/v1/pair/qr/:qr_code/claim",
-            post(routes::v1::pair::qr_claim_handler),
-        )
-        .route(
             "/api/v1/pair/qr/:qr_code/status",
             get(routes::v1::pair::qr_status_handler),
         )
@@ -1410,6 +1406,10 @@ fn v1_public_routes() -> Router<AppState> {
         .route(
             "/api/v1/policy/lan",
             post(routes::v1::modules::lan_policy_handler),
+        )
+        .route(
+            "/api/v1/pair/qr/:qr_code/claim",
+            post(routes::v1::pair::qr_claim_handler),
         )
         .route(
             "/api/v1/pair/qr/:qr_code/svg",

@@ -462,7 +462,17 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         info!("migration 37 applied");
     }
 
-    info!("database schema at version 37");
+    if current < 38 {
+        info!("applying migration 38: room groups");
+        migration_038(pool).await?;
+        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (38, ?)")
+            .bind(Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?;
+        info!("migration 38 applied");
+    }
+
+    info!("database schema at version 38");
     Ok(())
 }
 
@@ -1171,6 +1181,87 @@ async fn migration_037(pool: &SqlitePool) -> Result<(), DbError> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+async fn migration_038(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS room_groups (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            receiver_ids TEXT NOT NULL,
+            volumes TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn save_room_group_db(
+    pool: &SqlitePool,
+    id: &Uuid,
+    name: &str,
+    mode: &str,
+    receiver_ids: &[String],
+    volumes: &std::collections::HashMap<String, u32>,
+) -> Result<(), DbError> {
+    let now = Utc::now().to_rfc3339();
+    let r_json = serde_json::to_string(receiver_ids).unwrap_or_else(|_| "[]".into());
+    let v_json = serde_json::to_string(volumes).unwrap_or_else(|_| "{}".into());
+    sqlx::query(
+        "INSERT INTO room_groups (id, name, mode, receiver_ids, volumes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, mode = excluded.mode, receiver_ids = excluded.receiver_ids, volumes = excluded.volumes"
+    )
+    .bind(id.to_string())
+    .bind(name)
+    .bind(mode)
+    .bind(r_json)
+    .bind(v_json)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_room_groups_db(
+    pool: &SqlitePool,
+) -> Result<
+    Vec<(
+        Uuid,
+        String,
+        String,
+        Vec<String>,
+        std::collections::HashMap<String, u32>,
+        String,
+    )>,
+    DbError,
+> {
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+        "SELECT id, name, mode, receiver_ids, volumes, created_at FROM room_groups ORDER BY datetime(created_at) ASC"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut result = Vec::new();
+    for (id_s, name, mode, r_s, v_s, created) in rows {
+        let id = Uuid::parse_str(&id_s).unwrap_or_else(|_| Uuid::new_v4());
+        let r_ids: Vec<String> = serde_json::from_str(&r_s).unwrap_or_default();
+        let vols: std::collections::HashMap<String, u32> =
+            serde_json::from_str(&v_s).unwrap_or_default();
+        result.push((id, name, mode, r_ids, vols, created));
+    }
+    Ok(result)
+}
+
+pub async fn delete_room_group_db(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbError> {
+    let res = sqlx::query("DELETE FROM room_groups WHERE id = ?")
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
 }
 
 pub async fn save_snapshot(pool: &SqlitePool, data: &str) -> Result<(), DbError> {

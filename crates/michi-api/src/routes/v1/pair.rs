@@ -361,8 +361,7 @@ pub async fn list_devices_handler(
 
 // ── QR Pairing ───────────────────────────────────────────────────
 
-#[derive(Serialize)]
-#[derive(Debug, Deserialize, Default)]
+#[derive(Serialize, Debug, Deserialize, Default)]
 pub struct QrGenerateBody {
     pub server_url: Option<String>,
 }
@@ -380,7 +379,9 @@ pub async fn qr_generate_handler(
     body: Option<Json<QrGenerateBody>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let qr_code = Uuid::new_v4();
-    let explicit_url = body.and_then(|b| b.0.server_url).filter(|u| !u.trim().is_empty());
+    let explicit_url = body
+        .and_then(|b| b.0.server_url)
+        .filter(|u| !u.trim().is_empty());
 
     let host_hdr = headers
         .get("x-forwarded-host")
@@ -659,11 +660,19 @@ pub async fn qr_claim_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let qr_str = qr_code.to_string();
 
+    let mut tx = state.db.begin().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
     let row = sqlx::query_as::<_, (String, String, i64)>(
         "SELECT id, expires_at, claimed FROM pairing_qr_codes WHERE qr_code = ?",
     )
     .bind(&qr_str)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|e| {
         v1_error(
@@ -695,43 +704,88 @@ pub async fn qr_claim_handler(
         return Err(v1_error(StatusCode::GONE, "EXPIRED", "QR code has expired"));
     }
 
-    // Mark claimed
-    sqlx::query("UPDATE pairing_qr_codes SET claimed = 1, claimed_at = ? WHERE id = ?")
-        .bind(chrono::Utc::now().to_rfc3339())
-        .bind(&db_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "DB_ERROR",
-                &e.to_string(),
-            )
-        })?;
+    // Mark claimed atomically in transaction (guarantees no concurrent double claim)
+    let update_res = sqlx::query(
+        "UPDATE pairing_qr_codes SET claimed = 1, claimed_at = ? WHERE id = ? AND claimed = 0",
+    )
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(&db_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    if update_res.rows_affected() == 0 {
+        return Err(v1_error(
+            StatusCode::CONFLICT,
+            "CONCURRENT_CLAIM",
+            "QR code was claimed concurrently",
+        ));
+    }
 
     // Generate device token for the claimer
-    let device_name = body.device_name.unwrap_or_else(|| "QR-Paired Device".into());
+    let device_name = body
+        .device_name
+        .unwrap_or_else(|| "QR-Paired Device".into());
     let device_id = Uuid::new_v4();
     let token = generate_device_token();
 
-    state
-        .token_store
-        .store(&token, TokenType::Device, device_id)
-        .await;
-
-    // Register device in canonical link_devices registry
+    // Register device in canonical link_devices registry inside the same transaction
     let core_device = michi_core::LinkDevice {
         device_id,
         alias: device_name.clone(),
         device_type: body.device_type.unwrap_or_else(|| "mobile".into()),
         device_model: None,
         token_hash: hash_token(&token),
-        permissions_json: r#"{"playback":true,"queue":true,"library_read":true,"settings":false}"#.into(),
+        permissions_json: r#"{"playback":true,"queue":true,"library_read":true,"settings":false}"#
+            .into(),
         created_at: chrono::Utc::now(),
         last_seen: Some(chrono::Utc::now().to_rfc3339()),
         revoked: false,
     };
-    let _ = michi_db::create_link_device(&state.db, &core_device).await;
+
+    let dev_id_str = core_device.device_id.to_string();
+    let created_str = core_device.created_at.to_rfc3339();
+    sqlx::query(
+        "INSERT INTO link_devices (device_id, alias, device_type, device_model, token_hash, permissions, created_at, last_seen, revoked)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&dev_id_str)
+    .bind(&core_device.alias)
+    .bind(&core_device.device_type)
+    .bind(&core_device.device_model)
+    .bind(&core_device.token_hash)
+    .bind(&core_device.permissions_json)
+    .bind(&created_str)
+    .bind(&core_device.last_seen)
+    .bind(core_device.revoked as i64)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DEVICE_PERSISTENCE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    tx.commit().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "COMMIT_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    state
+        .token_store
+        .store(&token, TokenType::Device, device_id)
+        .await;
 
     // Broadcast device paired event
     let _ = state.tx.send(
