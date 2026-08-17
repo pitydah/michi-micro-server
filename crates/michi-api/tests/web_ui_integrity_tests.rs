@@ -591,7 +591,7 @@ async fn test_playback_chains_verifiable_effect() {
     assert_eq!(stop_res.status(), StatusCode::OK);
 }
 
-// ── UI-015 / UI-016 / UI-017 / UI-018: Room Groups Persistence & Effect ──
+// ── UI-015 / UI-016 / UI-017 / UI-018 / UI-020: Room Groups Persistence & Effect ──
 #[tokio::test]
 async fn test_room_groups_persistence_and_activation() {
     let (app, pool, state) = make_app().await;
@@ -779,7 +779,86 @@ async fn test_playback_controls_and_queue_traversal() {
     assert_eq!((ps_vol.volume * 100.0) as u32, 75);
 }
 
-// ── UI-019: Settings Effective Profile & Persistent Restart Flag ──
+// ── PLAY-02 / PLAY-03 / PLAY-04 / PLAY-06 / PLAY-07 / PLAY-08: Seek, Pause, Resume & Repeat ──
+#[tokio::test]
+async fn test_playback_seek_pause_resume_and_repeat_modes() {
+    let (app, pool, state) = make_app().await;
+    let t = seed_track(&pool, "/music/seek_test.flac", "Seek Track").await;
+
+    // Set initial playing state
+    {
+        let mut ps = state.playback_state.write().await;
+        ps.track_id = Some(t.id);
+        ps.playing = true;
+        ps.position_ms = 0;
+    }
+
+    // PLAY-04: Seek to 45000ms
+    let seek_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"command":"seek","position_ms":45000}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(seek_res.status(), StatusCode::OK);
+    assert_eq!(state.playback_state.read().await.position_ms, 45000);
+
+    // PLAY-02: Pause
+    let pause_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"command":"pause"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pause_res.status(), StatusCode::OK);
+    assert!(!state.playback_state.read().await.playing);
+
+    // PLAY-03: Resume
+    let play_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"command":"play"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(play_res.status(), StatusCode::OK);
+    assert!(state.playback_state.read().await.playing);
+
+    // PLAY-08: Repeat "one"
+    let rep_one = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"command":"repeat","value":"one"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rep_one.status(), StatusCode::OK);
+    assert_eq!(state.playback_state.read().await.repeat, "one");
+}
+
+// ── UI-019 / UI-027: Settings Effective Profile & Persistent Restart Flag ──
 #[tokio::test]
 async fn test_settings_effective_profile_and_restart_flag() {
     let (app, _pool, _state) = make_app().await;
@@ -819,7 +898,7 @@ async fn test_settings_effective_profile_and_restart_flag() {
     assert_eq!(put_json["restart_required"], true);
 }
 
-// ── UI-024: Automated Matrix & Endpoint Drift Check ──
+// ── UI-024 / UI-028 / UI-029: Automated Matrix & Endpoint Drift Check ──
 #[tokio::test]
 async fn test_automated_endpoint_drift_check() {
     // Verify essential frontend endpoints are accepted by the router
@@ -835,6 +914,8 @@ async fn test_automated_endpoint_drift_check() {
         ("GET", "/api/v1/settings"),
         ("GET", "/api/v1/library/stats"),
         ("GET", "/api/v1/events"),
+        ("GET", "/api/v1/sources"),
+        ("POST", "/api/v1/backup/verify"),
     ];
 
     for (method, path) in critical_routes {
@@ -857,7 +938,7 @@ async fn test_automated_endpoint_drift_check() {
     }
 }
 
-// ── UI-025: Default Port 9090 Contract Across Entire Repository ──
+// ── UI-025 / UI-030: Default Port 9090 Contract Across Entire Repository ──
 #[tokio::test]
 async fn test_default_port_9090_contract_consistency() {
     let cfg = test_config();
