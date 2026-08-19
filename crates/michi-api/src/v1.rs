@@ -34,47 +34,9 @@ fn v1_map_err(status: StatusCode, msg: &str, code: &str) -> (StatusCode, Json<V1
     (status, Json(V1Error::new(code, msg.to_string())))
 }
 
-#[derive(Debug, Serialize)]
-pub struct ServerInfo {
-    pub name: String,
-    pub server_id: Uuid,
-    pub version: String,
-    pub api_version: String,
-    pub features: ServerFeatures,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ServerFeatures {
-    pub library: bool,
-    pub search: bool,
-    pub streaming: bool,
-    pub web_ui: bool,
-    pub playlists: bool,
-    pub artwork: bool,
-    pub sync: bool,
-    pub transcoding: bool,
-    pub websocket: bool,
-}
-
-pub async fn server_info_handler(State(state): State<AppState>) -> Json<ServerInfo> {
-    Json(ServerInfo {
-        name: "Michi Micro Server".to_string(),
-        server_id: state.server_id(),
-        version: state.config.version.to_string(),
-        api_version: "v1".to_string(),
-        features: ServerFeatures {
-            library: true,
-            search: true,
-            streaming: true,
-            web_ui: true,
-            playlists: true,
-            artwork: true,
-            sync: false,
-            transcoding: michi_streaming::check_ffmpeg(),
-            websocket: true,
-        },
-    })
-}
+// NOTE: ServerInfo/ServerFeatures/server_info_handler were removed (dead code).
+// The canonical live handler is routes::v1::server::server_info_handler,
+// which emits V1ServerInfo conforming to the Michi Link v1 contract.
 
 pub async fn v1_status_handler(State(state): State<AppState>) -> Json<status::StatusResponse> {
     status::status_handler(State(state)).await
