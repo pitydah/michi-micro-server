@@ -1,0 +1,3 @@
+[submodule "vendor/michi-link"]
+	path = vendor/michi-link
+	url = https://github.com/pitydah/michi-link.git

@@ -51,12 +51,9 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
         version: state.config.version().to_string(),
         api_version: "v1".into(),
         roles: vec![
-            "library_server".into(),
-            "stream_server".into(),
-            "sync_source".into(),
-            "home_server".into(),
+            "music_server".into(),
+            "library_host".into(),
             "playback_host".into(),
-            "multiroom_host".into(),
         ],
         features: V1Features {
             library: !disabled.contains("scan"),
