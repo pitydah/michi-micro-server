@@ -1,6 +1,6 @@
 //! Michi Connect — Descubrimiento multi-capa y conexión resiliente
 //!
-//! - mDNS announce del servidor como _michi._tcp
+//! - mDNS announce del servidor como _michi-link._tcp
 //! - QR link michi://connect?id=XYZ&host=IP&port=PORT
 //! - CORS dinámico basado en firma
 
@@ -78,12 +78,14 @@ impl MichiConnect {
 
         let daemon = mdns_sd::ServiceDaemon::new().map_err(|e| format!("mdns daemon: {e}"))?;
 
-        let service_type = "_michi._tcp.local.";
+        let service_type = "_michi-link._tcp.local.";
         let instance_name = format!("Michi Micro Server ({})", &michi_id[..8]);
         let service_hostname = format!("{hostname}.local.");
 
         let properties = [
             ("michi_id", michi_id.as_str()),
+            ("api_version", "v1"),
+            ("service", "michi-micro-server"),
             ("version", env!("CARGO_PKG_VERSION")),
         ];
 
