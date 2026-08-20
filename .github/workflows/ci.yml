@@ -46,8 +46,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Fetch canonical Michi Link contracts (michi-music-stream)
+        run: git clone --depth 1 https://github.com/pitydah/michi-music-stream.git /tmp/michi-music-stream
       - name: Validate Michi Link v1-lite Stream Contract Drift & Full OpenAPI
-        run: python3 scripts/test_stream_contract_drift.py
+        run: python3 scripts/test_stream_contract_drift.py --contract-dir /tmp/michi-music-stream/contracts/michi-link
 
   ci-receiver-contract-simulator:
     runs-on: ubuntu-latest
@@ -104,6 +106,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies & Mosquitto broker
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config mosquitto
+      - name: Build michi-server binary
+        run: cargo build --bin michi-server
       - name: Run Mosquitto Real Integration Tests
         run: bash scripts/test_mosquitto_real_e2e.sh 18885 9098
 
