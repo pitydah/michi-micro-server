@@ -145,12 +145,13 @@ impl AppState {
             )
             .unwrap_or_else(|e| {
                 tracing::warn!("failed to load identity from config dir: {e}; using ephemeral");
-                michi_identity::IdentityManager::generate(
-                    &std::env::temp_dir().join("michi-ephemeral-identity"),
-                    "Michi Micro Server",
-                    "",
-                )
-                .expect("ephemeral identity generation must not fail")
+                // Unique per-instance dir: tests build many AppStates in
+                // parallel and a fixed path would race on the identity file.
+                let ephemeral_dir = std::env::temp_dir()
+                    .join(format!("michi-ephemeral-identity-{}", uuid::Uuid::new_v4()));
+                let _ = std::fs::create_dir_all(&ephemeral_dir);
+                michi_identity::IdentityManager::generate(&ephemeral_dir, "Michi Micro Server", "")
+                    .expect("ephemeral identity generation must not fail")
             }),
         );
         let pairing_registry = Arc::new(michi_identity::PairingRegistry::new());
