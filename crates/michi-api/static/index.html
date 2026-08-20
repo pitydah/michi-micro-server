@@ -558,13 +558,6 @@
                     <div id="discover-result" class="panel-result"></div>
                 </div>
                 <div class="panel">
-                    <div class="panel-header">Receiver Groups</div>
-                    <div class="panel-row"><span class="panel-label">Name</span><input type="text" id="group-name" class="panel-input" placeholder="Living Room"></div>
-                    <div class="panel-row"><span class="panel-label">Receivers</span><input type="text" id="group-receivers" class="panel-input" placeholder="comma-separated IDs"></div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="createGroup()">Create Group</button></div>
-                    <div id="groups-list" class="panel-result"></div>
-                </div>
-                <div class="panel">
                     <div class="panel-header">Room Groups</div>
                     <div class="panel-row"><span class="panel-label">Name</span><input type="text" id="rg-name" class="panel-input" placeholder="Downstairs"></div>
                     <div class="panel-row"><span class="panel-label">Mode</span><select id="rg-mode" class="panel-input"><option value="relax">Relax</option><option value="party">Party</option><option value="custom">Custom</option></select></div>
@@ -694,7 +687,7 @@
             <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center">
                 <span class="badge disabled" id="np-format-badge" style="display:none">--</span>
                 <span class="badge disabled" id="np-source-badge" style="display:none">--</span>
-                <span class="badge stable" id="np-target-badge" style="font-size:.65rem;cursor:pointer" onclick="toggleOutputTarget()" title="Toggle playback target (Server canonical / Local preview)">Target: Server</span>
+                <span class="badge format" id="np-target-badge" style="font-size:.65rem;cursor:pointer" onclick="toggleOutputTarget()" title="Toggle playback output routing (This Browser / Remote Link)">Output: This Browser</span>
             </div>
         </div>
         <div class="np-progress">

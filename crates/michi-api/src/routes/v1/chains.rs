@@ -546,7 +546,9 @@ pub async fn chain_volume_handler(
         }
     }
 
-    let status = if failed_count == 0 {
+    let status = if links.is_empty() {
+        "no_links"
+    } else if failed_count == 0 {
         "success"
     } else if success_count > 0 {
         "partial"

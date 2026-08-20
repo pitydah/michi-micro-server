@@ -108,14 +108,37 @@ pub async fn playback_control_handler(
 
     match cmd {
         "play" => {
-            current.playing = true;
             if let Some(val) = &body.value {
-                if let Some(track_id) = val.get("track_id").and_then(|v| v.as_str()) {
-                    if let Ok(uid) = Uuid::parse_str(track_id) {
-                        current.track_id = Some(uid);
+                let tid_str = val
+                    .get("track_id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| val.as_str());
+                if let Some(track_id) = tid_str {
+                    let uid = Uuid::parse_str(track_id).map_err(|_| {
+                        v1_error(
+                            StatusCode::BAD_REQUEST,
+                            "INVALID_TRACK_ID",
+                            "invalid track UUID format",
+                        )
+                    })?;
+                    let track = michi_db::get_track(&state.db, &uid).await.map_err(|e| {
+                        v1_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "DATABASE_ERROR",
+                            &e.to_string(),
+                        )
+                    })?;
+                    if track.is_none() {
+                        return Err(v1_error(
+                            StatusCode::NOT_FOUND,
+                            "TRACK_NOT_FOUND",
+                            "track not found in library",
+                        ));
                     }
+                    current.track_id = Some(uid);
                 }
             }
+            current.playing = true;
             if let Some(pos) = body.position_ms.or_else(|| {
                 body.value
                     .as_ref()
@@ -162,7 +185,14 @@ pub async fn playback_control_handler(
                 let next_idx = match cur_idx {
                     Some(idx) => {
                         if current.shuffle {
-                            (idx + 1) % items.len()
+                            if items.len() > 1 {
+                                use rand::Rng;
+                                let mut rng = rand::thread_rng();
+                                let offset = rng.gen_range(1..items.len());
+                                (idx + offset) % items.len()
+                            } else {
+                                0
+                            }
                         } else if idx + 1 < items.len() {
                             idx + 1
                         } else if current.repeat == "all" {
@@ -243,7 +273,7 @@ pub async fn playback_control_handler(
             let vol = body.volume.or_else(|| {
                 body.value.as_ref().and_then(|v| {
                     v.get("volume")
-                        .and_then(|p| p.as_u64().or_else(|| p.as_f64().map(|f| f as u64)))
+                        .and_then(|p| p.as_i64().or_else(|| p.as_f64().map(|f| f as i64)))
                         .map(|v| v as u32)
                 })
             });
@@ -290,10 +320,23 @@ pub async fn playback_control_handler(
         }
         "repeat" => {
             if let Some(val) = &body.value {
-                if let Some(rep) = val.get("repeat").and_then(|v| v.as_str()) {
-                    current.repeat = rep.to_string();
-                } else if let Some(rep) = val.as_str() {
-                    current.repeat = rep.to_string();
+                let rep_str = val
+                    .get("repeat")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| val.as_str());
+                if let Some(rep) = rep_str {
+                    match rep {
+                        "none" | "all" | "one" => {
+                            current.repeat = rep.to_string();
+                        }
+                        _ => {
+                            return Err(v1_error(
+                                StatusCode::BAD_REQUEST,
+                                "INVALID_REQUEST",
+                                "repeat mode must be 'none', 'all', or 'one'",
+                            ));
+                        }
+                    }
                 } else {
                     current.repeat = match current.repeat.as_str() {
                         "none" => "all".into(),

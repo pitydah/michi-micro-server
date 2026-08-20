@@ -114,6 +114,7 @@ const State = {
   polling: null,
   audio: null,
 };
+window.State = State;
 
 // ── Helpers ─────────────────────────────────────────────────────
 function $(sel, ctx) { return (ctx || document).querySelector(sel); }
@@ -609,19 +610,19 @@ var ServerPlayback = {
   shuffle: false,
   repeat: 'none',
   playing: false,
-  outputTarget: 'server', // 'server' | 'browser'
+  outputTarget: 'browser', // 'browser' | 'remote'
   pollTimer: null,
   eventWs: null,
 };
 
 function toggleOutputTarget() {
-  ServerPlayback.outputTarget = ServerPlayback.outputTarget === 'server' ? 'browser' : 'server';
+  ServerPlayback.outputTarget = ServerPlayback.outputTarget === 'browser' ? 'remote' : 'browser';
   var badge = $('#np-target-badge');
   if (badge) {
-    badge.textContent = 'Target: ' + (ServerPlayback.outputTarget === 'server' ? 'Server' : 'Browser');
-    badge.className = 'badge ' + (ServerPlayback.outputTarget === 'server' ? 'stable' : 'format');
+    badge.textContent = ServerPlayback.outputTarget === 'browser' ? 'Output: This Browser' : 'Output: Remote Link';
+    badge.className = 'badge ' + (ServerPlayback.outputTarget === 'browser' ? 'format' : 'stable');
   }
-  showToast('Playback target: ' + (ServerPlayback.outputTarget === 'server' ? 'Server (Canonical Authority)' : 'Browser (Local Preview)'));
+  showToast('Playback output routing: ' + (ServerPlayback.outputTarget === 'browser' ? 'This Browser (Local Audio)' : 'Remote Link (Michi Stream / Rooms)'));
 }
 
 function getAudio() {
@@ -764,15 +765,21 @@ async function addToQueue(idx) {
 
 async function loadCanonicalQueue() {
   try {
-    const q = await MichiAPI.request('/api/v1/queue/saved');
-    if (q && q.found && q.items && q.items.length > 0) {
-      State.queue = q.items.map(function (it, i) {
-        const found = (State.allTracks || State.tracks || []).find(function (tr) { return tr.id === it.track_id; });
-        return found || { id: it.track_id, title: 'Track ' + (i + 1), duration_ms: 0 };
-      });
+    const q = await MichiAPI.request('/api/v1/queue');
+    if (q && q.items && Array.isArray(q.items)) {
+      if (q.items.length > 0) {
+        State.queue = q.items.map(function (it, i) {
+          const found = (State.allTracks || State.tracks || []).find(function (tr) { return tr.id === it.track_id; });
+          return found || { id: it.track_id, title: it.track?.title || 'Track ' + (i + 1), duration_ms: it.track?.duration_ms || 0 };
+        });
+      } else {
+        State.queue = [];
+      }
+    } else {
+      State.queue = [];
     }
   } catch (e) {
-    // keep current queue
+    State.queue = [];
   }
   renderQueue();
 }
@@ -1627,7 +1634,32 @@ async function loadSettings() {
     if ($('#settings-scan-concurrency')) $('#settings-scan-concurrency').textContent = scanWorkers + ' worker(s)';
     if ($('#settings-max-transcodes')) $('#settings-max-transcodes').textContent = maxTc + ' simultaneous';
     if ($('#settings-db-pool')) $('#settings-db-pool').textContent = dbPool + ' connections';
+
+    if (localStorage.getItem('michi_restart_required') === 'true') {
+      renderRestartBanner();
+    }
   } catch (e) { console.warn('settings:', e.message); }
+}
+
+function renderRestartBanner() {
+  var banner = $('#settings-restart-banner');
+  if (!banner) {
+    var sHeader = document.querySelector('.settings-section-title') || document.querySelector('#view-settings');
+    if (sHeader) {
+      var div = document.createElement('div');
+      div.id = 'settings-restart-banner';
+      div.className = 'panel';
+      div.style.backgroundColor = 'rgba(234, 179, 8, 0.15)';
+      div.style.borderColor = 'rgba(234, 179, 8, 0.4)';
+      div.style.color = '#fef08a';
+      div.style.padding = '12px 16px';
+      div.style.marginBottom = '16px';
+      div.style.borderRadius = '8px';
+      div.style.fontWeight = '500';
+      div.innerHTML = '⚠ <strong>Restart Required:</strong> Changes have been saved to disk, but require a server restart to take effect.';
+      sHeader.parentNode.insertBefore(div, sHeader.nextSibling);
+    }
+  }
 }
 
 var _settingsRestartRequired = false;
@@ -1643,24 +1675,8 @@ async function saveSetting(key, value) {
     });
     if (res && res.restart_required) {
       _settingsRestartRequired = true;
-      var banner = $('#settings-restart-banner');
-      if (!banner) {
-        var sHeader = document.querySelector('.settings-section-title') || document.querySelector('#view-settings');
-        if (sHeader) {
-          var div = document.createElement('div');
-          div.id = 'settings-restart-banner';
-          div.className = 'panel';
-          div.style.backgroundColor = 'rgba(234, 179, 8, 0.15)';
-          div.style.borderColor = 'rgba(234, 179, 8, 0.4)';
-          div.style.color = '#fef08a';
-          div.style.padding = '12px 16px';
-          div.style.marginBottom = '16px';
-          div.style.borderRadius = '8px';
-          div.style.fontWeight = '500';
-          div.innerHTML = '⚠ <strong>Restart Required:</strong> Changes have been saved to disk, but require a server restart to take effect.';
-          sHeader.parentNode.insertBefore(div, sHeader.nextSibling);
-        }
-      }
+      localStorage.setItem('michi_restart_required', 'true');
+      renderRestartBanner();
       showToast('Settings saved. ⚠ Server restart required for changes to take effect.');
     } else {
       showToast(t('toast.updated'));

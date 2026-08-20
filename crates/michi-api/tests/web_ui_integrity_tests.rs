@@ -905,27 +905,53 @@ async fn test_automated_endpoint_drift_check() {
     let (app, _pool, _state) = make_app().await;
 
     let critical_routes = vec![
+        ("GET", "/api/status"),
         ("GET", "/api/v1/server/info"),
-        ("GET", "/api/v1/status"),
+        ("GET", "/api/v1/library/stats"),
+        ("GET", "/api/v1/tracks"),
+        ("GET", "/api/v1/home/dashboard"),
+        ("GET", "/api/v1/playlists"),
         ("GET", "/api/v1/queue"),
+        ("POST", "/api/v1/queue/items"),
+        ("PUT", "/api/v1/queue/reorder"),
+        ("POST", "/api/v1/queue/jump"),
+        ("GET", "/api/v1/playback/state"),
+        ("POST", "/api/v1/playback/control"),
+        ("GET", "/api/v1/capabilities"),
+        ("GET", "/api/v1/link/devices"),
+        ("POST", "/api/v1/pair/qr"),
         ("GET", "/api/v1/receivers"),
         ("GET", "/api/v1/rooms/groups"),
+        ("POST", "/api/v1/rooms/groups"),
         ("GET", "/api/v1/chains"),
-        ("GET", "/api/v1/settings"),
-        ("GET", "/api/v1/library/stats"),
-        ("GET", "/api/v1/events"),
+        ("POST", "/api/v1/chains"),
         ("GET", "/api/v1/sources"),
+        ("POST", "/api/v1/sources"),
+        ("GET", "/api/v1/settings"),
+        ("PUT", "/api/v1/settings"),
+        ("GET", "/api/v1/backup"),
         ("POST", "/api/v1/backup/verify"),
+        ("GET", "/api/v1/history"),
+        ("GET", "/api/v1/history/stats"),
+        ("GET", "/api/v1/history/export"),
+        ("POST", "/api/v1/player/handoff"),
+        ("GET", "/api/v1/events"),
     ];
 
     for (method, path) in critical_routes {
+        let body = if method == "POST" || method == "PUT" {
+            Body::from("{}")
+        } else {
+            Body::empty()
+        };
         let res = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method(method)
                     .uri(path)
-                    .body(Body::empty())
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(body)
                     .unwrap(),
             )
             .await
@@ -936,6 +962,139 @@ async fn test_automated_endpoint_drift_check() {
             "Critical endpoint {method} {path} not found in router!"
         );
     }
+}
+
+// ── Strict Play track_id validation & Repeat rejection ──
+#[tokio::test]
+async fn test_strict_play_track_validation_and_invalid_repeat_rejection() {
+    let (app, _pool, _state) = make_app().await;
+
+    // Play non-existent track -> 404 NOT_FOUND
+    let fake_id = Uuid::new_v4();
+    let play_fake = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(
+                    r#"{{"command":"play","value":{{"track_id":"{fake_id}"}}}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(play_fake.status(), StatusCode::NOT_FOUND);
+
+    // Invalid repeat mode string -> 400 BAD_REQUEST
+    let rep_invalid = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"command":"repeat","value":{"repeat":"invalid_mode"}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rep_invalid.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── Real Shuffle Queue Traversal ──
+#[tokio::test]
+async fn test_real_shuffle_queue_traversal() {
+    let (app, pool, state) = make_app().await;
+
+    let t1 = seed_track(&pool, "/music/shuf1.flac", "Track S1").await;
+    let t2 = seed_track(&pool, "/music/shuf2.flac", "Track S2").await;
+    let t3 = seed_track(&pool, "/music/shuf3.flac", "Track S3").await;
+
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/queue/items")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(
+                    r#"{{"track_ids":["{}","{}","{}"]}}"#,
+                    t1.id, t2.id, t3.id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Enable shuffle
+    {
+        let mut ps = state.playback_state.write().await;
+        ps.track_id = Some(t1.id);
+        ps.playing = true;
+        ps.shuffle = true;
+        ps.repeat = "all".into();
+    }
+
+    // Call next
+    let next_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"command":"next"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next_res.status(), StatusCode::OK);
+    let ps = state.playback_state.read().await;
+    assert!(ps.track_id.is_some());
+}
+
+// ── Room Play Rejection When Zero Receivers Connect ──
+#[tokio::test]
+async fn test_room_play_rejection_when_zero_receivers_connect() {
+    let (app, pool, state) = make_app().await;
+    let t = seed_track(&pool, "/music/room_part.flac", "Room Partial Track").await;
+
+    // Create room with unreachable receivers
+    let room_id = Uuid::new_v4();
+    let mut volumes = std::collections::HashMap::new();
+    volumes.insert("rec-room-offline".into(), 70);
+
+    michi_db::save_room_group_db(
+        &pool,
+        &room_id,
+        "Patio Unreachable",
+        "custom",
+        &["rec-room-offline".into()],
+        &volumes,
+    )
+    .await
+    .unwrap();
+
+    let play_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/api/v1/rooms/{room_id}/play"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(r#"{{"track_id":"{}"}}"#, t.id)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(play_res.status(), StatusCode::BAD_GATEWAY);
+    let ps = state.playback_state.read().await;
+    assert!(!ps.playing);
 }
 
 // ── UI-025 / UI-030: Default Port 9090 Contract Across Entire Repository ──

@@ -259,8 +259,14 @@ pub async fn room_play_handler(
         .to_string(),
     );
 
+    let status_str = if active_count < receiver_ids.len() {
+        "partial"
+    } else {
+        "playing"
+    };
+
     Ok(Json(serde_json::json!({
-        "status": "playing",
+        "status": status_str,
         "room_id": room_id,
         "active_receivers": active_count,
         "total_receivers": receiver_ids.len(),

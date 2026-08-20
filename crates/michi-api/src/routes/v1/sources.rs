@@ -232,7 +232,18 @@ pub async fn proxy_stream_handler(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .connect_timeout(std::time::Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::limited(3))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 3 {
+                attempt.error("too many redirects")
+            } else {
+                let next_url = attempt.url().as_str();
+                if let Err(e) = michi_ingest::validate_url(next_url) {
+                    attempt.error(format!("SSRF blocked redirect target: {e}"))
+                } else {
+                    attempt.follow()
+                }
+            }
+        }))
         .build()
         .map_err(|e| {
             v1_error(
@@ -314,7 +325,18 @@ pub async fn proxy_episode_handler(
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(60))
                     .connect_timeout(std::time::Duration::from_secs(5))
-                    .redirect(reqwest::redirect::Policy::limited(3))
+                    .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                        if attempt.previous().len() >= 3 {
+                            attempt.error("too many redirects")
+                        } else {
+                            let next_url = attempt.url().as_str();
+                            if let Err(e) = michi_ingest::validate_url(next_url) {
+                                attempt.error(format!("SSRF blocked redirect target: {e}"))
+                            } else {
+                                attempt.follow()
+                            }
+                        }
+                    }))
                     .build()
                     .map_err(|e| {
                         v1_error(
