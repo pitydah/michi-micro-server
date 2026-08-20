@@ -4,20 +4,20 @@
 //! - QR link michi://connect?id=XYZ&host=IP&port=PORT
 //! - CORS dinámico basado en firma
 
-use michi_identity::MichiIdentity;
+use michi_identity::IdentityManager;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 use tracing::info;
 
 #[derive(Clone)]
 pub struct MichiConnect {
-    identity: MichiIdentity,
+    identity: Arc<IdentityManager>,
     server_url: Arc<RwLock<String>>,
     service_name: Arc<RwLock<String>>,
 }
 
 impl MichiConnect {
-    pub fn new(identity: MichiIdentity, port: u16, host: Option<String>) -> Self {
+    pub fn new(identity: Arc<IdentityManager>, port: u16, host: Option<String>) -> Self {
         let host = host.unwrap_or_else(|| "localhost".to_string());
         let server_url = format!("http://{host}:{port}");
         Self {
@@ -29,7 +29,7 @@ impl MichiConnect {
 
     /// Generate a QR code link string: michi://connect?id=XYZ&host=IP&port=PORT
     pub async fn qr_link(&self, host: &str, port: u16) -> String {
-        let michi_id = self.identity.get_id().await;
+        let michi_id = self.identity.michi_id().to_base64url();
         format!("michi://connect?id={michi_id}&host={host}&port={port}")
     }
 
@@ -48,21 +48,23 @@ impl MichiConnect {
 
     /// Update the server URL (when IP changes)
     pub async fn update_url(&self, host: &str, port: u16) {
-        let mut url = self.server_url.write().await;
-        *url = format!("http://{host}:{port}");
-        info!("connect: server URL updated to {}", url);
+        {
+            let mut url = self.server_url.write().unwrap();
+            *url = format!("http://{host}:{port}");
+            info!("connect: server URL updated to {}", url);
+        }
         // Re-announce mDNS
         let _ = self.announce_mdns().await;
     }
 
     pub async fn server_url(&self) -> String {
-        self.server_url.read().await.clone()
+        self.server_url.read().unwrap().clone()
     }
 
     /// Announce via mDNS using mdns-sd
     pub async fn announce_mdns(&self) -> Result<(), String> {
-        let url = self.server_url.read().await.clone();
-        let michi_id = self.identity.get_id().await;
+        let url = self.server_url.read().unwrap().clone();
+        let michi_id = self.identity.michi_id().to_base64url();
         let hostonly = url.trim_start_matches("http://");
         let hostname = hostonly
             .split(':')
@@ -105,7 +107,7 @@ impl MichiConnect {
             .map_err(|e| format!("mdns register: {e}"))?;
 
         let name = instance_name;
-        *self.service_name.write().await = name.clone();
+        *self.service_name.write().unwrap() = name.clone();
         info!("connect: mDNS announced as {}.{}", name, service_type);
         Ok(())
     }
@@ -118,7 +120,8 @@ impl MichiConnect {
         signature_b64: &str,
     ) -> bool {
         let pub_key_bytes = hex::decode(peer_public_key_hex).unwrap_or_default();
-        MichiIdentity::verify_peer(&pub_key_bytes, payload, signature_b64).unwrap_or(false)
+        let pub_key_b64url = michi_identity::encode_base64url(&pub_key_bytes);
+        IdentityManager::verify(payload, signature_b64, &pub_key_b64url).unwrap_or(false)
     }
 
     pub async fn stop_mdns(&self) {
@@ -134,16 +137,16 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    async fn make_identity() -> MichiIdentity {
+    fn make_identity() -> Arc<IdentityManager> {
         let dir = tempdir().unwrap();
-        let id = MichiIdentity::load_or_create(dir.path()).await.unwrap();
+        let id = IdentityManager::load_or_generate(dir.path(), "test", "password").unwrap();
         std::mem::forget(dir);
-        id
+        Arc::new(id)
     }
 
     #[tokio::test]
     async fn test_new_default_host() {
-        let identity = make_identity().await;
+        let identity = make_identity();
         let conn = MichiConnect::new(identity, 8080, None);
         let url = conn.server_url().await;
         assert_eq!(url, "http://localhost:8080");
@@ -151,7 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_with_host() {
-        let identity = make_identity().await;
+        let identity = make_identity();
         let conn = MichiConnect::new(identity, 9090, Some("192.168.1.5".into()));
         let url = conn.server_url().await;
         assert_eq!(url, "http://192.168.1.5:9090");
@@ -159,7 +162,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_default_host_url() {
-        let identity = make_identity().await;
+        let identity = make_identity();
         let conn = MichiConnect::new(identity, 3000, None);
         let url = conn.server_url().await;
         assert_eq!(url, "http://localhost:3000");
@@ -167,8 +170,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_qr_link_format() {
-        let identity = make_identity().await;
-        let michi_id = identity.get_id().await;
+        let identity = make_identity();
+        let michi_id = identity.michi_id().to_base64url();
         let conn = MichiConnect::new(identity, 5000, Some("10.0.0.1".into()));
         let link = conn.qr_link("10.0.0.1", 5000).await;
         assert!(link.starts_with("michi://connect?id="));
@@ -179,7 +182,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_qr_svg_produces_valid_svg() {
-        let identity = make_identity().await;
+        let identity = make_identity();
         let conn = MichiConnect::new(identity, 5000, None);
         let svg = conn.qr_svg("localhost", 5000).await.unwrap();
         assert!(svg.starts_with("<?xml"));
@@ -195,11 +198,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_peer_signature_valid() {
-        let identity = make_identity().await;
-        let pub_key = identity.public_key_bytes().await;
+        let identity = make_identity();
+        let pub_key = identity.public_key_bytes().to_vec();
         let pub_key_hex = hex::encode(&pub_key);
         let payload = b"test payload for signature";
-        let signature = identity.sign_payload(payload).await;
+        let signature = identity.sign_base64url(payload).0;
 
         let conn = MichiConnect::new(identity, 4000, None);
         let valid = conn
@@ -210,11 +213,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_peer_signature_tampered_payload() {
-        let identity = make_identity().await;
-        let pub_key = identity.public_key_bytes().await;
+        let identity = make_identity();
+        let pub_key = identity.public_key_bytes().to_vec();
         let pub_key_hex = hex::encode(&pub_key);
         let payload = b"original message";
-        let signature = identity.sign_payload(payload).await;
+        let signature = identity.sign_base64url(payload).0;
 
         let conn = MichiConnect::new(identity, 4000, None);
         let valid = conn
@@ -225,9 +228,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_peer_signature_invalid_pubkey() {
-        let identity = make_identity().await;
+        let identity = make_identity();
         let payload = b"some data";
-        let signature = identity.sign_payload(payload).await;
+        let signature = identity.sign_base64url(payload).0;
 
         let conn = MichiConnect::new(identity, 4000, None);
         // Use a bogus public key (all zeros, wrong length, etc.)
@@ -239,8 +242,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_peer_signature_invalid_signature() {
-        let identity = make_identity().await;
-        let pub_key = identity.public_key_bytes().await;
+        let identity = make_identity();
+        let pub_key = identity.public_key_bytes().to_vec();
         let pub_key_hex = hex::encode(&pub_key);
         let payload = b"message";
 
@@ -254,7 +257,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_qr_svg_different_hosts_produce_different_output() {
-        let identity = make_identity().await;
+        let identity = make_identity();
         let conn = MichiConnect::new(identity, 5000, None);
         let svg1 = conn.qr_svg("192.168.1.1", 5000).await.unwrap();
         let svg2 = conn.qr_svg("192.168.1.2", 5000).await.unwrap();
@@ -263,7 +266,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_service_name_starts_empty() {
-        let identity = make_identity().await;
+        let identity = make_identity();
         let conn = MichiConnect::new(identity, 4000, None);
         // service_name is not publicly readable, but we test via the field
         // indirectly: announce_mdns() populates it, but that needs network.
@@ -273,12 +276,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_qr_link_uses_identity_id_not_host() {
-        let identity = make_identity().await;
-        let michi_id = identity.get_id().await;
+        let identity = make_identity();
+        let michi_id = identity.michi_id().to_base64url();
         assert_eq!(
             michi_id.len(),
-            64,
-            "michi_id must be 64 hex chars (SHA-256)"
+            43,
+            "michi_id must be 43 base64url chars (BLAKE3)"
         );
 
         let conn = MichiConnect::new(identity, 5000, None);
@@ -290,7 +293,7 @@ mod tests {
     /// in a different scope — i.e., identity is Clone and independent.
     #[tokio::test]
     async fn test_identity_independent_of_connect_lifetime() {
-        let identity = make_identity().await;
+        let identity = make_identity();
         let conn = MichiConnect::new(identity, 5555, None);
         let url = conn.server_url().await;
         assert_eq!(url, "http://localhost:5555");

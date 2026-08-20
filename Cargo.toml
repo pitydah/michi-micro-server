@@ -20,7 +20,6 @@ members = [
     "crates/michi-receivers",
     "crates/michi-security",
     "crates/michi-ingest",
-    "crates/michi-identity",
     "crates/michi-connect",
     "crates/michi-onboard",
 ]
@@ -68,3 +67,5 @@ tracing-opentelemetry = "0.27"
 mdns-sd = "0.13"
 # QR code generation
 qrcode = { version = "0.14", features = ["svg"] }
+# Michi Link contract identity (from vendored submodule)
+michi-identity = { path = "vendor/michi-link/crates/michi-identity" }

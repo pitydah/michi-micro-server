@@ -1902,23 +1902,25 @@ dependencies = [
 name = "michi-identity"
 version = "0.2.0"
 dependencies = [
+ "argon2",
  "base64",
  "blake3",
  "chacha20poly1305",
+ "chrono",
  "ed25519-dalek",
  "gethostname",
- "hex",
  "rand 0.8.6",
+ "rand_core 0.6.4",
  "rmp-serde",
  "serde",
  "serde_json",
- "sha2",
+ "subtle",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
+ "url",
+ "urlencoding",
  "uuid",
- "zeroize",
 ]
 
 [[package]]
@@ -4685,9 +4687,6 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "zerotrie"

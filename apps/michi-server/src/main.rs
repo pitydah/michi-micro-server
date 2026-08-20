@@ -113,8 +113,12 @@ async fn main() -> Result<()> {
         michi_db::init_pool_with_size(&config.database_url, config.resource_profile.db_pool_size())
             .await?;
 
-    let identity = michi_identity::MichiIdentity::load_or_create(&config.config_path).await?;
-    info!("michi_id: {}...", &identity.get_id().await[..12]);
+    let identity = Arc::new(michi_identity::IdentityManager::load_or_generate(
+        &config.config_path,
+        "Michi Micro Server",
+        "",
+    )?);
+    info!("michi_id: {}...", &identity.michi_id().to_base64url()[..12]);
 
     let michi_connect = michi_connect::MichiConnect::new(
         identity.clone(),

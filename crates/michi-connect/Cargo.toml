@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-michi-identity = { path = "../michi-identity" }
+michi-identity = { workspace = true }
 mdns-sd = "0.13"
 hex = "0.4"
 tokio.workspace = true
