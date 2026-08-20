@@ -33,6 +33,7 @@ mod pwa;
 mod rooms;
 mod root;
 mod scrobble;
+mod server_caps;
 mod static_files;
 mod status;
 mod stream;

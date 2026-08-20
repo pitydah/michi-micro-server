@@ -43,7 +43,7 @@ pub struct V1Features {
 }
 
 pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1ServerInfo> {
-    let disabled = state.disabled_modules.read().await;
+    let caps = crate::server_caps::ServerCapabilities::from_state(&state).await;
     Json(V1ServerInfo {
         service: "michi-micro-server".into(),
         name: "Michi Micro Server".into(),
@@ -56,21 +56,21 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
             "playback_host".into(),
         ],
         features: V1Features {
-            library: !disabled.contains("scan"),
-            search: true,
-            streaming: !disabled.contains("stream"),
-            download: true,
-            artwork: true,
-            playlists: true,
-            sync_manifest: !disabled.contains("sync"),
-            import: true,
-            playback: !disabled.contains("playback"),
-            queue: true,
-            receivers: false,
-            rooms: false,
-            events: true,
-            transcoding: michi_streaming::check_ffmpeg(),
-            token_refresh: true,
+            library: caps.feature_enabled("library"),
+            search: caps.feature_enabled("search"),
+            streaming: caps.feature_enabled("stream"),
+            download: caps.feature_enabled("download"),
+            artwork: caps.feature_enabled("artwork"),
+            playlists: caps.feature_enabled("playlists"),
+            sync_manifest: caps.feature_enabled("sync"),
+            import: caps.feature_enabled("import"),
+            playback: caps.feature_enabled("playback"),
+            queue: caps.feature_enabled("queue"),
+            receivers: caps.feature_enabled("receivers"),
+            rooms: caps.feature_enabled("rooms"),
+            events: caps.feature_enabled("events"),
+            transcoding: caps.feature_enabled("transcoding"),
+            token_refresh: caps.feature_enabled("token_refresh"),
         },
         auth: V1AuthInfo {
             required: state.auth_enabled,

@@ -167,41 +167,8 @@ pub async fn self_test_handler(State(state): State<AppState>) -> Json<serde_json
 // ── Capabilities Manifest ──────────────────────────────────────
 
 pub async fn capabilities_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let disabled = state.disabled_modules.read().await;
-    let has_ffmpeg = false;
-    let receiver_count = state
-        .receiver_manager
-        .registry()
-        .await
-        .read()
-        .await
-        .list()
-        .len();
-    Json(serde_json::json!({
-        "version": "0.2.0",
-        "features": [
-            { "name": "scan", "version": "1.0", "description": "Library scanning with watcher", "enabled": !disabled.contains("scan") },
-            { "name": "sync", "version": "1.0", "description": "Peer-to-peer library sync", "enabled": !disabled.contains("sync") },
-            { "name": "stream", "version": "1.0", "description": "Direct & proxied audio streaming", "enabled": !disabled.contains("stream") },
-            { "name": "playback", "version": "1.0", "description": "Playback tracking & history", "enabled": !disabled.contains("playback") },
-            { "name": "backup", "version": "1.0", "description": "JSON backup & tar.gz bundle", "enabled": !disabled.contains("backup") },
-            { "name": "webhook", "version": "1.0", "description": "Sync completion webhooks", "enabled": !disabled.contains("webhook") },
-            { "name": "etag", "version": "1.0", "description": "ETag-based conditional requests", "enabled": true },
-            { "name": "handoff", "version": "1.0", "description": "Direct stream handoff between peers", "enabled": true },
-            { "name": "mounts", "version": "1.0", "description": "Mount health monitoring", "enabled": true },
-            { "name": "audit", "version": "1.0", "description": "Audit log for admin actions", "enabled": true },
-            { "name": "jobs", "version": "1.0", "description": "Persistent job queue with workers", "enabled": true },
-            { "name": "modules", "version": "1.0", "description": "Runtime module enable/disable", "enabled": true },
-        ],
-        "protocols": [
-            { "name": "michi-link", "version": "0.2" },
-            { "name": "websocket", "version": "1.0" },
-        ],
-        "runtime": {
-            "receivers_connected": receiver_count,
-            "ffmpeg_available": has_ffmpeg,
-        },
-    }))
+    let caps = crate::server_caps::ServerCapabilities::from_state(&state).await;
+    Json(serde_json::to_value(caps).unwrap_or_else(|_| serde_json::json!({})))
 }
 
 // ── Change Journal ─────────────────────────────────────────────
