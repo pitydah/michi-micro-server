@@ -172,6 +172,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
+      - name: Build michi-server binary
+        run: cargo build --bin michi-server
       - name: Run Three-Way Ecosystem E2E Integration Suite (Mobile -> Micro -> Stream)
         run: bash scripts/test_three_way_ecosystem.sh 9099 55438 55439
 
