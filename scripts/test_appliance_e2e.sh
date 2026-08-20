@@ -105,14 +105,19 @@ MICHI_CONFIG_PATH="$CONFIG_DIR" \
 SERVER_PID=$!
 SPAWNED_PIDS="$SERVER_PID"
 
-# Wait for server readiness
-for i in {1..25}; do
+# Wait for server readiness (generous window: cold start generates the
+# Ed25519 identity, migrates the DB and only then binds the listener).
+for i in {1..60}; do
     if curl -sf "http://127.0.0.1:${SERVER_PORT}/health/live" > /dev/null 2>&1; then
         echo "Server is live and ready."
         break
     fi
-    sleep 0.2
+    sleep 0.5
 done
+if ! curl -sf "http://127.0.0.1:${SERVER_PORT}/health/live" > /dev/null 2>&1; then
+    echo "ERROR: server did not become ready within 30s" >&2
+    exit 1
+fi
 
 # 5. Run Appliance Qualification Test Suite
 python3 "${PROJECT_ROOT}/tests/e2e/test_appliance_qualification.py" \
@@ -140,13 +145,17 @@ MICHI_CONFIG_PATH="$CONFIG_DIR" \
 SERVER_PID=$!
 SPAWNED_PIDS="$SERVER_PID"
 
-for i in {1..25}; do
+for i in {1..60}; do
     if curl -sf "http://127.0.0.1:${SERVER_PORT}/health/live" > /dev/null 2>&1; then
         echo "Server restarted successfully from persisted database."
         break
     fi
-    sleep 0.2
+    sleep 0.5
 done
+if ! curl -sf "http://127.0.0.1:${SERVER_PORT}/health/live" > /dev/null 2>&1; then
+    echo "ERROR: server did not become ready after restart within 30s" >&2
+    exit 1
+fi
 
 # Re-run full qualification on restarted server to verify total persistence
 python3 "${PROJECT_ROOT}/tests/e2e/test_appliance_qualification.py" \
