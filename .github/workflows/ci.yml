@@ -21,6 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
@@ -42,6 +44,8 @@ jobs:
     needs: ci-rust
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Validate Michi Link v1-lite Stream Contract Drift & Full OpenAPI
         run: python3 scripts/test_stream_contract_drift.py
 
@@ -50,6 +54,8 @@ jobs:
     needs: ci-rust
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
@@ -64,6 +70,8 @@ jobs:
     needs: ci-rust
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Run Snapcast Multi-Client Contract Mock Tests
         run: bash scripts/test_snapcast_e2e.sh 1780
 
@@ -72,6 +80,8 @@ jobs:
     needs: ci-rust
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
@@ -86,6 +96,8 @@ jobs:
     needs: ci-rust
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
@@ -100,6 +112,8 @@ jobs:
     needs: ci-rust
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
@@ -114,6 +128,8 @@ jobs:
     needs: ci-rust
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
@@ -128,6 +144,8 @@ jobs:
     needs: ci-rust
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
@@ -142,6 +160,8 @@ jobs:
     needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
@@ -156,6 +176,8 @@ jobs:
     needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-mosquitto-real, ci-generic-linux-appliance, ci-reliability-short, ci-web-ui-functional-integrity, ci-three-way-ecosystem]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
@@ -187,6 +209,8 @@ jobs:
     needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-mosquitto-real, ci-generic-linux-appliance, ci-reliability-short, ci-web-ui-functional-integrity, ci-three-way-ecosystem]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Set up QEMU for ARM64
         uses: docker/setup-qemu-action@v3
         with:
@@ -220,6 +244,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
