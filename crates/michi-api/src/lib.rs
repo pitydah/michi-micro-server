@@ -70,6 +70,10 @@ pub struct AppState {
     pub module_tokens: Arc<RwLock<HashMap<String, CancellationToken>>>,
     pub job_cancel_tokens: Arc<RwLock<HashMap<String, CancellationToken>>>,
     pub task_handles: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    /// Canonical server identity (Ed25519 + BLAKE3), shared with michi-connect.
+    pub identity: Arc<michi_identity::IdentityManager>,
+    /// Canonical v1-lite pairing registry (RAM-only sessions, rate limited).
+    pub pairing_registry: Arc<michi_identity::PairingRegistry>,
 }
 
 impl AppState {
@@ -133,6 +137,24 @@ impl AppState {
         });
         michi_link::spawn_token_cleanup(token_store.clone());
 
+        let identity = Arc::new(
+            michi_identity::IdentityManager::load_or_generate(
+                &config.config_path,
+                "Michi Micro Server",
+                "",
+            )
+            .unwrap_or_else(|e| {
+                tracing::warn!("failed to load identity from config dir: {e}; using ephemeral");
+                michi_identity::IdentityManager::generate(
+                    &std::env::temp_dir().join("michi-ephemeral-identity"),
+                    "Michi Micro Server",
+                    "",
+                )
+                .expect("ephemeral identity generation must not fail")
+            }),
+        );
+        let pairing_registry = Arc::new(michi_identity::PairingRegistry::new());
+
         let state = Self {
             config,
             db,
@@ -153,6 +175,8 @@ impl AppState {
             module_tokens,
             job_cancel_tokens,
             task_handles,
+            identity,
+            pairing_registry,
         };
 
         state.spawn_background_tasks();

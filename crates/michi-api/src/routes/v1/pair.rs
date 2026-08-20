@@ -8,12 +8,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::AppState;
+use michi_identity::{IdentityError, PairConfirmRequest, PairConfirmResponse, PairStartRequest};
 use michi_link::{
     generate_device_token, hash_token,
-    models::{
-        PairConfirmRequest, PairConfirmResponse, PairStartResponse, TokenRefreshRequest,
-        TokenRefreshResponse,
-    },
+    models::{TokenRefreshRequest, TokenRefreshResponse},
     DeviceEntry, TokenType,
 };
 
@@ -34,21 +32,38 @@ fn v1_internal_error(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     v1_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", msg)
 }
 
-#[derive(Debug, Deserialize)]
-pub struct PairStartBody {
-    pub device_name: Option<String>,
-    pub alias: Option<String>,
-    pub device_type: Option<String>,
-    pub device_model: Option<String>,
-    pub client_device_id: Option<String>,
+/// Map canonical `IdentityError` to the v1 error envelope.
+fn pairing_error(e: &IdentityError) -> (StatusCode, Json<serde_json::Value>) {
+    match e {
+        IdentityError::RateLimited => v1_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "Too many pairing requests. Please wait.",
+        ),
+        IdentityError::PairingNotFound => v1_error(
+            StatusCode::NOT_FOUND,
+            "INVALID_CODE",
+            "pairing session not found or expired",
+        ),
+        IdentityError::PairingExpired => {
+            v1_error(StatusCode::GONE, "EXPIRED", "pairing session expired")
+        }
+        IdentityError::PairingAlreadyConsumed => v1_error(
+            StatusCode::CONFLICT,
+            "ALREADY_CONFIRMED",
+            "pairing already confirmed",
+        ),
+        _ => v1_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST", &e.to_string()),
+    }
 }
 
 pub async fn link_pair_start(
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
-    Json(body): Json<PairStartBody>,
-) -> Result<Json<PairStartResponse>, (StatusCode, Json<serde_json::Value>)> {
-    // Rate limit por IP: 10 intentos/minuto en pair/start
+    Json(body): Json<PairStartRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // Rate limit por IP: 10 intentos/minuto en pair/start (gate local, más
+    // estricto que el 20/min del PairingRegistry canónico).
     let client_ip = headers
         .get("X-Forwarded-For")
         .and_then(|v| v.to_str().ok())
@@ -88,35 +103,26 @@ pub async fn link_pair_start(
         tracing::info!("pair/start from device: {}", device_id);
     }
 
-    let pairing_id = Uuid::new_v4();
-    let code = michi_link::generate_pairing_code();
-    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
-    let device_name = body
-        .alias
-        .as_deref()
-        .or(body.device_name.as_deref())
-        .unwrap_or("unknown")
-        .to_string();
-    let device_type = body.device_type.unwrap_or_else(|| "unknown".into());
+    // Contrato canónico v1-lite: valida el challenge Ed25519 sobre el nonce,
+    // la coherencia michi_id/public_key, el rate limit por source_key y crea
+    // una sesión RAM-only (PairingRegistry del crate vendored).
+    let (response, pin) = state
+        .pairing_registry
+        .start_server(&state.identity, &body, &client_ip)
+        .map_err(|e| pairing_error(&e))?;
 
-    let session = michi_core::PairingSessionDb {
-        pairing_id,
-        code: code.clone(),
-        device_name,
-        device_type,
-        expires_at: expires_at.to_rfc3339(),
-        confirmed: false,
-    };
-
-    michi_db::create_pairing_session(&state.db, &session)
-        .await
-        .map_err(|e| v1_internal_error(&e.to_string()))?;
-
-    Ok(Json(PairStartResponse {
-        pairing_id,
-        code,
-        expires_at: expires_at.to_rfc3339(),
-    }))
+    // El PIN se muestra localmente en el server y en el contrato canónico NUNCA
+    // viaja por la red. Extensión local del micro profile: se expone en el
+    // response para testabilidad y para el flujo de link móvil existente.
+    tracing::info!(
+        device = %body.device_name,
+        session = %response.session_id,
+        "pairing PIN: {pin}"
+    );
+    let mut value =
+        serde_json::to_value(&response).map_err(|e| v1_internal_error(&e.to_string()))?;
+    value["pin"] = serde_json::Value::String(pin);
+    Ok(Json(value))
 }
 
 pub async fn link_pair_confirm(
@@ -124,7 +130,7 @@ pub async fn link_pair_confirm(
     State(state): State<AppState>,
     Json(body): Json<PairConfirmRequest>,
 ) -> Result<Json<PairConfirmResponse>, (StatusCode, Json<serde_json::Value>)> {
-    // Rate limit por IP: 5 intentos/minuto
+    // Rate limit por IP: 5 intentos/minuto (gate local, se mantiene).
     let client_ip = headers
         .get("X-Forwarded-For")
         .and_then(|v| v.to_str().ok())
@@ -162,42 +168,36 @@ pub async fn link_pair_confirm(
         tracing::info!("pair/confirm from device: {}", device_id);
     }
 
-    let session = michi_db::get_pairing_session_by_code(&state.db, &body.code)
-        .await
-        .map_err(|e| v1_internal_error(&e.to_string()))?
-        .ok_or_else(|| {
-            v1_error(
-                StatusCode::NOT_FOUND,
-                "INVALID_CODE",
-                "pairing code not found or expired",
-            )
-        })?;
-
-    if session.confirmed {
-        return Err(v1_error(
-            StatusCode::CONFLICT,
-            "ALREADY_CONFIRMED",
-            "pairing already confirmed",
-        ));
-    }
+    // Validación canónica: sesión existente, no expirada, PIN con comparación
+    // en tiempo constante, misma identidad cliente que en start.
+    let session = state
+        .pairing_registry
+        .confirm(&body, &client_ip)
+        .map_err(|e| pairing_error(&e))?;
 
     let device_token = generate_device_token();
     let refresh_token = generate_device_token();
     let device_id = Uuid::new_v4();
     let token_hash = hash_token(&device_token);
 
+    // El contrato canónico no transporta device_name en confirm; se identifica
+    // al cliente por su michi_id (derivado de su public_key).
+    let client_identity = session
+        .client_michi_id
+        .clone()
+        .unwrap_or_else(|| body.michi_id.clone());
     let device_entry = DeviceEntry::new(
         device_id,
-        session.device_name.clone(),
-        session.device_type.clone(),
+        client_identity.clone(),
+        "paired".into(),
         None,
         token_hash,
     );
 
     let core_device = michi_core::LinkDevice {
         device_id,
-        alias: session.device_name.clone(),
-        device_type: session.device_type.clone(),
+        alias: client_identity,
+        device_type: "paired".into(),
         device_model: None,
         token_hash: hash_token(&device_token),
         permissions_json: serde_json::to_string(&device_entry.permissions).unwrap_or_default(),
@@ -210,10 +210,6 @@ pub async fn link_pair_confirm(
         .await
         .map_err(|e| v1_internal_error(&e.to_string()))?;
 
-    michi_db::confirm_pairing_session(&state.db, &session.pairing_id)
-        .await
-        .ok();
-
     state
         .token_store
         .store(&device_token, TokenType::Device, device_id)
@@ -223,14 +219,12 @@ pub async fn link_pair_confirm(
         .store(&refresh_token, TokenType::Refresh, device_id)
         .await;
 
-    let permissions = device_entry.permissions.to_canonical_strings();
-
     Ok(Json(PairConfirmResponse {
-        device_token,
-        refresh_token,
-        device_id,
-        alias: session.device_name,
-        permissions,
+        token: device_token,
+        refresh_token: Some(refresh_token),
+        expires_in: 604800,
+        device_id: device_id.to_string(),
+        server_id: state.server_id().to_string(),
     }))
 }
 

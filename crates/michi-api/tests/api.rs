@@ -1913,11 +1913,56 @@ async fn test_v1_hls_format_recognized() {
     );
 }
 
-#[tokio::test]
-async fn test_v1_pair_confirm_returns_canonical_permissions() {
-    let (app, pool) = make_app().await;
+/// Build a canonical v1-lite `POST /pair/start` body for a freshly generated
+/// client identity: Ed25519 challenge over a fixed 32-byte nonce.
+fn canonical_pair_start_body(
+    client: &michi_identity::IdentityManager,
+    device_name: &str,
+    device_type: &str,
+) -> String {
+    let nonce_raw = [7u8; 32];
+    let nonce = michi_identity::encode_base64url(&nonce_raw);
+    let (signature, public_key) = client.sign_base64url(&nonce_raw);
+    format!(
+        r#"{{
+  "device_name": "{device_name}",
+  "device_type": "{device_type}",
+  "roles": ["mobile_player", "remote_controller"],
+  "auth_strategy": "ED25519_CHALLENGE",
+  "michi_id": "{}",
+  "public_key": "{public_key}",
+  "challenge_nonce": "{nonce}",
+  "challenge_signature": "{signature}"
+}}"#,
+        client.michi_id().to_base64url(),
+    )
+}
 
-    // Start pairing
+/// Canonical v1-lite `POST /pair/confirm` body for a client session.
+fn canonical_pair_confirm_body(
+    client: &michi_identity::IdentityManager,
+    session_id: &str,
+    pin: &str,
+) -> String {
+    format!(
+        r#"{{"session_id":"{session_id}","pin":"{pin}","michi_id":"{}","public_key":"{}"}}"#,
+        client.michi_id().to_base64url(),
+        client.public_key_base64url(),
+    )
+}
+
+/// Fresh ephemeral client identity (unique temp dir per call).
+fn fresh_test_client(name: &str) -> michi_identity::IdentityManager {
+    let dir = std::env::temp_dir().join(format!("michi-test-client-{name}-{}", Uuid::new_v4()));
+    michi_identity::IdentityManager::generate(&dir, name, "").expect("test client identity")
+}
+
+#[tokio::test]
+async fn test_v1_pair_confirm_returns_canonical_contract() {
+    let (app, _pool) = make_app().await;
+    let client = fresh_test_client("mobile");
+
+    // Start pairing (canonical v1-lite challenge)
     let start_resp = app
         .clone()
         .oneshot(
@@ -1925,9 +1970,11 @@ async fn test_v1_pair_confirm_returns_canonical_permissions() {
                 .uri("/api/v1/pair/start")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"device_name":"test-mobile","device_type":"mobile"}"#,
-                ))
+                .body(Body::from(canonical_pair_start_body(
+                    &client,
+                    "test-mobile",
+                    "mobile",
+                )))
                 .unwrap(),
         )
         .await
@@ -1935,9 +1982,39 @@ async fn test_v1_pair_confirm_returns_canonical_permissions() {
     assert_eq!(start_resp.status(), StatusCode::OK);
     let start_text = body_text(start_resp).await;
     let start_json: Value = serde_json::from_str(&start_text).unwrap();
-    let code = start_json["code"].as_str().unwrap().to_string();
+    let session_id = start_json["session_id"].as_str().unwrap().to_string();
+    let pin = start_json["pin"].as_str().unwrap().to_string();
+    assert_eq!(pin.len(), 6, "micro-profile pin extension must be 6 digits");
+    assert!(
+        start_json["server_michi_id"].as_str().unwrap().len() > 10,
+        "server must expose its canonical michi_id"
+    );
+    assert!(start_json["server_public_key"].as_str().unwrap().len() > 10);
+    assert!(start_json["expires_at"].as_str().unwrap().len() > 10);
+    assert_eq!(start_json["attempts_remaining"].as_u64().unwrap(), 5);
 
-    // Confirm pairing
+    // Confirm with a wrong PIN -> 400 INVALID_REQUEST (attempts decrement)
+    let bad_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/pair/confirm")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(canonical_pair_confirm_body(
+                    &client,
+                    &session_id,
+                    "000000",
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad_resp.status(), StatusCode::BAD_REQUEST);
+    let bad_json: Value = serde_json::from_str(&body_text(bad_resp).await).unwrap();
+    assert_eq!(bad_json["error"]["code"], "INVALID_REQUEST");
+
+    // Confirm with the correct PIN -> canonical PairConfirmResponse
     let confirm_resp = app
         .clone()
         .oneshot(
@@ -1945,7 +2022,11 @@ async fn test_v1_pair_confirm_returns_canonical_permissions() {
                 .uri("/api/v1/pair/confirm")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(format!(r#"{{"code":"{code}"}}"#)))
+                .body(Body::from(canonical_pair_confirm_body(
+                    &client,
+                    &session_id,
+                    &pin,
+                )))
                 .unwrap(),
         )
         .await
@@ -1954,40 +2035,15 @@ async fn test_v1_pair_confirm_returns_canonical_permissions() {
     let confirm_text = body_text(confirm_resp).await;
     let confirm_json: Value = serde_json::from_str(&confirm_text).unwrap();
 
-    let permissions = confirm_json["permissions"].as_array().unwrap();
-    let perm_strings: Vec<&str> = permissions.iter().map(|p| p.as_str().unwrap()).collect();
+    assert!(confirm_json["token"].as_str().unwrap().len() > 10);
+    assert!(confirm_json["refresh_token"].as_str().unwrap().len() > 10);
+    assert!(confirm_json["expires_in"].as_u64().unwrap() > 0);
+    assert!(confirm_json["device_id"].as_str().unwrap().len() > 10);
+    assert!(confirm_json["server_id"].as_str().unwrap().len() > 10);
     assert!(
-        perm_strings.contains(&"library.read"),
-        "should contain library.read"
+        confirm_json["permissions"].is_null(),
+        "canonical confirm response must not carry a permissions array"
     );
-    assert!(
-        perm_strings.contains(&"stream.read"),
-        "should contain stream.read"
-    );
-    assert!(
-        perm_strings.contains(&"download.read"),
-        "mobile should have download.read"
-    );
-    assert!(
-        perm_strings.contains(&"playback.control"),
-        "should contain playback.control"
-    );
-    assert!(
-        perm_strings.contains(&"sync.read_manifest"),
-        "should contain sync.read_manifest"
-    );
-
-    // Verify no Debug-format strings leak through
-    for p in &perm_strings {
-        assert!(
-            !p.contains('{'),
-            "permission {p:?} contains debug formatting"
-        );
-        assert!(
-            !p.contains('('),
-            "permission {p:?} contains debug formatting"
-        );
-    }
 }
 
 #[tokio::test]
@@ -2150,7 +2206,8 @@ async fn test_v1_e2e_mobile_flow() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // 3. pair/start
+    // 3. pair/start (canonical v1-lite challenge)
+    let client = fresh_test_client("e2e-mobile");
     let resp = app
         .clone()
         .oneshot(
@@ -2158,16 +2215,19 @@ async fn test_v1_e2e_mobile_flow() {
                 .uri("/api/v1/pair/start")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"device_name":"e2e-mobile","device_type":"mobile"}"#,
-                ))
+                .body(Body::from(canonical_pair_start_body(
+                    &client,
+                    "e2e-mobile",
+                    "mobile",
+                )))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let start: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    let code = start["code"].as_str().unwrap().to_string();
+    let session_id = start["session_id"].as_str().unwrap().to_string();
+    let pin = start["pin"].as_str().unwrap().to_string();
 
     // 4. pair/confirm
     let resp = app
@@ -2177,18 +2237,22 @@ async fn test_v1_e2e_mobile_flow() {
                 .uri("/api/v1/pair/confirm")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(format!(r#"{{"code":"{code}"}}"#)))
+                .body(Body::from(canonical_pair_confirm_body(
+                    &client,
+                    &session_id,
+                    &pin,
+                )))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let confirm: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    let _device_token = confirm["device_token"].as_str().unwrap().to_string();
+    let _device_token = confirm["token"].as_str().unwrap().to_string();
     let refresh_token = confirm["refresh_token"].as_str().unwrap().to_string();
     let device_id = confirm["device_id"].as_str().unwrap().to_string();
-    let perms = confirm["permissions"].as_array().unwrap();
-    assert!(perms.iter().any(|p| p == "library.read"));
+    assert!(confirm["expires_in"].as_u64().unwrap() > 0);
+    assert!(confirm["server_id"].as_str().unwrap().len() > 10);
 
     // 5. token/refresh
     let resp = app
@@ -2523,8 +2587,9 @@ async fn test_v1_import_session_validation() {
 #[tokio::test]
 async fn test_v1_auth_flow_pairing_roundtrip() {
     let (app, _) = make_app().await;
+    let client = fresh_test_client("auth-test");
 
-    // pair/start
+    // pair/start (canonical v1-lite challenge)
     let resp = app
         .clone()
         .oneshot(
@@ -2532,18 +2597,21 @@ async fn test_v1_auth_flow_pairing_roundtrip() {
                 .uri("/api/v1/pair/start")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"device_name":"auth-test","device_type":"player"}"#,
-                ))
+                .body(Body::from(canonical_pair_start_body(
+                    &client,
+                    "auth-test",
+                    "player",
+                )))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let start: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    assert!(start["code"].as_str().unwrap().len() == 6);
+    let session_id = start["session_id"].as_str().unwrap().to_string();
+    assert_eq!(start["pin"].as_str().unwrap().len(), 6);
 
-    // pair/confirm with wrong code
+    // pair/confirm with unknown session -> 404 INVALID_CODE
     let resp = app
         .clone()
         .oneshot(
@@ -2551,7 +2619,11 @@ async fn test_v1_auth_flow_pairing_roundtrip() {
                 .uri("/api/v1/pair/confirm")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"code":"ZZZZZZ"}"#))
+                .body(Body::from(canonical_pair_confirm_body(
+                    &client,
+                    "00000000-0000-0000-0000-000000000000",
+                    "123456",
+                )))
                 .unwrap(),
         )
         .await
@@ -2559,9 +2631,6 @@ async fn test_v1_auth_flow_pairing_roundtrip() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let err: Value = serde_json::from_str(&body_text(resp).await).unwrap();
     assert_eq!(err["error"]["code"], "INVALID_CODE");
-
-    // pair/confirm success
-    let code = start["code"].as_str().unwrap();
     let resp = app
         .clone()
         .oneshot(
@@ -2569,22 +2638,47 @@ async fn test_v1_auth_flow_pairing_roundtrip() {
                 .uri("/api/v1/pair/confirm")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(format!(r#"{{"code":"{code}"}}"#)))
+                .body(Body::from(canonical_pair_confirm_body(
+                    &client,
+                    &session_id,
+                    "000000",
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let err: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(err["error"]["code"], "INVALID_REQUEST");
+
+    // pair/confirm success -> canonical PairConfirmResponse
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/pair/confirm")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(canonical_pair_confirm_body(
+                    &client,
+                    &session_id,
+                    start["pin"].as_str().unwrap(),
+                )))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let confirm: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    assert!(confirm["device_token"].as_str().unwrap().len() > 10);
+    assert!(confirm["token"].as_str().unwrap().len() > 10);
     assert!(confirm["refresh_token"].as_str().unwrap().len() > 10);
-    assert!(confirm["permissions"].is_array());
-    assert!(confirm["permissions"]
-        .as_array()
-        .unwrap()
-        .contains(&Value::String("playback.control".into())));
+    assert!(confirm["expires_in"].as_u64().unwrap() > 0);
+    assert!(confirm["device_id"].as_str().unwrap().len() > 10);
+    assert!(confirm["server_id"].as_str().unwrap().len() > 10);
+    assert!(confirm["permissions"].is_null());
 
-    // confirm again -> consumed (code already used from DB)
+    // confirm again -> session consumed (registry keeps the consumed session,
+    // canonical error is PairingAlreadyConsumed -> 409 ALREADY_CONFIRMED)
     let resp = app
         .clone()
         .oneshot(
@@ -2592,14 +2686,18 @@ async fn test_v1_auth_flow_pairing_roundtrip() {
                 .uri("/api/v1/pair/confirm")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(format!(r#"{{"code":"{code}"}}"#)))
+                .body(Body::from(canonical_pair_confirm_body(
+                    &client,
+                    &session_id,
+                    start["pin"].as_str().unwrap(),
+                )))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
     let err: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    assert_eq!(err["error"]["code"], "INVALID_CODE");
+    assert_eq!(err["error"]["code"], "ALREADY_CONFIRMED");
 }
 
 #[tokio::test]
@@ -3698,8 +3796,9 @@ async fn test_v1_import_commit_returns_mapping_with_status() {
 #[tokio::test]
 async fn test_v1_auth_real_pair_and_use_token() {
     let (app, _) = make_app().await;
+    let client = fresh_test_client("auth-test-player");
 
-    // 1. Pair a device
+    // 1. Pair a device (canonical v1-lite challenge)
     let resp = app
         .clone()
         .oneshot(
@@ -3707,16 +3806,19 @@ async fn test_v1_auth_real_pair_and_use_token() {
                 .uri("/api/v1/pair/start")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"device_name":"auth-test-player","device_type":"player"}"#,
-                ))
+                .body(Body::from(canonical_pair_start_body(
+                    &client,
+                    "auth-test-player",
+                    "player",
+                )))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let start: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    let code = start["code"].as_str().unwrap().to_string();
+    let session_id = start["session_id"].as_str().unwrap().to_string();
+    let pin = start["pin"].as_str().unwrap().to_string();
 
     let resp = app
         .clone()
@@ -3725,18 +3827,19 @@ async fn test_v1_auth_real_pair_and_use_token() {
                 .uri("/api/v1/pair/confirm")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(format!(r#"{{"code":"{code}"}}"#)))
+                .body(Body::from(canonical_pair_confirm_body(
+                    &client,
+                    &session_id,
+                    &pin,
+                )))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let confirm: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    let device_token = confirm["device_token"].as_str().unwrap().to_string();
-    assert!(confirm["permissions"]
-        .as_array()
-        .unwrap()
-        .contains(&Value::String("playback.control".into())));
+    let device_token = confirm["token"].as_str().unwrap().to_string();
+    assert!(confirm["server_id"].as_str().unwrap().len() > 10);
 
     // 2. Use token for playback/control
     let resp = app
@@ -4104,6 +4207,7 @@ async fn test_protected_route_rejects_bad_token() {
 #[tokio::test]
 async fn test_auth_pairing_grants_proper_permissions() {
     let (app, _) = make_app().await;
+    let client = fresh_test_client("perm-test");
 
     let resp = app
         .clone()
@@ -4112,16 +4216,19 @@ async fn test_auth_pairing_grants_proper_permissions() {
                 .uri("/api/v1/pair/start")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"device_name":"perm-test","device_type":"player"}"#,
-                ))
+                .body(Body::from(canonical_pair_start_body(
+                    &client,
+                    "perm-test",
+                    "player",
+                )))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let start: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    let code = start["code"].as_str().unwrap().to_string();
+    let session_id = start["session_id"].as_str().unwrap().to_string();
+    let pin = start["pin"].as_str().unwrap().to_string();
 
     let resp = app
         .clone()
@@ -4130,16 +4237,21 @@ async fn test_auth_pairing_grants_proper_permissions() {
                 .uri("/api/v1/pair/confirm")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(format!(r#"{{"code":"{code}"}}"#)))
+                .body(Body::from(canonical_pair_confirm_body(
+                    &client,
+                    &session_id,
+                    &pin,
+                )))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let confirm: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    let permissions = confirm["permissions"].as_array().unwrap();
-
-    assert!(permissions.contains(&serde_json::Value::String("library.read".into())));
-    assert!(permissions.contains(&serde_json::Value::String("stream.read".into())));
-    assert!(permissions.contains(&serde_json::Value::String("playback.control".into())));
+    assert!(confirm["token"].as_str().unwrap().len() > 10);
+    assert!(confirm["refresh_token"].as_str().unwrap().len() > 10);
+    assert!(confirm["expires_in"].as_u64().unwrap() > 0);
+    assert!(confirm["device_id"].as_str().unwrap().len() > 10);
+    assert!(confirm["server_id"].as_str().unwrap().len() > 10);
+    assert!(confirm["permissions"].is_null());
 }
