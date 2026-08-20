@@ -58,3 +58,7 @@ htmlcov/
 # Local AI runtime state
 .atl/
 .impeccable/
+
+# Python
+__pycache__/
+*.pyc
