@@ -7,8 +7,8 @@ This document describes the end-to-end flow between **Michi Music Mobile** and *
 1. Mobile scans the local network for `/_michi` or configures a known IP:port.
 2. Mobile calls `GET /api/v1/server/info` to discover:
    - `service`: must be `michi-micro-server`
-   - `michi_link_version`: `"1.0.0-alpha"`
-   - `auth.strategy`: `"SERVER_CODE"` or `"PLAYER_PASSWORD"`
+   - `api_version`: `"v1"`
+   - `auth.strategy`: `"ED25519_CHALLENGE"` (v1-lite pairing challenge) or `"SERVER_CODE"`
    - `features`: boolean flags (library, streaming, playback, queue, etc.)
 3. Mobile stores `server_id` for stable identification.
 
