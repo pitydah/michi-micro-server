@@ -32,22 +32,25 @@ COPY crates/michi-link/Cargo.toml ./crates/michi-link/Cargo.toml
 COPY crates/michi-receivers/Cargo.toml ./crates/michi-receivers/Cargo.toml
 COPY crates/michi-security/Cargo.toml ./crates/michi-security/Cargo.toml
 COPY crates/michi-ingest/Cargo.toml ./crates/michi-ingest/Cargo.toml
-COPY crates/michi-identity/Cargo.toml ./crates/michi-identity/Cargo.toml
 COPY crates/michi-connect/Cargo.toml ./crates/michi-connect/Cargo.toml
 COPY crates/michi-onboard/Cargo.toml ./crates/michi-onboard/Cargo.toml
+COPY vendor/michi-link/crates/michi-identity/Cargo.toml ./vendor/michi-link/crates/michi-identity/Cargo.toml
 
 # Dummy sources for dependency caching
-RUN for dir in michi-core michi-api michi-config michi-db michi-metadata michi-scanner michi-streaming michi-m3u michi-sync michi-homeassistant michi-tui michi-client michi-opensubsonic michi-rooms michi-link michi-receivers michi-security michi-ingest michi-identity michi-connect michi-onboard; do \
+RUN for dir in michi-core michi-api michi-config michi-db michi-metadata michi-scanner michi-streaming michi-m3u michi-sync michi-homeassistant michi-tui michi-client michi-opensubsonic michi-rooms michi-link michi-receivers michi-security michi-ingest michi-connect michi-onboard; do \
       mkdir -p crates/$dir/src && echo "pub fn placeholder() {}" > crates/$dir/src/lib.rs; \
     done && \
+    mkdir -p vendor/michi-link/crates/michi-identity/src && \
+      echo "pub fn placeholder() {}" > vendor/michi-link/crates/michi-identity/src/lib.rs && \
     mkdir -p apps/michi-server/src && echo "fn main() {}" > apps/michi-server/src/main.rs && \
     cargo build --release --package michi-server 2>&1 || { echo "dependency caching step completed (build may have warnings)"; }
 
 # Copy real source and rebuild
 COPY apps ./apps
 COPY crates ./crates
+COPY vendor ./vendor
 
-RUN find apps crates -type f \( \
+RUN find apps crates vendor -type f \( \
       -name '*.rs' -o -name '*.html' -o -name '*.css' -o -name '*.js' -o \
       -name '*.json' -o -name '*.svg' -o -name '*.png' -o -name '*.webp' \
     \) -exec touch {} + && \
