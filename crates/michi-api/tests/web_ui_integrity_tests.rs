@@ -3,7 +3,9 @@
     clippy::needless_borrows_for_generic_args,
     clippy::len_zero
 )]
+use base64::Engine;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::{
     body::Body,
@@ -1214,4 +1216,56 @@ async fn test_pair_start_response_must_not_contain_pin() {
     assert!(captured_pin.is_some(), "PIN must be recorded in local display observer");
     assert_eq!(captured_pin.as_ref().unwrap().len(), 6);
 }
+
+// ── M1.5.2 / P0-04 & P0-05: ReceiverClient Uses Persistent Identity and Signs Raw Nonce ──
+#[tokio::test]
+async fn test_receiver_client_uses_persistent_identity_and_signs_raw_nonce() {
+    let dir = std::env::temp_dir().join(format!("michi-test-server-id-{}", Uuid::new_v4()));
+    let identity = Arc::new(michi_identity::IdentityManager::generate(&dir, "Michi Micro Server", "").unwrap());
+
+    let client = michi_receivers::ReceiverClient::with_identity("http://127.0.0.1:9090", identity.clone());
+
+    // Verify identity on client matches persistent server identity
+    assert_eq!(client.identity.as_ref().unwrap().michi_id().to_base64url(), identity.michi_id().to_base64url());
+
+    // Verify raw nonce signing matches Ed25519 signature over binary bytes (not ASCII base64)
+    let nonce_raw: [u8; 32] = [99u8; 32];
+    let (sig_b64, pk_b64) = identity.sign_base64url(&nonce_raw);
+    assert_eq!(pk_b64, identity.public_key_base64url());
+
+    // Validate signature verification succeeds over RAW bytes
+    let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&sig_b64).unwrap();
+    let pk_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&pk_b64).unwrap();
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes.try_into().unwrap()).unwrap();
+    let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes.try_into().unwrap());
+    assert!(vk.verify_strict(&nonce_raw, &sig).is_ok(), "Signature must verify over RAW nonce bytes");
+
+    // Negative assertion: signature over ASCII base64 representation MUST FAIL verification
+    let ascii_nonce_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce_raw);
+    assert!(
+        vk.verify_strict(ascii_nonce_b64.as_bytes(), &sig).is_err(),
+        "Signature over raw bytes MUST NOT verify against ASCII base64 string bytes"
+    );
+}
+
+// ── M1.5.2: Micro Identity Persists Across Restarts ──
+#[tokio::test]
+async fn micro_identity_persists_across_restart() {
+    let dir = std::env::temp_dir().join(format!("michi-test-persist-{}", Uuid::new_v4()));
+    let _ = std::fs::create_dir_all(&dir);
+
+    let id1 = michi_identity::IdentityManager::load_or_generate(&dir, "Michi Micro Server", "").unwrap();
+    let michi_id1 = id1.michi_id().to_base64url();
+    let pk1 = id1.public_key_base64url();
+
+    // Reload from the same directory without re-generating
+    let id2 = michi_identity::IdentityManager::load_or_generate(&dir, "Michi Micro Server", "").unwrap();
+    let michi_id2 = id2.michi_id().to_base64url();
+    let pk2 = id2.public_key_base64url();
+
+    assert_eq!(michi_id1, michi_id2, "michi_id must be identical across reloads");
+    assert_eq!(pk1, pk2, "public_key must be identical across reloads");
+}
+
+
 

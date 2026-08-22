@@ -1,8 +1,6 @@
 use crate::models::*;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use rand::rngs::OsRng;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -15,10 +13,7 @@ pub struct ReceiverClient {
     pub active_session_id: Option<String>,
     pub active_session_token: Option<String>,
     pub heartbeat_sequence: Arc<AtomicU64>,
-    signing_key: Option<SigningKey>,
-    verifying_key: Option<VerifyingKey>,
-    pub michi_id: Option<String>,
-    pub public_key_b64: Option<String>,
+    pub identity: Option<Arc<michi_identity::IdentityManager>>,
 }
 
 impl ReceiverClient {
@@ -30,47 +25,34 @@ impl ReceiverClient {
             active_session_id: None,
             active_session_token: None,
             heartbeat_sequence: Arc::new(AtomicU64::new(0)),
-            signing_key: None,
-            verifying_key: None,
-            michi_id: None,
-            public_key_b64: None,
+            identity: None,
         }
     }
 
-    /// Ensure Ed25519 cryptographic identity is initialized
-    pub fn ensure_identity(&mut self) {
-        if self.signing_key.is_none() {
-            let mut csprng = OsRng;
-            let sk = SigningKey::generate(&mut csprng);
-            let vk = sk.verifying_key();
-            let pk_bytes = vk.to_bytes();
-            let pubkey_b64 = URL_SAFE_NO_PAD.encode(pk_bytes);
-            let michi_id_b64 = URL_SAFE_NO_PAD.encode(blake3::hash(&pk_bytes).as_bytes());
-
-            self.public_key_b64 = Some(pubkey_b64);
-            self.michi_id = Some(michi_id_b64);
-            self.verifying_key = Some(vk);
-            self.signing_key = Some(sk);
+    pub fn with_identity(base_url: &str, identity: Arc<michi_identity::IdentityManager>) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            client: reqwest::Client::new(),
+            token: None,
+            active_session_id: None,
+            active_session_token: None,
+            heartbeat_sequence: Arc::new(AtomicU64::new(0)),
+            identity: Some(identity),
         }
     }
 
-    /// GET /api/v1/server/info (canonical) with fallback to /api/v1/receiver/info
+    pub fn set_identity(&mut self, identity: Arc<michi_identity::IdentityManager>) {
+        self.identity = Some(identity);
+    }
+
+    /// GET /api/v1/server/info (canonical v1-lite)
     pub async fn get_info(&self) -> Result<ReceiverInfo, String> {
-        let resp = match self
+        let resp = self
             .client
             .get(format!("{}/api/v1/server/info", self.base_url))
             .send()
             .await
-        {
-            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
-                self.client
-                    .get(format!("{}/api/v1/receiver/info", self.base_url))
-                    .send()
-                    .await
-            }
-            res => res,
-        }
-        .map_err(|e| format!("info request failed: {e}"))?;
+            .map_err(|e| format!("info request failed: {e}"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -81,17 +63,16 @@ impl ReceiverClient {
             .map_err(|e| format!("info parse failed: {e}"))
     }
 
-    /// POST /api/v1/pair/start (canonical) with Ed25519 challenge signature
+    /// POST /api/v1/pair/start (canonical) with Ed25519 challenge signature over RAW nonce bytes
     pub async fn pair_start(&mut self, _initiator_id: &str) -> Result<PairStartResponse, String> {
-        self.ensure_identity();
-        let sk = self.signing_key.as_ref().unwrap();
-        let michi_id = self.michi_id.as_ref().unwrap().clone();
-        let public_key = self.public_key_b64.as_ref().unwrap().clone();
-
-        let nonce_bytes: [u8; 32] = rand::random();
-        let challenge_nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
-        let signature = sk.sign(challenge_nonce.as_bytes());
-        let challenge_signature = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+        let (michi_id, public_key, challenge_nonce, challenge_signature) = if let Some(ref id) = self.identity {
+            let nonce_raw: [u8; 32] = rand::random();
+            let challenge_nonce = URL_SAFE_NO_PAD.encode(nonce_raw);
+            let (sig_b64, pk_b64) = id.sign_base64url(&nonce_raw);
+            (id.michi_id().to_base64url(), pk_b64, challenge_nonce, sig_b64)
+        } else {
+            return Err("IdentityManager not configured on ReceiverClient".to_string());
+        };
 
         let payload = serde_json::json!({
             "device_name": "Michi Micro Server",
@@ -104,23 +85,13 @@ impl ReceiverClient {
             "challenge_signature": challenge_signature,
         });
 
-        let resp = match self
+        let resp = self
             .client
             .post(format!("{}/api/v1/pair/start", self.base_url))
             .json(&payload)
             .send()
             .await
-        {
-            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
-                self.client
-                    .post(format!("{}/api/v1/receiver/pair/start", self.base_url))
-                    .json(&payload)
-                    .send()
-                    .await
-            }
-            res => res,
-        }
-        .map_err(|e| format!("pair_start request failed: {e}"))?;
+            .map_err(|e| format!("pair_start request failed: {e}"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -134,39 +105,30 @@ impl ReceiverClient {
     /// POST /api/v1/pair/confirm (canonical) with 6-digit PIN verification
     pub async fn pair_confirm(
         &mut self,
-        session_id_or_nonce: &str,
+        session_id: &str,
         _initiator_id: &str,
         pin: &str,
     ) -> Result<PairConfirmResponse, String> {
-        self.ensure_identity();
-        let michi_id = self.michi_id.as_ref().unwrap().clone();
-        let public_key = self.public_key_b64.as_ref().unwrap().clone();
+        let (michi_id, public_key) = if let Some(ref id) = self.identity {
+            (id.michi_id().to_base64url(), id.public_key_base64url())
+        } else {
+            return Err("IdentityManager not configured on ReceiverClient".to_string());
+        };
 
         let payload = serde_json::json!({
-            "session_id": session_id_or_nonce,
-            "nonce": session_id_or_nonce,
+            "session_id": session_id,
             "pin": pin,
             "michi_id": michi_id,
             "public_key": public_key,
         });
 
-        let resp = match self
+        let resp = self
             .client
             .post(format!("{}/api/v1/pair/confirm", self.base_url))
             .json(&payload)
             .send()
             .await
-        {
-            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
-                self.client
-                    .post(format!("{}/api/v1/receiver/pair/confirm", self.base_url))
-                    .json(&payload)
-                    .send()
-                    .await
-            }
-            res => res,
-        }
-        .map_err(|e| format!("pair_confirm request failed: {e}"))?;
+            .map_err(|e| format!("pair_confirm request failed: {e}"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -215,17 +177,11 @@ impl ReceiverClient {
             .post(format!("{}/api/v1/receiver-lite/heartbeat", self.base_url));
         req = self.apply_session_headers(req);
 
-        let resp = match req.json(&payload).send().await {
-            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
-                let mut legacy_req = self
-                    .client
-                    .post(format!("{}/api/v1/receiver/heartbeat", self.base_url));
-                legacy_req = self.apply_session_headers(legacy_req);
-                legacy_req.json(&payload).send().await
-            }
-            res => res,
-        }
-        .map_err(|e| format!("heartbeat request failed: {e}"))?;
+        let resp = req
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("heartbeat request failed: {e}"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -274,19 +230,11 @@ impl ReceiverClient {
             req = req.header("Authorization", format!("Bearer {t}"));
         }
 
-        let resp = match req.json(&payload).send().await {
-            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
-                let mut legacy_req = self
-                    .client
-                    .post(format!("{}/api/v1/receiver/session/start", self.base_url));
-                if let Some(ref t) = self.token {
-                    legacy_req = legacy_req.header("Authorization", format!("Bearer {t}"));
-                }
-                legacy_req.json(&payload).send().await
-            }
-            res => res,
-        }
-        .map_err(|e| format!("session_start request failed: {e}"))?;
+        let resp = req
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("session_start request failed: {e}"))?;
 
         let status = resp.status();
         if status != reqwest::StatusCode::CREATED && status != reqwest::StatusCode::OK {
@@ -331,17 +279,11 @@ impl ReceiverClient {
             .patch(format!("{}/api/v1/receiver-lite/session", self.base_url));
         req = self.apply_session_headers(req);
 
-        let resp = match req.json(&payload).send().await {
-            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
-                let mut legacy_req = self
-                    .client
-                    .post(format!("{}/api/v1/receiver/volume", self.base_url));
-                legacy_req = self.apply_session_headers(legacy_req);
-                legacy_req.json(&payload).send().await
-            }
-            res => res,
-        }
-        .map_err(|e| format!("set_volume request failed: {e}"))?;
+        let resp = req
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("set_volume request failed: {e}"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -359,17 +301,10 @@ impl ReceiverClient {
             .delete(format!("{}/api/v1/receiver-lite/session", self.base_url));
         req = self.apply_session_headers(req);
 
-        let resp = match req.send().await {
-            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
-                let mut legacy_req = self
-                    .client
-                    .post(format!("{}/api/v1/receiver/session/stop", self.base_url));
-                legacy_req = self.apply_session_headers(legacy_req);
-                legacy_req.send().await
-            }
-            res => res,
-        }
-        .map_err(|e| format!("session_stop request failed: {e}"))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("session_stop request failed: {e}"))?;
 
         let status = resp.status();
         if status != reqwest::StatusCode::NO_CONTENT

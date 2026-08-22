@@ -7,6 +7,20 @@
 //!   cargo test --test receiver_simulator_integration -- --ignored
 
 use michi_receivers::{ReceiverClient, ReceiverSessionManager};
+use std::sync::Arc;
+
+fn make_test_identity() -> Arc<michi_identity::IdentityManager> {
+    let dir = std::env::temp_dir().join(format!("michi-rec-test-{}", uuid::Uuid::new_v4()));
+    let _ = std::fs::create_dir_all(&dir);
+    Arc::new(
+        michi_identity::IdentityManager::generate(&dir, "Michi Micro Server", "")
+            .expect("test identity generation"),
+    )
+}
+
+fn make_test_client(url: &str) -> ReceiverClient {
+    ReceiverClient::with_identity(url, make_test_identity())
+}
 
 fn sim_url() -> String {
     std::env::var("MICHI_RECEIVER_SIM_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())

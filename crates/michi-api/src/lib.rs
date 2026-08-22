@@ -104,7 +104,6 @@ impl AppState {
         }
         let token_store = michi_link::TokenStore::new();
         let playback_state = Arc::new(RwLock::new(PlaybackState::default()));
-        let receiver_manager = michi_receivers::ReceiverSessionManager::new();
         let upload_dir = config.cache_path.join("uploads");
         let _ = std::fs::create_dir_all(&upload_dir);
         let sync_manager = michi_sync::SyncManager::new(db.clone(), upload_dir);
@@ -156,6 +155,7 @@ impl AppState {
                     .expect("ephemeral identity generation must not fail")
             }),
         );
+        let receiver_manager = michi_receivers::ReceiverSessionManager::new_with_identity(identity.clone());
         let pairing_registry = Arc::new(michi_identity::PairingRegistry::new());
         let pairing_display = Arc::new(RwLock::new(None));
 

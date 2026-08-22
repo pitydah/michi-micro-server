@@ -8,44 +8,51 @@ use crate::models::*;
 #[derive(Debug, Clone)]
 pub struct ReceiverSessionManager {
     registry: Arc<RwLock<ReceiverRegistry>>,
+    identity: Option<Arc<michi_identity::IdentityManager>>,
 }
 
 impl ReceiverSessionManager {
     pub fn new() -> Self {
         Self {
             registry: Arc::new(RwLock::new(ReceiverRegistry::new())),
+            identity: None,
+        }
+    }
+
+    pub fn new_with_identity(identity: Arc<michi_identity::IdentityManager>) -> Self {
+        Self {
+            registry: Arc::new(RwLock::new(ReceiverRegistry::new())),
+            identity: Some(identity),
         }
     }
 
     pub fn new_with(registry: Arc<RwLock<ReceiverRegistry>>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            identity: None,
+        }
+    }
+
+    pub fn set_identity(&mut self, identity: Arc<michi_identity::IdentityManager>) {
+        self.identity = Some(identity);
     }
 
     pub async fn registry(&self) -> Arc<RwLock<ReceiverRegistry>> {
         self.registry.clone()
     }
 
-    pub async fn discover_and_pair(
+    /// Step 1 of receiver pairing: Initiate pairing and return the pending session_id.
+    pub async fn start_pairing(
         &self,
         base_url: &str,
         initiator_id: &str,
-    ) -> Result<String, String> {
-        let client = ReceiverClient::new(base_url);
+    ) -> Result<(String, ReceiverInfo, ReceiverClient), String> {
+        let mut client = if let Some(ref id) = self.identity {
+            ReceiverClient::with_identity(base_url, id.clone())
+        } else {
+            ReceiverClient::new(base_url)
+        };
         let info = client.get_info().await?;
-        let device_id = info
-            .michi_id
-            .clone()
-            .or_else(|| info.server_id.clone())
-            .or_else(|| info.device_id.clone())
-            .unwrap_or_else(|| base_url.to_string());
-        let name = info.name.clone().unwrap_or_else(|| device_id.clone());
-        let device_type = info
-            .device_type
-            .clone()
-            .or_else(|| info.service.clone())
-            .unwrap_or_else(|| "unknown".into());
-
-        let mut client = client;
         let start_resp = client.pair_start(initiator_id).await?;
         let session_id = if let Some(ref s_id) = start_resp.session_id {
             s_id.clone()
@@ -56,7 +63,32 @@ impl ReceiverSessionManager {
         } else {
             return Err("no session_id in pair_start response".to_string());
         };
-        let pin = "482391";
+        Ok((session_id, info, client))
+    }
+
+    /// Step 2 of receiver pairing: Confirm pairing using the PIN entered by user.
+    pub async fn discover_and_pair(
+        &self,
+        base_url: &str,
+        initiator_id: &str,
+        pin: &str,
+    ) -> Result<String, String> {
+        let (session_id, info, client) = self.start_pairing(base_url, initiator_id).await?;
+
+        let device_id = info
+            .michi_id
+            .clone()
+            .or_else(|| info.server_id.clone())
+            .or_else(|| info.device_id.clone())
+            .unwrap_or_else(|| client.base_url.clone());
+        let name = info.name.clone().unwrap_or_else(|| device_id.clone());
+        let device_type = info
+            .device_type
+            .clone()
+            .or_else(|| info.service.clone())
+            .unwrap_or_else(|| "unknown".into());
+
+        let mut client = client;
         let _confirm_resp = client.pair_confirm(&session_id, initiator_id, pin).await?;
 
         // Extract capabilities
@@ -174,7 +206,11 @@ impl ReceiverSessionManager {
 
         let base_url = entry.base_url.clone();
         let token = entry.token.clone();
-        let mut client = ReceiverClient::new(&base_url);
+        let mut client = if let Some(ref id) = self.identity {
+            ReceiverClient::with_identity(&base_url, id.clone())
+        } else {
+            ReceiverClient::new(&base_url)
+        };
         client.token = token;
 
         let resp = client
@@ -214,7 +250,11 @@ impl ReceiverSessionManager {
         }
         .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
 
-        let mut client = ReceiverClient::new(&entry.base_url);
+        let mut client = if let Some(ref id) = self.identity {
+            ReceiverClient::with_identity(&entry.base_url, id.clone())
+        } else {
+            ReceiverClient::new(&entry.base_url)
+        };
         client.token = entry.token.clone();
         let resp = client.session_stop().await?;
 
@@ -240,7 +280,11 @@ impl ReceiverSessionManager {
         }
         .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
 
-        let mut client = ReceiverClient::new(&entry.base_url);
+        let mut client = if let Some(ref id) = self.identity {
+            ReceiverClient::with_identity(&entry.base_url, id.clone())
+        } else {
+            ReceiverClient::new(&entry.base_url)
+        };
         client.token = entry.token.clone();
         client.set_volume(volume).await
     }
@@ -252,7 +296,11 @@ impl ReceiverSessionManager {
         }
         .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
 
-        let mut client = ReceiverClient::new(&entry.base_url);
+        let mut client = if let Some(ref id) = self.identity {
+            ReceiverClient::with_identity(&entry.base_url, id.clone())
+        } else {
+            ReceiverClient::new(&entry.base_url)
+        };
         client.token = entry.token.clone();
         let resp = client.heartbeat().await?;
 
@@ -273,7 +321,11 @@ impl ReceiverSessionManager {
         }
         .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
 
-        let client = ReceiverClient::new(&entry.base_url);
+        let client = if let Some(ref id) = self.identity {
+            ReceiverClient::with_identity(&entry.base_url, id.clone())
+        } else {
+            ReceiverClient::new(&entry.base_url)
+        };
         client.get_info().await
     }
 }

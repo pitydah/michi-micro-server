@@ -11,6 +11,19 @@ use uuid::Uuid;
 
 use crate::AppState;
 
+fn v1_error_code(
+    status: StatusCode,
+    code: michi_link::MichiLinkErrorCode,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": { "code": code.as_str(), "message": message, "details": {} }
+        })),
+    )
+}
+
 fn v1_error(
     status: StatusCode,
     code: &str,
@@ -170,6 +183,7 @@ pub async fn get_receiver_handler(
 pub struct DiscoverReceiverBody {
     pub base_url: String,
     pub initiator_id: Option<String>,
+    pub pin: Option<String>,
 }
 
 pub async fn discover_receiver_handler(
@@ -179,9 +193,19 @@ pub async fn discover_receiver_handler(
     let initiator_id = body
         .initiator_id
         .unwrap_or_else(|| "michi-micro-server".into());
+    let pin = match body.pin {
+        Some(p) if !p.trim().is_empty() => p,
+        _ => {
+            return Err(v1_error_code(
+                StatusCode::BAD_REQUEST,
+                michi_link::MichiLinkErrorCode::InvalidRequest,
+                "PIN is required to pair with receiver",
+            ));
+        }
+    };
     match state
         .receiver_manager
-        .discover_and_pair(&body.base_url, &initiator_id)
+        .discover_and_pair(&body.base_url, &initiator_id, &pin)
         .await
     {
         Ok(device_id) => Ok(Json(serde_json::json!({

@@ -18,6 +18,7 @@ ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
 rand = "0.8"
 blake3 = "1"
 base64 = "0.22"
+michi-identity = { path = "../../vendor/michi-link/crates/michi-identity" }
 
 [dev-dependencies]
 tokio.workspace = true
