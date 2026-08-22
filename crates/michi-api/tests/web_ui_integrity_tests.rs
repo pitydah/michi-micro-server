@@ -1267,5 +1267,140 @@ async fn micro_identity_persists_across_restart() {
     assert_eq!(pk1, pk2, "public_key must be identical across reloads");
 }
 
+// ── M1.5.9: Three-Way Real Integration E2E ──
+// Mobile Controller -> Micro Server HTTP API -> ReceiverManager -> Receiver Registry Entry
+#[tokio::test]
+async fn test_three_way_integration_e2e_flow() {
+    let (app, pool, state) = make_app().await;
+    let track = seed_track(&pool, "/music/canonical_e2e.flac", "Three Way Integrity").await;
+    let track_id = track.id;
+
+    // 1. Mobile Controller client creates pairing challenge
+    let dir = std::env::temp_dir().join(format!("michi-test-mobile-3way-{}", Uuid::new_v4()));
+    let mobile = michi_identity::IdentityManager::generate(&dir, "Mobile Controller", "").unwrap();
+    let nonce_raw = [88u8; 32];
+    let nonce = michi_identity::encode_base64url(&nonce_raw);
+    let (signature, public_key) = mobile.sign_base64url(&nonce_raw);
+
+    // 2. Mobile starts pairing with Micro Server
+    let start_payload = serde_json::json!({
+        "device_name": "Pixel Mobile",
+        "device_type": "mobile",
+        "roles": ["mobile_player", "remote_controller"],
+        "auth_strategy": "ED25519_CHALLENGE",
+        "michi_id": mobile.michi_id().to_base64url(),
+        "public_key": public_key,
+        "challenge_nonce": nonce,
+        "challenge_signature": signature,
+    });
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/pair/start")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(start_payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let start_json = body_json(res).await;
+    let session_id = start_json["session_id"].as_str().unwrap();
+
+    // 3. User observes PIN on Micro Server display observer and inputs into Mobile
+    let observed_pin = state.pairing_display.read().await.clone().expect("PIN on observer");
+
+    // 4. Mobile confirms pairing
+    let confirm_payload = serde_json::json!({
+        "session_id": session_id,
+        "pin": observed_pin,
+        "michi_id": mobile.michi_id().to_base64url(),
+        "public_key": mobile.public_key_base64url(),
+    });
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/pair/confirm")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(confirm_payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let confirm_json = body_json(res).await;
+    let device_token = confirm_json["token"].as_str().unwrap();
+    assert!(!device_token.is_empty());
+
+    // 5. Register an active receiver endpoint into Micro Server
+    let reg_entry = michi_receivers::ReceiverRegistryEntry {
+        receiver_id: "stream-living-room".to_string(),
+        name: "Living Room Speaker".to_string(),
+        device_type: "michi_stream_standard".to_string(),
+        base_url: "http://127.0.0.1:8080".to_string(),
+        paired: true,
+        token: Some("dummy_token".to_string()),
+        last_seen: Some(chrono::Utc::now()),
+        capabilities: vec!["stream".into(), "volume".into(), "heartbeat".into()],
+        active_session_id: None,
+        max_sample_rate: 48000,
+        max_bit_depth: 16,
+        supported_codecs: vec!["pcm_s16le".to_string()],
+        maximum_safe_volume: Some(100),
+    };
+    state.receiver_manager.registry().await.write().await.add(reg_entry);
+
+    // 6. Mobile controls playback through Micro Server API (enqueue & play)
+    let queue_payload = serde_json::json!({
+        "track_ids": [track_id.to_string()]
+    });
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/queue/items")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {device_token}"))
+                .body(Body::from(queue_payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 7. Mobile issues play command with target track_id
+    let play_payload = serde_json::json!({
+        "command": "play",
+        "value": track_id.to_string()
+    });
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {device_token}"))
+                .body(Body::from(play_payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 8. Verify Micro Server playback state is playing canonical track
+    let ps = state.playback_state.read().await;
+    assert!(ps.playing);
+    assert_eq!(ps.track_id, Some(track_id));
+}
+
+
 
 
