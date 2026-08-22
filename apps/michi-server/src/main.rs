@@ -120,13 +120,6 @@ async fn main() -> Result<()> {
     )?);
     info!("michi_id: {}...", &identity.michi_id().to_base64url()[..12]);
 
-    let michi_connect = michi_connect::MichiConnect::new(
-        identity.clone(),
-        config.port(),
-        Some("0.0.0.0".to_string()),
-    );
-    let _ = michi_connect.announce_mdns().await;
-
     let watchdog = Watchdog::new();
     watchdog.run().await;
 
@@ -193,9 +186,16 @@ async fn main() -> Result<()> {
     }
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    info!("listening on {}", addr);
-
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    let actual_port = listener.local_addr()?.port();
+    info!("listening on http://0.0.0.0:{}", actual_port);
+
+    let michi_connect = michi_connect::MichiConnect::new(
+        identity.clone(),
+        actual_port,
+        Some("0.0.0.0".to_string()),
+    );
+    let _ = michi_connect.announce_mdns().await;
 
     // Graceful shutdown: SIGINT + SIGTERM
     let shutdown_state = state.clone();
