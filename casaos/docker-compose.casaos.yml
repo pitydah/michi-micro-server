@@ -27,11 +27,11 @@ x-casaos:
   description:
     en_us: Lightweight, robust home music server. Stream your local music library over your home network or Tailscale.
   developer: pitydah
-  icon: ""
+  icon: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/docs/assets/icon.png"
   screenshot_link: []
   tagline:
     en_us: Your music, streamed simply.
-  thumbnail: ""
+  thumbnail: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/docs/assets/icon.png"
   title:
     en_us: Michi Micro Server
   index: /

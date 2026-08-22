@@ -1803,27 +1803,6 @@ async function discoverDevices() {
   } catch (e) { showToast(e.message, true); }
 }
 
-async function createGroup() {
-  var name = $('#group-name')?.value.trim();
-  var receivers = $('#group-receivers')?.value.trim();
-  if (!name) { showToast(t('error.please_enter_name'), true); return; }
-  var ids = receivers ? receivers.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [];
-  try {
-    var resp = await MichiAPI.request('/api/v1/receivers/groups', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, receiver_ids: ids }),
-    });
-    var el = $('#groups-list');
-    if (el) {
-      el.innerHTML = '<span style="color:var(--online)">✓ Group "' + resp.group.name + '" created</span>';
-    }
-    $('#group-name').value = '';
-    $('#group-receivers').value = '';
-    showToast(t('toast.created'));
-  } catch (e) { showToast(e.message, true); }
-}
-
 // Webhook
 async function setWebhook() {
   var url = $('#webhook-url')?.value.trim();
