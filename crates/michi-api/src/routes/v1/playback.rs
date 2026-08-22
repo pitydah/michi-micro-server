@@ -326,36 +326,39 @@ pub async fn playback_control_handler(
                     .or_else(|| val.as_str());
                 if let Some(rep) = rep_str {
                     match rep {
-                        "none" | "all" | "one" => {
+                        "off" | "none" => {
+                            current.repeat = "off".to_string();
+                        }
+                        "all" | "one" => {
                             current.repeat = rep.to_string();
                         }
                         _ => {
                             return Err(v1_error(
                                 StatusCode::BAD_REQUEST,
                                 "INVALID_REQUEST",
-                                "repeat mode must be 'none', 'all', or 'one'",
+                                "repeat mode must be 'off', 'one', or 'all'",
                             ));
                         }
                     }
                 } else {
                     current.repeat = match current.repeat.as_str() {
-                        "none" => "all".into(),
+                        "off" | "none" => "all".into(),
                         "all" => "one".into(),
-                        _ => "none".into(),
+                        _ => "off".into(),
                     };
                 }
             } else {
                 current.repeat = match current.repeat.as_str() {
-                    "none" => "all".into(),
+                    "off" | "none" => "all".into(),
                     "all" => "one".into(),
-                    _ => "none".into(),
+                    _ => "off".into(),
                 };
             }
         }
         _ => {
             return Err(v1_error(
                 StatusCode::BAD_REQUEST,
-                "INVALID_COMMAND",
+                "INVALID_REQUEST",
                 &format!("unknown command: {cmd}"),
             ));
         }

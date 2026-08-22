@@ -72,7 +72,7 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
             token_refresh: caps.feature_enabled("token_refresh"),
         },
         auth: V1AuthInfo {
-            required: state.auth_enabled,
+            required: true,
             strategy: "SERVER_CODE".into(),
             token_refresh: true,
         },
