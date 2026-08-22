@@ -10,15 +10,15 @@ use uuid::Uuid;
 
 use crate::AppState;
 
-fn v1_error(
+fn v1_error_code(
     status: StatusCode,
-    code: &str,
+    code: michi_link::MichiLinkErrorCode,
     message: &str,
 ) -> (StatusCode, Json<serde_json::Value>) {
     (
         status,
         Json(serde_json::json!({
-            "error": { "code": code, "message": message, "details": {} }
+            "error": { "code": code.as_str(), "message": message, "details": {} }
         })),
     )
 }
@@ -97,9 +97,9 @@ pub async fn playback_control_handler(
         .as_deref()
         .or(body.action.as_deref())
         .ok_or_else(|| {
-            v1_error(
+            v1_error_code(
                 StatusCode::BAD_REQUEST,
-                "INVALID_REQUEST",
+                michi_link::MichiLinkErrorCode::InvalidRequest,
                 "command is required",
             )
         })?;
@@ -115,23 +115,23 @@ pub async fn playback_control_handler(
                     .or_else(|| val.as_str());
                 if let Some(track_id) = tid_str {
                     let uid = Uuid::parse_str(track_id).map_err(|_| {
-                        v1_error(
+                        v1_error_code(
                             StatusCode::BAD_REQUEST,
-                            "INVALID_TRACK_ID",
+                            michi_link::MichiLinkErrorCode::InvalidRequest,
                             "invalid track UUID format",
                         )
                     })?;
                     let track = michi_db::get_track(&state.db, &uid).await.map_err(|e| {
-                        v1_error(
+                        v1_error_code(
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            "DATABASE_ERROR",
+                            michi_link::MichiLinkErrorCode::InternalError,
                             &e.to_string(),
                         )
                     })?;
                     if track.is_none() {
-                        return Err(v1_error(
+                        return Err(v1_error_code(
                             StatusCode::NOT_FOUND,
-                            "TRACK_NOT_FOUND",
+                            michi_link::MichiLinkErrorCode::TrackNotFound,
                             "track not found in library",
                         ));
                     }
@@ -282,16 +282,16 @@ pub async fn playback_control_handler(
                     current.volume = (v as f64) / 100.0;
                 }
                 Some(_) => {
-                    return Err(v1_error(
+                    return Err(v1_error_code(
                         StatusCode::BAD_REQUEST,
-                        "INVALID_REQUEST",
+                        michi_link::MichiLinkErrorCode::InvalidRequest,
                         "volume must be between 0 and 100",
                     ));
                 }
                 None => {
-                    return Err(v1_error(
+                    return Err(v1_error_code(
                         StatusCode::BAD_REQUEST,
-                        "INVALID_REQUEST",
+                        michi_link::MichiLinkErrorCode::InvalidRequest,
                         "volume is required",
                     ));
                 }
@@ -326,39 +326,39 @@ pub async fn playback_control_handler(
                     .or_else(|| val.as_str());
                 if let Some(rep) = rep_str {
                     match rep {
-                        "off" | "none" => {
+                        "off" => {
                             current.repeat = "off".to_string();
                         }
                         "all" | "one" => {
                             current.repeat = rep.to_string();
                         }
                         _ => {
-                            return Err(v1_error(
+                            return Err(v1_error_code(
                                 StatusCode::BAD_REQUEST,
-                                "INVALID_REQUEST",
+                                michi_link::MichiLinkErrorCode::InvalidRequest,
                                 "repeat mode must be 'off', 'one', or 'all'",
                             ));
                         }
                     }
                 } else {
                     current.repeat = match current.repeat.as_str() {
-                        "off" | "none" => "all".into(),
+                        "off" => "all".into(),
                         "all" => "one".into(),
                         _ => "off".into(),
                     };
                 }
             } else {
                 current.repeat = match current.repeat.as_str() {
-                    "off" | "none" => "all".into(),
+                    "off" => "all".into(),
                     "all" => "one".into(),
                     _ => "off".into(),
                 };
             }
         }
         _ => {
-            return Err(v1_error(
+            return Err(v1_error_code(
                 StatusCode::BAD_REQUEST,
-                "INVALID_REQUEST",
+                michi_link::MichiLinkErrorCode::InvalidRequest,
                 &format!("unknown command: {cmd}"),
             ));
         }
@@ -444,9 +444,9 @@ pub async fn playback_session_handler(
     michi_db::create_playback_session(&state.db, &db_session)
         .await
         .map_err(|e| {
-            v1_error(
+            v1_error_code(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "DATABASE_ERROR",
+                michi_link::MichiLinkErrorCode::InternalError,
                 &e.to_string(),
             )
         })?;
@@ -484,16 +484,16 @@ pub async fn playback_session_get_handler(
     let session = michi_db::get_playback_session(&state.db, &session_id)
         .await
         .map_err(|e| {
-            v1_error(
+            v1_error_code(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "DATABASE_ERROR",
+                michi_link::MichiLinkErrorCode::InternalError,
                 &e.to_string(),
             )
         })?
         .ok_or_else(|| {
-            v1_error(
+            v1_error_code(
                 StatusCode::NOT_FOUND,
-                "SESSION_NOT_FOUND",
+                michi_link::MichiLinkErrorCode::NotFound,
                 "playback session not found",
             )
         })?;
@@ -527,9 +527,9 @@ pub async fn playback_session_restore_handler(
     let latest = michi_db::get_latest_playback_session(&state.db)
         .await
         .map_err(|e| {
-            v1_error(
+            v1_error_code(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "DATABASE_ERROR",
+                michi_link::MichiLinkErrorCode::InternalError,
                 &e.to_string(),
             )
         })?;
