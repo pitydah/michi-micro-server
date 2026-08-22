@@ -1,63 +1,21 @@
-//! Canonical server roles for Michi Link v1.
+//! Michi Link integration adapter for server roles.
 //!
-//! These are the ONLY valid role strings that may appear in the `roles` field of
-//! `GET /api/v1/server/info`. Implementors MUST use these constants — never
-//! invent ad-hoc strings — to prevent silent contract drift between server
-//! implementations and client parsers.
-//!
-//! # Contract authority
-//! This module is the normative source for role names in the Michi ecosystem.
-//! Both Micro Server and any future Big Server implementation MUST derive their
-//! `roles` arrays from [`ServerRole::as_str`] / [`CANONICAL_MICRO_ROLES`].
+//! # Architecture Authority
+//! The normative specification and schema authority for Michi Link resides in
+//! `pitydah/michi-link` (pinned in `vendor/michi-link`). This crate acts as an
+//! internal adapter/runtime integration layer and derives its roles from
+//! [`michi_identity::types::Role`].
 
-use serde::{Deserialize, Serialize};
+pub use michi_identity::types::Role as ServerRole;
 
-/// Canonical roles a Michi server may advertise via the Michi Link v1 contract.
+/// Canonical roles advertised by Michi **Micro** Server per `server-info.schema.json`.
 ///
-/// Only these values are valid in `GET /api/v1/server/info → roles`.
-/// The `#[serde(rename_all = "snake_case")]` ensures wire format stability.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ServerRole {
-    /// Server hosts and indexes a music library.
-    MusicServer,
-    /// Server is authoritative for playback sessions and queue management.
-    PlaybackHost,
-    /// Server acts as a receiver controller (manages audio endpoints).
-    ReceiverController,
-    /// Server supports multiroom / zone grouping.
-    RoomController,
-    /// Server acts as a sync peer for library manifest exchange.
-    SyncPeer,
-}
-
-impl ServerRole {
-    /// Returns the canonical wire-format string for this role.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::MusicServer => "music_server",
-            Self::PlaybackHost => "playback_host",
-            Self::ReceiverController => "receiver_controller",
-            Self::RoomController => "room_controller",
-            Self::SyncPeer => "sync_peer",
-        }
-    }
-}
-
-impl std::fmt::Display for ServerRole {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Canonical roles advertised by Michi **Micro** Server.
-///
-/// Use this constant as the authoritative role set when building `server/info`
-/// responses. Do NOT hard-code string literals in route handlers.
+/// Per the official Michi Link v1 contract for `michi-micro-server`:
+/// `["music_server", "library_host", "playback_host"]`.
 pub const CANONICAL_MICRO_ROLES: &[ServerRole] = &[
     ServerRole::MusicServer,
+    ServerRole::LibraryHost,
     ServerRole::PlaybackHost,
-    ServerRole::ReceiverController,
 ];
 
 #[cfg(test)]
@@ -67,23 +25,21 @@ mod tests {
     #[test]
     fn roles_serialize_to_canonical_strings() {
         assert_eq!(ServerRole::MusicServer.as_str(), "music_server");
+        assert_eq!(ServerRole::LibraryHost.as_str(), "library_host");
         assert_eq!(ServerRole::PlaybackHost.as_str(), "playback_host");
-        assert_eq!(
-            ServerRole::ReceiverController.as_str(),
-            "receiver_controller"
-        );
-        assert_eq!(ServerRole::RoomController.as_str(), "room_controller");
-        assert_eq!(ServerRole::SyncPeer.as_str(), "sync_peer");
+        assert_eq!(ServerRole::MobilePlayer.as_str(), "mobile_player");
+        assert_eq!(ServerRole::RemoteController.as_str(), "remote_controller");
+        assert_eq!(ServerRole::AudioReceiver.as_str(), "audio_receiver");
     }
 
     #[test]
-    fn canonical_micro_roles_are_stable() {
+    fn canonical_micro_roles_match_exact_contract() {
         let strs: Vec<&str> = CANONICAL_MICRO_ROLES.iter().map(|r| r.as_str()).collect();
-        assert!(strs.contains(&"music_server"));
-        assert!(strs.contains(&"playback_host"));
-        assert!(strs.contains(&"receiver_controller"));
-        // Micro does NOT claim room_controller by default
-        assert!(!strs.contains(&"room_controller"));
+        assert_eq!(
+            strs,
+            vec!["music_server", "library_host", "playback_host"],
+            "Micro server roles must strictly match server-info.schema.json"
+        );
     }
 
     #[test]
@@ -95,3 +51,4 @@ mod tests {
         assert_eq!(back, role);
     }
 }
+

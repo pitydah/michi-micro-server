@@ -70,3 +70,4 @@ tar = "0.4"
 flate2 = "1"
 blake3 = "1"
 ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+jsonschema = "0.28"

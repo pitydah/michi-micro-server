@@ -120,3 +120,39 @@ class TestServerInfoConformance:
         assert "michi_link_version" not in server_info, (
             "michi_link_version is a phantom field; api_version is the sole contract authority"
         )
+
+    def test_conforms_to_vendored_json_schema(self, server_info):
+        """Validate live server_info response against vendor/michi-link/schemas/server-info.schema.json."""
+        try:
+            import jsonschema
+        except ImportError:
+            pytest.skip("jsonschema python package not installed; verified by Rust contract test")
+
+        schema_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "vendor", "michi-link", "schemas", "server-info.schema.json"
+        )
+        if not os.path.exists(schema_path):
+            pytest.skip(f"schema not found at {schema_path}")
+
+        with open(schema_path, "r", encoding="utf-8") as f:
+            schema = json.load(f)
+
+        # Load all schemas in vendor dir for offline $ref resolution
+        schema_dir = os.path.dirname(schema_path)
+        store = {}
+        for fname in os.listdir(schema_dir):
+            if fname.endswith(".json"):
+                fpath = os.path.join(schema_dir, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as sf:
+                        sub = json.load(sf)
+                        if "$id" in sub:
+                            store[sub["$id"]] = sub
+                except Exception:
+                    pass
+
+        resolver = jsonschema.RefResolver(base_uri=schema.get("$id", ""), referrer=schema, store=store)
+        validator = jsonschema.Draft7Validator(schema, resolver=resolver)
+        errors = list(validator.iter_errors(server_info))
+        assert not errors, f"server_info failed schema validation: {[e.message for e in errors]}"
+

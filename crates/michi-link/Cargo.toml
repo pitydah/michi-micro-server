@@ -20,3 +20,5 @@ tokio.workspace = true
 sha2 = "0.10"
 hex = "0.4"
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+michi-identity = { workspace = true }
+

@@ -33,7 +33,7 @@ fn test_config() -> Config {
         config_path: PathBuf::from("/tmp/michi-test/config"),
         cache_path: PathBuf::from("/tmp/michi-test/cache"),
         database_url: "sqlite::memory:".to_string(),
-        version: "0.2.0-test",
+        version: "0.2.0",
         sync_peers: Vec::new(),
         sync_name: "michi-server-test".to_string(),
         listenbrainz_token: None,
@@ -1126,7 +1126,7 @@ async fn test_default_port_9090_contract_consistency() {
     }
 }
 
-// ── M1: Server Info Roles Conform to Canonical Michi Link Roles ──
+// ── M1 / R2.1: Server Info Contract Conformance Gate against Normative JSON Schema ──
 #[tokio::test]
 async fn test_server_info_canonical_roles_contract() {
     let (app, _pool, _state) = make_app().await;
@@ -1160,6 +1160,56 @@ async fn test_server_info_canonical_roles_contract() {
         roles, expected_canonical,
         "server/info roles must match CANONICAL_MICRO_ROLES exactly"
     );
+    assert_eq!(
+        roles,
+        vec!["music_server", "library_host", "playback_host"],
+        "Micro server roles must strictly be music_server, library_host, playback_host"
+    );
+
+    // Validate entire JSON payload against vendor/michi-link/schemas/server-info.schema.json
+    let schema_dir = std::path::Path::new("../../vendor/michi-link/schemas")
+        .canonicalize()
+        .or_else(|_| std::path::Path::new("vendor/michi-link/schemas").canonicalize())
+        .expect("vendor/michi-link/schemas directory must exist");
+
+    let server_info_path = schema_dir.join("server-info.schema.json");
+    let schema_str = std::fs::read_to_string(&server_info_path).unwrap();
+    let schema_json: serde_json::Value = serde_json::from_str(&schema_str).unwrap();
+
+    let body_clone = body.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut options = jsonschema::ValidationOptions::default();
+        // Register all local schemas in vendor/michi-link/schemas to satisfy $ref offline
+        if let Ok(entries) = std::fs::read_dir(&schema_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                            if let Some(id) = json.get("$id").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+                                if let Ok(resource) = jsonschema::Resource::from_contents(json) {
+                                    let _ = options.with_resource(id, resource);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let validator = options.build(&schema_json).expect("valid schema compilation");
+        let mut errors: Vec<String> = Vec::new();
+        for error in validator.iter_errors(&body_clone) {
+            errors.push(format!("JSON schema validation error at {}: {}", error.instance_path, error));
+        }
+        assert!(
+            errors.is_empty(),
+            "GET /api/v1/server/info broke canonical Michi Link JSON Schema:\n{:#?}",
+            errors
+        );
+    })
+    .await
+    .unwrap();
 }
 
 // ── M1.5.1 / P0-01: PIN Must Never Travel Over HTTP in /pair/start ──
