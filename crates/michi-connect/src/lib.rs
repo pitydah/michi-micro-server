@@ -127,6 +127,32 @@ impl MichiConnect {
     pub async fn stop_mdns(&self) {
         info!("connect: mDNS stopped");
     }
+
+    /// Builds a canonical signed UDP multicast announce for Michi Micro Server
+    pub fn build_signed_announce(&self, port: u16, host: &str) -> Result<michi_identity::types::Announce, michi_identity::IdentityError> {
+        let engine = michi_identity::discovery::DiscoveryEngine::new(self.identity.clone());
+        let mut features = std::collections::BTreeMap::new();
+        features.insert("library".to_string(), true);
+        features.insert("stream".to_string(), true);
+        features.insert("playback".to_string(), true);
+        features.insert("sync".to_string(), true);
+
+        let profile = michi_identity::types::AnnounceProfile {
+            device_id: self.identity.michi_id().to_base64url(),
+            name: "Michi Micro Server".to_string(),
+            service: michi_identity::types::Service::MicroServer,
+            roles: vec![
+                michi_identity::types::Role::MusicServer,
+                michi_identity::types::Role::LibraryHost,
+                michi_identity::types::Role::PlaybackHost,
+            ],
+            api_version: michi_identity::types::ApiVersion::V1,
+            host: host.to_string(),
+            port,
+            features,
+        };
+        engine.build_signed_announce(&profile)
+    }
 }
 
 // Re-export for convenience
@@ -298,4 +324,19 @@ mod tests {
         let url = conn.server_url().await;
         assert_eq!(url, "http://localhost:5555");
     }
+
+    #[test]
+    fn test_build_signed_announce_validates_and_signs() {
+        let identity = make_identity();
+        let conn = MichiConnect::new(identity.clone(), 9090, Some("192.168.1.100".into()));
+        let announce = conn.build_signed_announce(9090, "192.168.1.100").expect("signed announce must succeed");
+
+        assert_eq!(announce.service, michi_identity::types::Service::MicroServer);
+        assert_eq!(announce.api_version, michi_identity::types::ApiVersion::V1);
+        assert_eq!(announce.port, 9090);
+        assert_eq!(announce.host, "192.168.1.100");
+        assert!(announce.signature.is_some());
+        assert_eq!(announce.michi_id.as_deref(), Some(identity.michi_id().to_base64url()).as_deref());
+    }
 }
+
