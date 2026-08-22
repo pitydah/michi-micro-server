@@ -70,15 +70,14 @@ async fn handle_events_socket(socket: WebSocket, state: AppState) {
 
     info!("events websocket authenticated");
 
-    let init = json!({
-        "type": "server.status",
-        "data": {
-            "service": "michi-micro-server",
-            "version": state.config.version(),
-            "server_id": state.server_id(),
-        }
-    });
-    let _ = sender.send(Message::Text(init.to_string())).await;
+    let init_event = michi_link::LinkEvent::ServerStatus {
+        service: "michi-micro-server".into(),
+        version: state.config.version().to_string(),
+        server_id: state.server_id(),
+    };
+    if let Ok(init_str) = init_event.to_json_string() {
+        let _ = sender.send(Message::Text(init_str)).await;
+    }
 
     let send_task = tokio::spawn(async move {
         let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));

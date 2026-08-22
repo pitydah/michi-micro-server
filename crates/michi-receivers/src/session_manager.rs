@@ -151,6 +151,27 @@ impl ReceiverSessionManager {
         }
         .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
 
+        // ── Capability Negotiation (SERVER_CAPS ∩ RECEIVER_CAPS) ───────────
+        if sample_rate > entry.max_sample_rate {
+            return Err(format!(
+                "requested sample rate {sample_rate} exceeds receiver maximum {}",
+                entry.max_sample_rate
+            ));
+        }
+        if bit_depth > entry.max_bit_depth {
+            return Err(format!(
+                "requested bit depth {bit_depth} exceeds receiver maximum {}",
+                entry.max_bit_depth
+            ));
+        }
+        if !entry.supported_codecs.is_empty() && !entry.supported_codecs.iter().any(|c| c == codec)
+        {
+            return Err(format!(
+                "requested codec {codec} is not supported by receiver (supported: {:?})",
+                entry.supported_codecs
+            ));
+        }
+
         let base_url = entry.base_url.clone();
         let token = entry.token.clone();
         let mut client = ReceiverClient::new(&base_url);
@@ -260,5 +281,88 @@ impl ReceiverSessionManager {
 impl Default for ReceiverSessionManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn start_session_rejects_exceeding_sample_rate() {
+        let mgr = ReceiverSessionManager::new();
+        let entry = ReceiverRegistryEntry {
+            receiver_id: "rec-test-1".into(),
+            name: "Standard Receiver".into(),
+            device_type: "standard".into(),
+            base_url: "http://127.0.0.1:9999".into(),
+            paired: true,
+            token: None,
+            last_seen: None,
+            capabilities: vec![],
+            active_session_id: None,
+            max_sample_rate: 48000,
+            max_bit_depth: 16,
+            supported_codecs: vec!["pcm_s16le".into()],
+            maximum_safe_volume: Some(100),
+        };
+        mgr.registry.write().await.add(entry);
+
+        let res = mgr
+            .start_session(
+                "rec-test-1",
+                "sess-1",
+                "pcm_s16le",
+                96000, // exceeds 48000
+                16,
+                2,
+                9000,
+                100,
+                80,
+            )
+            .await;
+
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("requested sample rate 96000 exceeds receiver maximum 48000"));
+    }
+
+    #[tokio::test]
+    async fn start_session_rejects_unsupported_codec() {
+        let mgr = ReceiverSessionManager::new();
+        let entry = ReceiverRegistryEntry {
+            receiver_id: "rec-test-2".into(),
+            name: "Standard Receiver".into(),
+            device_type: "standard".into(),
+            base_url: "http://127.0.0.1:9999".into(),
+            paired: true,
+            token: None,
+            last_seen: None,
+            capabilities: vec![],
+            active_session_id: None,
+            max_sample_rate: 48000,
+            max_bit_depth: 16,
+            supported_codecs: vec!["pcm_s16le".into()],
+            maximum_safe_volume: Some(100),
+        };
+        mgr.registry.write().await.add(entry);
+
+        let res = mgr
+            .start_session(
+                "rec-test-2",
+                "sess-2",
+                "flac", // unsupported
+                48000,
+                16,
+                2,
+                9000,
+                100,
+                80,
+            )
+            .await;
+
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("requested codec flac is not supported by receiver"));
     }
 }
