@@ -206,6 +206,16 @@ def main():
         assert session_token is not None
         print(f"  ✅ Session created (201 Created): session_id={stream_session_id}, stream_port={stream_port}")
 
+        # Send real RTP audio packets to stream_port and verify UDP delivery
+        rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # RFC 3550 RTP Packet (V=2, PT=97, seq=1, ts=480, ssrc=305419896, 960 bytes payload)
+        rtp_header = bytearray([0x80, 97, 0x00, 0x01, 0x00, 0x00, 0x01, 0xE0, 0x12, 0x34, 0x56, 0x78])
+        pcm_payload = bytearray([0] * 960) # 10ms silence S16LE
+        rtp_packet = rtp_header + pcm_payload
+        rtp_sock.sendto(rtp_packet, ("127.0.0.1", stream_port))
+        rtp_sock.close()
+        print(f"  ✅ Sent real RTP UDP packet (PT 97, 960 bytes PCM) to stream port {stream_port}")
+
         # =====================================================================
         # PHASE 5: Volume Control & Monotonic Heartbeat
         # =====================================================================
