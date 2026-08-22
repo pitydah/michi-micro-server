@@ -151,10 +151,10 @@ async fn test_receiver_pairing_window_closed_rejected() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_standard_full_lifecycle() {
-    let mgr = ReceiverSessionManager::new();
+    let mgr = ReceiverSessionManager::new_with_identity(make_test_identity());
     let base_url = sim_url();
     let device_id = mgr
-        .discover_and_pair(&base_url, "test-lifecycle")
+        .discover_and_pair(&base_url, "test-lifecycle", "482391")
         .await
         .expect("discover and pair failed");
 
@@ -199,10 +199,10 @@ async fn test_receiver_standard_full_lifecycle() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_hifi_full_lifecycle() {
-    let mgr = ReceiverSessionManager::new();
+    let mgr = ReceiverSessionManager::new_with_identity(make_test_identity());
     let base_url = sim_url_hifi();
     let device_id = mgr
-        .discover_and_pair(&base_url, "test-hifi")
+        .discover_and_pair(&base_url, "test-hifi", "482391")
         .await
         .expect("discover and pair failed");
 
@@ -242,9 +242,9 @@ async fn test_receiver_hifi_full_lifecycle() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_errors_unsupported_codec() {
-    let mgr = ReceiverSessionManager::new();
+    let mgr = ReceiverSessionManager::new_with_identity(make_test_identity());
     let device_id = mgr
-        .discover_and_pair(&sim_url(), "test-codec")
+        .discover_and_pair(&sim_url(), "test-codec", "482391")
         .await
         .expect("pair failed");
 
@@ -258,9 +258,9 @@ async fn test_receiver_errors_unsupported_codec() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_errors_sample_rate_exceeds() {
-    let mgr = ReceiverSessionManager::new();
+    let mgr = ReceiverSessionManager::new_with_identity(make_test_identity());
     let device_id = mgr
-        .discover_and_pair(&sim_url(), "test-sr")
+        .discover_and_pair(&sim_url(), "test-sr", "482391")
         .await
         .expect("pair failed");
 
@@ -284,9 +284,9 @@ async fn test_receiver_errors_sample_rate_exceeds() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_errors_duplicate_session() {
-    let mgr = ReceiverSessionManager::new();
+    let mgr = ReceiverSessionManager::new_with_identity(make_test_identity());
     let device_id = mgr
-        .discover_and_pair(&sim_url(), "test-dupe")
+        .discover_and_pair(&sim_url(), "test-dupe", "482391")
         .await
         .expect("pair failed");
 
@@ -327,9 +327,9 @@ async fn test_receiver_errors_duplicate_session() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_errors_volume_out_of_range() {
-    let mgr = ReceiverSessionManager::new();
+    let mgr = ReceiverSessionManager::new_with_identity(make_test_identity());
     let device_id = mgr
-        .discover_and_pair(&sim_url(), "test-vol")
+        .discover_and_pair(&sim_url(), "test-vol", "482391")
         .await
         .expect("pair failed");
 
@@ -343,7 +343,7 @@ async fn test_receiver_errors_volume_out_of_range() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_errors_unauthenticated() {
-    let client = ReceiverClient::new(&sim_url());
+    let client = make_test_client(&sim_url());
     let hb = client.heartbeat().await;
     assert!(hb.is_err(), "unauthenticated heartbeat must fail");
 }
@@ -351,14 +351,14 @@ async fn test_receiver_errors_unauthenticated() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_heartbeat_monotonic_sequence() {
-    let mut client = ReceiverClient::new(&sim_url());
+    let mut client = make_test_client(&sim_url());
     let start = client
         .pair_start("hb-test")
         .await
         .expect("pair_start failed");
-    let nonce = start.nonce.expect("nonce missing");
+    let session_id = start.session_id.expect("session_id missing");
     client
-        .pair_confirm(&nonce, "hb-test", "482391")
+        .pair_confirm(&session_id, "hb-test", "482391")
         .await
         .expect("pair_confirm failed");
 
@@ -382,9 +382,9 @@ async fn test_receiver_heartbeat_monotonic_sequence() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_registry_tracks_state() {
-    let mgr = ReceiverSessionManager::new();
+    let mgr = ReceiverSessionManager::new_with_identity(make_test_identity());
     let device_id = mgr
-        .discover_and_pair(&sim_url(), "test-reg")
+        .discover_and_pair(&sim_url(), "test-reg", "482391")
         .await
         .expect("pair failed");
 

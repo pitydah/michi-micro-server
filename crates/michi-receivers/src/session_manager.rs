@@ -91,19 +91,19 @@ impl ReceiverSessionManager {
         let mut client = client;
         let _confirm_resp = client.pair_confirm(&session_id, initiator_id, pin).await?;
 
-        // Extract capabilities
+        // Extract capabilities strictly without assuming fake default codecs/rates
         let (max_sr, max_bd, codecs) = if let Some(audio) = &info.audio {
             let max_sr = audio
                 .get("sample_rates")
                 .and_then(|v| v.as_array())
                 .and_then(|a| a.iter().filter_map(|x| x.as_u64()).max())
-                .unwrap_or(48000) as u32;
+                .ok_or_else(|| "receiver capabilities missing valid sample_rates".to_string())? as u32;
             let max_bd = audio
                 .get("bit_depths")
                 .and_then(|v| v.as_array())
                 .and_then(|a| a.iter().filter_map(|x| x.as_u64()).max())
-                .unwrap_or(16) as u32;
-            let codecs = audio
+                .ok_or_else(|| "receiver capabilities missing valid bit_depths".to_string())? as u32;
+            let codecs: Vec<String> = audio
                 .get("codecs")
                 .and_then(|v| v.as_array())
                 .map(|a| {
@@ -111,21 +111,26 @@ impl ReceiverSessionManager {
                         .filter_map(|x| x.as_str().map(|s| s.to_string()))
                         .collect()
                 })
-                .unwrap_or_else(|| vec!["pcm_s16le".to_string()]);
+                .filter(|c: &Vec<String>| !c.is_empty())
+                .ok_or_else(|| "receiver capabilities missing valid audio codecs".to_string())?;
             (max_sr, max_bd, codecs)
         } else if let Some(output) = &info.output {
             let max_sr = output
                 .get("max_sample_rate")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(48000) as u32;
+                .ok_or_else(|| "receiver output missing valid max_sample_rate".to_string())? as u32;
             let max_bd = output
                 .get("max_bit_depth")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(16) as u32;
-            let codecs = info.supported_codecs.clone().unwrap_or_default();
+                .ok_or_else(|| "receiver output missing valid max_bit_depth".to_string())? as u32;
+            let codecs = info
+                .supported_codecs
+                .clone()
+                .filter(|c| !c.is_empty())
+                .ok_or_else(|| "receiver output missing supported_codecs".to_string())?;
             (max_sr, max_bd, codecs)
         } else {
-            (48000, 16, vec!["pcm_s16le".to_string()])
+            return Err("receiver failed capability negotiation: no audio/output specifications found".to_string());
         };
 
         let mut caps = vec![
