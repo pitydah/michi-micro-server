@@ -74,6 +74,8 @@ pub struct AppState {
     pub identity: Arc<michi_identity::IdentityManager>,
     /// Canonical v1-lite pairing registry (RAM-only sessions, rate limited).
     pub pairing_registry: Arc<michi_identity::PairingRegistry>,
+    /// Testability observer for generated pairing PINs without leaking over network.
+    pub pairing_display: Arc<RwLock<Option<String>>>,
 }
 
 impl AppState {
@@ -155,6 +157,7 @@ impl AppState {
             }),
         );
         let pairing_registry = Arc::new(michi_identity::PairingRegistry::new());
+        let pairing_display = Arc::new(RwLock::new(None));
 
         let state = Self {
             config,
@@ -178,6 +181,7 @@ impl AppState {
             task_handles,
             identity,
             pairing_registry,
+            pairing_display,
         };
 
         state.spawn_background_tasks();

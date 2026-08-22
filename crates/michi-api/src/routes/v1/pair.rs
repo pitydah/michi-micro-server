@@ -8,12 +8,25 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::AppState;
-use michi_identity::{IdentityError, PairConfirmRequest, PairConfirmResponse, PairStartRequest};
+use michi_identity::{IdentityError, PairConfirmRequest, PairConfirmResponse, PairStartRequest, PairStartResponse};
 use michi_link::{
     generate_device_token, hash_token,
     models::{TokenRefreshRequest, TokenRefreshResponse},
     DeviceEntry, TokenType,
 };
+
+fn v1_error_code(
+    status: StatusCode,
+    code: michi_link::MichiLinkErrorCode,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": { "code": code.as_str(), "message": message, "details": {} }
+        })),
+    )
+}
 
 fn v1_error(
     status: StatusCode,
@@ -29,31 +42,52 @@ fn v1_error(
 }
 
 fn v1_internal_error(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
-    v1_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", msg)
+    v1_error_code(StatusCode::INTERNAL_SERVER_ERROR, michi_link::MichiLinkErrorCode::InternalError, msg)
 }
 
 /// Map canonical `IdentityError` to the v1 error envelope.
 fn pairing_error(e: &IdentityError) -> (StatusCode, Json<serde_json::Value>) {
     match e {
-        IdentityError::RateLimited => v1_error(
+        IdentityError::RateLimited => v1_error_code(
             StatusCode::TOO_MANY_REQUESTS,
-            "RATE_LIMITED",
+            michi_link::MichiLinkErrorCode::RateLimited,
             "Too many pairing requests. Please wait.",
         ),
-        IdentityError::PairingNotFound => v1_error(
+        IdentityError::PairingNotFound => v1_error_code(
             StatusCode::NOT_FOUND,
-            "INVALID_CODE",
+            michi_link::MichiLinkErrorCode::PairingNotFound,
             "pairing session not found or expired",
         ),
-        IdentityError::PairingExpired => {
-            v1_error(StatusCode::GONE, "EXPIRED", "pairing session expired")
-        }
-        IdentityError::PairingAlreadyConsumed => v1_error(
+        IdentityError::PairingExpired => v1_error_code(
+            StatusCode::GONE,
+            michi_link::MichiLinkErrorCode::PairingExpired,
+            "pairing session expired",
+        ),
+        IdentityError::PairingAlreadyConsumed => v1_error_code(
             StatusCode::CONFLICT,
-            "ALREADY_CONFIRMED",
+            michi_link::MichiLinkErrorCode::PairingAlreadyConsumed,
             "pairing already confirmed",
         ),
-        _ => v1_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST", &e.to_string()),
+        IdentityError::PairingPinMismatch => v1_error_code(
+            StatusCode::UNAUTHORIZED,
+            michi_link::MichiLinkErrorCode::PairingPinMismatch,
+            "invalid pairing PIN",
+        ),
+        IdentityError::PairingAttemptsExceeded => v1_error_code(
+            StatusCode::TOO_MANY_REQUESTS,
+            michi_link::MichiLinkErrorCode::PairingAttemptsExceeded,
+            "maximum pairing PIN attempts exceeded",
+        ),
+        IdentityError::PairingKeyMismatch => v1_error_code(
+            StatusCode::FORBIDDEN,
+            michi_link::MichiLinkErrorCode::PairingKeyMismatch,
+            "cryptographic identity key mismatch",
+        ),
+        _ => v1_error_code(
+            StatusCode::BAD_REQUEST,
+            michi_link::MichiLinkErrorCode::InvalidRequest,
+            &e.to_string(),
+        ),
     }
 }
 
@@ -61,9 +95,9 @@ pub async fn link_pair_start(
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<PairStartRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<PairStartResponse>, (StatusCode, Json<serde_json::Value>)> {
     // Rate limit por IP: 10 intentos/minuto en pair/start (gate local, más
-    // estricto que el 20/min del PairingRegistry canónico).
+    // tolerante que confirm para permitir reintentos legítimos).
     let client_ip = headers
         .get("X-Forwarded-For")
         .and_then(|v| v.to_str().ok())
@@ -76,7 +110,7 @@ pub async fn link_pair_start(
         let mut entry = state
             .security_state
             .pairing_attempts
-            .entry(format!("start:{client_ip}"))
+            .entry(client_ip.clone())
             .or_insert((0u32, now));
         let (count, last_reset) = entry.value();
         let elapsed = now.duration_since(*last_reset);
@@ -84,18 +118,17 @@ pub async fn link_pair_start(
         if elapsed.as_secs() > 60 {
             *entry = (1, now);
         } else if *count >= 10 {
-            tracing::warn!("Pair/start rate limit exceeded for IP: {}", client_ip);
-            return Err(v1_error(
+            tracing::warn!("Pairing start rate limit exceeded for IP: {}", client_ip);
+            return Err(v1_error_code(
                 StatusCode::TOO_MANY_REQUESTS,
-                "RATE_LIMITED",
-                "Too many pairing requests. Please wait.",
+                michi_link::MichiLinkErrorCode::RateLimited,
+                "Too many pairing attempts. Please wait 60 seconds.",
             ));
         } else {
-            entry.value_mut().0 += 1;
+            *entry = (count + 1, *last_reset);
         }
     }
 
-    // Log X-Michi-Device-Id header if present (Player sends this)
     if let Some(device_id) = headers
         .get("X-Michi-Device-Id")
         .and_then(|v| v.to_str().ok())
@@ -111,18 +144,15 @@ pub async fn link_pair_start(
         .start_server(&state.identity, &body, &client_ip)
         .map_err(|e| pairing_error(&e))?;
 
-    // El PIN se muestra localmente en el server y en el contrato canónico NUNCA
-    // viaja por la red. Extensión local del micro profile: se expone en el
-    // response para testabilidad y para el flujo de link móvil existente.
-    tracing::info!(
+    // El PIN se muestra localmente en el servidor / observer in-memory y en el contrato canónico
+    // NUNCA viaja por la red (cumplimiento estricto con pair-start-response.schema.json).
+    *state.pairing_display.write().await = Some(pin.clone());
+    tracing::debug!(
         device = %body.device_name,
         session = %response.session_id,
-        "pairing PIN: {pin}"
+        "pairing PIN registered for local display"
     );
-    let mut value =
-        serde_json::to_value(&response).map_err(|e| v1_internal_error(&e.to_string()))?;
-    value["pin"] = serde_json::Value::String(pin);
-    Ok(Json(value))
+    Ok(Json(response))
 }
 
 pub async fn link_pair_confirm(
@@ -152,13 +182,13 @@ pub async fn link_pair_confirm(
             *entry = (1, now);
         } else if *count >= 5 {
             tracing::warn!("Pairing rate limit exceeded for IP: {}", client_ip);
-            return Err(v1_error(
+            return Err(v1_error_code(
                 StatusCode::TOO_MANY_REQUESTS,
-                "RATE_LIMITED",
+                michi_link::MichiLinkErrorCode::RateLimited,
                 "Too many pairing attempts. Please wait 60 seconds.",
             ));
         } else {
-            entry.value_mut().0 += 1;
+            *entry = (count + 1, *last_reset);
         }
     }
     if let Some(device_id) = headers

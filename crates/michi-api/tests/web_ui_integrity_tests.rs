@@ -1159,3 +1159,59 @@ async fn test_server_info_canonical_roles_contract() {
         "server/info roles must match CANONICAL_MICRO_ROLES exactly"
     );
 }
+
+// ── M1.5.1 / P0-01: PIN Must Never Travel Over HTTP in /pair/start ──
+#[tokio::test]
+async fn test_pair_start_response_must_not_contain_pin() {
+    let (app, _pool, state) = make_app().await;
+    let dir = std::env::temp_dir().join(format!("michi-test-client-{}", Uuid::new_v4()));
+    let client = michi_identity::IdentityManager::generate(&dir, "mobile-test", "").unwrap();
+
+    let nonce_raw = [42u8; 32];
+    let nonce = michi_identity::encode_base64url(&nonce_raw);
+    let (signature, public_key) = client.sign_base64url(&nonce_raw);
+    let payload = serde_json::json!({
+        "device_name": "Test Mobile",
+        "device_type": "mobile",
+        "roles": ["mobile_player", "remote_controller"],
+        "auth_strategy": "ED25519_CHALLENGE",
+        "michi_id": client.michi_id().to_base64url(),
+        "public_key": public_key,
+        "challenge_nonce": nonce,
+        "challenge_signature": signature,
+    });
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/pair/start")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+
+    // Strict P0-01 assertion
+    assert!(
+        body.get("pin").is_none(),
+        "P0-01 CONTRACT VIOLATION: 'pin' field must NEVER be present in /api/v1/pair/start HTTP response"
+    );
+
+    // Validate fields against pair-start-response.schema.json
+    assert!(body.get("session_id").is_some());
+    assert!(body.get("expires_at").is_some());
+    assert!(body.get("attempts_remaining").is_some());
+    assert!(body.get("server_michi_id").is_some());
+    assert!(body.get("server_public_key").is_some());
+
+    // Verify local observer did capture the PIN safely in memory
+    let captured_pin = state.pairing_display.read().await;
+    assert!(captured_pin.is_some(), "PIN must be recorded in local display observer");
+    assert_eq!(captured_pin.as_ref().unwrap().len(), 6);
+}
+

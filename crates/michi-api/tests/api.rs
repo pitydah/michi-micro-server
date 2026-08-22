@@ -60,10 +60,15 @@ fn test_config() -> Config {
 }
 
 async fn make_app() -> (axum::Router, SqlitePool) {
+    let (router, pool, _state) = make_app_with_state().await;
+    (router, pool)
+}
+
+async fn make_app_with_state() -> (axum::Router, SqlitePool, michi_api::AppState) {
     let pool = test_db().await;
     let config = test_config();
     let state = michi_api::AppState::new(config, pool.clone(), None);
-    (router_with_test_admin(state, &pool).await, pool)
+    (router_with_test_admin(state.clone(), &pool).await, pool, state)
 }
 
 async fn router_with_test_admin(state: michi_api::AppState, pool: &SqlitePool) -> axum::Router {
@@ -1959,7 +1964,7 @@ fn fresh_test_client(name: &str) -> michi_identity::IdentityManager {
 
 #[tokio::test]
 async fn test_v1_pair_confirm_returns_canonical_contract() {
-    let (app, _pool) = make_app().await;
+    let (app, _pool, state) = make_app_with_state().await;
     let client = fresh_test_client("mobile");
 
     // Start pairing (canonical v1-lite challenge)
@@ -1982,9 +1987,19 @@ async fn test_v1_pair_confirm_returns_canonical_contract() {
     assert_eq!(start_resp.status(), StatusCode::OK);
     let start_text = body_text(start_resp).await;
     let start_json: Value = serde_json::from_str(&start_text).unwrap();
+    assert!(
+        start_json.get("pin").is_none(),
+        "P0-01 contract violation: PIN MUST NEVER be returned over HTTP in pair/start"
+    );
     let session_id = start_json["session_id"].as_str().unwrap().to_string();
-    let pin = start_json["pin"].as_str().unwrap().to_string();
-    assert_eq!(pin.len(), 6, "micro-profile pin extension must be 6 digits");
+    let pin = state
+        .pairing_display
+        .read()
+        .await
+        .as_ref()
+        .expect("local pairing observer must capture PIN")
+        .clone();
+    assert_eq!(pin.len(), 6, "PIN must be 6 digits");
     assert!(
         start_json["server_michi_id"].as_str().unwrap().len() > 10,
         "server must expose its canonical michi_id"
@@ -1993,7 +2008,7 @@ async fn test_v1_pair_confirm_returns_canonical_contract() {
     assert!(start_json["expires_at"].as_str().unwrap().len() > 10);
     assert_eq!(start_json["attempts_remaining"].as_u64().unwrap(), 5);
 
-    // Confirm with a wrong PIN -> 400 INVALID_REQUEST (attempts decrement)
+    // Confirm with a wrong PIN -> 401 UNAUTHORIZED with PAIRING_PIN_MISMATCH
     let bad_resp = app
         .clone()
         .oneshot(
@@ -2010,9 +2025,9 @@ async fn test_v1_pair_confirm_returns_canonical_contract() {
         )
         .await
         .unwrap();
-    assert_eq!(bad_resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(bad_resp.status(), StatusCode::UNAUTHORIZED);
     let bad_json: Value = serde_json::from_str(&body_text(bad_resp).await).unwrap();
-    assert_eq!(bad_json["error"]["code"], "INVALID_REQUEST");
+    assert_eq!(bad_json["error"]["code"], "PAIRING_PIN_MISMATCH");
 
     // Confirm with the correct PIN -> canonical PairConfirmResponse
     let confirm_resp = app
@@ -2174,7 +2189,7 @@ async fn test_v1_sync_manifest_delta_with_cursor() {
 
 #[tokio::test]
 async fn test_v1_e2e_mobile_flow() {
-    let (app, pool) = make_app().await;
+    let (app, pool, state) = make_app_with_state().await;
     seed_track(&pool, "/music/e2e.flac", "E2E Song").await;
 
     // 1. server/info
@@ -2227,7 +2242,13 @@ async fn test_v1_e2e_mobile_flow() {
     assert_eq!(resp.status(), StatusCode::OK);
     let start: Value = serde_json::from_str(&body_text(resp).await).unwrap();
     let session_id = start["session_id"].as_str().unwrap().to_string();
-    let pin = start["pin"].as_str().unwrap().to_string();
+    let pin = state
+        .pairing_display
+        .read()
+        .await
+        .as_ref()
+        .expect("pairing display pin")
+        .clone();
 
     // 4. pair/confirm
     let resp = app
@@ -2586,7 +2607,7 @@ async fn test_v1_import_session_validation() {
 
 #[tokio::test]
 async fn test_v1_auth_flow_pairing_roundtrip() {
-    let (app, _) = make_app().await;
+    let (app, _, state) = make_app_with_state().await;
     let client = fresh_test_client("auth-test");
 
     // pair/start (canonical v1-lite challenge)
@@ -2609,9 +2630,16 @@ async fn test_v1_auth_flow_pairing_roundtrip() {
     assert_eq!(resp.status(), StatusCode::OK);
     let start: Value = serde_json::from_str(&body_text(resp).await).unwrap();
     let session_id = start["session_id"].as_str().unwrap().to_string();
-    assert_eq!(start["pin"].as_str().unwrap().len(), 6);
+    let pin = state
+        .pairing_display
+        .read()
+        .await
+        .as_ref()
+        .expect("pairing display pin")
+        .clone();
+    assert_eq!(pin.len(), 6);
 
-    // pair/confirm with unknown session -> 404 INVALID_CODE
+    // pair/confirm with unknown session -> 404 PAIRING_NOT_FOUND
     let resp = app
         .clone()
         .oneshot(
@@ -2630,7 +2658,9 @@ async fn test_v1_auth_flow_pairing_roundtrip() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let err: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    assert_eq!(err["error"]["code"], "INVALID_CODE");
+    assert_eq!(err["error"]["code"], "PAIRING_NOT_FOUND");
+
+    // pair/confirm with wrong PIN -> 401 PAIRING_PIN_MISMATCH
     let resp = app
         .clone()
         .oneshot(
@@ -2647,9 +2677,9 @@ async fn test_v1_auth_flow_pairing_roundtrip() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let err: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    assert_eq!(err["error"]["code"], "INVALID_REQUEST");
+    assert_eq!(err["error"]["code"], "PAIRING_PIN_MISMATCH");
 
     // pair/confirm success -> canonical PairConfirmResponse
     let resp = app
@@ -2662,7 +2692,7 @@ async fn test_v1_auth_flow_pairing_roundtrip() {
                 .body(Body::from(canonical_pair_confirm_body(
                     &client,
                     &session_id,
-                    start["pin"].as_str().unwrap(),
+                    &pin,
                 )))
                 .unwrap(),
         )
@@ -2678,7 +2708,7 @@ async fn test_v1_auth_flow_pairing_roundtrip() {
     assert!(confirm["permissions"].is_null());
 
     // confirm again -> session consumed (registry keeps the consumed session,
-    // canonical error is PairingAlreadyConsumed -> 409 ALREADY_CONFIRMED)
+    // canonical error is PairingAlreadyConsumed -> 409 PAIRING_ALREADY_CONSUMED)
     let resp = app
         .clone()
         .oneshot(
@@ -2689,7 +2719,7 @@ async fn test_v1_auth_flow_pairing_roundtrip() {
                 .body(Body::from(canonical_pair_confirm_body(
                     &client,
                     &session_id,
-                    start["pin"].as_str().unwrap(),
+                    &pin,
                 )))
                 .unwrap(),
         )
@@ -2697,7 +2727,7 @@ async fn test_v1_auth_flow_pairing_roundtrip() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let err: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    assert_eq!(err["error"]["code"], "ALREADY_CONFIRMED");
+    assert_eq!(err["error"]["code"], "PAIRING_ALREADY_CONSUMED");
 }
 
 #[tokio::test]
@@ -3795,7 +3825,7 @@ async fn test_v1_import_commit_returns_mapping_with_status() {
 
 #[tokio::test]
 async fn test_v1_auth_real_pair_and_use_token() {
-    let (app, _) = make_app().await;
+    let (app, _, state) = make_app_with_state().await;
     let client = fresh_test_client("auth-test-player");
 
     // 1. Pair a device (canonical v1-lite challenge)
@@ -3818,7 +3848,13 @@ async fn test_v1_auth_real_pair_and_use_token() {
     assert_eq!(resp.status(), StatusCode::OK);
     let start: Value = serde_json::from_str(&body_text(resp).await).unwrap();
     let session_id = start["session_id"].as_str().unwrap().to_string();
-    let pin = start["pin"].as_str().unwrap().to_string();
+    let pin = state
+        .pairing_display
+        .read()
+        .await
+        .as_ref()
+        .expect("pairing display pin")
+        .clone();
 
     let resp = app
         .clone()
@@ -4206,7 +4242,7 @@ async fn test_protected_route_rejects_bad_token() {
 
 #[tokio::test]
 async fn test_auth_pairing_grants_proper_permissions() {
-    let (app, _) = make_app().await;
+    let (app, _, state) = make_app_with_state().await;
     let client = fresh_test_client("perm-test");
 
     let resp = app
@@ -4228,7 +4264,13 @@ async fn test_auth_pairing_grants_proper_permissions() {
     assert_eq!(resp.status(), StatusCode::OK);
     let start: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
     let session_id = start["session_id"].as_str().unwrap().to_string();
-    let pin = start["pin"].as_str().unwrap().to_string();
+    let pin = state
+        .pairing_display
+        .read()
+        .await
+        .as_ref()
+        .expect("pairing display pin")
+        .clone();
 
     let resp = app
         .clone()
