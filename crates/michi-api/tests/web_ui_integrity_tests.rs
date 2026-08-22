@@ -1123,3 +1123,39 @@ async fn test_default_port_9090_contract_consistency() {
         );
     }
 }
+
+// ── M1: Server Info Roles Conform to Canonical Michi Link Roles ──
+#[tokio::test]
+async fn test_server_info_canonical_roles_contract() {
+    let (app, _pool, _state) = make_app().await;
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/server/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    let roles: Vec<String> = body["roles"]
+        .as_array()
+        .expect("roles must be an array")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+
+    let expected_canonical: Vec<String> = michi_link::CANONICAL_MICRO_ROLES
+        .iter()
+        .map(|r| r.as_str().to_string())
+        .collect();
+
+    assert_eq!(
+        roles, expected_canonical,
+        "server/info roles must match CANONICAL_MICRO_ROLES exactly"
+    );
+}

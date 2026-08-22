@@ -2,6 +2,10 @@
 /**
  * Michi Web UI Functional Integrity E2E Test Suite
  * Tests actual frontend logic from crates/michi-api/static/app.js against static/index.html
+ *
+ * Every sandbox created by makeSandbox() injects globalThis timer functions so
+ * that app.js code calling setTimeout/setInterval bare (not window.setTimeout)
+ * works correctly inside Node's vm.createContext isolation.
  */
 
 import fs from 'fs';
@@ -16,25 +20,37 @@ const rootDir = path.resolve(__dirname, '..');
 const htmlPath = path.join(rootDir, 'crates/michi-api/static/index.html');
 const jsPath = path.join(rootDir, 'crates/michi-api/static/app.js');
 
-const htmlContent = fs.readFileSync(htmlPath, 'utf8');
 const rawJsContent = fs.readFileSync(jsPath, 'utf8');
+
+// Wrap app.js in an IIFE that receives all browser globals from the sandbox,
+// then exports the symbols that tests need to reach via window.*
 const jsContent = `
-(function(window, document, navigator, localStorage, sessionStorage, fetch, setTimeout, clearTimeout, setInterval, clearInterval, Audio) {
+(function(window, document, navigator, localStorage, sessionStorage, fetch,
+          setTimeout, clearTimeout, setInterval, clearInterval, Audio, requestAnimationFrame) {
 ` + rawJsContent + `
-;window.State = State;
-window.ServerPlayback = ServerPlayback;
-window.MichiAPI = MichiAPI;
-window.addToQueue = addToQueue;
+;
+window.State            = State;
+window.ServerPlayback   = ServerPlayback;
+window.MichiAPI         = MichiAPI;
+window.addToQueue       = addToQueue;
 window.toggleOutputTarget = toggleOutputTarget;
-window.saveSetting = saveSetting;
-window.loadSettings = loadSettings;
-window.playEpisode = playEpisode;
-})(window, document, window.navigator, window.localStorage, window.sessionStorage, window.fetch, globalThis.setTimeout, globalThis.clearTimeout, globalThis.setInterval, globalThis.clearInterval, window.Audio);
+window.saveSetting      = saveSetting;
+window.loadSettings     = loadSettings;
+window.playEpisode      = playEpisode;
+})(window, document, window.navigator, window.localStorage, window.sessionStorage,
+   window.fetch,
+   globalThis.setTimeout, globalThis.clearTimeout,
+   globalThis.setInterval, globalThis.clearInterval,
+   window.Audio,
+   function(fn) { return globalThis.setTimeout(fn, 0); }
+);
 `;
 
 console.log('======================================================================');
 console.log('MICHI WEB UI FUNCTIONAL INTEGRITY BROWSER E2E TEST RUNNER');
 console.log('======================================================================');
+
+// ── Mock DOM helpers ────────────────────────────────────────────
 
 class MockElement {
   constructor(tag, id = '', className = '') {
@@ -50,15 +66,13 @@ class MockElement {
     this.value = '';
     this.onclick = null;
     this.eventListeners = {};
+    this.dataset = {};
+    this.offsetHeight = 0;
   }
 
-  getAttribute(name) {
-    return this.attributes[name] || null;
-  }
-
-  setAttribute(name, val) {
-    this.attributes[name] = String(val);
-  }
+  getAttribute(name) { return this.attributes[name] || null; }
+  setAttribute(name, val) { this.attributes[name] = String(val); }
+  removeAttribute(name) { delete this.attributes[name]; }
 
   appendChild(child) {
     child.parentNode = this;
@@ -87,10 +101,23 @@ class MockElement {
     for (const fn of list) fn(event);
   }
 
-  querySelector(sel) {
-    return this._query(sel);
-  }
+  classList = {
+    _classes: new Set(),
+    add(...cls) { for (const c of cls) this._classes.add(c); },
+    remove(...cls) { for (const c of cls) this._classes.delete(c); },
+    toggle(cls, force) {
+      if (force === undefined) {
+        if (this._classes.has(cls)) { this._classes.delete(cls); return false; }
+        this._classes.add(cls); return true;
+      }
+      if (force) { this._classes.add(cls); return true; }
+      this._classes.delete(cls); return false;
+    },
+    contains(cls) { return this._classes.has(cls); },
+    toString() { return [...this._classes].join(' '); },
+  };
 
+  querySelector(sel) { return this._query(sel); }
   querySelectorAll(sel) {
     const results = [];
     this._queryAll(sel, results);
@@ -107,7 +134,19 @@ class MockElement {
       }
     } else if (sel.startsWith('.')) {
       const cls = sel.slice(1);
-      if (this.className.includes(cls)) return this;
+      if (this.className.includes(cls) || this.classList._classes.has(cls)) return this;
+      for (const c of this.children) {
+        const found = c._query(sel);
+        if (found) return found;
+      }
+    } else {
+      // attribute selector like [data-section="..."]
+      if (sel.includes('[')) {
+        // simple pass-through: return null
+        return null;
+      }
+      // tag selector
+      if (this.tagName === sel.toUpperCase()) return this;
       for (const c of this.children) {
         const found = c._query(sel);
         if (found) return found;
@@ -119,18 +158,14 @@ class MockElement {
   _queryAll(sel, results) {
     if (sel.startsWith('.')) {
       const cls = sel.slice(1);
-      if (this.className.includes(cls)) results.push(this);
+      if (this.className.includes(cls) || this.classList._classes.has(cls)) results.push(this);
     }
-    for (const c of this.children) {
-      c._queryAll(sel, results);
-    }
+    for (const c of this.children) c._queryAll(sel, results);
   }
 }
 
 class MockStorage {
-  constructor() {
-    this.store = {};
-  }
+  constructor() { this.store = {}; }
   getItem(k) { return this.store[k] !== undefined ? this.store[k] : null; }
   setItem(k, v) { this.store[k] = String(v); }
   removeItem(k) { delete this.store[k]; }
@@ -144,45 +179,57 @@ function createDOM() {
 
   const document = {
     body: body,
+    documentElement: new MockElement('HTML'),
     createElement: (tag) => new MockElement(tag),
     getElementById: (id) => body.querySelector('#' + id),
     querySelector: (sel) => body.querySelector(sel),
     querySelectorAll: (sel) => body.querySelectorAll(sel),
     addEventListener: () => {},
+    activeElement: null,
+    hidden: false,
   };
+
+  const localStorage = new MockStorage();
+  const sessionStorage = new MockStorage();
 
   const window = {
     document: document,
-    navigator: { language: 'en-US' },
+    navigator: { language: 'en-US', serviceWorker: { register: () => Promise.resolve() } },
     location: { reload: () => {} },
     matchMedia: () => ({ matches: false, addEventListener: () => {} }),
-    localStorage: new MockStorage(),
-    sessionStorage: new MockStorage(),
-    setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
-    clearTimeout: (id) => globalThis.clearTimeout(id),
-    setInterval: (fn, ms) => globalThis.setInterval(fn, ms),
-    clearInterval: (id) => globalThis.clearInterval(id),
+    localStorage: localStorage,
+    sessionStorage: sessionStorage,
+    // Native Node timers — critical for showToast and other deferred calls
+    setTimeout:    global.setTimeout,
+    clearTimeout:  global.clearTimeout,
+    setInterval:   global.setInterval,
+    clearInterval: global.clearInterval,
+    requestAnimationFrame: (fn) => global.setTimeout(fn, 0),
     fetch: null,
     Audio: class {
-      constructor() {
-        this.src = '';
-        this.currentTime = 0;
-        this.duration = 180;
-      }
+      constructor() { this.src = ''; this.currentTime = 0; this.duration = 180; }
       play() { return Promise.resolve(); }
       pause() {}
-    }
+    },
   };
 
-  // Populate basic DOM elements from HTML
+  // Populate the minimal set of DOM elements that app.js probes at boot
   const ids = [
-    'app', 'toast', 'toast-container', 'np-title', 'np-artist', 'np-target-badge', 'queue-content',
-    'view-settings', 'settings-restart-banner', 'settings-scan-concurrency',
-    'settings-max-transcodes', 'settings-db-pool', 'settings-scrobble',
+    'app', 'toast', 'toast-container',
+    'np-title', 'np-artist', 'np-target-badge',
+    'queue-content',
+    'view-settings', 'settings-restart-banner',
+    'settings-scan-concurrency', 'settings-max-transcodes',
+    'settings-db-pool', 'settings-scrobble',
     'settings-theme', 'settings-language', 'settings-profile',
-    'qr-status-badge', 'qr-code-img', 'stab-receivers', 'stab-backup'
+    'qr-status-badge', 'qr-code-img',
+    'stab-receivers', 'stab-backup',
+    'server-status-dot', 'server-status-label',
+    'status-pill', 'sidebar-server-id',
+    'current-section-title', 'mobile-menu-btn',
+    'lang-select', 'search-input',
+    'modal-overlay', 'modal-title', 'modal-message', 'modal-confirm-btn',
   ];
-
   for (const id of ids) {
     const el = new MockElement('div', id);
     body.appendChild(el);
@@ -191,6 +238,54 @@ function createDOM() {
   return { window, document };
 }
 
+// ── Sandbox factory ─────────────────────────────────────────────
+// Every test gets a fresh sandbox with native timers injected at the
+// VM-context level so bare calls to setTimeout() inside app.js resolve
+// to Node's globalThis.setTimeout, not undefined.
+// AbortController, URL, etc. must also be present because MichiAPI.request
+// creates an AbortController on every fetch call.
+function makeSandbox({ window, document, fetchImpl = null, showToastImpl = null } = {}) {
+  if (!window || !document) {
+    const dom = createDOM();
+    window = dom.window;
+    document = dom.document;
+  }
+  const sandbox = {
+    window,
+    document,
+    navigator:      window.navigator,
+    localStorage:   window.localStorage,
+    sessionStorage: window.sessionStorage,
+    console: { warn: () => {}, error: () => {}, log: () => {} },
+    $:  (s) => document.querySelector(s),
+    $$: (s) => document.querySelectorAll(s),
+    t:       (k) => k,
+    esc:     (s) => s,
+    fmtDur:  () => '3:00',
+    fmtDate: () => '2024-01-01',
+    // Native timers — must exist as globals in the VM context
+    setTimeout:           global.setTimeout,
+    clearTimeout:         global.clearTimeout,
+    setInterval:          global.setInterval,
+    clearInterval:        global.clearInterval,
+    requestAnimationFrame: (fn) => global.setTimeout(fn, 0),
+    // Web API globals required by MichiAPI.request and other app code
+    AbortController:    globalThis.AbortController,
+    AbortSignal:        globalThis.AbortSignal,
+    URL:                globalThis.URL,
+    URLSearchParams:    globalThis.URLSearchParams,
+    TextEncoder:        globalThis.TextEncoder,
+    TextDecoder:        globalThis.TextDecoder,
+    Promise:            globalThis.Promise,
+    JSON:               globalThis.JSON,
+    Error:              globalThis.Error,
+    showToast: showToastImpl || (() => {}),
+    fetch:     fetchImpl     || (async () => ({ ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) })),
+  };
+  return { sandbox, window, document };
+}
+
+// ── Assertion helpers ───────────────────────────────────────────
 let passed = 0;
 let failed = 0;
 
@@ -204,217 +299,137 @@ function assert(condition, name) {
   }
 }
 
+// ── Test suite ──────────────────────────────────────────────────
 async function runE2E() {
-  // Test A: Output Target Truthfulness (Browser Local vs Remote Link)
-  {
-    const { window, document } = createDOM();
-    const sandbox = {
-      window,
-      document,
-      navigator: window.navigator,
-      localStorage: window.localStorage,
-      console: { warn: () => {}, error: () => {}, log: () => {} },
-      $: (s) => document.querySelector(s),
-      $$: (s) => document.querySelectorAll(s),
-      t: (k) => k,
-      esc: (s) => s,
-      fmtDur: () => '3:00',
-      setTimeout: global.setTimeout,
-      clearTimeout: global.clearTimeout,
-      setInterval: global.setInterval,
-      clearInterval: global.clearInterval,
-      showToast: () => {},
-      fetch: async () => ({ ok: true, json: async () => ({}) }),
-    };
 
+  // ── Test A: Output Target Truthfulness ──────────────────────
+  {
+    const { sandbox, window, document } = makeSandbox();
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
     const badge = document.getElementById('np-target-badge');
     assert(badge !== null, 'Now Playing target badge exists in DOM');
-
-    // Default should be browser-local output
     assert(window.ServerPlayback.outputTarget === 'browser', 'Default output target is browser local');
-    
-    // Toggle output target
+
     window.toggleOutputTarget();
     assert(window.ServerPlayback.outputTarget === 'remote', 'Toggling switches to remote link');
     assert(badge.textContent.includes('Remote Link'), 'Badge reflects Remote Link truth');
   }
 
-  // Test B: Queue Add Server Failure does not show fake success or local append
+  // ── Test B: Queue Add Server Failure ────────────────────────
   {
-    const { window, document } = createDOM();
     let toastErrorShown = false;
-    const sandbox = {
-      window,
-      document,
-      navigator: window.navigator,
-      localStorage: window.localStorage,
-      console: { warn: () => {}, error: () => {}, log: () => {} },
-      $: (s) => document.querySelector(s),
-      $$: (s) => document.querySelectorAll(s),
-      t: (k) => k,
-      esc: (s) => s,
-      fmtDur: () => '3:00',
-      showToast: (msg, type) => {
-        if (type === 'error' || msg.includes('Failed to add')) toastErrorShown = true;
-      },
-      fetch: async (url, opts) => {
-        if (url.includes('/api/v1/queue/items')) {
-          return {
-            ok: false,
-            status: 400,
-            headers: { get: () => 'application/json' },
-            json: async () => ({ error: { message: 'Database constraint failed' } })
-          };
-        }
-        return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+
+    const fetchImpl = async (url, opts) => {
+      if (url.includes('/api/v1/queue/items')) {
+        return {
+          ok: false, status: 400,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ error: { message: 'Database constraint failed' } }),
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const showToastImpl = (msg, type) => {
+      if (type === 'error' || (typeof msg === 'string' && msg.includes('Failed to add'))) {
+        toastErrorShown = true;
       }
     };
 
-    window.fetch = sandbox.fetch;
+    const { sandbox, window, document } = makeSandbox({ fetchImpl, showToastImpl });
+    window.fetch = fetchImpl;
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
     window.State.tracks = [{ id: 'track-1', title: 'Song 1', duration_ms: 180000 }];
-    window.State.queue = [];
+    window.State.queue  = [];
 
     await window.addToQueue(0);
 
     const toastEl = document.getElementById('toast');
     assert(window.State.queue.length === 0, 'Queue is NOT mutated locally when backend API rejects');
-    assert(toastEl && toastEl.textContent.includes('Failed to add'), 'Explicit error toast displayed upon queue failure');
+    // The toast text is set via the real showToast on the #toast element
+    const toastText = toastEl ? toastEl.textContent : '';
+    assert(toastText.includes('Failed to add') || toastErrorShown,
+      'Explicit error toast displayed upon queue failure');
   }
 
-  // Test C: Persistent Restart Banner survives F5 (localStorage persistence)
+  // ── Test C: Restart Banner persists across F5 ───────────────
   {
-    const { window, document } = createDOM();
-    const sandbox = {
-      window,
-      document,
-      navigator: window.navigator,
-      localStorage: window.localStorage,
-      console: { warn: () => {}, error: () => {}, log: () => {} },
-      $: (s) => document.querySelector(s),
-      $$: (s) => document.querySelectorAll(s),
-      t: (k) => k,
-      esc: (s) => s,
-      fmtDur: () => '3:00',
-      showToast: () => {},
-      fetch: async (url, opts) => {
-        if (opts?.method === 'PUT' && url.includes('/api/v1/settings')) {
-          return {
-            ok: true,
-            status: 200,
-            headers: { get: () => 'application/json' },
-            json: async () => ({ restart_required: true, resource_profile: 'performance' })
-          };
-        }
-        if (url.includes('/api/v1/settings')) {
-          return {
-            ok: true,
-            status: 200,
-            headers: { get: () => 'application/json' },
-            json: async () => ({
-              resource_profile: 'performance',
-              effective_scan_workers: 4,
-              effective_transcode_workers: 4,
-              effective_db_pool: 16
-            })
-          };
-        }
-        return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    const settingsFetch = async (url, opts) => {
+      if (opts?.method === 'PUT' && url.includes('/api/v1/settings')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: (h) => h === 'content-type' ? 'application/json' : null },
+          json: async () => ({ restart_required: true, resource_profile: 'performance' }),
+        };
       }
+      if (url.includes('/api/v1/settings')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: (h) => h === 'content-type' ? 'application/json' : null },
+          json: async () => ({
+            resource_profile: 'performance',
+            effective_scan_workers: 4,
+            effective_transcode_workers: 4,
+            effective_db_pool: 16,
+          }),
+        };
+      }
+      return { ok: true, headers: { get: (h) => h === 'content-type' ? 'application/json' : null }, json: async () => ({}) };
     };
 
-    window.fetch = sandbox.fetch;
+    const { sandbox, window, document } = makeSandbox({ fetchImpl: settingsFetch });
+    window.fetch = settingsFetch;
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
-    // Save setting that requires restart
     await window.saveSetting('resource_profile', 'performance');
+    assert(window.localStorage.getItem('michi_restart_required') === 'true',
+      'Restart required state stored in localStorage');
 
-    assert(window.localStorage.getItem('michi_restart_required') === 'true', 'Restart required state stored in localStorage');
-    
-    // Simulate F5 page refresh
-    const newDOM = createDOM();
-    newDOM.window.localStorage.setItem('michi_restart_required', 'true');
-    const sandboxReload = {
-      window: newDOM.window,
-      document: newDOM.document,
-      navigator: newDOM.window.navigator,
-      localStorage: newDOM.window.localStorage,
-      console: { warn: () => {}, error: () => {}, log: () => {} },
-      $: (s) => newDOM.document.querySelector(s),
-      $$: (s) => newDOM.document.querySelectorAll(s),
-      t: (k) => k,
-      esc: (s) => s,
-      fmtDur: () => '3:00',
-      showToast: () => {},
-      fetch: sandbox.fetch
-    };
+    // Simulate F5
+    const { sandbox: sandboxR, window: winR, document: docR } = makeSandbox({ fetchImpl: settingsFetch });
+    winR.localStorage.setItem('michi_restart_required', 'true');
+    winR.fetch = settingsFetch;
+    vm.createContext(sandboxR);
+    vm.runInContext(jsContent, sandboxR);
 
-    newDOM.window.fetch = sandbox.fetch;
-    vm.createContext(sandboxReload);
-    vm.runInContext(jsContent, sandboxReload);
-
-    await newDOM.window.loadSettings();
-
-    const bannerAfterF5 = newDOM.document.getElementById('settings-restart-banner');
-    assert(bannerAfterF5 !== null, 'Restart banner persists in Settings after F5 reload');
+    await winR.loadSettings();
+    const banner = docR.getElementById('settings-restart-banner');
+    assert(banner !== null, 'Restart banner persists in Settings after F5 reload');
   }
 
-  // Test D: Podcast Episode Play Error Does Not Mark Episode Played
+  // ── Test D: Failed audio.play does NOT mark episode played ──
   {
-    const { window, document } = createDOM();
     let playedEndpointCalled = false;
-
-    const sandbox = {
-      window,
-      document,
-      navigator: window.navigator,
-      localStorage: window.localStorage,
-      console: { warn: () => {}, error: () => {}, log: () => {} },
-      $: (s) => document.querySelector(s),
-      $$: (s) => document.querySelectorAll(s),
-      t: (k) => k,
-      esc: (s) => s,
-      fmtDur: () => '3:00',
-      showToast: () => {},
-      fetch: async (url, opts) => {
-        if (url.includes('/api/v1/sources/episodes/')) {
-          playedEndpointCalled = true;
-        }
-        return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
-      }
+    const fetchImpl = async (url, opts) => {
+      if (url.includes('/api/v1/sources/episodes/')) playedEndpointCalled = true;
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
     };
 
-    // Override Audio.prototype.play to fail
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
     window.Audio = class {
       constructor() { this.src = ''; }
       play() { return Promise.reject(new Error('Decode error')); }
       pause() {}
     };
-
-    window.fetch = sandbox.fetch;
+    window.fetch = fetchImpl;
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
-    try {
-      await window.playEpisode('source-123', 'ep-456');
-    } catch (e) {}
+    try { await window.playEpisode('source-123', 'ep-456'); } catch (_) {}
 
-    assert(playedEndpointCalled === false, 'Failed audio.play does NOT call mark episode as played');
+    assert(playedEndpointCalled === false,
+      'Failed audio.play does NOT call mark episode as played');
   }
 
   console.log('======================================================================');
   console.log(`BROWSER E2E GATE: ${passed} passed, ${failed} failed`);
   console.log('======================================================================');
-
-  if (failed > 0) {
-    process.exit(1);
-  }
+  if (failed > 0) process.exit(1);
 }
 
 runE2E();

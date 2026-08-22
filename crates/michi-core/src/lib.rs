@@ -913,3 +913,260 @@ impl std::fmt::Display for AudioFormatPolicy {
         }
     }
 }
+
+// ── M2: Server Domain Types ──────────────────────────────────────────────────
+//
+// These types implement the architectural concepts described in the Michi Link v1
+// contract. They are intentionally separate from wire DTOs and from infrastructure
+// crates (no Axum, no sqlx, no tokio — only std + serde + uuid).
+//
+// Dependency direction: michi-core → nothing internal.
+
+// ── PlaybackTarget ───────────────────────────────────────────────────────────
+
+/// The destination to which a [`PlaybackSession`] directs audio.
+///
+/// Corresponds to the `playback_target` concept in Michi Link v1.
+/// Clients send high-level intents (e.g., "play on Living Room") and
+/// Michi Server resolves the concrete endpoint here.
+///
+/// **Mobile MUST NOT need to know UDP ports, RTP SSRC, or session tokens.**
+/// All transport details are owned by Micro Server + Michi Stream.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PlaybackTarget {
+    /// Audio is routed to the server's local audio output or HTTP streaming.
+    Local,
+    /// Audio is sent to a paired Michi Stream receiver identified by `receiver_id`.
+    Receiver { receiver_id: Uuid },
+    /// Audio is sent to all receivers belonging to a named zone.
+    Room { room_id: String },
+}
+
+impl PlaybackTarget {
+    /// Returns a display-friendly label for this target.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Local => "Local".into(),
+            Self::Receiver { receiver_id } => format!("Receiver:{receiver_id}"),
+            Self::Room { room_id } => format!("Room:{room_id}"),
+        }
+    }
+
+    /// Returns `true` if this target requires an active audio endpoint session.
+    pub fn requires_endpoint_session(&self) -> bool {
+        matches!(self, Self::Receiver { .. } | Self::Room { .. })
+    }
+}
+
+impl std::fmt::Display for PlaybackTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label())
+    }
+}
+
+// ── AudioEndpoint ────────────────────────────────────────────────────────────
+
+/// Connection state of an audio endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointConnectionState {
+    /// Endpoint was discovered but not yet authenticated/paired.
+    Discovered,
+    /// Endpoint is paired and idle (no active session).
+    Paired,
+    /// Endpoint is paired and has an active playback session.
+    Active,
+    /// Endpoint was previously paired but is not currently reachable.
+    Offline,
+}
+
+/// A hardware-agnostic audio sink that can receive audio from Micro Server.
+///
+/// `AudioEndpoint` separates the *device* concept from the *zone* concept.
+/// A single `AudioEndpoint` is typically backed by one `Michi Stream` receiver,
+/// but the abstraction allows future backends (ALSA, Snapcast, etc.).
+///
+/// **Do NOT use `receiver_hardware_id` directly as a UX concept.** Always go
+/// through [`Zone`] for user-facing operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioEndpoint {
+    /// Stable, opaque identifier for this endpoint in the server's registry.
+    pub id: Uuid,
+    /// Human-readable display name (e.g., "Living Room Stream").
+    pub name: String,
+    /// The michi_id of the underlying hardware device, if known.
+    pub hardware_michi_id: Option<String>,
+    /// Backend type: "michi_stream", "snapcast", "alsa", etc.
+    pub backend_type: String,
+    /// Current connection state of this endpoint.
+    pub state: EndpointConnectionState,
+    /// ID of the active playback session on this endpoint, if any.
+    pub active_session_id: Option<Uuid>,
+    /// Supported audio codecs derived from the physical device — NEVER invented.
+    pub supported_codecs: Vec<String>,
+    /// Maximum certified sample rate (Hz). Only values verified against hardware.
+    pub max_sample_rate: u32,
+    /// Maximum certified bit depth. Only values verified against hardware.
+    pub max_bit_depth: u32,
+}
+
+impl AudioEndpoint {
+    /// Returns `true` if this endpoint can accept a new session right now.
+    pub fn is_available(&self) -> bool {
+        matches!(self.state, EndpointConnectionState::Paired)
+    }
+}
+
+// ── Zone ────────────────────────────────────────────────────────────────────
+
+/// A user-facing musical destination that maps to one or more [`AudioEndpoint`]s.
+///
+/// `Zone` is the UX concept; `AudioEndpoint` is the hardware concept.
+/// "Play in Living Room" addresses a `Zone`, not a receiver hardware ID.
+///
+/// Initially a zone maps 1:1 to a single endpoint. Multi-receiver synchronized
+/// zones require physical clock sync certification before being enabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Zone {
+    /// Stable identifier for this zone (user-visible, e.g., "living-room").
+    pub id: String,
+    /// Display name shown in the UI.
+    pub name: String,
+    /// The audio endpoint(s) belonging to this zone.
+    /// Typically one endpoint; multiple require certified sync.
+    pub endpoint_ids: Vec<Uuid>,
+    /// Zone-level volume (0–100). Individual endpoints may have further adjustments.
+    pub volume: u8,
+    /// Whether this zone is currently muted.
+    pub muted: bool,
+}
+
+impl Zone {
+    /// Returns `true` when the zone has at least one configured endpoint.
+    pub fn has_endpoints(&self) -> bool {
+        !self.endpoint_ids.is_empty()
+    }
+}
+
+// ── LibrarySource ────────────────────────────────────────────────────────────
+
+/// Describes a single source of music content for the library.
+///
+/// Replaces the ad-hoc `Vec<PathBuf>` pattern scattered across the codebase.
+/// The architecture must not depend on a single `MICHI_MUSIC_PATH` env var;
+/// multiple sources of different types must be possible without structural change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LibrarySourceType {
+    /// Local filesystem path accessible to the server process.
+    Local,
+    // Future: Smb, Nfs, Usb — not implemented, here for forward-compatibility
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibrarySource {
+    /// Stable opaque identifier for this source.
+    pub id: Uuid,
+    /// Human-readable label (e.g., "Main Library").
+    pub label: String,
+    /// The type of storage backend.
+    pub source_type: LibrarySourceType,
+    /// The filesystem path (for `Local` sources). Internal only — never exposed via Michi Link.
+    pub internal_path: std::path::PathBuf,
+    /// Whether this source is currently enabled for scanning.
+    pub enabled: bool,
+    /// Last known scan status message.
+    pub scan_status: Option<String>,
+}
+
+impl LibrarySource {
+    /// Create a local filesystem library source.
+    pub fn local(label: impl Into<String>, path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            label: label.into(),
+            source_type: LibrarySourceType::Local,
+            internal_path: path.into(),
+            enabled: true,
+            scan_status: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod m2_domain_tests {
+    use super::*;
+
+    #[test]
+    fn playback_target_local_does_not_require_endpoint() {
+        assert!(!PlaybackTarget::Local.requires_endpoint_session());
+    }
+
+    #[test]
+    fn playback_target_receiver_requires_endpoint() {
+        let id = Uuid::new_v4();
+        assert!(PlaybackTarget::Receiver { receiver_id: id }.requires_endpoint_session());
+    }
+
+    #[test]
+    fn playback_target_room_requires_endpoint() {
+        assert!(PlaybackTarget::Room {
+            room_id: "living-room".into()
+        }
+        .requires_endpoint_session());
+    }
+
+    #[test]
+    fn playback_target_serialises_with_type_tag() {
+        let t = PlaybackTarget::Receiver {
+            receiver_id: Uuid::nil(),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("\"type\":\"receiver\""));
+        assert!(json.contains("receiver_id"));
+    }
+
+    #[test]
+    fn audio_endpoint_availability() {
+        let ep = AudioEndpoint {
+            id: Uuid::new_v4(),
+            name: "Test Stream".into(),
+            hardware_michi_id: None,
+            backend_type: "michi_stream".into(),
+            state: EndpointConnectionState::Paired,
+            active_session_id: None,
+            supported_codecs: vec!["pcm_s16le".into()],
+            max_sample_rate: 48_000,
+            max_bit_depth: 16,
+        };
+        assert!(ep.is_available());
+        let ep_active = AudioEndpoint {
+            state: EndpointConnectionState::Active,
+            ..ep.clone()
+        };
+        assert!(!ep_active.is_available());
+    }
+
+    #[test]
+    fn zone_has_endpoints_check() {
+        let mut z = Zone {
+            id: "living-room".into(),
+            name: "Living Room".into(),
+            endpoint_ids: vec![],
+            volume: 50,
+            muted: false,
+        };
+        assert!(!z.has_endpoints());
+        z.endpoint_ids.push(Uuid::new_v4());
+        assert!(z.has_endpoints());
+    }
+
+    #[test]
+    fn library_source_local_constructor() {
+        let src = LibrarySource::local("Music", "/srv/music");
+        assert_eq!(src.source_type, LibrarySourceType::Local);
+        assert!(src.enabled);
+        assert_eq!(src.internal_path.to_string_lossy(), "/srv/music");
+    }
+}

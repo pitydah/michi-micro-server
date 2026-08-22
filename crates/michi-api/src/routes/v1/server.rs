@@ -50,11 +50,10 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
         server_id: state.server_id(),
         version: state.config.version().to_string(),
         api_version: "v1".into(),
-        roles: vec![
-            "music_server".into(),
-            "library_host".into(),
-            "playback_host".into(),
-        ],
+        roles: michi_link::CANONICAL_MICRO_ROLES
+            .iter()
+            .map(|r| r.as_str().to_string())
+            .collect(),
         features: V1Features {
             library: caps.feature_enabled("library"),
             search: caps.feature_enabled("search"),

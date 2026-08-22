@@ -1,6 +1,7 @@
 pub mod client;
 pub mod models;
 pub mod session_manager;
+pub mod transport;
 
 use async_trait::async_trait;
 
