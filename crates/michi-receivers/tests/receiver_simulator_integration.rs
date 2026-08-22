@@ -103,7 +103,7 @@ async fn test_receiver_info_hifi_output() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_pairing_flow() {
-    let mut client = ReceiverClient::new(&sim_url());
+    let mut client = make_test_client(&sim_url());
 
     // pair/start
     let start = client
@@ -126,7 +126,7 @@ async fn test_receiver_pairing_flow() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_pairing_window_closed_rejected() {
-    let mut client = ReceiverClient::new(&sim_url());
+    let mut client = make_test_client(&sim_url());
     let start = client
         .pair_start("test-reject")
         .await
@@ -403,7 +403,7 @@ async fn test_receiver_registry_tracks_state() {
 #[ignore]
 async fn test_receiver_full_lifecycle_and_session_recovery() {
     let url = sim_url();
-    let mut client = ReceiverClient::new(&url);
+    let mut client = make_test_client(&url);
 
     // 1. Discovery
     let info = client.get_info().await.expect("discovery info failed");
@@ -524,15 +524,15 @@ async fn test_receiver_fault_temporary_network_drop_and_recovery() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_pairing_wrong_pin_rejected() {
-    let mut client = ReceiverClient::new(&sim_url());
+    let mut client = make_test_client(&sim_url());
     let start = client
         .pair_start("test-wrong-pin")
         .await
         .expect("pair_start failed");
-    let session_id = start.session_id.expect("session_id missing");
+    let nonce = start.nonce.expect("nonce missing");
 
     let confirm = client
-        .pair_confirm(&session_id, "test-wrong-pin", "000000")
+        .pair_confirm(&nonce, "test-wrong-pin", "000000")
         .await;
     assert!(confirm.is_err(), "wrong PIN must be rejected with 401");
 }
@@ -540,14 +540,14 @@ async fn test_receiver_pairing_wrong_pin_rejected() {
 #[tokio::test]
 #[ignore]
 async fn test_receiver_heartbeat_replay_rejected() {
-    let mut client = ReceiverClient::new(&sim_url());
+    let mut client = make_test_client(&sim_url());
     let start = client
         .pair_start("hb-replay")
         .await
         .expect("pair_start failed");
-    let session_id = start.session_id.expect("session_id missing");
+    let nonce = start.nonce.expect("nonce missing");
     client
-        .pair_confirm(&session_id, "hb-replay", "482391")
+        .pair_confirm(&nonce, "hb-replay", "482391")
         .await
         .expect("pair_confirm failed");
 
