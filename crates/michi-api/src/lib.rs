@@ -76,6 +76,8 @@ pub struct AppState {
     pub pairing_registry: Arc<michi_identity::PairingRegistry>,
     /// Testability observer for generated pairing PINs without leaking over network.
     pub pairing_display: Arc<RwLock<Option<String>>>,
+    /// Testability observer mapping session_id -> PIN for safe concurrent pairing.
+    pub pairing_sessions_display: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl AppState {
@@ -158,6 +160,7 @@ impl AppState {
         let receiver_manager = michi_receivers::ReceiverSessionManager::new_with_identity(identity.clone());
         let pairing_registry = Arc::new(michi_identity::PairingRegistry::new());
         let pairing_display = Arc::new(RwLock::new(None));
+        let pairing_sessions_display = Arc::new(RwLock::new(HashMap::new()));
 
         let state = Self {
             config,
@@ -182,6 +185,7 @@ impl AppState {
             identity,
             pairing_registry,
             pairing_display,
+            pairing_sessions_display,
         };
 
         state.spawn_background_tasks();
@@ -1349,6 +1353,14 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/receivers/discover",
             post(routes::v1::receivers::discover_receiver_handler),
+        )
+        .route(
+            "/api/v1/receivers/pair/start",
+            post(routes::v1::receivers::receiver_pair_start_handler),
+        )
+        .route(
+            "/api/v1/receivers/pair/confirm",
+            post(routes::v1::receivers::receiver_pair_confirm_handler),
         )
         .route(
             "/api/v1/receivers/:id",

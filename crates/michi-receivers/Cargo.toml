@@ -19,6 +19,8 @@ rand = "0.8"
 blake3 = "1"
 base64 = "0.22"
 michi-identity = { path = "../../vendor/michi-link/crates/michi-identity" }
+tokio-util.workspace = true
+
 
 [dev-dependencies]
 tokio.workspace = true

@@ -269,6 +269,9 @@ async fn test_receiver_online_calculation_during_active_session() {
         max_sample_rate: 48000,
         max_bit_depth: 16,
         supported_codecs: vec!["pcm_s16le".into()],
+        supported_sample_rates: vec![48000],
+        supported_bit_depths: vec![16],
+        supported_channels: vec![2],
         maximum_safe_volume: Some(100),
     };
     reg_write.add(entry);
@@ -1402,6 +1405,9 @@ async fn test_three_way_integration_e2e_flow() {
         max_sample_rate: 48000,
         max_bit_depth: 16,
         supported_codecs: vec!["pcm_s16le".to_string()],
+        supported_sample_rates: vec![48000],
+        supported_bit_depths: vec![16],
+        supported_channels: vec![2],
         maximum_safe_volume: Some(100),
     };
     state.receiver_manager.registry().await.write().await.add(reg_entry);

@@ -147,6 +147,11 @@ pub async fn link_pair_start(
     // El PIN se muestra localmente en el servidor / observer in-memory y en el contrato canónico
     // NUNCA viaja por la red (cumplimiento estricto con pair-start-response.schema.json).
     *state.pairing_display.write().await = Some(pin.clone());
+    state
+        .pairing_sessions_display
+        .write()
+        .await
+        .insert(response.session_id.to_string(), pin.clone());
     tracing::debug!(
         device = %body.device_name,
         session = %response.session_id,
@@ -248,6 +253,9 @@ pub async fn link_pair_confirm(
         .token_store
         .store(&refresh_token, TokenType::Refresh, device_id)
         .await;
+
+    // Clear session display observer on successful confirm
+    state.pairing_sessions_display.write().await.remove(&body.session_id.to_string());
 
     Ok(Json(PairConfirmResponse {
         token: device_token,

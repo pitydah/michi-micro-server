@@ -41,8 +41,52 @@ impl ReceiverInfo {
                     .collect();
             }
         }
-        vec!["pcm_s16le".to_string()]
+        // No fake fallback to pcm_s16le. Unknown != pcm_s16le.
+        Vec::new()
     }
+}
+
+/// Discrete, structured audio capabilities negotiated with a receiver.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DiscreteAudioCapabilities {
+    pub sample_rates: Vec<u32>,
+    pub bit_depths: Vec<u32>,
+    pub channels: Vec<u8>,
+    pub codecs: Vec<String>,
+    pub transports: Vec<String>,
+}
+
+/// Pending pairing state held in memory between `/pair/start` and `/pair/confirm`.
+#[derive(Debug, Clone)]
+pub struct PendingReceiverPairing {
+    pub pairing_id: String,
+    pub receiver_base_url: String,
+    pub receiver_info: ReceiverInfo,
+    pub receiver_pair_session_id: String,
+    pub initiator_id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// RAM-only active session authority for an active receiver stream.
+#[derive(Debug, Clone)]
+pub struct ReceiverActiveSession {
+    pub receiver_id: String,
+    pub playback_session_id: String,
+    pub receiver_session_id: String,
+    pub session_token: Option<String>,
+    pub device_token: Option<String>,
+    pub stream_port: u16,
+    pub lease_seconds: u64,
+    pub heartbeat_sequence: u64,
+    pub negotiated_codec: String,
+    pub negotiated_sample_rate: u32,
+    pub negotiated_bit_depth: u32,
+    pub negotiated_channels: u32,
+    pub payload_type: u8,
+    pub ssrc: u32,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_heartbeat: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +177,9 @@ pub struct ReceiverRegistryEntry {
     pub max_sample_rate: u32,
     pub max_bit_depth: u32,
     pub supported_codecs: Vec<String>,
+    pub supported_sample_rates: Vec<u32>,
+    pub supported_bit_depths: Vec<u32>,
+    pub supported_channels: Vec<u8>,
     pub maximum_safe_volume: Option<u32>,
 }
 

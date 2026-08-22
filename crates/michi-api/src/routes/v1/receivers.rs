@@ -180,6 +180,67 @@ pub async fn get_receiver_handler(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ReceiverPairStartBody {
+    pub base_url: String,
+    pub initiator_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReceiverPairConfirmBody {
+    pub pairing_id: String,
+    pub pin: String,
+}
+
+pub async fn receiver_pair_start_handler(
+    State(state): State<AppState>,
+    Json(body): Json<ReceiverPairStartBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let initiator_id = body
+        .initiator_id
+        .unwrap_or_else(|| "michi-micro-server".into());
+
+    match state
+        .receiver_manager
+        .start_pairing(&body.base_url, &initiator_id)
+        .await
+    {
+        Ok(pending) => Ok(Json(serde_json::json!({
+            "status": "pending_confirmation",
+            "pairing_id": pending.pairing_id,
+            "receiver_base_url": pending.receiver_base_url,
+            "receiver_pair_session_id": pending.receiver_pair_session_id,
+            "expires_at": pending.expires_at.to_rfc3339(),
+        }))),
+        Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "PAIR_START_FAILED", &e)),
+    }
+}
+
+pub async fn receiver_pair_confirm_handler(
+    State(state): State<AppState>,
+    Json(body): Json<ReceiverPairConfirmBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if body.pin.trim().is_empty() {
+        return Err(v1_error_code(
+            StatusCode::BAD_REQUEST,
+            michi_link::MichiLinkErrorCode::InvalidRequest,
+            "PIN is required to confirm pairing",
+        ));
+    }
+
+    match state
+        .receiver_manager
+        .confirm_pairing(&body.pairing_id, &body.pin)
+        .await
+    {
+        Ok(device_id) => Ok(Json(serde_json::json!({
+            "status": "paired",
+            "device_id": device_id,
+        }))),
+        Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "PAIR_CONFIRM_FAILED", &e)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct DiscoverReceiverBody {
     pub base_url: String,
     pub initiator_id: Option<String>,
