@@ -80,6 +80,7 @@ pub async fn playback_state_handler(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlaybackControlBody {
     pub command: String,
     pub value: Option<serde_json::Value>,
@@ -92,6 +93,28 @@ pub async fn playback_control_handler(
     Json(body): Json<PlaybackControlBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let cmd = body.command.as_str();
+    const VALID_COMMANDS: &[&str] = &[
+        "play",
+        "pause",
+        "toggle",
+        "stop",
+        "next",
+        "previous",
+        "seek",
+        "set_volume",
+        "mute",
+        "unmute",
+        "shuffle",
+        "repeat",
+    ];
+
+    if !VALID_COMMANDS.contains(&cmd) {
+        return Err(v1_error_code(
+            StatusCode::BAD_REQUEST,
+            michi_link::MichiLinkErrorCode::InvalidRequest,
+            &format!("unknown playback command '{cmd}'"),
+        ));
+    }
 
     let mut current = state.playback_state.write().await;
 
