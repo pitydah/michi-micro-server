@@ -232,7 +232,21 @@ def main():
         assert metrics["last_payload_type"] == 97, f"Expected PT 97, got {metrics['last_payload_type']}"
         assert metrics["last_ssrc"] == negotiated_ssrc, f"SSRC mismatch! Negotiated: {negotiated_ssrc}, Received: {metrics['last_ssrc']}"
         assert metrics.get("source_port", 0) > 0, "Local source port from Micro must be positive non-zero"
-        print(f"  ✅ Stream Standard Simulator verified reception of {metrics['packets_received']} RTP packets (size=1920, PT=97, SSRC={metrics['last_ssrc']} == Negotiated {negotiated_ssrc}, src_port={metrics.get('source_port')})")
+
+        # Verify RFC 3550 continuous monotonic progression: seq +1, ts +480 per packet
+        pkt_history = metrics.get("packet_history", [])
+        assert len(pkt_history) >= 5, f"Expected at least 5 packets in history, got {len(pkt_history)}"
+        for i in range(1, len(pkt_history)):
+            prev = pkt_history[i-1]
+            curr = pkt_history[i]
+            seq_delta = (curr["seq"] - prev["seq"]) & 0xFFFF
+            ts_delta = (curr["ts"] - prev["ts"]) & 0xFFFFFFFF
+            assert seq_delta == 1, f"Packet sequence discontinuity: {prev['seq']} -> {curr['seq']} (delta {seq_delta} != 1)"
+            assert ts_delta == 480, f"RTP timestamp discontinuity: {prev['ts']} -> {curr['ts']} (delta {ts_delta} != 480 frames)"
+            assert curr["size"] == 1920, f"Packet payload size != 1920 bytes: {curr['size']}"
+            assert curr["ssrc"] == negotiated_ssrc, f"Packet SSRC mismatch in stream: {curr['ssrc']} != {negotiated_ssrc}"
+
+        print(f"  ✅ Stream Standard Simulator verified reception of {metrics['packets_received']} RTP packets (size=1920, PT=97, SSRC={metrics['last_ssrc']} == Negotiated {negotiated_ssrc}, src_port={metrics.get('source_port')}, seq_delta=+1, ts_delta=+480)")
 
         # =====================================================================
         # PHASE 5: Mobile ➔ Micro: Volume Control & Heartbeats
@@ -250,7 +264,17 @@ def main():
         status, hb_res = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/{standard_device_id}/heartbeat", headers=headers)
         assert status == 200, f"Heartbeat via Micro failed: {status}"
         assert hb_res.get("status") == "alive"
-        print("  ✅ Heartbeat verified via Micro Server")
+        print("  ✅ Manual heartbeat verified via Micro Server")
+
+        # 3. Verify automatic background heartbeat task from Micro Server
+        time.sleep(2.5) # Background task interval is clamped at 2-10s
+        status, metrics_hb = http_req("GET", f"{std_url}/api/v1/test/metrics")
+        assert status == 200
+        hb_count = metrics_hb.get("heartbeats_received", 0)
+        assert hb_count >= 1, f"Expected automatic background heartbeat to be received, got {hb_count}"
+        last_seq = metrics_hb.get("last_heartbeat_seq", 0)
+        assert last_seq >= 1, f"Expected last_heartbeat_seq >= 1, got {last_seq}"
+        print(f"  ✅ Automatic background heartbeat confirmed (received={hb_count}, last_seq={last_seq})")
 
         # =====================================================================
         # PHASE 6: Mobile ➔ Micro: Output Handoff (Standard ➔ Hi-Fi)

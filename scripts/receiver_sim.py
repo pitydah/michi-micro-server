@@ -84,6 +84,14 @@ class ReceiverState:
                         ts = int.from_bytes(data[4:8], "big")
                         ssrc = int.from_bytes(data[8:12], "big")
                         payload_size = len(data) - 12
+                        if "packet_history" not in self.metrics:
+                            self.metrics["packet_history"] = []
+                        self.metrics["packet_history"].append({
+                            "seq": seq,
+                            "ts": ts,
+                            "ssrc": ssrc,
+                            "size": payload_size,
+                        })
                         self.metrics["packets_received"] += 1
                         self.metrics["bytes_received"] += len(data)
                         self.metrics["last_payload_size"] = payload_size
@@ -471,6 +479,8 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 return
 
             st.last_heartbeat_seq = seq
+            st.metrics["heartbeats_received"] = st.metrics.get("heartbeats_received", 0) + 1
+            st.metrics["last_heartbeat_seq"] = seq
             st.lease_expires_at = time.time() + 30.0
             uptime_ms = int((time.time() - st.start_time) * 1000)
 
