@@ -179,15 +179,12 @@ impl ReceiverClient {
                 details: serde_json::Value::Null,
             });
         }
-        let result: PairConfirmResponse = resp
-            .json()
-            .await
-            .map_err(|e| ReceiverProtocolError {
-                http_status: 500,
-                code: "DECODE_ERROR".into(),
-                message: format!("pair_confirm parse failed: {e}"),
-                details: serde_json::Value::Null,
-            })?;
+        let result: PairConfirmResponse = resp.json().await.map_err(|e| ReceiverProtocolError {
+            http_status: 500,
+            code: "DECODE_ERROR".into(),
+            message: format!("pair_confirm parse failed: {e}"),
+            details: serde_json::Value::Null,
+        })?;
         if let Some(ref t) = result.token {
             self.token = Some(t.clone());
         }

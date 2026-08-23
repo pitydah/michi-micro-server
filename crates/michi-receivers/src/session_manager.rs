@@ -241,10 +241,10 @@ impl ReceiverSessionManager {
             .unwrap_or_else(|| "unknown".into());
 
         // Extract discrete capabilities without fake defaults - require canonical info.audio
-        let audio = info
-            .audio
-            .as_ref()
-            .ok_or_else(|| "receiver failed capability negotiation: missing canonical 'audio' specification".to_string())?;
+        let audio = info.audio.as_ref().ok_or_else(|| {
+            "receiver failed capability negotiation: missing canonical 'audio' specification"
+                .to_string()
+        })?;
 
         let transports: Vec<String> = audio
             .get("transports")
@@ -336,6 +336,7 @@ impl ReceiverSessionManager {
             active_session_id: None,
             max_sample_rate: max_sr,
             max_bit_depth: max_bd,
+            supported_transports: transports,
             supported_codecs: codecs,
             supported_sample_rates: sample_rates,
             supported_bit_depths: bit_depths,
@@ -767,6 +768,7 @@ mod tests {
             active_session_id: None,
             max_sample_rate: 48000,
             max_bit_depth: 16,
+            supported_transports: vec!["rtp_udp".into()],
             supported_codecs: vec!["pcm_s16le".into()],
             supported_sample_rates: vec![48000],
             supported_bit_depths: vec![16],
@@ -811,6 +813,7 @@ mod tests {
             active_session_id: None,
             max_sample_rate: 48000,
             max_bit_depth: 16,
+            supported_transports: vec!["rtp_udp".into()],
             supported_codecs: vec!["pcm_s16le".into()],
             supported_sample_rates: vec![48000],
             supported_bit_depths: vec![16],
@@ -853,6 +856,7 @@ mod tests {
             active_session_id: None,
             max_sample_rate: 48000,
             max_bit_depth: 16,
+            supported_transports: vec!["rtp_udp".into()],
             supported_codecs: vec!["pcm_s16le".into()],
             supported_sample_rates: vec![48000],
             supported_bit_depths: vec![16],
@@ -881,6 +885,7 @@ mod tests {
             active_session_id: None,
             max_sample_rate: 48000,
             max_bit_depth: 16,
+            supported_transports: vec!["rtp_udp".into()],
             supported_codecs: vec!["pcm_s16le".into()],
             supported_sample_rates: vec![48000],
             supported_bit_depths: vec![16],
@@ -909,6 +914,7 @@ mod tests {
             active_session_id: None,
             max_sample_rate: 48000,
             max_bit_depth: 16,
+            supported_transports: vec!["rtp_udp".into()],
             supported_codecs: vec!["pcm_s16le".into()],
             supported_sample_rates: vec![48000],
             supported_bit_depths: vec![16],

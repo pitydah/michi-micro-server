@@ -163,6 +163,7 @@ pub struct PairConfirmResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EffectiveSessionWire {
     pub transport: String,
     pub codec: String,
@@ -178,17 +179,24 @@ pub struct EffectiveSessionWire {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionStartResponse {
     pub session_id: String,
     pub session_token: String,
     pub lease_seconds: u64,
     pub effective: EffectiveSessionWire,
-    #[serde(default)]
-    pub status: Option<String>,
 }
 
 impl SessionStartResponse {
     pub fn validate_strict(&self) -> Result<NegotiatedReceiverSession, String> {
+        // Enforce valid UUID format for session_id
+        if uuid::Uuid::parse_str(&self.session_id).is_err() {
+            return Err(format!(
+                "CONTRACT_VIOLATION: session_id must be a valid UUID v4, got '{}'",
+                self.session_id
+            ));
+        }
+
         // Enforce frozen lease_seconds == 30
         if self.lease_seconds != 30 {
             return Err(format!(
@@ -339,6 +347,7 @@ pub struct ReceiverRegistryEntry {
     pub active_session_id: Option<String>,
     pub max_sample_rate: u32,
     pub max_bit_depth: u32,
+    pub supported_transports: Vec<String>,
     pub supported_codecs: Vec<String>,
     pub supported_sample_rates: Vec<u32>,
     pub supported_bit_depths: Vec<u32>,

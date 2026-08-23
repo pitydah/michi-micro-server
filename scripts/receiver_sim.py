@@ -445,10 +445,6 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "session_token": st.active_session_token,
                 "lease_seconds": 30,
                 "effective": effective,
-                "status": "session_started",
-                "device_id": st.device_id,
-                "stream_port": st.stream_port,
-                "buffer_ms": buffer_ms,
             })
             return
 
