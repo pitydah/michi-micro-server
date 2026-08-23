@@ -190,16 +190,20 @@ async fn main() -> Result<()> {
     let actual_port = listener.local_addr()?.port();
     info!("listening on http://0.0.0.0:{}", actual_port);
 
+    let advertised_host = michi_connect::MichiConnect::resolve_lan_ip();
+    info!("advertised LAN host: {}", advertised_host);
+
     let michi_connect = michi_connect::MichiConnect::new(
         identity.clone(),
         actual_port,
-        Some("0.0.0.0".to_string()),
+        Some(advertised_host.clone()),
     );
     let _ = michi_connect.announce_mdns().await;
 
     // Spawn UDP multicast discovery announcer with cancellation on shutdown
     let announcer_cancel = tokio_util::sync::CancellationToken::new();
-    michi_connect.spawn_announcer(actual_port, None, announcer_cancel.clone());
+    let announcer_handle =
+        michi_connect.spawn_announcer(actual_port, Some(advertised_host), announcer_cancel.clone());
 
     // Graceful shutdown: SIGINT + SIGTERM
     let shutdown_state = state.clone();
@@ -225,6 +229,7 @@ async fn main() -> Result<()> {
             }
 
             announcer_cancel.cancel();
+            let _ = announcer_handle.await;
             michi_connect.stop_mdns().await;
 
             shutdown_state

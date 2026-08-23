@@ -14,6 +14,7 @@ pub struct MichiConnect {
     identity: Arc<IdentityManager>,
     server_url: Arc<RwLock<String>>,
     service_name: Arc<RwLock<String>>,
+    mdns_daemon: Arc<RwLock<Option<mdns_sd::ServiceDaemon>>>,
 }
 
 impl MichiConnect {
@@ -24,6 +25,7 @@ impl MichiConnect {
             identity,
             server_url: Arc::new(RwLock::new(server_url)),
             service_name: Arc::new(RwLock::new(String::new())),
+            mdns_daemon: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -108,6 +110,7 @@ impl MichiConnect {
 
         let name = instance_name;
         *self.service_name.write().unwrap() = name.clone();
+        *self.mdns_daemon.write().unwrap() = Some(daemon);
         info!("connect: mDNS announced as {}.{}", name, service_type);
         Ok(())
     }
@@ -125,7 +128,17 @@ impl MichiConnect {
     }
 
     pub async fn stop_mdns(&self) {
-        info!("connect: mDNS stopped");
+        if let Ok(mut lock) = self.mdns_daemon.write() {
+            if let Some(daemon) = lock.take() {
+                let name = self.service_name.read().unwrap().clone();
+                if !name.is_empty() {
+                    let fullname = format!("{name}._michi-link._tcp.local.");
+                    let _ = daemon.unregister(&fullname);
+                }
+                let _ = daemon.shutdown();
+                info!("connect: mDNS service unregistered and shut down");
+            }
+        }
     }
 
     /// Builds a canonical signed UDP multicast announce for Michi Micro Server
@@ -191,7 +204,7 @@ impl MichiConnect {
         port: u16,
         advertised_host: Option<String>,
         cancel_token: tokio_util::sync::CancellationToken,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         let connect = self.clone();
         let host = advertised_host.unwrap_or_else(Self::resolve_lan_ip);
 
@@ -242,7 +255,7 @@ impl MichiConnect {
                     }
                 }
             }
-        });
+        })
     }
 }
 
