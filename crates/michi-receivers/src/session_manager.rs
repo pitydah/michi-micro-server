@@ -358,7 +358,7 @@ impl ReceiverSessionManager {
         stream_port: u16,
         buffer_ms: u64,
         volume: u32,
-    ) -> Result<SessionStartResponse, String> {
+    ) -> Result<NegotiatedReceiverSession, String> {
         let entry = {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
@@ -420,7 +420,7 @@ impl ReceiverSessionManager {
         };
         client.token = token.clone();
 
-        let resp = client
+        let negotiated = client
             .session_start(
                 session_id,
                 codec,
@@ -433,31 +433,13 @@ impl ReceiverSessionManager {
             )
             .await?;
 
-        if let Some(err) = &resp.error {
-            let code = &err.code;
-            let message = &err.message;
-            return Err(format!("session_start failed: {code}: {message}"));
-        }
+        let receiver_session_id = negotiated.session_id.clone();
+        let session_token = Some(negotiated.session_token.clone());
+        let effective_port = negotiated.stream_port;
+        let lease_seconds = negotiated.lease_seconds;
+        let ssrc = negotiated.ssrc;
 
-        let receiver_session_id = resp
-            .session_id
-            .clone()
-            .unwrap_or_else(|| session_id.to_string());
-        let session_token = resp
-            .session_token
-            .clone()
-            .or(client.active_session_token.clone());
-        let effective_port = resp.stream_port.unwrap_or(stream_port);
-        let lease_seconds = resp.lease_seconds.unwrap_or(30);
-
-        // Derive single source of truth for SSRC from effective response if present
-        let ssrc = resp
-            .effective
-            .as_ref()
-            .and_then(|eff| eff.get("ssrc").and_then(|v| v.as_u64()).map(|s| s as u32))
-            .unwrap_or_else(|| rand::random::<u32>().max(1));
-
-        // Create and start RtpReceiverTransport targeting receiver_host:effective_port
+        // Create and start RtpReceiverTransport targeting receiver_host:effective_port with EXACT negotiated SSRC
         let host = base_url
             .trim_start_matches("http://")
             .trim_start_matches("https://")
@@ -468,11 +450,11 @@ impl ReceiverSessionManager {
 
         let mut transport = RtpReceiverTransport::new(&target_addr, ssrc);
         let config = TransportStreamConfig {
-            codec: codec.to_string(),
-            sample_rate,
-            bit_depth,
-            channels: channels as u8,
-            packet_ms: 10,
+            codec: negotiated.codec.clone(),
+            sample_rate: negotiated.sample_rate,
+            bit_depth: negotiated.bit_depth,
+            channels: negotiated.channels as u8,
+            packet_ms: negotiated.packet_ms,
         };
 
         if let Err(e) = transport.start(config).await {
@@ -493,11 +475,11 @@ impl ReceiverSessionManager {
             stream_port: effective_port,
             lease_seconds,
             heartbeat_sequence: 0,
-            negotiated_codec: codec.to_string(),
-            negotiated_sample_rate: sample_rate,
-            negotiated_bit_depth: bit_depth,
-            negotiated_channels: channels,
-            payload_type: 97,
+            negotiated_codec: negotiated.codec.clone(),
+            negotiated_sample_rate: negotiated.sample_rate,
+            negotiated_bit_depth: negotiated.bit_depth,
+            negotiated_channels: negotiated.channels,
+            payload_type: negotiated.payload_type,
             ssrc,
             state: ReceiverActiveSessionState::Active,
             created_at: chrono::Utc::now(),
@@ -528,7 +510,7 @@ impl ReceiverSessionManager {
         // Spawn managed background heartbeat task
         self.spawn_heartbeat_task(receiver_id, lease_seconds).await;
 
-        Ok(resp)
+        Ok(negotiated)
     }
 
     async fn spawn_heartbeat_task(&self, receiver_id: &str, lease_seconds: u64) {
@@ -568,7 +550,7 @@ impl ReceiverSessionManager {
     }
 
     pub async fn stop_session(&self, receiver_id: &str) -> Result<SessionStopResponse, String> {
-        // Fail-fast if no active session exists
+        // 1. Mark session as Closing in RAM; do not delete active_transports yet
         let active_sess = {
             let mut sessions = self.active_sessions.write().await;
             let sess = sessions.get_mut(receiver_id).ok_or_else(|| {
@@ -578,18 +560,18 @@ impl ReceiverSessionManager {
             sess.clone()
         };
 
-        // Cancel heartbeat task immediately
+        // 2. Pause audio emission on active transport while preserving ownership
+        if let Some(transport_lock) = self.active_transports.read().await.get(receiver_id) {
+            let mut tr = transport_lock.lock().await;
+            let _ = tr.pause().await;
+        }
+
+        // 3. Cancel heartbeat task
         {
             let mut tokens = self.heartbeat_tokens.write().await;
             if let Some(token) = tokens.remove(receiver_id) {
                 token.cancel();
             }
-        }
-
-        // Stop audio transport
-        if let Some(transport_lock) = self.active_transports.write().await.remove(receiver_id) {
-            let mut tr = transport_lock.lock().await;
-            let _ = tr.pause().await;
         }
 
         let entry = {
@@ -607,10 +589,11 @@ impl ReceiverSessionManager {
         client.active_session_id = Some(active_sess.receiver_session_id.clone());
         client.active_session_token = active_sess.session_token.clone();
 
+        // 4. Remote DELETE
         let resp = match client.session_stop().await {
             Ok(r) => r,
             Err(e) => {
-                // Keep session marked Failed/Closing in RAM for retryability
+                // Keep session marked Failed in RAM for retryability; preserve transport
                 let mut sessions = self.active_sessions.write().await;
                 if let Some(sess) = sessions.get_mut(receiver_id) {
                     sess.state = ReceiverActiveSessionState::Failed;
@@ -619,7 +602,12 @@ impl ReceiverSessionManager {
             }
         };
 
-        // On successful remote teardown, remove active session and update registry
+        // 5. Success: call AudioTransport::stop(), clean active transport and active session
+        if let Some(transport_lock) = self.active_transports.write().await.remove(receiver_id) {
+            let mut tr = transport_lock.lock().await;
+            let _ = tr.stop().await;
+        }
+
         {
             let mut sessions = self.active_sessions.write().await;
             sessions.remove(receiver_id);

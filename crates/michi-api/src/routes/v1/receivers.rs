@@ -311,7 +311,7 @@ pub async fn receiver_session_start_handler(
         .await
     {
         Ok(resp) => Ok(Json(serde_json::json!({
-            "status": resp.status,
+            "status": "session_started",
             "session_id": resp.session_id,
             "stream_port": resp.stream_port,
             "buffer_ms": resp.buffer_ms,

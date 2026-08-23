@@ -209,7 +209,7 @@ impl ReceiverClient {
         _stream_port_hint: u16,
         buffer_ms: u64,
         volume: u32,
-    ) -> Result<SessionStartResponse, String> {
+    ) -> Result<NegotiatedReceiverSession, String> {
         if volume > 100 {
             return Err(format!("volume {volume} exceeds maximum of 100"));
         }
@@ -245,29 +245,18 @@ impl ReceiverClient {
         if status != reqwest::StatusCode::CREATED && status != reqwest::StatusCode::OK {
             return Err(format!("session_start failed with status {status}"));
         }
-        let mut result: SessionStartResponse = resp
+        let raw_resp: SessionStartResponse = resp
             .json()
             .await
             .map_err(|e| format!("session_start parse failed: {e}"))?;
 
-        if let Some(ref sid) = result.session_id {
-            self.active_session_id = Some(sid.clone());
-        }
-        if let Some(ref stok) = result.session_token {
-            self.active_session_token = Some(stok.clone());
-        }
+        let negotiated = raw_resp.validate_strict()?;
+
+        self.active_session_id = Some(negotiated.session_id.clone());
+        self.active_session_token = Some(negotiated.session_token.clone());
         self.heartbeat_sequence.store(0, Ordering::SeqCst);
 
-        // Derive stream_port from effective if present
-        if result.stream_port.is_none() {
-            if let Some(ref eff) = result.effective {
-                if let Some(p) = eff.get("stream_port").and_then(|v| v.as_u64()) {
-                    result.stream_port = Some(p as u16);
-                }
-            }
-        }
-        result.status = Some("session_started".to_string());
-        Ok(result)
+        Ok(negotiated)
     }
 
     /// PATCH /api/v1/receiver-lite/session (canonical)

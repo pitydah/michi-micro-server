@@ -97,6 +97,46 @@ pub struct ReceiverActiveSession {
     pub last_heartbeat: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProtocolError {
+    pub http_status: u16,
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub details: serde_json::Value,
+}
+
+impl std::fmt::Display for ReceiverProtocolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ReceiverProtocolError(status={}, code={}, message={})",
+            self.http_status, self.code, self.message
+        )
+    }
+}
+
+impl std::error::Error for ReceiverProtocolError {}
+
+/// Strict DTO for successfully negotiated and verified session
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NegotiatedReceiverSession {
+    pub session_id: String,
+    pub session_token: String,
+    pub lease_seconds: u64,
+    pub transport: String,
+    pub codec: String,
+    pub sample_rate: u32,
+    pub bit_depth: u32,
+    pub channels: u32,
+    pub packet_ms: u32,
+    pub buffer_ms: u32,
+    pub payload_type: u8,
+    pub ssrc: u32,
+    pub stream_port: u16,
+    pub volume: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairStartResponse {
     pub session_id: Option<String>,
@@ -123,17 +163,134 @@ pub struct PairConfirmResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectiveSessionWire {
+    pub transport: String,
+    pub codec: String,
+    pub sample_rate: u32,
+    pub bit_depth: u32,
+    pub channels: u32,
+    pub packet_ms: u32,
+    pub buffer_ms: u32,
+    pub payload_type: u8,
+    pub ssrc: u32,
+    pub stream_port: u16,
+    pub volume: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionStartResponse {
+    pub session_id: String,
+    pub session_token: String,
+    pub lease_seconds: u64,
+    pub effective: EffectiveSessionWire,
     #[serde(default)]
     pub status: Option<String>,
-    pub session_id: Option<String>,
-    pub session_token: Option<String>,
-    pub lease_seconds: Option<u64>,
-    pub effective: Option<serde_json::Value>,
-    pub device_id: Option<String>,
-    pub stream_port: Option<u16>,
-    pub buffer_ms: Option<u64>,
-    pub error: Option<ErrorBody>,
+}
+
+impl SessionStartResponse {
+    pub fn validate_strict(&self) -> Result<NegotiatedReceiverSession, String> {
+        // Enforce frozen lease_seconds == 30
+        if self.lease_seconds != 30 {
+            return Err(format!(
+                "CONTRACT_VIOLATION: lease_seconds must be exactly 30, got {}",
+                self.lease_seconds
+            ));
+        }
+
+        // Validate session_token pattern ^[A-Za-z0-9_-]{43}$
+        if self.session_token.len() != 43
+            || !self
+                .session_token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(
+                "CONTRACT_VIOLATION: session_token must be 43 base64url characters".to_string(),
+            );
+        }
+
+        let eff = &self.effective;
+        if eff.transport != "rtp_udp" {
+            return Err(format!(
+                "CONTRACT_VIOLATION: effective transport must be 'rtp_udp', got '{}'",
+                eff.transport
+            ));
+        }
+        if eff.codec != "pcm_s16le" {
+            return Err(format!(
+                "CONTRACT_VIOLATION: effective codec must be 'pcm_s16le', got '{}'",
+                eff.codec
+            ));
+        }
+        if eff.sample_rate != 48000 {
+            return Err(format!(
+                "CONTRACT_VIOLATION: effective sample_rate must be 48000, got {}",
+                eff.sample_rate
+            ));
+        }
+        if eff.bit_depth != 16 {
+            return Err(format!(
+                "CONTRACT_VIOLATION: effective bit_depth must be 16, got {}",
+                eff.bit_depth
+            ));
+        }
+        if eff.channels != 2 {
+            return Err(format!(
+                "CONTRACT_VIOLATION: effective channels must be 2, got {}",
+                eff.channels
+            ));
+        }
+        if eff.packet_ms != 10 {
+            return Err(format!(
+                "CONTRACT_VIOLATION: effective packet_ms must be 10, got {}",
+                eff.packet_ms
+            ));
+        }
+        if !(50..=500).contains(&eff.buffer_ms) {
+            return Err(format!(
+                "CONTRACT_VIOLATION: effective buffer_ms must be 50..=500, got {}",
+                eff.buffer_ms
+            ));
+        }
+        if eff.payload_type != 97 {
+            return Err(format!(
+                "CONTRACT_VIOLATION: effective payload_type must be 97, got {}",
+                eff.payload_type
+            ));
+        }
+        if eff.ssrc == 0 {
+            return Err("CONTRACT_VIOLATION: effective ssrc must be non-zero".to_string());
+        }
+        if !(49152..=65535).contains(&eff.stream_port) {
+            return Err(format!(
+                "CONTRACT_VIOLATION: effective stream_port must be 49152..=65535, got {}",
+                eff.stream_port
+            ));
+        }
+        if eff.volume > 100 {
+            return Err(format!(
+                "CONTRACT_VIOLATION: effective volume must be <= 100, got {}",
+                eff.volume
+            ));
+        }
+
+        Ok(NegotiatedReceiverSession {
+            session_id: self.session_id.clone(),
+            session_token: self.session_token.clone(),
+            lease_seconds: self.lease_seconds,
+            transport: eff.transport.clone(),
+            codec: eff.codec.clone(),
+            sample_rate: eff.sample_rate,
+            bit_depth: eff.bit_depth,
+            channels: eff.channels,
+            packet_ms: eff.packet_ms,
+            buffer_ms: eff.buffer_ms,
+            payload_type: eff.payload_type,
+            ssrc: eff.ssrc,
+            stream_port: eff.stream_port,
+            volume: eff.volume,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

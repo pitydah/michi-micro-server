@@ -150,6 +150,7 @@ pub struct RtpReceiverTransport {
     timestamp: u32,
     ssrc: u32,
     payload_type: u8,
+    pending_pcm: Vec<u8>,
 }
 
 impl RtpReceiverTransport {
@@ -163,7 +164,15 @@ impl RtpReceiverTransport {
             timestamp: 0,
             ssrc,
             payload_type: 97,
+            pending_pcm: Vec::with_capacity(3840),
         }
+    }
+
+    /// Expose local UDP socket port (useful for diagnostics and test validation)
+    pub fn local_port(&self) -> Option<u16> {
+        self.socket
+            .as_ref()
+            .and_then(|s| s.local_addr().ok().map(|a| a.port()))
     }
 
     /// Build an RTP packet header for PCM audio according to RFC 3550 / Michi Link specification.
@@ -198,13 +207,13 @@ impl RtpReceiverTransport {
 
     /// Generate synthetic PCM S16LE sine wave buffer (48kHz, 2ch, 10ms chunks).
     pub fn generate_synthetic_sine(frequency_hz: f32, duration_ms: u32) -> Vec<i16> {
-        let sample_rate = 48000;
-        let total_samples = (sample_rate as f32 * (duration_ms as f32 / 1000.0)) as usize;
+        let sample_rate = 48000.0;
+        let total_samples = (48000 * duration_ms / 1000) as usize;
         let mut samples = Vec::with_capacity(total_samples * 2);
         for i in 0..total_samples {
-            let t = i as f32 / sample_rate as f32;
+            let t = i as f32 / sample_rate;
             let val = (2.0 * std::f32::consts::PI * frequency_hz * t).sin();
-            let sample = (val * 32767.0 * 0.5) as i16;
+            let sample = (val * 16384.0) as i16;
             samples.push(sample); // Left
             samples.push(sample); // Right
         }
@@ -273,6 +282,7 @@ impl AudioTransport for RtpReceiverTransport {
         self.handle = Some(handle.clone());
         self.sequence_number = rand::random::<u16>();
         self.timestamp = rand::random::<u32>();
+        self.pending_pcm.clear();
 
         Ok(handle)
     }
@@ -307,18 +317,20 @@ impl AudioTransport for RtpReceiverTransport {
 
     async fn write_pcm(&mut self, pcm_data: &[u8]) -> TransportResult<usize> {
         let socket = self.socket.as_ref().ok_or(TransportError::NoSession)?;
-        // 10ms of 48kHz PCM S16LE stereo = 480 frames * 2 channels * 2 bytes = 1920 bytes
-        let chunk_size = 1920;
-        let mut bytes_written = 0;
+        let chunk_size = 1920; // Exact 10ms of 48kHz PCM S16LE stereo: 480 frames * 2 ch * 2 bytes
 
-        for chunk in pcm_data.chunks(chunk_size) {
+        self.pending_pcm.extend_from_slice(pcm_data);
+        let mut packets_sent = 0;
+
+        while self.pending_pcm.len() >= chunk_size {
+            let chunk: Vec<u8> = self.pending_pcm.drain(..chunk_size).collect();
             let packet = Self::build_rtp_packet(
                 self.payload_type,
                 self.sequence_number,
                 self.timestamp,
                 self.ssrc,
                 false,
-                chunk,
+                &chunk,
             );
             socket
                 .send(&packet)
@@ -326,13 +338,12 @@ impl AudioTransport for RtpReceiverTransport {
                 .map_err(|e| TransportError::Other(e.to_string()))?;
 
             self.sequence_number = self.sequence_number.wrapping_add(1);
-            // RTP timestamp represents audio frames per channel (4 bytes = 1 stereo frame = 1 frame increment)
-            let frames_in_chunk = (chunk.len() / 4) as u32;
-            self.timestamp = self.timestamp.wrapping_add(frames_in_chunk);
-            bytes_written += chunk.len();
+            self.timestamp = self.timestamp.wrapping_add(480); // Exact 480 audio frames per 10ms packet
+            packets_sent += 1;
         }
 
-        Ok(bytes_written)
+        let bytes_consumed = packets_sent * chunk_size;
+        Ok(bytes_consumed)
     }
 
     async fn send_frame(&mut self, samples: &[i16], marker: bool) -> TransportResult<()> {
@@ -367,6 +378,7 @@ impl AudioTransport for RtpReceiverTransport {
         self.socket = None;
         self.handle = None;
         self.config = None;
+        self.pending_pcm.clear();
         Ok(())
     }
 }
@@ -442,5 +454,112 @@ mod tests {
         bad_cfg.sample_rate = 96000;
         let err = transport.start(bad_cfg).await;
         assert!(matches!(err, Err(TransportError::CapabilityMismatch(_))));
+    }
+
+    #[tokio::test]
+    async fn write_1919_bytes_sends_zero_packets() {
+        let dummy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = dummy.local_addr().unwrap().port();
+
+        let mut transport = RtpReceiverTransport::new(format!("127.0.0.1:{port}"), 12345);
+        let cfg = TransportStreamConfig::receiver_v1_lite_default();
+        transport.start(cfg).await.unwrap();
+
+        let data = vec![0u8; 1919];
+        let written = transport.write_pcm(&data).await.unwrap();
+        assert_eq!(written, 0);
+        assert_eq!(transport.pending_pcm.len(), 1919);
+    }
+
+    #[tokio::test]
+    async fn write_1920_bytes_sends_one_packet() {
+        let dummy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = dummy.local_addr().unwrap().port();
+
+        let mut transport = RtpReceiverTransport::new(format!("127.0.0.1:{port}"), 12345);
+        let cfg = TransportStreamConfig::receiver_v1_lite_default();
+        transport.start(cfg).await.unwrap();
+
+        let initial_seq = transport.sequence_number;
+        let initial_ts = transport.timestamp;
+
+        let data = vec![0u8; 1920];
+        let written = transport.write_pcm(&data).await.unwrap();
+        assert_eq!(written, 1920);
+        assert_eq!(transport.pending_pcm.len(), 0);
+        assert_eq!(transport.sequence_number, initial_seq.wrapping_add(1));
+        assert_eq!(transport.timestamp, initial_ts.wrapping_add(480));
+    }
+
+    #[tokio::test]
+    async fn write_1921_bytes_sends_one_packet_and_buffers_one() {
+        let dummy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = dummy.local_addr().unwrap().port();
+
+        let mut transport = RtpReceiverTransport::new(format!("127.0.0.1:{port}"), 12345);
+        let cfg = TransportStreamConfig::receiver_v1_lite_default();
+        transport.start(cfg).await.unwrap();
+
+        let data = vec![0u8; 1921];
+        let written = transport.write_pcm(&data).await.unwrap();
+        assert_eq!(written, 1920);
+        assert_eq!(transport.pending_pcm.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn two_partial_writes_complete_one_packet() {
+        let dummy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = dummy.local_addr().unwrap().port();
+
+        let mut transport = RtpReceiverTransport::new(format!("127.0.0.1:{port}"), 12345);
+        let cfg = TransportStreamConfig::receiver_v1_lite_default();
+        transport.start(cfg).await.unwrap();
+
+        let data1 = vec![0u8; 1000];
+        let written1 = transport.write_pcm(&data1).await.unwrap();
+        assert_eq!(written1, 0);
+        assert_eq!(transport.pending_pcm.len(), 1000);
+
+        let data2 = vec![0u8; 920];
+        let written2 = transport.write_pcm(&data2).await.unwrap();
+        assert_eq!(written2, 1920);
+        assert_eq!(transport.pending_pcm.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn write_3840_bytes_sends_two_packets() {
+        let dummy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = dummy.local_addr().unwrap().port();
+
+        let mut transport = RtpReceiverTransport::new(format!("127.0.0.1:{port}"), 12345);
+        let cfg = TransportStreamConfig::receiver_v1_lite_default();
+        transport.start(cfg).await.unwrap();
+
+        let initial_seq = transport.sequence_number;
+        let initial_ts = transport.timestamp;
+
+        let data = vec![0u8; 3840];
+        let written = transport.write_pcm(&data).await.unwrap();
+        assert_eq!(written, 3840);
+        assert_eq!(transport.pending_pcm.len(), 0);
+        assert_eq!(transport.sequence_number, initial_seq.wrapping_add(2));
+        assert_eq!(transport.timestamp, initial_ts.wrapping_add(960));
+    }
+
+    #[tokio::test]
+    async fn stop_discards_partial_remainder() {
+        let dummy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = dummy.local_addr().unwrap().port();
+
+        let mut transport = RtpReceiverTransport::new(format!("127.0.0.1:{port}"), 12345);
+        let cfg = TransportStreamConfig::receiver_v1_lite_default();
+        transport.start(cfg).await.unwrap();
+
+        let data = vec![0u8; 500];
+        let _ = transport.write_pcm(&data).await.unwrap();
+        assert_eq!(transport.pending_pcm.len(), 500);
+
+        transport.stop().await.unwrap();
+        assert_eq!(transport.pending_pcm.len(), 0);
     }
 }

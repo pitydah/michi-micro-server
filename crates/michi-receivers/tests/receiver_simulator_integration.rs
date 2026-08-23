@@ -175,8 +175,12 @@ async fn test_receiver_standard_full_lifecycle() {
         )
         .await
         .expect("session_start failed");
-    assert_eq!(sess_resp.status.as_deref(), Some("session_started"));
-    assert!(sess_resp.stream_port.is_some());
+    assert!(!sess_resp.session_id.is_empty());
+    assert!(sess_resp.stream_port >= 49152);
+    assert_eq!(sess_resp.lease_seconds, 30);
+    assert_eq!(sess_resp.sample_rate, 48000);
+    assert_eq!(sess_resp.bit_depth, 16);
+    assert_eq!(sess_resp.channels, 2);
 
     // Heartbeat
     let hb = mgr.heartbeat(&device_id).await.expect("heartbeat failed");
@@ -222,7 +226,9 @@ async fn test_receiver_hifi_full_lifecycle() {
         )
         .await
         .expect("session_start failed");
-    assert_eq!(sess_resp.status.as_deref(), Some("session_started"));
+    assert!(!sess_resp.session_id.is_empty());
+    assert!(sess_resp.stream_port >= 49152);
+    assert_eq!(sess_resp.lease_seconds, 30);
 
     let hb = mgr.heartbeat(&device_id).await.expect("heartbeat failed");
     assert_eq!(hb.status.as_deref(), Some("alive"));
@@ -429,7 +435,8 @@ async fn test_receiver_full_lifecycle_and_session_recovery() {
         .session_start(session_id, "pcm_s16le", 48000, 16, 2, 55800, 250, 75)
         .await
         .expect("session start failed");
-    assert_eq!(start_res.status.as_deref(), Some("session_started"));
+    assert!(!start_res.session_id.is_empty());
+    assert_eq!(start_res.lease_seconds, 30);
     assert!(
         client.active_session_token.is_some(),
         "session_token must be retained"
