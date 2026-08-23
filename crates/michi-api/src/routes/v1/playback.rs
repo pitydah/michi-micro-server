@@ -79,13 +79,40 @@ pub async fn playback_state_handler(
     })))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackRepeatMode {
+    Off,
+    One,
+    All,
+}
+
+impl PlaybackRepeatMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::One => "one",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PlaybackControlValue {
+    Integer(u64),
+    Repeat(PlaybackRepeatMode),
+    Boolean(bool),
+    Null,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlaybackControlBody {
     pub command: String,
-    pub value: Option<serde_json::Value>,
     pub position_ms: Option<u64>,
     pub volume: Option<u32>,
+    pub value: Option<PlaybackControlValue>,
 }
 
 pub async fn playback_control_handler(
@@ -116,91 +143,14 @@ pub async fn playback_control_handler(
         ));
     }
 
-    if let Some(val) = &body.value {
-        // Schema allows: null, integer >= 0, boolean, string enum ["off", "one", "all"]
-        match val {
-            serde_json::Value::Null | serde_json::Value::Bool(_) => {}
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    if i < 0 {
-                        return Err(v1_error_code(
-                            StatusCode::BAD_REQUEST,
-                            michi_link::MichiLinkErrorCode::InvalidRequest,
-                            "value numeric argument must be >= 0",
-                        ));
-                    }
-                } else if let Some(f) = n.as_f64() {
-                    if f < 0.0 {
-                        return Err(v1_error_code(
-                            StatusCode::BAD_REQUEST,
-                            michi_link::MichiLinkErrorCode::InvalidRequest,
-                            "value numeric argument must be >= 0",
-                        ));
-                    }
-                }
-            }
-            serde_json::Value::String(s) => {
-                // If it's for repeat, it must be off, one, all. Other string commands are rejected or parsed if track UUID
-                if cmd == "repeat" && s != "off" && s != "one" && s != "all" {
-                    return Err(v1_error_code(
-                        StatusCode::BAD_REQUEST,
-                        michi_link::MichiLinkErrorCode::InvalidRequest,
-                        "repeat value must be 'off', 'one', or 'all'",
-                    ));
-                }
-            }
-            serde_json::Value::Object(_) => {
-                // Value object containing structured parameters (e.g. { "track_id": "...", "position_ms": 100 })
-            }
-            _ => {
-                return Err(v1_error_code(
-                    StatusCode::BAD_REQUEST,
-                    michi_link::MichiLinkErrorCode::InvalidRequest,
-                    "invalid value type in PlaybackControl",
-                ));
-            }
-        }
-    }
-
     let mut current = state.playback_state.write().await;
 
     match cmd {
         "play" => {
-            if let Some(val) = &body.value {
-                let tid_str = val
-                    .get("track_id")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| val.as_str());
-                if let Some(track_id) = tid_str {
-                    let uid = Uuid::parse_str(track_id).map_err(|_| {
-                        v1_error_code(
-                            StatusCode::BAD_REQUEST,
-                            michi_link::MichiLinkErrorCode::InvalidRequest,
-                            "invalid track UUID format",
-                        )
-                    })?;
-                    let track = michi_db::get_track(&state.db, &uid).await.map_err(|e| {
-                        v1_error_code(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            michi_link::MichiLinkErrorCode::InternalError,
-                            &e.to_string(),
-                        )
-                    })?;
-                    if track.is_none() {
-                        return Err(v1_error_code(
-                            StatusCode::NOT_FOUND,
-                            michi_link::MichiLinkErrorCode::TrackNotFound,
-                            "track not found in library",
-                        ));
-                    }
-                    current.track_id = Some(uid);
-                }
-            }
             current.playing = true;
-            if let Some(pos) = body.position_ms.or_else(|| {
-                body.value
-                    .as_ref()
-                    .and_then(|v| v.get("position_ms").and_then(|p| p.as_u64()))
+            if let Some(pos) = body.position_ms.or(match body.value {
+                Some(PlaybackControlValue::Integer(ms)) => Some(ms),
+                _ => None,
             }) {
                 current.position_ms = pos;
             }
@@ -319,21 +269,17 @@ pub async fn playback_control_handler(
             current.position_ms = 0;
         }
         "seek" => {
-            if let Some(p) = body.position_ms.or_else(|| {
-                body.value
-                    .as_ref()
-                    .and_then(|v| v.get("position_ms").and_then(|p| p.as_u64()))
+            if let Some(p) = body.position_ms.or(match body.value {
+                Some(PlaybackControlValue::Integer(ms)) => Some(ms),
+                _ => None,
             }) {
                 current.position_ms = p;
             }
         }
         "set_volume" => {
-            let vol = body.volume.or_else(|| {
-                body.value.as_ref().and_then(|v| {
-                    v.get("volume")
-                        .and_then(|p| p.as_i64().or_else(|| p.as_f64().map(|f| f as i64)))
-                        .map(|v| v as u32)
-                })
+            let vol = body.volume.or(match body.value {
+                Some(PlaybackControlValue::Integer(v)) => Some(v as u32),
+                _ => None,
             });
             match vol {
                 Some(v) if v <= 100 => {
@@ -363,56 +309,26 @@ pub async fn playback_control_handler(
                 current.volume = 0.8;
             }
         }
-        "shuffle" => {
-            if let Some(val) = &body.value {
-                if let Some(shuf) = val.get("shuffle").and_then(|v| v.as_bool()) {
-                    current.shuffle = shuf;
-                } else if let Some(shuf) = val.as_bool() {
-                    current.shuffle = shuf;
-                } else {
-                    current.shuffle = !current.shuffle;
-                }
-            } else {
+        "shuffle" => match body.value {
+            Some(PlaybackControlValue::Boolean(shuf)) => {
+                current.shuffle = shuf;
+            }
+            _ => {
                 current.shuffle = !current.shuffle;
             }
-        }
-        "repeat" => {
-            if let Some(val) = &body.value {
-                let rep_str = val
-                    .get("repeat")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| val.as_str());
-                if let Some(rep) = rep_str {
-                    match rep {
-                        "off" => {
-                            current.repeat = "off".to_string();
-                        }
-                        "all" | "one" => {
-                            current.repeat = rep.to_string();
-                        }
-                        _ => {
-                            return Err(v1_error_code(
-                                StatusCode::BAD_REQUEST,
-                                michi_link::MichiLinkErrorCode::InvalidRequest,
-                                "repeat mode must be 'off', 'one', or 'all'",
-                            ));
-                        }
-                    }
-                } else {
-                    current.repeat = match current.repeat.as_str() {
-                        "off" => "all".into(),
-                        "all" => "one".into(),
-                        _ => "off".into(),
-                    };
-                }
-            } else {
+        },
+        "repeat" => match body.value {
+            Some(PlaybackControlValue::Repeat(rep)) => {
+                current.repeat = rep.as_str().to_string();
+            }
+            _ => {
                 current.repeat = match current.repeat.as_str() {
                     "off" => "all".into(),
                     "all" => "one".into(),
                     _ => "off".into(),
                 };
             }
-        }
+        },
         _ => {
             return Err(v1_error_code(
                 StatusCode::BAD_REQUEST,
@@ -715,4 +631,81 @@ pub async fn handoff_handler(
         "position_ms": body.position_ms,
         "playing": body.playing,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_playback_control_schema_valid_shapes() {
+        // 1. Repeat enum string: "off", "one", "all"
+        let json_repeat_off = r#"{"command": "repeat", "value": "off"}"#;
+        let parsed: PlaybackControlBody = serde_json::from_str(json_repeat_off).unwrap();
+        assert_eq!(parsed.command, "repeat");
+        assert_eq!(
+            parsed.value,
+            Some(PlaybackControlValue::Repeat(PlaybackRepeatMode::Off))
+        );
+
+        let json_repeat_all = r#"{"command": "repeat", "value": "all"}"#;
+        let parsed: PlaybackControlBody = serde_json::from_str(json_repeat_all).unwrap();
+        assert_eq!(
+            parsed.value,
+            Some(PlaybackControlValue::Repeat(PlaybackRepeatMode::All))
+        );
+
+        // 2. Integer value >= 0
+        let json_seek_val = r#"{"command": "seek", "value": 45000}"#;
+        let parsed: PlaybackControlBody = serde_json::from_str(json_seek_val).unwrap();
+        assert_eq!(parsed.value, Some(PlaybackControlValue::Integer(45000)));
+
+        // 3. Official position_ms and volume fields
+        let json_official = r#"{"command": "seek", "position_ms": 12000}"#;
+        let parsed: PlaybackControlBody = serde_json::from_str(json_official).unwrap();
+        assert_eq!(parsed.position_ms, Some(12000));
+        assert_eq!(parsed.value, None);
+
+        let json_vol = r#"{"command": "set_volume", "volume": 75}"#;
+        let parsed: PlaybackControlBody = serde_json::from_str(json_vol).unwrap();
+        assert_eq!(parsed.volume, Some(75));
+
+        // 4. Boolean value for shuffle
+        let json_shuf = r#"{"command": "shuffle", "value": true}"#;
+        let parsed: PlaybackControlBody = serde_json::from_str(json_shuf).unwrap();
+        assert_eq!(parsed.value, Some(PlaybackControlValue::Boolean(true)));
+
+        // 5. Null value (deserializes as None for Option<PlaybackControlValue>)
+        let json_null = r#"{"command": "toggle", "value": null}"#;
+        let parsed: PlaybackControlBody = serde_json::from_str(json_null).unwrap();
+        assert_eq!(parsed.value, None);
+    }
+
+    #[test]
+    fn test_playback_control_schema_rejects_invalid_shapes() {
+        // Reject object in value (strictly not in schema oneOf)
+        let json_obj = r#"{"command": "repeat", "value": {"repeat": "all"}}"#;
+        let err = serde_json::from_str::<PlaybackControlBody>(json_obj);
+        assert!(err.is_err(), "Must reject object in value");
+
+        // Reject float in value
+        let json_float = r#"{"command": "seek", "value": 12.5}"#;
+        let err = serde_json::from_str::<PlaybackControlBody>(json_float);
+        assert!(err.is_err(), "Must reject float in value");
+
+        // Reject negative integer in value
+        let json_neg = r#"{"command": "seek", "value": -100}"#;
+        let err = serde_json::from_str::<PlaybackControlBody>(json_neg);
+        assert!(err.is_err(), "Must reject negative integer in value");
+
+        // Reject non-canonical string enum in value
+        let json_bad_str = r#"{"command": "repeat", "value": "custom_repeat"}"#;
+        let err = serde_json::from_str::<PlaybackControlBody>(json_bad_str);
+        assert!(err.is_err(), "Must reject unknown string enum in value");
+
+        // Reject unknown top-level field (additionalProperties: false)
+        let json_unknown = r#"{"command": "play", "unknown_param": 123}"#;
+        let err = serde_json::from_str::<PlaybackControlBody>(json_unknown);
+        assert!(err.is_err(), "Must reject unknown top-level field");
+    }
 }
