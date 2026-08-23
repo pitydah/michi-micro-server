@@ -84,7 +84,8 @@ impl MichiConnect {
 
         let service_type = "_michi-link._tcp.local.";
         let instance_name = format!("Michi Micro Server ({})", &michi_id[..8]);
-        let service_hostname = format!("{hostname}.local.");
+        let safe_host_label = hostname.replace('.', "-");
+        let service_hostname = format!("{safe_host_label}.local.");
 
         let properties = [
             ("michi_id", michi_id.as_str()),
