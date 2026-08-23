@@ -68,7 +68,11 @@ async fn make_app_with_state() -> (axum::Router, SqlitePool, michi_api::AppState
     let pool = test_db().await;
     let config = test_config();
     let state = michi_api::AppState::new(config, pool.clone(), None);
-    (router_with_test_admin(state.clone(), &pool).await, pool, state)
+    (
+        router_with_test_admin(state.clone(), &pool).await,
+        pool,
+        state,
+    )
 }
 
 async fn router_with_test_admin(state: michi_api::AppState, pool: &SqlitePool) -> axum::Router {

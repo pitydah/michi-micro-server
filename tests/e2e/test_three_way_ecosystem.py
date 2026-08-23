@@ -144,174 +144,166 @@ def main():
         # PHASE 2: Mobile ➔ Micro Authentication
         # =====================================================================
         print("\n[Phase 2] Mobile ➔ Micro Authentication...")
-        auth_header = "Basic " + base64.b64encode(b"admin:admin123").decode("ascii")
-        headers = {"Authorization": auth_header}
+        status, login_data = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/auth/login", {
+            "username": "admin",
+            "password": "admin123"
+        })
+        assert status == 200, f"Login failed with status {status}: {login_data}"
+        session_token = login_data["token"]
+        headers = {"Authorization": f"Bearer {session_token}"}
 
         status, status_data = http_req("GET", f"http://127.0.0.1:{args.micro_port}/api/v1/status", headers=headers)
         assert status == 200, f"Authentication failed with status {status}"
         print("  ✅ Mobile authenticated with Micro Server")
 
         # =====================================================================
-        # PHASE 3: Micro ➔ Stream Receiver Pairing via Canonical Contract
+        # PHASE 3: Mobile ➔ Micro Receiver Discovery & Pairing
         # =====================================================================
-        print("\n[Phase 3] Micro ➔ Stream Receiver Pairing (Ed25519 + 6-digit PIN)...")
-        # Direct receiver client pairing check
+        print("\n[Phase 3] Mobile ➔ Micro: Pairing with Stream Standard...")
         std_url = f"http://127.0.0.1:{args.stream_std_port}"
-        status, pair_start = http_req("POST", f"{std_url}/api/v1/pair/start", {
-            "device_name": "Michi Micro Server",
-            "device_type": "server",
-            "roles": ["music_server"],
-            "auth_strategy": "RECEIVER_BUTTON",
-            "michi_id": "QlGQosQszLQse057MCaw32IAHXv-I5klmAAsbivIays",
-            "public_key": "KJN5aOu4gWhA0clmvmwqprYcwYI013vDNPx1jf90CpQ",
-            "challenge_nonce": "VFfZjzw8JeAM7-RFiTSrMA43434343434343",
-            "challenge_signature": "DTlMt9BYH_TnYgKAeGd8zTpza-w5b8BDm9AyIoAW2p0clD7JrzwN9cwPY5y48K14x_0z2TPq7-LTXdNTqmhr-w"
-        })
-        assert status == 200, f"Pair start failed: {status}"
-        session_id = pair_start["session_id"]
+        
+        # 1. Mobile requests Micro to start pairing with Stream Standard
+        status, pair_start = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/pair/start", {
+            "base_url": std_url,
+            "initiator_id": "mobile-client-1"
+        }, headers=headers)
+        assert status == 200, f"Pair start via Micro failed: {status}, data: {pair_start}"
+        pairing_id = pair_start["pairing_id"]
+        assert pairing_id is not None
+        print(f"  ✅ Micro initiated pairing with Stream Standard (pairing_id={pairing_id})")
 
-        status, pair_confirm = http_req("POST", f"{std_url}/api/v1/pair/confirm", {
+        # 2. Query Stream Simulator test-only endpoint for active PIN (simulating user looking at receiver display)
+        status, pin_info = http_req("GET", f"{std_url}/api/v1/test/active_pin")
+        assert status == 200
+        active_pin = pin_info.get("pin", "482391")
+
+        # 3. Mobile confirms pairing through Micro Server using the PIN
+        status, pair_confirm = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/pair/confirm", {
+            "pairing_id": pairing_id,
+            "pin": active_pin
+        }, headers=headers)
+        assert status == 200, f"Pair confirm via Micro failed: {status}, data: {pair_confirm}"
+        standard_device_id = pair_confirm["device_id"]
+        print(f"  ✅ Micro paired with Stream Standard: device_id={standard_device_id}")
+
+        # Verify receiver is listed in Micro registry
+        status, receivers_list = http_req("GET", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers", headers=headers)
+        assert status == 200
+        assert any(r.get("receiver_id") == standard_device_id and r.get("paired") for r in receivers_list.get("receivers", []))
+        print("  ✅ Receiver confirmed in Micro registry")
+
+        # =====================================================================
+        # PHASE 4: Mobile ➔ Micro: Start Remote Session & Stream Real PCM
+        # =====================================================================
+        print("\n[Phase 4] Mobile ➔ Micro: Start Session & Stream Real PCM via Micro Transport...")
+        session_id = "sess-ecosystem-e2e-1"
+        status, sess_start = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/{standard_device_id}/session/start", {
             "session_id": session_id,
-            "pin": "482391",
-            "michi_id": "QlGQosQszLQse057MCaw32IAHXv-I5klmAAsbivIays",
-            "public_key": "KJN5aOu4gWhA0clmvmwqprYcwYI013vDNPx1jf90CpQ"
-        })
-        assert status == 200, f"Pair confirm failed: {status}"
-        receiver_bearer = pair_confirm["token"]
-        assert receiver_bearer.startswith("tok_michi_")
-        print(f"  ✅ Paired with Standard Stream Receiver; issued Bearer token: {receiver_bearer[:18]}...")
-
-        # =====================================================================
-        # PHASE 4: Remote Output Target Selection & RTP Session Creation (201)
-        # =====================================================================
-        print("\n[Phase 4] Remote Output Target Session Creation (48kHz/16b PCM)...")
-        rec_headers = {"Authorization": f"Bearer {receiver_bearer}"}
-        status, sess_create = http_req("POST", f"{std_url}/api/v1/receiver-lite/session", {
-            "transport": "rtp_udp",
             "codec": "pcm_s16le",
             "sample_rate": 48000,
             "bit_depth": 16,
             "channels": 2,
-            "packet_ms": 10,
+            "stream_port": 50438,
             "buffer_ms": 120,
-            "payload_type": 97,
-            "ssrc": 305419896,
             "volume": 70
-        }, headers=rec_headers)
-        assert status == 201, f"Session create expected 201 Created, got {status}"
-        stream_session_id = sess_create["session_id"]
-        session_token = sess_create["session_token"]
-        stream_port = sess_create["effective"]["stream_port"]
-        assert stream_session_id is not None
-        assert session_token is not None
-        print(f"  ✅ Session created (201 Created): session_id={stream_session_id}, stream_port={stream_port}")
+        }, headers=headers)
+        assert status == 200, f"Session start via Micro failed: {status}, data: {sess_start}"
+        print(f"  ✅ Micro started active session to Stream Standard: {sess_start}")
 
-        # Send real RTP audio packets to stream_port and verify UDP delivery
-        rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # RFC 3550 RTP Packet (V=2, PT=97, seq=1, ts=480, ssrc=305419896, 960 bytes payload)
-        rtp_header = bytearray([0x80, 97, 0x00, 0x01, 0x00, 0x00, 0x01, 0xE0, 0x12, 0x34, 0x56, 0x78])
-        pcm_payload = bytearray([0] * 960) # 10ms silence S16LE
-        rtp_packet = rtp_header + pcm_payload
-        rtp_sock.sendto(rtp_packet, ("127.0.0.1", stream_port))
-        rtp_sock.close()
-        print(f"  ✅ Sent real RTP UDP packet (PT 97, 960 bytes PCM) to stream port {stream_port}")
+        # Micro Server transmits 50ms of real 480Hz sine wave PCM through its own RtpReceiverTransport
+        status, stream_res = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/{standard_device_id}/stream/test_pcm", {
+            "frequency_hz": 480.0,
+            "duration_ms": 50
+        }, headers=headers)
+        assert status == 200, f"Micro PCM streaming failed: {status}, data: {stream_res}"
+        bytes_sent = stream_res.get("bytes_sent", 0)
+        assert bytes_sent == 9600 # 50ms = 5 packets * 1920 bytes = 9600 bytes
+        print(f"  ✅ Micro Server streamed {bytes_sent} bytes of real RTP/UDP PCM to Stream Standard")
+
+        # Query Stream Standard Simulator test metrics to verify UDP arrival
+        time.sleep(0.2)
+        status, metrics = http_req("GET", f"{std_url}/api/v1/test/metrics")
+        assert status == 200
+        assert metrics["packets_received"] >= 5, f"Expected >=5 packets, got {metrics['packets_received']}"
+        assert metrics["last_payload_size"] == 1920, f"Expected 1920 bytes payload size, got {metrics['last_payload_size']}"
+        assert metrics["last_payload_type"] == 97, f"Expected PT 97, got {metrics['last_payload_type']}"
+        print(f"  ✅ Stream Standard Simulator verified reception of {metrics['packets_received']} RTP packets (size=1920, PT=97)")
 
         # =====================================================================
-        # PHASE 5: Volume Control & Monotonic Heartbeat
+        # PHASE 5: Mobile ➔ Micro: Volume Control & Heartbeats
         # =====================================================================
-        print("\n[Phase 5] Volume Mutation & Monotonic Heartbeats...")
-        session_headers = {
-            "Authorization": f"Bearer {receiver_bearer}",
-            "X-Michi-Session": session_token
-        }
-
-        # Set Volume to 85
-        status, vol_res = http_req("PATCH", f"{std_url}/api/v1/receiver-lite/session", {
+        print("\n[Phase 5] Mobile ➔ Micro: Volume Mutation & Heartbeats...")
+        # 1. Set volume to 85 via Micro Server
+        status, vol_res = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/{standard_device_id}/volume", {
             "volume": 85
-        }, headers=session_headers)
-        assert status == 200, f"Volume patch failed: {status}"
+        }, headers=headers)
+        assert status == 200, f"Volume set via Micro failed: {status}"
         assert vol_res.get("volume") == 85
-        print("  ✅ Volume patched to 85 on Stream Receiver")
+        print("  ✅ Volume set to 85 via Micro Server")
 
-        # Heartbeat 1 (seq = 1)
-        status, hb1 = http_req("POST", f"{std_url}/api/v1/receiver-lite/heartbeat", {
-            "session_id": stream_session_id,
-            "sequence": 1,
-            "sent_at_ms": int(time.time() * 1000)
-        }, headers=session_headers)
-        assert status == 200, f"Heartbeat 1 failed: {status}"
-        assert hb1.get("status") == "alive"
-
-        # Heartbeat 2 (seq = 2)
-        status, hb2 = http_req("POST", f"{std_url}/api/v1/receiver-lite/heartbeat", {
-            "session_id": stream_session_id,
-            "sequence": 2,
-            "sent_at_ms": int(time.time() * 1000)
-        }, headers=session_headers)
-        assert status == 200, f"Heartbeat 2 failed: {status}"
-
-        # Replay Heartbeat (seq = 2 again) -> must respond 409 CONFLICT
-        status, hb_replay = http_req("POST", f"{std_url}/api/v1/receiver-lite/heartbeat", {
-            "session_id": stream_session_id,
-            "sequence": 2,
-            "sent_at_ms": int(time.time() * 1000)
-        }, headers=session_headers)
-        assert status == 409, f"Expected 409 CONFLICT on replay heartbeat, got {status}"
-        print("  ✅ Heartbeats monotonic and replay rejected (409 CONFLICT)")
+        # 2. Trigger managed heartbeat via Micro Server
+        status, hb_res = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/{standard_device_id}/heartbeat", headers=headers)
+        assert status == 200, f"Heartbeat via Micro failed: {status}"
+        assert hb_res.get("status") == "alive"
+        print("  ✅ Heartbeat verified via Micro Server")
 
         # =====================================================================
-        # PHASE 6: Bidirectional Handoff (Stream Standard ➔ Stream Hi-Fi)
+        # PHASE 6: Mobile ➔ Micro: Output Handoff (Standard ➔ Hi-Fi)
         # =====================================================================
-        print("\n[Phase 6] Output Handoff (Stream Standard ➔ Stream Hi-Fi)...")
-        # 1. Tear down Standard session (DELETE -> 204 No Content)
-        status, _ = http_req("DELETE", f"{std_url}/api/v1/receiver-lite/session", headers=session_headers)
-        assert status == 204 or status == 200, f"Expected 204 No Content, got {status}"
-        print("  ✅ Session cleanly destroyed on Standard (204 No Content)")
+        print("\n[Phase 6] Mobile ➔ Micro: Output Handoff (Standard ➔ Hi-Fi)...")
+        # 1. Stop session on Standard via Micro Server
+        status, stop_res = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/{standard_device_id}/session/stop", headers=headers)
+        assert status == 200, f"Session stop via Micro failed: {status}"
+        print("  ✅ Standard session cleanly stopped via Micro Server")
 
-        # 2. Pair and start session on Hi-Fi
+        # 2. Pair with Stream Hi-Fi via Micro Server
         hifi_url = f"http://127.0.0.1:{args.stream_hifi_port}"
-        status, hifi_start = http_req("POST", f"{hifi_url}/api/v1/pair/start", {
-            "device_name": "Michi Micro Server",
-            "device_type": "server",
-            "roles": ["music_server"],
-            "auth_strategy": "RECEIVER_BUTTON",
-            "michi_id": "QlGQosQszLQse057MCaw32IAHXv-I5klmAAsbivIays",
-            "public_key": "KJN5aOu4gWhA0clmvmwqprYcwYI013vDNPx1jf90CpQ",
-            "challenge_nonce": "VFfZjzw8JeAM7-RFiTSrMA43434343434343",
-            "challenge_signature": "DTlMt9BYH_TnYgKAeGd8zTpza-w5b8BDm9AyIoAW2p0clD7JrzwN9cwPY5y48K14x_0z2TPq7-LTXdNTqmhr-w"
-        })
+        status, hifi_start = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/pair/start", {
+            "base_url": hifi_url,
+            "initiator_id": "mobile-client-1"
+        }, headers=headers)
         assert status == 200
-        hifi_sess_id = hifi_start["session_id"]
+        hifi_pairing_id = hifi_start["pairing_id"]
 
-        status, hifi_confirm = http_req("POST", f"{hifi_url}/api/v1/pair/confirm", {
-            "session_id": hifi_sess_id,
-            "pin": "482391",
-            "michi_id": "QlGQosQszLQse057MCaw32IAHXv-I5klmAAsbivIays",
-            "public_key": "KJN5aOu4gWhA0clmvmwqprYcwYI013vDNPx1jf90CpQ"
-        })
+        status, hifi_pin_info = http_req("GET", f"{hifi_url}/api/v1/test/active_pin")
         assert status == 200
-        hifi_bearer = hifi_confirm["token"]
+        hifi_pin = hifi_pin_info.get("pin", "482391")
 
-        status, hifi_sess = http_req("POST", f"{hifi_url}/api/v1/receiver-lite/session", {
-            "transport": "rtp_udp",
+        status, hifi_confirm = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/pair/confirm", {
+            "pairing_id": hifi_pairing_id,
+            "pin": hifi_pin
+        }, headers=headers)
+        assert status == 200
+        hifi_device_id = hifi_confirm["device_id"]
+        print(f"  ✅ Paired with Hi-Fi receiver: device_id={hifi_device_id}")
+
+        # 3. Start session on Hi-Fi via Micro Server
+        status, hifi_sess = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/{hifi_device_id}/session/start", {
+            "session_id": "sess-ecosystem-hifi-1",
             "codec": "pcm_s16le",
             "sample_rate": 48000,
             "bit_depth": 16,
             "channels": 2,
-            "packet_ms": 10,
+            "stream_port": 50439,
             "buffer_ms": 120,
-            "payload_type": 97,
-            "ssrc": 999111,
-            "volume": 60
-        }, headers={"Authorization": f"Bearer {hifi_bearer}"})
-        assert status == 201, f"Hi-Fi session create failed: {status}"
-        print("  ✅ Handoff to Hi-Fi Receiver complete (201 Created)")
+            "volume": 65
+        }, headers=headers)
+        assert status == 200, f"Hi-Fi session start failed: {status}"
+
+        # 4. Stream real PCM to Hi-Fi
+        status, hifi_stream = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/{hifi_device_id}/stream/test_pcm", {
+            "frequency_hz": 1000.0,
+            "duration_ms": 30
+        }, headers=headers)
+        assert status == 200
+        assert hifi_stream.get("bytes_sent") == 5760 # 30ms = 3 packets * 1920 bytes
+        print("  ✅ Real PCM streamed to Hi-Fi receiver via Micro Server")
 
         # =====================================================================
         # PHASE 7: Fault Injection & Recovery Resilience
         # =====================================================================
         print("\n[Phase 7] Fault Injection & Recovery Resilience...")
-        # Inject network drop on Hi-Fi receiver
+        # Inject network drop on Hi-Fi receiver simulator
         http_req("POST", f"{hifi_url}/api/v1/receiver/fault/network_drop", {"drop_count": 2})
 
         # Requests will drop twice then succeed
@@ -328,11 +320,9 @@ def main():
         # PHASE 8: Teardown
         # =====================================================================
         print("\n[Phase 8] Teardown & Final Health Check...")
-        hifi_headers = {
-            "Authorization": f"Bearer {hifi_bearer}",
-            "X-Michi-Session": hifi_sess["session_token"]
-        }
-        http_req("DELETE", f"{hifi_url}/api/v1/receiver-lite/session", headers=hifi_headers)
+        status, _ = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/{hifi_device_id}/session/stop", headers=headers)
+        assert status == 200, "Hi-Fi session teardown should succeed"
+
         status, s = http_req("GET", f"http://127.0.0.1:{args.micro_port}/api/v1/status", headers=headers)
         assert status == 200
         print("  ✅ Final health check PASS")

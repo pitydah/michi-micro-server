@@ -435,7 +435,7 @@ pub async fn sync_state_handler(
         queue_position: None,
         device_id: None,
         shuffle: false,
-        repeat: "none".into(),
+        repeat: "off".into(),
     };
 
     {

@@ -130,6 +130,7 @@ pub async fn receivers_handler(
                 .unwrap_or(false);
             serde_json::json!({
                 "id": e.receiver_id,
+                "receiver_id": e.receiver_id,
                 "name": e.name,
                 "device_type": e.device_type,
                 "host": e.base_url,
@@ -362,6 +363,50 @@ pub async fn receiver_heartbeat_handler(
             serde_json::json!({ "status": resp.status, "uptime_seconds": resp.uptime_seconds }),
         )),
         Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "HEARTBEAT_FAILED", &e)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReceiverTestPcmBody {
+    pub pcm_base64: Option<String>,
+    pub frequency_hz: Option<f32>,
+    pub duration_ms: Option<usize>,
+}
+
+pub async fn receiver_stream_test_pcm_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ReceiverTestPcmBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let pcm_bytes = if let Some(ref b64) = body.pcm_base64 {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| v1_error(StatusCode::BAD_REQUEST, "INVALID_BASE64", &e.to_string()))?
+    } else {
+        let freq = body.frequency_hz.unwrap_or(440.0);
+        let ms = body.duration_ms.unwrap_or(20);
+        let frames = (48000 * ms) / 1000;
+        let mut bytes = Vec::with_capacity(frames * 4);
+        for i in 0..frames {
+            let t = (i as f32) / 48000.0;
+            let sample_f = (2.0 * std::f32::consts::PI * freq * t).sin();
+            let sample_i = (sample_f * 16384.0) as i16;
+            let le = sample_i.to_le_bytes();
+            // Stereo
+            bytes.extend_from_slice(&le);
+            bytes.extend_from_slice(&le);
+        }
+        bytes
+    };
+
+    match state.receiver_manager.send_test_pcm(&id, &pcm_bytes).await {
+        Ok(bytes_sent) => Ok(Json(serde_json::json!({
+            "status": "pcm_streamed",
+            "bytes_sent": bytes_sent,
+            "receiver_id": id,
+        }))),
+        Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "STREAM_PCM_FAILED", &e)),
     }
 }
 

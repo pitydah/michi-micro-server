@@ -5,15 +5,27 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::ReceiverClient;
 use crate::models::*;
+use crate::transport::{AudioTransport, RtpReceiverTransport, TransportStreamConfig};
+
+pub type SharedAudioTransport = Arc<tokio::sync::Mutex<Box<dyn AudioTransport>>>;
 
 /// Manages receiver sessions: pairing, heartbeat, session start/stop, volume.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ReceiverSessionManager {
     registry: Arc<RwLock<ReceiverRegistry>>,
     identity: Option<Arc<michi_identity::IdentityManager>>,
     pending_pairings: Arc<RwLock<HashMap<String, PendingReceiverPairing>>>,
     active_sessions: Arc<RwLock<HashMap<String, ReceiverActiveSession>>>,
+    active_transports: Arc<RwLock<HashMap<String, SharedAudioTransport>>>,
     heartbeat_tokens: Arc<RwLock<HashMap<String, CancellationToken>>>,
+}
+
+impl std::fmt::Debug for ReceiverSessionManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceiverSessionManager")
+            .field("identity", &self.identity.is_some())
+            .finish()
+    }
 }
 
 impl ReceiverSessionManager {
@@ -23,6 +35,7 @@ impl ReceiverSessionManager {
             identity: None,
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
+            active_transports: Arc::new(RwLock::new(HashMap::new())),
             heartbeat_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -33,6 +46,7 @@ impl ReceiverSessionManager {
             identity: Some(identity),
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
+            active_transports: Arc::new(RwLock::new(HashMap::new())),
             heartbeat_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -43,6 +57,7 @@ impl ReceiverSessionManager {
             identity: None,
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
+            active_transports: Arc::new(RwLock::new(HashMap::new())),
             heartbeat_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -57,6 +72,17 @@ impl ReceiverSessionManager {
 
     pub async fn active_sessions(&self) -> Arc<RwLock<HashMap<String, ReceiverActiveSession>>> {
         self.active_sessions.clone()
+    }
+
+    pub async fn get_transport(
+        &self,
+        receiver_id: &str,
+    ) -> Option<Arc<tokio::sync::Mutex<Box<dyn AudioTransport>>>> {
+        self.active_transports
+            .read()
+            .await
+            .get(receiver_id)
+            .cloned()
     }
 
     pub async fn get_active_session(&self, receiver_id: &str) -> Option<ReceiverActiveSession> {
@@ -78,18 +104,32 @@ impl ReceiverSessionManager {
         let start_resp = client.pair_start(initiator_id).await?;
         let pair_session_id = if let Some(ref s_id) = start_resp.session_id {
             s_id.clone()
-        } else if let Some(ref n) = start_resp.nonce {
-            n.clone()
         } else if let Some(ref err) = start_resp.error {
             return Err(format!("pair_start failed: {}: {}", err.code, err.message));
         } else {
-            return Err("no session_id in pair_start response".to_string());
+            return Err(
+                "INVALID_RECEIVER_RESPONSE: session_id is required in pair_start response"
+                    .to_string(),
+            );
+        };
+
+        let now = chrono::Utc::now();
+        let expires_at = if let Some(ref exp_str) = start_resp.expires_at {
+            chrono::DateTime::parse_from_rfc3339(exp_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| {
+                    format!(
+                        "INVALID_RECEIVER_RESPONSE: invalid RFC3339 expires_at '{exp_str}': {e}"
+                    )
+                })?
+        } else {
+            return Err(
+                "INVALID_RECEIVER_RESPONSE: expires_at is required in pair_start response"
+                    .to_string(),
+            );
         };
 
         let pairing_id = uuid::Uuid::new_v4().to_string();
-        let now = chrono::Utc::now();
-        let expires_in_secs = start_resp.expires_in.unwrap_or(start_resp.pairing_window_seconds.unwrap_or(60));
-        let expires_at = now + chrono::Duration::seconds(expires_in_secs as i64);
 
         let pending = PendingReceiverPairing {
             pairing_id: pairing_id.clone(),
@@ -112,18 +152,16 @@ impl ReceiverSessionManager {
     }
 
     /// Step 2 of receiver pairing: Confirm pairing using the pairing_id and PIN entered by user.
-    pub async fn confirm_pairing(
-        &self,
-        pairing_id: &str,
-        pin: &str,
-    ) -> Result<String, String> {
+    pub async fn confirm_pairing(&self, pairing_id: &str, pin: &str) -> Result<String, String> {
         let pending = {
-            let mut p = self.pending_pairings.write().await;
-            p.remove(pairing_id)
+            let p = self.pending_pairings.read().await;
+            p.get(pairing_id).cloned()
         }
         .ok_or_else(|| "pairing session not found or expired".to_string())?;
 
         if chrono::Utc::now() > pending.expires_at {
+            let mut p = self.pending_pairings.write().await;
+            p.remove(pairing_id);
             return Err("pairing session expired".to_string());
         }
 
@@ -139,10 +177,35 @@ impl ReceiverSessionManager {
                 &pending.initiator_id,
                 pin,
             )
-            .await?;
+            .await;
+
+        let confirm_resp = match confirm_resp {
+            Ok(resp) => resp,
+            Err(e) => {
+                // If it's expired, remove pending; if it's retryable (e.g. wrong PIN), keep pending
+                if e.contains("408") || e.contains("expired") {
+                    let mut p = self.pending_pairings.write().await;
+                    p.remove(pairing_id);
+                }
+                return Err(e);
+            }
+        };
 
         if let Some(ref err) = confirm_resp.error {
-            return Err(format!("pair_confirm failed: {}: {}", err.code, err.message));
+            if err.code.contains("EXPIRED") {
+                let mut p = self.pending_pairings.write().await;
+                p.remove(pairing_id);
+            }
+            return Err(format!(
+                "pair_confirm failed: {}: {}",
+                err.code, err.message
+            ));
+        }
+
+        // On successful confirmation, clean up pending pairing
+        {
+            let mut p = self.pending_pairings.write().await;
+            p.remove(pairing_id);
         }
 
         let info = pending.receiver_info;
@@ -164,27 +227,44 @@ impl ReceiverSessionManager {
             let srs: Vec<u32> = audio
                 .get("sample_rates")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as u32)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_u64().map(|n| n as u32))
+                        .collect()
+                })
                 .filter(|v: &Vec<u32>| !v.is_empty())
                 .ok_or_else(|| "receiver capabilities missing valid sample_rates".to_string())?;
 
             let bds: Vec<u32> = audio
                 .get("bit_depths")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as u32)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_u64().map(|n| n as u32))
+                        .collect()
+                })
                 .filter(|v: &Vec<u32>| !v.is_empty())
                 .ok_or_else(|| "receiver capabilities missing valid bit_depths".to_string())?;
 
             let chs: Vec<u8> = audio
                 .get("channels")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect())
-                .unwrap_or_else(|| vec![2]);
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_u64().map(|n| n as u8))
+                        .collect()
+                })
+                .filter(|v: &Vec<u8>| !v.is_empty())
+                .ok_or_else(|| "receiver capabilities missing valid channels".to_string())?;
 
             let cds: Vec<String> = audio
                 .get("codecs")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .filter(|v: &Vec<String>| !v.is_empty())
                 .ok_or_else(|| "receiver capabilities missing valid audio codecs".to_string())?;
 
@@ -193,11 +273,13 @@ impl ReceiverSessionManager {
             let max_sr = output
                 .get("max_sample_rate")
                 .and_then(|v| v.as_u64())
-                .ok_or_else(|| "receiver output missing valid max_sample_rate".to_string())? as u32;
+                .ok_or_else(|| "receiver output missing valid max_sample_rate".to_string())?
+                as u32;
             let max_bd = output
                 .get("max_bit_depth")
                 .and_then(|v| v.as_u64())
-                .ok_or_else(|| "receiver output missing valid max_bit_depth".to_string())? as u32;
+                .ok_or_else(|| "receiver output missing valid max_bit_depth".to_string())?
+                as u32;
             let cds = info
                 .supported_codecs
                 .clone()
@@ -205,7 +287,10 @@ impl ReceiverSessionManager {
                 .ok_or_else(|| "receiver output missing supported_codecs".to_string())?;
             (vec![max_sr], vec![max_bd], vec![2], cds)
         } else {
-            return Err("receiver failed capability negotiation: no audio/output specifications found".to_string());
+            return Err(
+                "receiver failed capability negotiation: no audio/output specifications found"
+                    .to_string(),
+            );
         };
 
         let max_sr = *sample_rates.iter().max().unwrap_or(&48000);
@@ -281,7 +366,9 @@ impl ReceiverSessionManager {
         .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
 
         // ── Discrete Capability Negotiation (SERVER_CAPS ∩ RECEIVER_CAPS) ──
-        if !entry.supported_sample_rates.is_empty() && !entry.supported_sample_rates.contains(&sample_rate) {
+        if !entry.supported_sample_rates.is_empty()
+            && !entry.supported_sample_rates.contains(&sample_rate)
+        {
             return Err(format!(
                 "requested sample rate {sample_rate} is not in receiver supported rates {:?}",
                 entry.supported_sample_rates
@@ -293,7 +380,9 @@ impl ReceiverSessionManager {
             ));
         }
 
-        if !entry.supported_bit_depths.is_empty() && !entry.supported_bit_depths.contains(&bit_depth) {
+        if !entry.supported_bit_depths.is_empty()
+            && !entry.supported_bit_depths.contains(&bit_depth)
+        {
             return Err(format!(
                 "requested bit depth {bit_depth} is not in receiver supported depths {:?}",
                 entry.supported_bit_depths
@@ -305,14 +394,17 @@ impl ReceiverSessionManager {
             ));
         }
 
-        if !entry.supported_channels.is_empty() && !entry.supported_channels.contains(&(channels as u8)) {
+        if !entry.supported_channels.is_empty()
+            && !entry.supported_channels.contains(&(channels as u8))
+        {
             return Err(format!(
                 "requested channel count {channels} is not in receiver supported channels {:?}",
                 entry.supported_channels
             ));
         }
 
-        if !entry.supported_codecs.is_empty() && !entry.supported_codecs.iter().any(|c| c == codec) {
+        if !entry.supported_codecs.is_empty() && !entry.supported_codecs.iter().any(|c| c == codec)
+        {
             return Err(format!(
                 "requested codec {codec} is not supported by receiver (supported: {:?})",
                 entry.supported_codecs
@@ -351,9 +443,45 @@ impl ReceiverSessionManager {
             .session_id
             .clone()
             .unwrap_or_else(|| session_id.to_string());
-        let session_token = resp.session_token.clone().or(client.active_session_token.clone());
+        let session_token = resp
+            .session_token
+            .clone()
+            .or(client.active_session_token.clone());
         let effective_port = resp.stream_port.unwrap_or(stream_port);
         let lease_seconds = resp.lease_seconds.unwrap_or(30);
+
+        // Derive single source of truth for SSRC from effective response if present
+        let ssrc = resp
+            .effective
+            .as_ref()
+            .and_then(|eff| eff.get("ssrc").and_then(|v| v.as_u64()).map(|s| s as u32))
+            .unwrap_or_else(|| rand::random::<u32>().max(1));
+
+        // Create and start RtpReceiverTransport targeting receiver_host:effective_port
+        let host = base_url
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .split(':')
+            .next()
+            .unwrap_or("127.0.0.1");
+        let target_addr = format!("{host}:{effective_port}");
+
+        let mut transport = RtpReceiverTransport::new(&target_addr, ssrc);
+        let config = TransportStreamConfig {
+            codec: codec.to_string(),
+            sample_rate,
+            bit_depth,
+            channels: channels as u8,
+            packet_ms: 10,
+        };
+
+        if let Err(e) = transport.start(config).await {
+            // Best effort close remote receiver session if transport cannot start
+            let _ = client.session_stop().await;
+            return Err(format!(
+                "failed to initialize audio transport to {target_addr}: {e}"
+            ));
+        }
 
         // Store authoritative active session in manager RAM
         let active_sess = ReceiverActiveSession {
@@ -370,7 +498,8 @@ impl ReceiverSessionManager {
             negotiated_bit_depth: bit_depth,
             negotiated_channels: channels,
             payload_type: 97,
-            ssrc: rand::random::<u32>().max(1),
+            ssrc,
+            state: ReceiverActiveSessionState::Active,
             created_at: chrono::Utc::now(),
             last_heartbeat: chrono::Utc::now(),
         };
@@ -378,6 +507,14 @@ impl ReceiverSessionManager {
         {
             let mut sessions = self.active_sessions.write().await;
             sessions.insert(receiver_id.to_string(), active_sess);
+        }
+
+        {
+            let mut transports = self.active_transports.write().await;
+            transports.insert(
+                receiver_id.to_string(),
+                Arc::new(tokio::sync::Mutex::new(Box::new(transport))),
+            );
         }
 
         {
@@ -411,7 +548,7 @@ impl ReceiverSessionManager {
 
         let mgr = self.clone();
         let rec_id = receiver_id.to_string();
-        let interval_secs = (lease_seconds / 3).max(2).min(10);
+        let interval_secs = (lease_seconds / 3).clamp(2, 10);
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
@@ -431,6 +568,16 @@ impl ReceiverSessionManager {
     }
 
     pub async fn stop_session(&self, receiver_id: &str) -> Result<SessionStopResponse, String> {
+        // Fail-fast if no active session exists
+        let active_sess = {
+            let mut sessions = self.active_sessions.write().await;
+            let sess = sessions.get_mut(receiver_id).ok_or_else(|| {
+                "NoActiveSession: cannot stop receiver session when none is active".to_string()
+            })?;
+            sess.state = ReceiverActiveSessionState::Closing;
+            sess.clone()
+        };
+
         // Cancel heartbeat task immediately
         {
             let mut tokens = self.heartbeat_tokens.write().await;
@@ -439,16 +586,17 @@ impl ReceiverSessionManager {
             }
         }
 
+        // Stop audio transport
+        if let Some(transport_lock) = self.active_transports.write().await.remove(receiver_id) {
+            let mut tr = transport_lock.lock().await;
+            let _ = tr.pause().await;
+        }
+
         let entry = {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
         }
         .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
-
-        let active_sess = {
-            let mut sessions = self.active_sessions.write().await;
-            sessions.remove(receiver_id)
-        };
 
         let mut client = if let Some(ref id) = self.identity {
             ReceiverClient::with_identity(&entry.base_url, id.clone())
@@ -456,12 +604,26 @@ impl ReceiverSessionManager {
             ReceiverClient::new(&entry.base_url)
         };
         client.token = entry.token.clone();
-        if let Some(ref sess) = active_sess {
-            client.active_session_id = Some(sess.receiver_session_id.clone());
-            client.active_session_token = sess.session_token.clone();
-        }
+        client.active_session_id = Some(active_sess.receiver_session_id.clone());
+        client.active_session_token = active_sess.session_token.clone();
 
-        let resp = client.session_stop().await?;
+        let resp = match client.session_stop().await {
+            Ok(r) => r,
+            Err(e) => {
+                // Keep session marked Failed/Closing in RAM for retryability
+                let mut sessions = self.active_sessions.write().await;
+                if let Some(sess) = sessions.get_mut(receiver_id) {
+                    sess.state = ReceiverActiveSessionState::Failed;
+                }
+                return Err(e);
+            }
+        };
+
+        // On successful remote teardown, remove active session and update registry
+        {
+            let mut sessions = self.active_sessions.write().await;
+            sessions.remove(receiver_id);
+        }
 
         {
             let mut reg = self.registry.write().await;
@@ -487,7 +649,9 @@ impl ReceiverSessionManager {
 
         let active_sess = {
             let sessions = self.active_sessions.read().await;
-            sessions.get(receiver_id).cloned()
+            sessions.get(receiver_id).cloned().ok_or_else(|| {
+                "NoActiveSession: cannot set volume without active session".to_string()
+            })?
         };
 
         let mut client = if let Some(ref id) = self.identity {
@@ -496,10 +660,8 @@ impl ReceiverSessionManager {
             ReceiverClient::new(&entry.base_url)
         };
         client.token = entry.token.clone();
-        if let Some(ref sess) = active_sess {
-            client.active_session_id = Some(sess.receiver_session_id.clone());
-            client.active_session_token = sess.session_token.clone();
-        }
+        client.active_session_id = Some(active_sess.receiver_session_id.clone());
+        client.active_session_token = active_sess.session_token.clone();
         client.set_volume(volume).await
     }
 
@@ -512,7 +674,9 @@ impl ReceiverSessionManager {
 
         let active_sess = {
             let sessions = self.active_sessions.read().await;
-            sessions.get(receiver_id).cloned()
+            sessions.get(receiver_id).cloned().ok_or_else(|| {
+                "NoActiveSession: cannot heartbeat without active session".to_string()
+            })?
         };
 
         let mut client = if let Some(ref id) = self.identity {
@@ -521,11 +685,12 @@ impl ReceiverSessionManager {
             ReceiverClient::new(&entry.base_url)
         };
         client.token = entry.token.clone();
-        if let Some(ref sess) = active_sess {
-            client.active_session_id = Some(sess.receiver_session_id.clone());
-            client.active_session_token = sess.session_token.clone();
-            client.heartbeat_sequence.store(sess.heartbeat_sequence, std::sync::atomic::Ordering::SeqCst);
-        }
+        client.active_session_id = Some(active_sess.receiver_session_id.clone());
+        client.active_session_token = active_sess.session_token.clone();
+        client.heartbeat_sequence.store(
+            active_sess.heartbeat_sequence,
+            std::sync::atomic::Ordering::SeqCst,
+        );
 
         let resp = client.heartbeat().await?;
 
@@ -561,6 +726,19 @@ impl ReceiverSessionManager {
             ReceiverClient::new(&entry.base_url)
         };
         client.get_info().await
+    }
+
+    /// Internal & test-only method to stream synthetic PCM audio frames through the active RTP transport
+    pub async fn send_test_pcm(&self, receiver_id: &str, pcm_data: &[u8]) -> Result<usize, String> {
+        let transport_lock = self
+            .get_transport(receiver_id)
+            .await
+            .ok_or_else(|| format!("NoActiveTransport for receiver {receiver_id}"))?;
+
+        let mut tr = transport_lock.lock().await;
+        tr.write_pcm(pcm_data)
+            .await
+            .map_err(|e| format!("write_pcm failed: {e:?}"))
     }
 }
 
@@ -613,7 +791,9 @@ mod tests {
 
         assert!(res.is_err());
         let err = res.unwrap_err();
-        assert!(err.contains("requested sample rate 96000 is not in receiver supported rates [48000]"));
+        assert!(
+            err.contains("requested sample rate 96000 is not in receiver supported rates [48000]")
+        );
     }
 
     #[tokio::test]
@@ -656,5 +836,89 @@ mod tests {
         assert!(res.is_err());
         let err = res.unwrap_err();
         assert!(err.contains("requested codec flac is not supported by receiver"));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_without_session_fails_locally() {
+        let mgr = ReceiverSessionManager::new();
+        let entry = ReceiverRegistryEntry {
+            receiver_id: "rec-test-3".into(),
+            name: "Test".into(),
+            device_type: "standard".into(),
+            base_url: "http://127.0.0.1:9999".into(),
+            paired: true,
+            token: None,
+            last_seen: None,
+            capabilities: vec![],
+            active_session_id: None,
+            max_sample_rate: 48000,
+            max_bit_depth: 16,
+            supported_codecs: vec!["pcm_s16le".into()],
+            supported_sample_rates: vec![48000],
+            supported_bit_depths: vec![16],
+            supported_channels: vec![2],
+            maximum_safe_volume: Some(100),
+        };
+        mgr.registry.write().await.add(entry);
+
+        let res = mgr.heartbeat("rec-test-3").await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("NoActiveSession"));
+    }
+
+    #[tokio::test]
+    async fn volume_without_session_fails_locally() {
+        let mgr = ReceiverSessionManager::new();
+        let entry = ReceiverRegistryEntry {
+            receiver_id: "rec-test-4".into(),
+            name: "Test".into(),
+            device_type: "standard".into(),
+            base_url: "http://127.0.0.1:9999".into(),
+            paired: true,
+            token: None,
+            last_seen: None,
+            capabilities: vec![],
+            active_session_id: None,
+            max_sample_rate: 48000,
+            max_bit_depth: 16,
+            supported_codecs: vec!["pcm_s16le".into()],
+            supported_sample_rates: vec![48000],
+            supported_bit_depths: vec![16],
+            supported_channels: vec![2],
+            maximum_safe_volume: Some(100),
+        };
+        mgr.registry.write().await.add(entry);
+
+        let res = mgr.set_volume("rec-test-4", 80).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("NoActiveSession"));
+    }
+
+    #[tokio::test]
+    async fn stop_without_session_fails_locally() {
+        let mgr = ReceiverSessionManager::new();
+        let entry = ReceiverRegistryEntry {
+            receiver_id: "rec-test-5".into(),
+            name: "Test".into(),
+            device_type: "standard".into(),
+            base_url: "http://127.0.0.1:9999".into(),
+            paired: true,
+            token: None,
+            last_seen: None,
+            capabilities: vec![],
+            active_session_id: None,
+            max_sample_rate: 48000,
+            max_bit_depth: 16,
+            supported_codecs: vec!["pcm_s16le".into()],
+            supported_sample_rates: vec![48000],
+            supported_bit_depths: vec![16],
+            supported_channels: vec![2],
+            maximum_safe_volume: Some(100),
+        };
+        mgr.registry.write().await.add(entry);
+
+        let res = mgr.stop_session("rec-test-5").await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("NoActiveSession"));
     }
 }

@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::AppState;
-use michi_identity::{IdentityError, PairConfirmRequest, PairConfirmResponse, PairStartRequest, PairStartResponse};
+use michi_identity::{
+    IdentityError, PairConfirmRequest, PairConfirmResponse, PairStartRequest, PairStartResponse,
+};
 use michi_link::{
     generate_device_token, hash_token,
     models::{TokenRefreshRequest, TokenRefreshResponse},
@@ -42,7 +44,11 @@ fn v1_error(
 }
 
 fn v1_internal_error(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
-    v1_error_code(StatusCode::INTERNAL_SERVER_ERROR, michi_link::MichiLinkErrorCode::InternalError, msg)
+    v1_error_code(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        michi_link::MichiLinkErrorCode::InternalError,
+        msg,
+    )
 }
 
 /// Map canonical `IdentityError` to the v1 error envelope.
@@ -255,7 +261,11 @@ pub async fn link_pair_confirm(
         .await;
 
     // Clear session display observer on successful confirm
-    state.pairing_sessions_display.write().await.remove(&body.session_id.to_string());
+    state
+        .pairing_sessions_display
+        .write()
+        .await
+        .remove(&body.session_id.to_string());
 
     Ok(Json(PairConfirmResponse {
         token: device_token,

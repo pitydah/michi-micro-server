@@ -68,6 +68,13 @@ pub struct PendingReceiverPairing {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReceiverActiveSessionState {
+    Active,
+    Closing,
+    Failed,
+}
+
 /// RAM-only active session authority for an active receiver stream.
 #[derive(Debug, Clone)]
 pub struct ReceiverActiveSession {
@@ -85,22 +92,21 @@ pub struct ReceiverActiveSession {
     pub negotiated_channels: u32,
     pub payload_type: u8,
     pub ssrc: u32,
+    pub state: ReceiverActiveSessionState,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_heartbeat: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairStartResponse {
-    pub status: Option<String>,
     pub session_id: Option<String>,
     pub expires_at: Option<String>,
     pub attempts_remaining: Option<u32>,
     pub server_michi_id: Option<String>,
     pub server_public_key: Option<String>,
-    pub device_id: Option<String>,
-    pub pairing_window_seconds: Option<u64>,
-    pub expires_in: Option<u64>,
-    pub nonce: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
     pub error: Option<ErrorBody>,
 }
 

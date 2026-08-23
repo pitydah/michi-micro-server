@@ -1189,7 +1189,11 @@ async fn test_server_info_canonical_roles_contract() {
                 if path.extension().and_then(|s| s.to_str()) == Some("json") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                            if let Some(id) = json.get("$id").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+                            if let Some(id) = json
+                                .get("$id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                            {
                                 if let Ok(resource) = jsonschema::Resource::from_contents(json) {
                                     let _ = options.with_resource(id, resource);
                                 }
@@ -1200,15 +1204,19 @@ async fn test_server_info_canonical_roles_contract() {
             }
         }
 
-        let validator = options.build(&schema_json).expect("valid schema compilation");
+        let validator = options
+            .build(&schema_json)
+            .expect("valid schema compilation");
         let mut errors: Vec<String> = Vec::new();
         for error in validator.iter_errors(&body_clone) {
-            errors.push(format!("JSON schema validation error at {}: {}", error.instance_path, error));
+            errors.push(format!(
+                "JSON schema validation error at {}: {}",
+                error.instance_path, error
+            ));
         }
         assert!(
             errors.is_empty(),
-            "GET /api/v1/server/info broke canonical Michi Link JSON Schema:\n{:#?}",
-            errors
+            "GET /api/v1/server/info broke canonical Michi Link JSON Schema:\n{errors:#?}"
         );
     })
     .await
@@ -1266,7 +1274,10 @@ async fn test_pair_start_response_must_not_contain_pin() {
 
     // Verify local observer did capture the PIN safely in memory
     let captured_pin = state.pairing_display.read().await;
-    assert!(captured_pin.is_some(), "PIN must be recorded in local display observer");
+    assert!(
+        captured_pin.is_some(),
+        "PIN must be recorded in local display observer"
+    );
     assert_eq!(captured_pin.as_ref().unwrap().len(), 6);
 }
 
@@ -1274,12 +1285,18 @@ async fn test_pair_start_response_must_not_contain_pin() {
 #[tokio::test]
 async fn test_receiver_client_uses_persistent_identity_and_signs_raw_nonce() {
     let dir = std::env::temp_dir().join(format!("michi-test-server-id-{}", Uuid::new_v4()));
-    let identity = Arc::new(michi_identity::IdentityManager::generate(&dir, "Michi Micro Server", "").unwrap());
+    let identity = Arc::new(
+        michi_identity::IdentityManager::generate(&dir, "Michi Micro Server", "").unwrap(),
+    );
 
-    let client = michi_receivers::ReceiverClient::with_identity("http://127.0.0.1:9090", identity.clone());
+    let client =
+        michi_receivers::ReceiverClient::with_identity("http://127.0.0.1:9090", identity.clone());
 
     // Verify identity on client matches persistent server identity
-    assert_eq!(client.identity.as_ref().unwrap().michi_id().to_base64url(), identity.michi_id().to_base64url());
+    assert_eq!(
+        client.identity.as_ref().unwrap().michi_id().to_base64url(),
+        identity.michi_id().to_base64url()
+    );
 
     // Verify raw nonce signing matches Ed25519 signature over binary bytes (not ASCII base64)
     let nonce_raw: [u8; 32] = [99u8; 32];
@@ -1287,11 +1304,18 @@ async fn test_receiver_client_uses_persistent_identity_and_signs_raw_nonce() {
     assert_eq!(pk_b64, identity.public_key_base64url());
 
     // Validate signature verification succeeds over RAW bytes
-    let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&sig_b64).unwrap();
-    let pk_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&pk_b64).unwrap();
+    let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&sig_b64)
+        .unwrap();
+    let pk_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&pk_b64)
+        .unwrap();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes.try_into().unwrap()).unwrap();
     let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes.try_into().unwrap());
-    assert!(vk.verify_strict(&nonce_raw, &sig).is_ok(), "Signature must verify over RAW nonce bytes");
+    assert!(
+        vk.verify_strict(&nonce_raw, &sig).is_ok(),
+        "Signature must verify over RAW nonce bytes"
+    );
 
     // Negative assertion: signature over ASCII base64 representation MUST FAIL verification
     let ascii_nonce_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce_raw);
@@ -1307,16 +1331,21 @@ async fn micro_identity_persists_across_restart() {
     let dir = std::env::temp_dir().join(format!("michi-test-persist-{}", Uuid::new_v4()));
     let _ = std::fs::create_dir_all(&dir);
 
-    let id1 = michi_identity::IdentityManager::load_or_generate(&dir, "Michi Micro Server", "").unwrap();
+    let id1 =
+        michi_identity::IdentityManager::load_or_generate(&dir, "Michi Micro Server", "").unwrap();
     let michi_id1 = id1.michi_id().to_base64url();
     let pk1 = id1.public_key_base64url();
 
     // Reload from the same directory without re-generating
-    let id2 = michi_identity::IdentityManager::load_or_generate(&dir, "Michi Micro Server", "").unwrap();
+    let id2 =
+        michi_identity::IdentityManager::load_or_generate(&dir, "Michi Micro Server", "").unwrap();
     let michi_id2 = id2.michi_id().to_base64url();
     let pk2 = id2.public_key_base64url();
 
-    assert_eq!(michi_id1, michi_id2, "michi_id must be identical across reloads");
+    assert_eq!(
+        michi_id1, michi_id2,
+        "michi_id must be identical across reloads"
+    );
     assert_eq!(pk1, pk2, "public_key must be identical across reloads");
 }
 
@@ -1364,7 +1393,12 @@ async fn test_three_way_integration_e2e_flow() {
     let session_id = start_json["session_id"].as_str().unwrap();
 
     // 3. User observes PIN on Micro Server display observer and inputs into Mobile
-    let observed_pin = state.pairing_display.read().await.clone().expect("PIN on observer");
+    let observed_pin = state
+        .pairing_display
+        .read()
+        .await
+        .clone()
+        .expect("PIN on observer");
 
     // 4. Mobile confirms pairing
     let confirm_payload = serde_json::json!({
@@ -1410,7 +1444,13 @@ async fn test_three_way_integration_e2e_flow() {
         supported_channels: vec![2],
         maximum_safe_volume: Some(100),
     };
-    state.receiver_manager.registry().await.write().await.add(reg_entry);
+    state
+        .receiver_manager
+        .registry()
+        .await
+        .write()
+        .await
+        .add(reg_entry);
 
     // 6. Mobile controls playback through Micro Server API (enqueue & play)
     let queue_payload = serde_json::json!({
@@ -1456,7 +1496,3 @@ async fn test_three_way_integration_e2e_flow() {
     assert!(ps.playing);
     assert_eq!(ps.track_id, Some(track_id));
 }
-
-
-
-

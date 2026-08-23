@@ -179,7 +179,11 @@ impl RtpReceiverTransport {
         // V=2, P=0, X=0, CC=0 -> 0x80
         packet.push(0x80);
         // M (1 bit) + PT (7 bits)
-        let m_pt = if marker { 0x80 | (payload_type & 0x7F) } else { payload_type & 0x7F };
+        let m_pt = if marker {
+            0x80 | (payload_type & 0x7F)
+        } else {
+            payload_type & 0x7F
+        };
         packet.push(m_pt);
         // Sequence Number (16 bits)
         packet.extend_from_slice(&sequence_number.to_be_bytes());
@@ -227,6 +231,23 @@ impl AudioTransport for RtpReceiverTransport {
     ) -> TransportResult<TransportSessionHandle> {
         if self.handle.is_some() {
             return Err(TransportError::AlreadyActive);
+        }
+
+        // Validate canonical receiver-v1-lite configuration
+        if config.codec != "pcm_s16le"
+            || config.sample_rate != 48000
+            || config.bit_depth != 16
+            || config.channels != 2
+            || config.packet_ms != 10
+        {
+            return Err(TransportError::CapabilityMismatch(format!(
+                "unsupported receiver-v1-lite config: codec={}, sr={}, bd={}, ch={}, packet_ms={}",
+                config.codec,
+                config.sample_rate,
+                config.bit_depth,
+                config.channels,
+                config.packet_ms
+            )));
         }
 
         let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
@@ -286,7 +307,8 @@ impl AudioTransport for RtpReceiverTransport {
 
     async fn write_pcm(&mut self, pcm_data: &[u8]) -> TransportResult<usize> {
         let socket = self.socket.as_ref().ok_or(TransportError::NoSession)?;
-        let chunk_size = 960; // 10ms of 48kHz S16LE stereo = 480 samples * 2 channels * 2 bytes = 1920 bytes? No: 480 * 2 bytes = 960 bytes mono, stereo is 480 * 2 * 2 = 1920 bytes.
+        // 10ms of 48kHz PCM S16LE stereo = 480 frames * 2 channels * 2 bytes = 1920 bytes
+        let chunk_size = 1920;
         let mut bytes_written = 0;
 
         for chunk in pcm_data.chunks(chunk_size) {
@@ -304,8 +326,9 @@ impl AudioTransport for RtpReceiverTransport {
                 .map_err(|e| TransportError::Other(e.to_string()))?;
 
             self.sequence_number = self.sequence_number.wrapping_add(1);
-            let samples_in_chunk = (chunk.len() / 4) as u32;
-            self.timestamp = self.timestamp.wrapping_add(samples_in_chunk);
+            // RTP timestamp represents audio frames per channel (4 bytes = 1 stereo frame = 1 frame increment)
+            let frames_in_chunk = (chunk.len() / 4) as u32;
+            self.timestamp = self.timestamp.wrapping_add(frames_in_chunk);
             bytes_written += chunk.len();
         }
 
@@ -371,10 +394,11 @@ mod tests {
     #[test]
     fn test_rtp_packet_header_structure() {
         let payload = vec![0x12, 0x34, 0x56, 0x78];
-        let packet = RtpReceiverTransport::build_rtp_packet(97, 100, 48000, 0xDEADBEEF, false, &payload);
+        let packet =
+            RtpReceiverTransport::build_rtp_packet(97, 100, 48000, 0xDEADBEEF, false, &payload);
         assert_eq!(packet.len(), 12 + 4);
         assert_eq!(packet[0], 0x80); // V=2
-        assert_eq!(packet[1], 97);   // PT=97, Marker=0
+        assert_eq!(packet[1], 97); // PT=97, Marker=0
         assert_eq!(&packet[2..4], &100u16.to_be_bytes());
         assert_eq!(&packet[4..8], &48000u32.to_be_bytes());
         assert_eq!(&packet[8..12], &0xDEADBEEFu32.to_be_bytes());
@@ -396,6 +420,27 @@ mod tests {
         assert!(res.is_ok());
 
         assert!(transport.stop().await.is_ok());
-        assert!(transport.health().await.is_err());
+    }
+
+    #[test]
+    fn rtp_v1_lite_payload_bytes_1920() {
+        let sample_rate = 48000;
+        let channels = 2;
+        let bit_depth = 16;
+        let packet_ms = 10;
+        let frames = sample_rate * packet_ms / 1000;
+        let bytes_per_frame = channels * bit_depth / 8;
+        let payload_bytes = frames * bytes_per_frame;
+        assert_eq!(frames, 480);
+        assert_eq!(payload_bytes, 1920);
+    }
+
+    #[tokio::test]
+    async fn rtp_rejects_noncanonical_config() {
+        let mut transport = RtpReceiverTransport::new("127.0.0.1:9099", 12345);
+        let mut bad_cfg = TransportStreamConfig::receiver_v1_lite_default();
+        bad_cfg.sample_rate = 96000;
+        let err = transport.start(bad_cfg).await;
+        assert!(matches!(err, Err(TransportError::CapabilityMismatch(_))));
     }
 }

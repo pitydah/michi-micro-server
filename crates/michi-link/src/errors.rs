@@ -96,4 +96,3 @@ impl std::fmt::Display for MichiLinkErrorCode {
         f.write_str(self.as_str())
     }
 }
-

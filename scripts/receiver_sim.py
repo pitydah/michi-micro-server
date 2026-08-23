@@ -45,12 +45,59 @@ class ReceiverState:
         self.active_session_token = None
         self.lease_expires_at = 0.0
         self.last_heartbeat_seq = 0
-        self.stream_port = None
+        self.stream_port = 50000 + (port % 1000)
         self.ssrc = 0
         self.volume = 70
         self.playing = False
         self.position_ms = 0
         self.start_time = time.time()
+
+        # RTP Metrics State (Test-only)
+        self.metrics = {
+            "packets_received": 0,
+            "bytes_received": 0,
+            "last_payload_size": 0,
+            "last_payload_type": 0,
+            "last_sequence": 0,
+            "last_timestamp": 0,
+            "last_ssrc": 0,
+            "source_ip": "",
+            "source_port": 0,
+            "heartbeats_received": 0,
+            "session_id": "",
+        }
+
+        # Start background UDP thread on stream_port
+        import socket
+        import threading
+        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_sock.bind(("0.0.0.0", self.stream_port))
+        self.running = True
+
+        def udp_listener():
+            while self.running:
+                try:
+                    data, addr = self.udp_sock.recvfrom(4096)
+                    if len(data) >= 12:
+                        pt = data[1] & 0x7F
+                        seq = int.from_bytes(data[2:4], "big")
+                        ts = int.from_bytes(data[4:8], "big")
+                        ssrc = int.from_bytes(data[8:12], "big")
+                        payload_size = len(data) - 12
+                        self.metrics["packets_received"] += 1
+                        self.metrics["bytes_received"] += len(data)
+                        self.metrics["last_payload_size"] = payload_size
+                        self.metrics["last_payload_type"] = pt
+                        self.metrics["last_sequence"] = seq
+                        self.metrics["last_timestamp"] = ts
+                        self.metrics["last_ssrc"] = ssrc
+                        self.metrics["source_ip"] = addr[0]
+                        self.metrics["source_port"] = addr[1]
+                except Exception:
+                    break
+
+        t = threading.Thread(target=udp_listener, daemon=True)
+        t.start()
 
         # Fault Injection State
         self.latency_s = 0.0
@@ -125,7 +172,7 @@ class ReceiverHandler(BaseHTTPRequestHandler):
         if self.check_faults(path):
             return
 
-        if path in ("/api/v1/receiver/info", "/api/v1/server/info"):
+        if path == "/api/v1/server/info":
             self.send_json(200, {
                 "service": st.service,
                 "name": st.name,
@@ -161,7 +208,7 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             })
             return
 
-        if path in ("/api/v1/receiver-lite/session", "/api/v1/receiver/playback/state"):
+        if path == "/api/v1/receiver-lite/session":
             if not st.active_session_id:
                 self.send_json(404, {"error": {"code": "NOT_FOUND", "message": "no active session"}})
                 return
@@ -174,13 +221,25 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "paused": not st.playing,
                 "stream_port": st.stream_port,
                 "ssrc": st.ssrc,
-                "packets_received": 100,
+                "packets_received": st.metrics.get("packets_received", 0),
                 "packets_rejected": 0,
                 "packets_lost": 0,
                 "underruns": 0,
                 "playing": st.playing,
                 "position_ms": st.position_ms,
             })
+            return
+
+        if path == "/api/v1/test/metrics":
+            # Test-only metrics inspection endpoint for E2E validation
+            self.send_json(200, st.metrics)
+            return
+
+        if path == "/api/v1/test/active_pin":
+            # Test-only PIN lookup for test harness without wire sniffing
+            active_pins = [v["pin"] for v in st.pairing_sessions.values() if not v.get("consumed", False)]
+            pin = active_pins[-1] if active_pins else "482391"
+            self.send_json(200, {"pin": pin})
             return
 
         self.send_json(404, {"error": {"code": "NOT_FOUND", "message": "endpoint not found"}})
@@ -220,7 +279,7 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             return
 
         # 1. Pairing Start (POST /api/v1/pair/start)
-        if path in ("/api/v1/pair/start", "/api/v1/receiver/pair/start"):
+        if path == "/api/v1/pair/start":
             session_id = str(uuid.uuid4())
             nonce = body.get("challenge_nonce") or str(uuid.uuid4())
             pin = "482391" # Canonical 6-digit numeric PIN for simulation
@@ -233,26 +292,19 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "expires_at": now + 120,
                 "consumed": False,
             }
-            # Also index by nonce
-            st.pairing_sessions[nonce] = st.pairing_sessions[session_id]
 
             self.send_json(200, {
-                "status": "pairing_window_open",
                 "session_id": session_id,
                 "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
                 "attempts_remaining": 5,
                 "server_michi_id": st.server_michi_id,
                 "server_public_key": st.server_pubkey_b64,
-                "pairing_window_seconds": 120,
-                "expires_in": 120,
-                "nonce": nonce,
-                "device_id": st.device_id,
             })
             return
 
         # 2. Pairing Confirm (POST /api/v1/pair/confirm)
-        if path in ("/api/v1/pair/confirm", "/api/v1/receiver/pair/confirm"):
-            sess_key = body.get("session_id") or body.get("nonce")
+        if path == "/api/v1/pair/confirm":
+            sess_key = body.get("session_id")
             if not sess_key or sess_key not in st.pairing_sessions:
                 self.send_json(400, {
                     "error": {"code": "PAIRING_EXPIRED", "message": "invalid pairing session or window closed"},

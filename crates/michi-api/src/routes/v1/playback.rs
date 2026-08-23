@@ -634,7 +634,7 @@ pub async fn handoff_handler(
         queue_position: body.queue_position,
         device_id: Some("server".into()),
         shuffle: false,
-        repeat: "none".into(),
+        repeat: "off".into(),
     };
 
     {

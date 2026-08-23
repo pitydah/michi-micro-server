@@ -3,7 +3,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use uuid::Uuid;
 
 /// HTTP client for interacting with a Michi Music Stream receiver (canonical Michi Link v1-lite).
 pub struct ReceiverClient {
@@ -65,14 +64,20 @@ impl ReceiverClient {
 
     /// POST /api/v1/pair/start (canonical) with Ed25519 challenge signature over RAW nonce bytes
     pub async fn pair_start(&mut self, _initiator_id: &str) -> Result<PairStartResponse, String> {
-        let (michi_id, public_key, challenge_nonce, challenge_signature) = if let Some(ref id) = self.identity {
-            let nonce_raw: [u8; 32] = rand::random();
-            let challenge_nonce = URL_SAFE_NO_PAD.encode(nonce_raw);
-            let (sig_b64, pk_b64) = id.sign_base64url(&nonce_raw);
-            (id.michi_id().to_base64url(), pk_b64, challenge_nonce, sig_b64)
-        } else {
-            return Err("IdentityManager not configured on ReceiverClient".to_string());
-        };
+        let (michi_id, public_key, challenge_nonce, challenge_signature) =
+            if let Some(ref id) = self.identity {
+                let nonce_raw: [u8; 32] = rand::random();
+                let challenge_nonce = URL_SAFE_NO_PAD.encode(nonce_raw);
+                let (sig_b64, pk_b64) = id.sign_base64url(&nonce_raw);
+                (
+                    id.michi_id().to_base64url(),
+                    pk_b64,
+                    challenge_nonce,
+                    sig_b64,
+                )
+            } else {
+                return Err("IdentityManager not configured on ReceiverClient".to_string());
+            };
 
         let payload = serde_json::json!({
             "device_name": "Michi Micro Server",
@@ -156,15 +161,15 @@ impl ReceiverClient {
 
     /// POST /api/v1/receiver-lite/heartbeat (canonical)
     pub async fn heartbeat(&self) -> Result<HeartbeatResponse, String> {
+        let session_id = self.active_session_id.as_ref().ok_or_else(|| {
+            "NoActiveSession: cannot heartbeat without active session".to_string()
+        })?;
+
         let seq = self.heartbeat_sequence.fetch_add(1, Ordering::SeqCst) + 1;
         let sent_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let session_id = self
-            .active_session_id
-            .clone()
-            .unwrap_or_else(|| Uuid::nil().to_string());
 
         let payload = serde_json::json!({
             "session_id": session_id,
@@ -267,6 +272,9 @@ impl ReceiverClient {
 
     /// PATCH /api/v1/receiver-lite/session (canonical)
     pub async fn set_volume(&self, volume: u32) -> Result<VolumeResponse, String> {
+        if self.active_session_id.is_none() {
+            return Err("NoActiveSession: cannot set volume without active session".to_string());
+        }
         if volume > 100 {
             return Err(format!("volume {volume} exceeds maximum of 100"));
         }
@@ -296,6 +304,11 @@ impl ReceiverClient {
 
     /// DELETE /api/v1/receiver-lite/session (canonical HTTP 204 or 200)
     pub async fn session_stop(&mut self) -> Result<SessionStopResponse, String> {
+        if self.active_session_id.is_none() {
+            return Err(
+                "NoActiveSession: cannot stop session when no session is active".to_string(),
+            );
+        }
         let mut req = self
             .client
             .delete(format!("{}/api/v1/receiver-lite/session", self.base_url));

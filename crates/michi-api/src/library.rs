@@ -879,9 +879,9 @@ pub async fn set_playback_state_handler(
         updated_at: Utc::now(),
         playlist_id: None,
         queue_position: None,
-        device_id: None,
+        device_id: Some("server".into()),
         shuffle: false,
-        repeat: "none".into(),
+        repeat: "off".into(),
     };
 
     {

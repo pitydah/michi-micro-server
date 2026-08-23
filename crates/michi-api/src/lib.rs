@@ -157,7 +157,8 @@ impl AppState {
                     .expect("ephemeral identity generation must not fail")
             }),
         );
-        let receiver_manager = michi_receivers::ReceiverSessionManager::new_with_identity(identity.clone());
+        let receiver_manager =
+            michi_receivers::ReceiverSessionManager::new_with_identity(identity.clone());
         let pairing_registry = Arc::new(michi_identity::PairingRegistry::new());
         let pairing_display = Arc::new(RwLock::new(None));
         let pairing_sessions_display = Arc::new(RwLock::new(HashMap::new()));
@@ -841,7 +842,7 @@ pub fn start_sync_peers(state: &AppState) {
                                                                     queue_position: None,
                                                                     device_id: None,
                                                                     shuffle: false,
-                                                                    repeat: "none".into(),
+                                                                    repeat: "off".into(),
                                                                 };
                                                                 {
                                                                     let mut current = recv_playback.write().await;
@@ -1381,6 +1382,10 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/receivers/:id/heartbeat",
             post(routes::v1::receivers::receiver_heartbeat_handler),
+        )
+        .route(
+            "/api/v1/receivers/:id/stream/test_pcm",
+            post(routes::v1::receivers::receiver_stream_test_pcm_handler),
         )
         .route(
             "/api/v1/devices/discover",

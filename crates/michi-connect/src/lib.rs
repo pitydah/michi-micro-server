@@ -129,7 +129,11 @@ impl MichiConnect {
     }
 
     /// Builds a canonical signed UDP multicast announce for Michi Micro Server
-    pub fn build_signed_announce(&self, port: u16, host: &str) -> Result<michi_identity::types::Announce, michi_identity::IdentityError> {
+    pub fn build_signed_announce(
+        &self,
+        port: u16,
+        host: &str,
+    ) -> Result<michi_identity::types::Announce, michi_identity::IdentityError> {
         let engine = michi_identity::discovery::DiscoveryEngine::new(self.identity.clone());
         let mut features = std::collections::BTreeMap::new();
         features.insert("library".to_string(), true);
@@ -152,6 +156,82 @@ impl MichiConnect {
             features,
         };
         engine.build_signed_announce(&profile)
+    }
+
+    /// Resolves the primary non-loopback reachable LAN IP, or falls back to 127.0.0.1
+    pub fn resolve_lan_ip() -> String {
+        // Attempt UDP connection to a public IP to determine default route interface
+        if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+            if socket.connect("8.8.8.8:80").is_ok() {
+                if let Ok(local_addr) = socket.local_addr() {
+                    let ip = local_addr.ip();
+                    if !ip.is_loopback() && !ip.is_unspecified() {
+                        return ip.to_string();
+                    }
+                }
+            }
+        }
+        "127.0.0.1".to_string()
+    }
+
+    /// Spawns a background task broadcasting signed UDP multicast announces periodically
+    pub fn spawn_announcer(
+        &self,
+        port: u16,
+        advertised_host: Option<String>,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) {
+        let connect = self.clone();
+        let host = advertised_host.unwrap_or_else(Self::resolve_lan_ip);
+
+        tokio::spawn(async move {
+            let bind_addr: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+            let socket = match tokio::net::UdpSocket::bind(bind_addr).await {
+                Ok(s) => {
+                    let _ = s.set_broadcast(true);
+                    s
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to bind UDP announcer socket: {e}");
+                    return;
+                }
+            };
+
+            let target_addr = format!(
+                "{}:{}",
+                michi_identity::discovery::MULTICAST_GROUP,
+                michi_identity::discovery::MULTICAST_PORT
+            );
+
+            let mut interval = tokio::time::interval(michi_identity::discovery::ANNOUNCE_INTERVAL);
+            info!(
+                "connect: discovery announcer started for host {} targeting {}",
+                host, target_addr
+            );
+
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        info!("connect: discovery announcer stopping on cancel signal");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        match connect.build_signed_announce(port, &host) {
+                            Ok(announce) => {
+                                if let Ok(json_bytes) = serde_json::to_vec(&announce) {
+                                    if let Err(e) = socket.send_to(&json_bytes, &target_addr).await {
+                                        tracing::debug!("UDP multicast announce send error: {e}");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to build signed announce: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -329,14 +409,21 @@ mod tests {
     fn test_build_signed_announce_validates_and_signs() {
         let identity = make_identity();
         let conn = MichiConnect::new(identity.clone(), 9090, Some("192.168.1.100".into()));
-        let announce = conn.build_signed_announce(9090, "192.168.1.100").expect("signed announce must succeed");
+        let announce = conn
+            .build_signed_announce(9090, "192.168.1.100")
+            .expect("signed announce must succeed");
 
-        assert_eq!(announce.service, michi_identity::types::Service::MicroServer);
+        assert_eq!(
+            announce.service,
+            michi_identity::types::Service::MicroServer
+        );
         assert_eq!(announce.api_version, michi_identity::types::ApiVersion::V1);
         assert_eq!(announce.port, 9090);
         assert_eq!(announce.host, "192.168.1.100");
         assert!(announce.signature.is_some());
-        assert_eq!(announce.michi_id.as_deref(), Some(identity.michi_id().to_base64url()).as_deref());
+        assert_eq!(
+            announce.michi_id.as_deref(),
+            Some(identity.michi_id().to_base64url()).as_deref()
+        );
     }
 }
-

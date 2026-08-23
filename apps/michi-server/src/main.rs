@@ -197,6 +197,10 @@ async fn main() -> Result<()> {
     );
     let _ = michi_connect.announce_mdns().await;
 
+    // Spawn UDP multicast discovery announcer with cancellation on shutdown
+    let announcer_cancel = tokio_util::sync::CancellationToken::new();
+    michi_connect.spawn_announcer(actual_port, None, announcer_cancel.clone());
+
     // Graceful shutdown: SIGINT + SIGTERM
     let shutdown_state = state.clone();
     let shutdown_tx = state.tx.clone();
@@ -219,6 +223,8 @@ async fn main() -> Result<()> {
                     info!("received SIGTERM, starting graceful shutdown...");
                 }
             }
+
+            announcer_cancel.cancel();
 
             shutdown_state
                 .shutdown_and_wait(Duration::from_secs(15))

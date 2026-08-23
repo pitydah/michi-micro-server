@@ -28,7 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM_SCRIPT="${SCRIPT_DIR}/receiver_sim.py"
 
 # Start Standard simulator if not running
-if ! curl -sf "http://127.0.0.1:${STD_PORT}/api/v1/receiver/info" > /dev/null 2>&1; then
+if ! curl -sf "http://127.0.0.1:${STD_PORT}/api/v1/server/info" > /dev/null 2>&1; then
     echo "Starting Standard receiver simulator on port ${STD_PORT}..."
     python3 "$SIM_SCRIPT" --type standard --port "${STD_PORT}" &
     STD_PID=$!
@@ -36,7 +36,7 @@ if ! curl -sf "http://127.0.0.1:${STD_PORT}/api/v1/receiver/info" > /dev/null 2>
 fi
 
 # Start Hi-Fi simulator if not running
-if ! curl -sf "http://127.0.0.1:${HIFI_PORT}/api/v1/receiver/info" > /dev/null 2>&1; then
+if ! curl -sf "http://127.0.0.1:${HIFI_PORT}/api/v1/server/info" > /dev/null 2>&1; then
     echo "Starting Hi-Fi receiver simulator on port ${HIFI_PORT}..."
     python3 "$SIM_SCRIPT" --type hifi --port "${HIFI_PORT}" &
     HIFI_PID=$!
@@ -47,10 +47,10 @@ fi
 for i in {1..20}; do
     STD_OK=0
     HIFI_OK=0
-    if curl -sf "http://127.0.0.1:${STD_PORT}/api/v1/receiver/info" > /dev/null 2>&1; then
+    if curl -sf "http://127.0.0.1:${STD_PORT}/api/v1/server/info" > /dev/null 2>&1; then
         STD_OK=1
     fi
-    if curl -sf "http://127.0.0.1:${HIFI_PORT}/api/v1/receiver/info" > /dev/null 2>&1; then
+    if curl -sf "http://127.0.0.1:${HIFI_PORT}/api/v1/server/info" > /dev/null 2>&1; then
         HIFI_OK=1
     fi
     if [ "$STD_OK" -eq 1 ] && [ "$HIFI_OK" -eq 1 ]; then

@@ -110,13 +110,12 @@ async fn test_receiver_pairing_flow() {
         .pair_start("test-flow")
         .await
         .expect("pair_start failed");
-    assert_eq!(start.status.as_deref(), Some("pairing_window_open"));
-    assert!(start.pairing_window_seconds.unwrap_or(0) > 0);
-    let nonce = start.nonce.expect("must have nonce");
+    assert!(start.expires_at.is_some());
+    let session_id = start.session_id.expect("must have session_id");
 
     // pair/confirm with 6-digit PIN
     let confirm = client
-        .pair_confirm(&nonce, "test-flow", "482391")
+        .pair_confirm(&session_id, "test-flow", "482391")
         .await
         .expect("pair_confirm failed");
     assert_eq!(confirm.status.as_deref(), Some("paired"));
@@ -131,17 +130,19 @@ async fn test_receiver_pairing_window_closed_rejected() {
         .pair_start("test-reject")
         .await
         .expect("pair_start failed");
-    let nonce = start.nonce.expect("must have nonce");
+    let session_id = start.session_id.expect("must have session_id");
 
     // First confirm succeeds
     let confirm = client
-        .pair_confirm(&nonce, "test-reject", "482391")
+        .pair_confirm(&session_id, "test-reject", "482391")
         .await
         .expect("first confirm failed");
     assert_eq!(confirm.status.as_deref(), Some("paired"));
 
-    // Second confirm on same nonce should fail
-    let confirm2 = client.pair_confirm(&nonce, "test-reject", "482391").await;
+    // Second confirm on same session_id should fail
+    let confirm2 = client
+        .pair_confirm(&session_id, "test-reject", "482391")
+        .await;
     assert!(
         confirm2.is_err(),
         "second confirm on consumed nonce must fail"
@@ -414,9 +415,9 @@ async fn test_receiver_full_lifecycle_and_session_recovery() {
         .pair_start("e2e-matrix")
         .await
         .expect("pair start failed");
-    let nonce = pair_start.nonce.expect("missing nonce");
+    let session_id = pair_start.session_id.expect("missing session_id");
     let confirm = client
-        .pair_confirm(&nonce, "e2e-matrix", "482391")
+        .pair_confirm(&session_id, "e2e-matrix", "482391")
         .await
         .expect("pair confirm failed");
     assert_eq!(confirm.status.as_deref(), Some("paired"));
@@ -529,10 +530,10 @@ async fn test_receiver_pairing_wrong_pin_rejected() {
         .pair_start("test-wrong-pin")
         .await
         .expect("pair_start failed");
-    let nonce = start.nonce.expect("nonce missing");
+    let session_id = start.session_id.expect("session_id missing");
 
     let confirm = client
-        .pair_confirm(&nonce, "test-wrong-pin", "000000")
+        .pair_confirm(&session_id, "test-wrong-pin", "000000")
         .await;
     assert!(confirm.is_err(), "wrong PIN must be rejected with 401");
 }
@@ -545,9 +546,9 @@ async fn test_receiver_heartbeat_replay_rejected() {
         .pair_start("hb-replay")
         .await
         .expect("pair_start failed");
-    let nonce = start.nonce.expect("nonce missing");
+    let session_id = start.session_id.expect("session_id missing");
     client
-        .pair_confirm(&nonce, "hb-replay", "482391")
+        .pair_confirm(&session_id, "hb-replay", "482391")
         .await
         .expect("pair_confirm failed");
 

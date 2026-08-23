@@ -120,12 +120,27 @@ pub struct PlaybackState {
     pub device_id: Option<String>,
     #[serde(default)]
     pub shuffle: bool,
-    #[serde(default = "default_repeat_mode")]
+    #[serde(
+        default = "default_repeat_mode",
+        deserialize_with = "deserialize_repeat_mode"
+    )]
     pub repeat: String,
 }
 
 fn default_repeat_mode() -> String {
-    "none".to_string()
+    "off".to_string()
+}
+
+fn deserialize_repeat_mode<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s == "none" {
+        Ok("off".to_string())
+    } else {
+        Ok(s)
+    }
 }
 
 impl Default for PlaybackState {
@@ -140,7 +155,7 @@ impl Default for PlaybackState {
             queue_position: None,
             device_id: None,
             shuffle: false,
-            repeat: "none".into(),
+            repeat: "off".into(),
         }
     }
 }
