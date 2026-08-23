@@ -1,26 +1,31 @@
 services:
   michi-micro-server:
-    image: ghcr.io/pitydah/michi-micro-server:latest
+    image: ghcr.io/pitydah/michi-micro-server:v0.2.0
     container_name: michi-micro-server
     ports:
       - "9090:9090"
     volumes:
-      - ${CONFIG_PATH}:/config
-      - ${CACHE_PATH}:/cache
-      - ${MUSIC_PATH}:/music
+      - ${CONFIG_PATH:-/DATA/AppData/michi/config}:/config
+      - ${CACHE_PATH:-/DATA/AppData/michi/cache}:/cache
+      - ${MUSIC_PATH:-/DATA/Media/Music}:/music
     environment:
-      - TZ=${TZ}
+      - TZ=${TZ:-UTC}
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
       - MICHI_PORT=9090
       - MICHI_MUSIC_PATH=/music
       - MICHI_CONFIG_PATH=/config
       - MICHI_CACHE_PATH=/cache
       - MICHI_DATABASE=sqlite:///config/michi.db
+      - MICHI_AUTH_USERNAME=${MICHI_AUTH_USERNAME:-admin}
+      - MICHI_AUTH_PASSWORD=${MICHI_AUTH_PASSWORD:-}
     restart: unless-stopped
 
 x-casaos:
   architectures:
     - amd64
     - arm64
+  main: michi-micro-server
   main_app: michi-micro-server
   author: pitydah
   category: music

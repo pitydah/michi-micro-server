@@ -64,6 +64,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsqlite3-0 \
     wget \
     ca-certificates \
+    ffmpeg \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /config /cache /music && \
@@ -72,6 +74,8 @@ RUN mkdir -p /config /cache /music && \
     chown -R michi:michi /config /cache /music
 
 COPY --from=builder /app/target/release/michi-server /usr/local/bin/michi-server
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 9090
 
@@ -82,10 +86,11 @@ ENV MICHI_MUSIC_PATH=/music
 ENV MICHI_CONFIG_PATH=/config
 ENV MICHI_CACHE_PATH=/cache
 ENV MICHI_DATABASE=sqlite:///config/michi.db
-
-USER michi
+ENV PUID=1000
+ENV PGID=1000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://127.0.0.1:9090/health/live || exit 1
 
-ENTRYPOINT ["michi-server"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
