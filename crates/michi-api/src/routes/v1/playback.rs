@@ -81,8 +81,7 @@ pub async fn playback_state_handler(
 
 #[derive(Debug, Deserialize)]
 pub struct PlaybackControlBody {
-    pub command: Option<String>,
-    pub action: Option<String>,
+    pub command: String,
     pub value: Option<serde_json::Value>,
     pub position_ms: Option<u64>,
     pub volume: Option<u32>,
@@ -92,17 +91,7 @@ pub async fn playback_control_handler(
     State(state): State<AppState>,
     Json(body): Json<PlaybackControlBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let cmd = body
-        .command
-        .as_deref()
-        .or(body.action.as_deref())
-        .ok_or_else(|| {
-            v1_error_code(
-                StatusCode::BAD_REQUEST,
-                michi_link::MichiLinkErrorCode::InvalidRequest,
-                "command is required",
-            )
-        })?;
+    let cmd = body.command.as_str();
 
     let mut current = state.playback_state.write().await;
 
