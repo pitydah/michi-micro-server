@@ -228,7 +228,8 @@ def main():
         assert metrics["last_payload_size"] == 1920, f"Expected 1920 bytes payload size, got {metrics['last_payload_size']}"
         assert metrics["last_payload_type"] == 97, f"Expected PT 97, got {metrics['last_payload_type']}"
         assert metrics["last_ssrc"] > 0, "SSRC must be positive non-zero"
-        print(f"  ✅ Stream Standard Simulator verified reception of {metrics['packets_received']} RTP packets (size=1920, PT=97, SSRC={metrics['last_ssrc']})")
+        assert metrics.get("source_port", 0) > 0, "Local source port from Micro must be positive non-zero"
+        print(f"  ✅ Stream Standard Simulator verified reception of {metrics['packets_received']} RTP packets (size=1920, PT=97, SSRC={metrics['last_ssrc']}, src_port={metrics.get('source_port')})")
 
         # =====================================================================
         # PHASE 5: Mobile ➔ Micro: Volume Control & Heartbeats
@@ -256,6 +257,16 @@ def main():
         status, stop_res = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/{standard_device_id}/session/stop", headers=headers)
         assert status == 200, f"Session stop via Micro failed: {status}"
         print("  ✅ Standard session cleanly stopped via Micro Server")
+
+        # Verify no packets received after stop
+        status, metrics_after_stop = http_req("GET", f"{std_url}/api/v1/test/metrics")
+        assert status == 200
+        count_at_stop = metrics_after_stop["packets_received"]
+        time.sleep(0.1)
+        status, metrics_check = http_req("GET", f"{std_url}/api/v1/test/metrics")
+        assert status == 200
+        assert metrics_check["packets_received"] == count_at_stop, "Zero RTP packets must be transmitted after session stop"
+        print("  ✅ Zero packets after session stop confirmed")
 
         # 2. Pair with Stream Hi-Fi via Micro Server
         hifi_url = f"http://127.0.0.1:{args.stream_hifi_port}"
