@@ -900,7 +900,7 @@ pub fn start_sync_peers(state: &AppState) {
     }));
 }
 fn v1_link_routes() -> Router<AppState> {
-    Router::new()
+    let api_v1 = Router::new()
         .route(
             "/api/v1/pair/qr",
             post(routes::v1::pair::qr_generate_handler),
@@ -1378,11 +1378,19 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/receivers/:id/heartbeat",
             post(routes::v1::receivers::receiver_heartbeat_handler),
-        )
-        .route(
+        );
+
+    // /stream/test_pcm is an engineering verification route, disabled in release builds
+    let api_v1 = if cfg!(debug_assertions) || cfg!(test) {
+        api_v1.route(
             "/api/v1/receivers/:id/stream/test_pcm",
             post(routes::v1::receivers::receiver_stream_test_pcm_handler),
         )
+    } else {
+        api_v1
+    };
+
+    api_v1
         .route(
             "/api/v1/devices/discover",
             post(routes::v1::receivers::discover_mdns_handler),
