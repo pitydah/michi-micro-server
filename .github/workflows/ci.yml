@@ -338,18 +338,68 @@ jobs:
           push: false
           load: true
           tags: michi-server:arm64
-      - name: Verify ARM64 boot under QEMU
+      - name: Verify ARM64 runtime and Player Contract under QEMU
         run: |
-          docker run -d --name michi-arm64 -p 9091:9091 \
+          set -euo pipefail
+
+          cleanup() {
+            docker rm -f michi-arm64 >/dev/null 2>&1 || true
+          }
+
+          trap cleanup EXIT
+
+          docker run -d \
+            --name michi-arm64 \
+            -p 9091:9091 \
+            --tmpfs /music:rw,uid=1000,gid=1000,mode=0775 \
+            -e PUID=1000 \
+            -e PGID=1000 \
             -e MICHI_PORT=9091 \
             -e MICHI_AUTH_USERNAME=admin \
             -e MICHI_AUTH_PASSWORD=admin \
             michi-server:arm64
-          sleep 10
-          curl -f http://127.0.0.1:9091/health/live || exit 1
-          curl -f http://127.0.0.1:9091/api/v1/status || exit 1
-          docker stop michi-arm64
-          docker rm michi-arm64
+
+          READY=0
+
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:9091/health/live >/dev/null 2>&1; then
+              READY=1
+              break
+            fi
+
+            if ! docker ps --format '{{.Names}}' | grep -qx michi-arm64; then
+              echo "FAIL: ARM64 container terminated before becoming healthy"
+              docker logs michi-arm64 || true
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "FAIL: ARM64 container did not become healthy within timeout"
+            docker logs michi-arm64 || true
+            exit 1
+          fi
+
+          curl -fsS http://127.0.0.1:9091/health/live >/dev/null
+          curl -fsS http://127.0.0.1:9091/api/v1/status >/dev/null
+          curl -fsS http://127.0.0.1:9091/ >/dev/null
+
+          docker exec michi-arm64 sh -lc '
+            echo "Effective runtime:"
+            id
+            echo "/music ownership:"
+            stat -c "%u:%g %a" /music
+            echo "Writable /music check:"
+            touch /music/.ci-write-test
+            rm /music/.ci-write-test
+          '
+
+          python3 tests/e2e/test_player_micro_contract_compatibility.py \
+            --url http://127.0.0.1:9091 \
+            --username admin \
+            --password admin
 
   release-ghcr:
     needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-mosquitto-real, ci-generic-linux-appliance, ci-reliability-short, ci-web-ui-functional-integrity, ci-three-way-ecosystem, ci-docker-amd64, ci-arm64-qemu]
