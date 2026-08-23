@@ -116,6 +116,52 @@ pub async fn playback_control_handler(
         ));
     }
 
+    if let Some(val) = &body.value {
+        // Schema allows: null, integer >= 0, boolean, string enum ["off", "one", "all"]
+        match val {
+            serde_json::Value::Null | serde_json::Value::Bool(_) => {}
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    if i < 0 {
+                        return Err(v1_error_code(
+                            StatusCode::BAD_REQUEST,
+                            michi_link::MichiLinkErrorCode::InvalidRequest,
+                            "value numeric argument must be >= 0",
+                        ));
+                    }
+                } else if let Some(f) = n.as_f64() {
+                    if f < 0.0 {
+                        return Err(v1_error_code(
+                            StatusCode::BAD_REQUEST,
+                            michi_link::MichiLinkErrorCode::InvalidRequest,
+                            "value numeric argument must be >= 0",
+                        ));
+                    }
+                }
+            }
+            serde_json::Value::String(s) => {
+                // If it's for repeat, it must be off, one, all. Other string commands are rejected or parsed if track UUID
+                if cmd == "repeat" && s != "off" && s != "one" && s != "all" {
+                    return Err(v1_error_code(
+                        StatusCode::BAD_REQUEST,
+                        michi_link::MichiLinkErrorCode::InvalidRequest,
+                        "repeat value must be 'off', 'one', or 'all'",
+                    ));
+                }
+            }
+            serde_json::Value::Object(_) => {
+                // Value object containing structured parameters (e.g. { "track_id": "...", "position_ms": 100 })
+            }
+            _ => {
+                return Err(v1_error_code(
+                    StatusCode::BAD_REQUEST,
+                    michi_link::MichiLinkErrorCode::InvalidRequest,
+                    "invalid value type in PlaybackControl",
+                ));
+            }
+        }
+    }
+
     let mut current = state.playback_state.write().await;
 
     match cmd {
