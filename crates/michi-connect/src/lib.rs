@@ -181,8 +181,16 @@ impl MichiConnect {
             }
         }
 
-        // 2. Offline routing check towards local RFC1918 gateway
-        for probe in &["192.168.1.1:80", "10.0.0.1:80", "172.16.0.1:80"] {
+        // 2. Offline routing check towards local gateways, container bridges, and DNS resolvers
+        for probe in &[
+            "192.168.1.1:80",
+            "192.168.0.1:80",
+            "10.0.0.1:80",
+            "172.17.0.1:80", // Docker default bridge
+            "172.16.0.1:80",
+            "1.1.1.1:80",
+            "8.8.8.8:80",
+        ] {
             if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
                 if socket.connect(probe).is_ok() {
                     if let Ok(local_addr) = socket.local_addr() {
