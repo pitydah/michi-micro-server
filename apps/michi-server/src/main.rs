@@ -225,6 +225,7 @@ async fn main() -> Result<()> {
             }
 
             announcer_cancel.cancel();
+            michi_connect.stop_mdns().await;
 
             shutdown_state
                 .shutdown_and_wait(Duration::from_secs(15))

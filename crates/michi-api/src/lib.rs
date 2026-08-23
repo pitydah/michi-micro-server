@@ -1352,10 +1352,6 @@ fn v1_link_routes() -> Router<AppState> {
             get(routes::v1::receivers::receivers_handler),
         )
         .route(
-            "/api/v1/receivers/discover",
-            post(routes::v1::receivers::discover_receiver_handler),
-        )
-        .route(
             "/api/v1/receivers/pair/start",
             post(routes::v1::receivers::receiver_pair_start_handler),
         )
