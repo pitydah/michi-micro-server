@@ -158,19 +158,30 @@ impl MichiConnect {
         engine.build_signed_announce(&profile)
     }
 
-    /// Resolves the primary non-loopback reachable LAN IP, or falls back to 127.0.0.1
+    /// Resolves the primary non-loopback reachable LAN IP, checking MICHI_ADVERTISE_HOST and local routes offline.
     pub fn resolve_lan_ip() -> String {
-        // Attempt UDP connection to a public IP to determine default route interface
-        if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-            if socket.connect("8.8.8.8:80").is_ok() {
-                if let Ok(local_addr) = socket.local_addr() {
-                    let ip = local_addr.ip();
-                    if !ip.is_loopback() && !ip.is_unspecified() {
-                        return ip.to_string();
+        // 1. Explicit environment variable
+        if let Ok(host) = std::env::var("MICHI_ADVERTISE_HOST") {
+            if !host.trim().is_empty() {
+                return host.trim().to_string();
+            }
+        }
+
+        // 2. Offline routing check towards local RFC1918 gateway
+        for probe in &["192.168.1.1:80", "10.0.0.1:80", "172.16.0.1:80"] {
+            if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                if socket.connect(probe).is_ok() {
+                    if let Ok(local_addr) = socket.local_addr() {
+                        let ip = local_addr.ip();
+                        if !ip.is_loopback() && !ip.is_unspecified() {
+                            return ip.to_string();
+                        }
                     }
                 }
             }
         }
+
+        // 3. Fallback to 127.0.0.1
         "127.0.0.1".to_string()
     }
 
