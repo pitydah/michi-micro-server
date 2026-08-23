@@ -182,17 +182,35 @@ impl ReceiverSessionManager {
         let confirm_resp = match confirm_resp {
             Ok(resp) => resp,
             Err(e) => {
-                // If it's expired, remove pending; if it's retryable (e.g. wrong PIN), keep pending
-                if e.contains("408") || e.contains("expired") {
-                    let mut p = self.pending_pairings.write().await;
-                    p.remove(pairing_id);
+                // Strict typed handling of receiver error codes
+                match e.code.as_str() {
+                    "PAIRING_PIN_MISMATCH" => {
+                        // Keep pending for user retry
+                    }
+                    "PAIRING_EXPIRED"
+                    | "PAIRING_NOT_FOUND"
+                    | "PAIRING_ALREADY_CONSUMED"
+                    | "PAIRING_ATTEMPTS_EXCEEDED" => {
+                        let mut p = self.pending_pairings.write().await;
+                        p.remove(pairing_id);
+                    }
+                    _ => {
+                        if e.http_status == 408 || e.http_status == 410 {
+                            let mut p = self.pending_pairings.write().await;
+                            p.remove(pairing_id);
+                        }
+                    }
                 }
-                return Err(e);
+                return Err(format!("pair_confirm failed: {}: {}", e.code, e.message));
             }
         };
 
         if let Some(ref err) = confirm_resp.error {
-            if err.code.contains("EXPIRED") {
+            if err.code == "PAIRING_EXPIRED"
+                || err.code == "PAIRING_NOT_FOUND"
+                || err.code == "PAIRING_ALREADY_CONSUMED"
+                || err.code == "PAIRING_ATTEMPTS_EXCEEDED"
+            {
                 let mut p = self.pending_pairings.write().await;
                 p.remove(pairing_id);
             }
@@ -222,76 +240,70 @@ impl ReceiverSessionManager {
             .or_else(|| info.service.clone())
             .unwrap_or_else(|| "unknown".into());
 
-        // Extract discrete capabilities without fake defaults
-        let (sample_rates, bit_depths, channels, codecs) = if let Some(audio) = &info.audio {
-            let srs: Vec<u32> = audio
-                .get("sample_rates")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_u64().map(|n| n as u32))
-                        .collect()
-                })
-                .filter(|v: &Vec<u32>| !v.is_empty())
-                .ok_or_else(|| "receiver capabilities missing valid sample_rates".to_string())?;
+        // Extract discrete capabilities without fake defaults - require canonical info.audio
+        let audio = info
+            .audio
+            .as_ref()
+            .ok_or_else(|| "receiver failed capability negotiation: missing canonical 'audio' specification".to_string())?;
 
-            let bds: Vec<u32> = audio
-                .get("bit_depths")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_u64().map(|n| n as u32))
-                        .collect()
-                })
-                .filter(|v: &Vec<u32>| !v.is_empty())
-                .ok_or_else(|| "receiver capabilities missing valid bit_depths".to_string())?;
+        let transports: Vec<String> = audio
+            .get("transports")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .filter(|v: &Vec<String>| !v.is_empty())
+            .ok_or_else(|| "receiver capabilities missing valid audio.transports".to_string())?;
 
-            let chs: Vec<u8> = audio
-                .get("channels")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_u64().map(|n| n as u8))
-                        .collect()
-                })
-                .filter(|v: &Vec<u8>| !v.is_empty())
-                .ok_or_else(|| "receiver capabilities missing valid channels".to_string())?;
+        if !transports.iter().any(|t| t == "rtp_udp") {
+            return Err("receiver does not support required 'rtp_udp' audio transport".to_string());
+        }
 
-            let cds: Vec<String> = audio
-                .get("codecs")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .filter(|v: &Vec<String>| !v.is_empty())
-                .ok_or_else(|| "receiver capabilities missing valid audio codecs".to_string())?;
+        let sample_rates: Vec<u32> = audio
+            .get("sample_rates")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_u64().map(|n| n as u32))
+                    .collect()
+            })
+            .filter(|v: &Vec<u32>| !v.is_empty())
+            .ok_or_else(|| "receiver capabilities missing valid audio.sample_rates".to_string())?;
 
-            (srs, bds, chs, cds)
-        } else if let Some(output) = &info.output {
-            let max_sr = output
-                .get("max_sample_rate")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| "receiver output missing valid max_sample_rate".to_string())?
-                as u32;
-            let max_bd = output
-                .get("max_bit_depth")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| "receiver output missing valid max_bit_depth".to_string())?
-                as u32;
-            let cds = info
-                .supported_codecs
-                .clone()
-                .filter(|c| !c.is_empty())
-                .ok_or_else(|| "receiver output missing supported_codecs".to_string())?;
-            (vec![max_sr], vec![max_bd], vec![2], cds)
-        } else {
-            return Err(
-                "receiver failed capability negotiation: no audio/output specifications found"
-                    .to_string(),
-            );
-        };
+        let bit_depths: Vec<u32> = audio
+            .get("bit_depths")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_u64().map(|n| n as u32))
+                    .collect()
+            })
+            .filter(|v: &Vec<u32>| !v.is_empty())
+            .ok_or_else(|| "receiver capabilities missing valid audio.bit_depths".to_string())?;
+
+        let channels: Vec<u8> = audio
+            .get("channels")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_u64().map(|n| n as u8))
+                    .collect()
+            })
+            .filter(|v: &Vec<u8>| !v.is_empty())
+            .ok_or_else(|| "receiver capabilities missing valid audio.channels".to_string())?;
+
+        let codecs: Vec<String> = audio
+            .get("codecs")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .filter(|v: &Vec<String>| !v.is_empty())
+            .ok_or_else(|| "receiver capabilities missing valid audio.codecs".to_string())?;
 
         let max_sr = *sample_rates.iter().max().unwrap_or(&48000);
         let max_bd = *bit_depths.iter().max().unwrap_or(&16);

@@ -186,10 +186,15 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "roles": ["audio_receiver"],
                 "supported_codecs": st.supported_codecs,
                 "audio": {
+                    "transports": ["rtp_udp"],
                     "codecs": st.supported_codecs,
                     "sample_rates": [48000],
                     "bit_depths": [16],
                     "channels": [2],
+                    "packet_ms": [10],
+                    "payload_types": [97],
+                    "buffer_ms_min": 50,
+                    "buffer_ms_max": 500,
                 },
                 "output": {
                     "connector": st.output_connector,

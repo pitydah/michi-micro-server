@@ -113,11 +113,16 @@ impl ReceiverClient {
         session_id: &str,
         _initiator_id: &str,
         pin: &str,
-    ) -> Result<PairConfirmResponse, String> {
+    ) -> Result<PairConfirmResponse, ReceiverProtocolError> {
         let (michi_id, public_key) = if let Some(ref id) = self.identity {
             (id.michi_id().to_base64url(), id.public_key_base64url())
         } else {
-            return Err("IdentityManager not configured on ReceiverClient".to_string());
+            return Err(ReceiverProtocolError {
+                http_status: 500,
+                code: "INTERNAL_ERROR".into(),
+                message: "IdentityManager not configured on ReceiverClient".into(),
+                details: serde_json::Value::Null,
+            });
         };
 
         let payload = serde_json::json!({
@@ -133,16 +138,56 @@ impl ReceiverClient {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| format!("pair_confirm request failed: {e}"))?;
+            .map_err(|e| ReceiverProtocolError {
+                http_status: 503,
+                code: "NETWORK_ERROR".into(),
+                message: format!("pair_confirm request failed: {e}"),
+                details: serde_json::Value::Null,
+            })?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            return Err(format!("pair_confirm failed with status {status}"));
+        let status = resp.status();
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            if let Ok(err_val) = resp.json::<serde_json::Value>().await {
+                if let Some(err_obj) = err_val.get("error") {
+                    let code = err_obj
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("PAIRING_FAILED")
+                        .to_string();
+                    let message = err_obj
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("pair confirm rejected")
+                        .to_string();
+                    let details = err_obj
+                        .get("details")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    return Err(ReceiverProtocolError {
+                        http_status: status_code,
+                        code,
+                        message,
+                        details,
+                    });
+                }
+            }
+            return Err(ReceiverProtocolError {
+                http_status: status_code,
+                code: "PAIRING_FAILED".into(),
+                message: format!("pair_confirm failed with status {status}"),
+                details: serde_json::Value::Null,
+            });
         }
         let result: PairConfirmResponse = resp
             .json()
             .await
-            .map_err(|e| format!("pair_confirm parse failed: {e}"))?;
+            .map_err(|e| ReceiverProtocolError {
+                http_status: 500,
+                code: "DECODE_ERROR".into(),
+                message: format!("pair_confirm parse failed: {e}"),
+                details: serde_json::Value::Null,
+            })?;
         if let Some(ref t) = result.token {
             self.token = Some(t.clone());
         }
@@ -242,8 +287,10 @@ impl ReceiverClient {
             .map_err(|e| format!("session_start request failed: {e}"))?;
 
         let status = resp.status();
-        if status != reqwest::StatusCode::CREATED && status != reqwest::StatusCode::OK {
-            return Err(format!("session_start failed with status {status}"));
+        if status != reqwest::StatusCode::CREATED {
+            return Err(format!(
+                "session_start failed: expected HTTP 201 Created, got {status}"
+            ));
         }
         let raw_resp: SessionStartResponse = resp
             .json()
