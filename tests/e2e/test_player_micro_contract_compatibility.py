@@ -274,7 +274,7 @@ def main():
         "POST /api/v1/playback/control (play)",
         "POST",
         "/api/v1/playback/control",
-        body={"command": "play", "value": {"track_id": imported_track_id, "position_ms": 2000}},
+        body={"command": "play", "position_ms": 2000},
         headers=auth_headers,
     )
     st = test(base_url, "GET /api/v1/playback/state (after play)", "GET", "/api/v1/playback/state", headers=auth_headers)

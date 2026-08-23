@@ -276,18 +276,46 @@ jobs:
           tags: michi-server:test
       - name: Smoke test and Player Contract verification
         run: |
-          docker run -d --name michi-test -p 9090:9090 \
+          set -euo pipefail
+
+          cleanup() {
+            docker rm -f michi-test >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run -d \
+            --name michi-test \
+            -p 9090:9090 \
+            --tmpfs /music:rw,uid=1000,gid=1000,mode=0775 \
+            -e PUID=1000 \
+            -e PGID=1000 \
             -e MICHI_PORT=9090 \
             -e MICHI_AUTH_USERNAME=admin \
             -e MICHI_AUTH_PASSWORD=admin \
             michi-server:test
-          sleep 5
-          curl -f http://127.0.0.1:9090/health/live || exit 1
-          curl -f http://127.0.0.1:9090/api/v1/status || exit 1
-          curl -f http://127.0.0.1:9090/ || exit 1
-          python3 tests/e2e/test_player_micro_contract_compatibility.py --url http://127.0.0.1:9090 --username admin --password admin || exit 1
-          docker stop michi-test
-          docker rm michi-test
+
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9090/health/live >/dev/null 2>&1; then
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "FAIL: container did not become healthy within timeout"
+            docker logs michi-test
+            exit 1
+          fi
+
+          curl -fsS http://127.0.0.1:9090/health/live >/dev/null
+          curl -fsS http://127.0.0.1:9090/api/v1/status >/dev/null
+          curl -fsS http://127.0.0.1:9090/ >/dev/null
+          python3 tests/e2e/test_player_micro_contract_compatibility.py \
+            --url http://127.0.0.1:9090 \
+            --username admin \
+            --password admin
 
   ci-arm64-qemu:
     runs-on: ubuntu-latest
