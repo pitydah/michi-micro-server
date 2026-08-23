@@ -176,11 +176,61 @@ jobs:
         run: cargo build --release --bin michi-server
       - name: Verify engineering route test_pcm is 404 in release
         run: |
+          set -euo pipefail
+
+          TEST_ROOT="${RUNNER_TEMP}/michi-release-gate"
+
+          rm -rf "${TEST_ROOT}"
+          mkdir -p \
+            "${TEST_ROOT}/config" \
+            "${TEST_ROOT}/cache" \
+            "${TEST_ROOT}/music"
+
+          MICHI_CONFIG_PATH="${TEST_ROOT}/config" \
+          MICHI_CACHE_PATH="${TEST_ROOT}/cache" \
+          MICHI_MUSIC_PATH="${TEST_ROOT}/music" \
+          MICHI_DATABASE="sqlite://${TEST_ROOT}/config/michi.db" \
+          MICHI_PORT=9090 \
           ./target/release/michi-server &
+
           PID=$!
-          sleep 2
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:9090/api/v1/receivers/dummy/stream/test_pcm || true)
-          kill $PID || true
+
+          cleanup() {
+            kill "$PID" 2>/dev/null || true
+            wait "$PID" 2>/dev/null || true
+          }
+
+          trap cleanup EXIT
+
+          READY=0
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9090/health/live >/dev/null 2>&1; then
+              READY=1
+              break
+            fi
+
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "FAIL: release server terminated before becoming healthy"
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "FAIL: release server did not become healthy within timeout"
+            exit 1
+          fi
+
+          STATUS="$(
+            curl -sS \
+              -o /dev/null \
+              -w "%{http_code}" \
+              -X POST \
+              http://127.0.0.1:9090/api/v1/receivers/dummy/stream/test_pcm
+          )"
+
           if [ "$STATUS" = "404" ]; then
             echo "PASS: /stream/test_pcm strictly 404 in release (status=$STATUS)"
           else
