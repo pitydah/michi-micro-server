@@ -142,19 +142,33 @@ impl MichiConnect {
         }
     }
 
+    /// Default canonical discovery features for Michi Micro Server
+    pub fn canonical_features() -> std::collections::BTreeMap<String, bool> {
+        let mut features = std::collections::BTreeMap::new();
+        features.insert("library".to_string(), true);
+        features.insert("stream".to_string(), true);
+        features.insert("playback".to_string(), true);
+        features.insert("sync".to_string(), true);
+        features
+    }
+
     /// Builds a canonical signed UDP multicast announce for Michi Micro Server
     pub fn build_signed_announce(
         &self,
         port: u16,
         host: &str,
     ) -> Result<michi_identity::types::Announce, michi_identity::IdentityError> {
-        let engine = michi_identity::discovery::DiscoveryEngine::new(self.identity.clone());
-        let mut features = std::collections::BTreeMap::new();
-        features.insert("library".to_string(), true);
-        features.insert("stream".to_string(), true);
-        features.insert("playback".to_string(), true);
-        features.insert("sync".to_string(), true);
+        self.build_signed_announce_with_features(port, host, Self::canonical_features())
+    }
 
+    /// Builds a canonical signed UDP multicast announce with specified feature map
+    pub fn build_signed_announce_with_features(
+        &self,
+        port: u16,
+        host: &str,
+        features: std::collections::BTreeMap<String, bool>,
+    ) -> Result<michi_identity::types::Announce, michi_identity::IdentityError> {
+        let engine = michi_identity::discovery::DiscoveryEngine::new(self.identity.clone());
         let profile = michi_identity::types::AnnounceProfile {
             device_id: self.identity.michi_id().to_base64url(),
             name: "Michi Micro Server".to_string(),

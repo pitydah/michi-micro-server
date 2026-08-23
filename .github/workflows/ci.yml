@@ -181,8 +181,8 @@ jobs:
           sleep 2
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:9090/api/v1/receivers/dummy/stream/test_pcm || true)
           kill $PID || true
-          if [ "$STATUS" = "404" ] || [ "$STATUS" = "401" ] || [ "$STATUS" = "405" ]; then
-            echo "PASS: /stream/test_pcm not reachable as active route in release (status=$STATUS)"
+          if [ "$STATUS" = "404" ]; then
+            echo "PASS: /stream/test_pcm strictly 404 in release (status=$STATUS)"
           else
             echo "FAIL: expected 404 in release build, got $STATUS"
             exit 1

@@ -61,7 +61,7 @@ const ALWAYS_ON_FEATURES: &[(&str, &str, &str)] = &[
     ("playlists", "1.0", "Playlist management"),
     ("import", "1.0", "Library import"),
     ("queue", "1.0", "Playback queue"),
-    ("events", "1.0", "Server-sent events"),
+    ("events", "1.0", "Real-time WebSocket event dispatch"),
     ("token_refresh", "1.0", "Device token refresh"),
 ];
 
@@ -175,6 +175,17 @@ impl ServerCapabilities {
             .map(|f| f.enabled)
             .unwrap_or(false)
     }
+
+    /// Derives the discovery announcement features map directly from the canonical capabilities.
+    #[allow(dead_code)]
+    pub fn discovery_features(&self) -> std::collections::BTreeMap<String, bool> {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("library".to_string(), self.feature_enabled("library"));
+        map.insert("stream".to_string(), self.feature_enabled("stream"));
+        map.insert("playback".to_string(), self.feature_enabled("playback"));
+        map.insert("sync".to_string(), self.feature_enabled("sync"));
+        map
+    }
 }
 
 #[cfg(test)]
@@ -227,5 +238,9 @@ mod tests {
         assert!(caps.feature_enabled("stream"));
         assert!(!caps.feature_enabled("receivers"));
         assert!(!caps.feature_enabled("unknown"));
+
+        let disc = caps.discovery_features();
+        assert_eq!(disc.get("stream"), Some(&true));
+        assert_eq!(disc.get("library"), Some(&false));
     }
 }

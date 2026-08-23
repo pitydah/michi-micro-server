@@ -2,6 +2,7 @@
 
 **CURRENT VERSION:** v0.2.0  
 **CURRENT PHASE:** R3.1 — CERTIFICATION CLOSURE (SEALED)  
+**CURRENT HEAD:** e059d57ecb1ec43ed00c458e46ac28a938f1dcb0 (R3.1-SEALED)  
 **STATUS DATE:** 2026-08-23  
 
 ---
@@ -52,7 +53,7 @@ Michi Micro Server (Rust / Tokio / Axum)
 
 1. **Physical Hardware Certification:**
    - Physical device verification on ESP32-S3 hardware + PCM5122 DAC via RCA is explicitly pending phase **R4 — PHYSICAL CERTIFICATION**.
-   - Current certification level is **NETWORK_E2E_PASS** using canonical pinned simulator.
+   - Current certification level is **NETWORK_E2E_PASS** verified against canonical pinned reference (`pitydah/michi-music-stream@05265da` / `pitydah/michi-link@1b0684a`).
 2. **Audio Format Scope:**
    - Standard profile is strictly frozen at PCM S16LE / 48 kHz / 16-bit / 2 channels / 10 ms (1920 bytes payload).
    - DSD, DoP, 24/96, Sendspin, and Audio Lab are out of scope for receiver-v1-lite.

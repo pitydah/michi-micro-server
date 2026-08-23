@@ -277,10 +277,14 @@ pub async fn playback_control_handler(
             }
         }
         "set_volume" => {
-            let vol = body.volume.or(match body.value {
-                Some(PlaybackControlValue::Integer(v)) => Some(v as u32),
-                _ => None,
-            });
+            let vol = if let Some(v) = body.volume {
+                Some(v as u64)
+            } else {
+                match body.value {
+                    Some(PlaybackControlValue::Integer(v)) => Some(v),
+                    _ => None,
+                }
+            };
             match vol {
                 Some(v) if v <= 100 => {
                     current.volume = (v as f64) / 100.0;
@@ -707,5 +711,13 @@ mod tests {
         let json_unknown = r#"{"command": "play", "unknown_param": 123}"#;
         let err = serde_json::from_str::<PlaybackControlBody>(json_unknown);
         assert!(err.is_err(), "Must reject unknown top-level field");
+
+        // Large u64 volume value parses into Integer variant
+        let json_large_vol = r#"{"command": "set_volume", "value": 5000000000}"#;
+        let parsed: PlaybackControlBody = serde_json::from_str(json_large_vol).unwrap();
+        assert_eq!(
+            parsed.value,
+            Some(PlaybackControlValue::Integer(5_000_000_000))
+        );
     }
 }

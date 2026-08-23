@@ -91,6 +91,8 @@ class ReceiverState:
                             "ts": ts,
                             "ssrc": ssrc,
                             "size": payload_size,
+                            "source_port": addr[1],
+                            "source_ip": addr[0],
                         })
                         self.metrics["packets_received"] += 1
                         self.metrics["bytes_received"] += len(data)
