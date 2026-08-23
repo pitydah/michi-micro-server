@@ -315,6 +315,12 @@ pub async fn receiver_session_start_handler(
             "session_id": resp.session_id,
             "stream_port": resp.stream_port,
             "buffer_ms": resp.buffer_ms,
+            "ssrc": resp.ssrc,
+            "transport": resp.transport,
+            "codec": resp.codec,
+            "sample_rate": resp.sample_rate,
+            "bit_depth": resp.bit_depth,
+            "channels": resp.channels,
         }))),
         Err(e) => Err(v1_error(
             StatusCode::BAD_REQUEST,

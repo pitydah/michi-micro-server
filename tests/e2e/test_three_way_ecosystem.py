@@ -210,6 +210,9 @@ def main():
         assert status == 200, f"Session start via Micro failed: {status}, data: {sess_start}"
         print(f"  ✅ Micro started active session to Stream Standard: {sess_start}")
 
+        negotiated_ssrc = sess_start.get("ssrc")
+        assert negotiated_ssrc is not None and negotiated_ssrc > 0, f"Micro must return valid negotiated ssrc, got {negotiated_ssrc}"
+
         # Micro Server transmits 50ms of real 480Hz sine wave PCM through its own RtpReceiverTransport
         status, stream_res = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/{standard_device_id}/stream/test_pcm", {
             "frequency_hz": 480.0,
@@ -227,9 +230,9 @@ def main():
         assert metrics["packets_received"] >= 5, f"Expected >=5 packets, got {metrics['packets_received']}"
         assert metrics["last_payload_size"] == 1920, f"Expected 1920 bytes payload size, got {metrics['last_payload_size']}"
         assert metrics["last_payload_type"] == 97, f"Expected PT 97, got {metrics['last_payload_type']}"
-        assert metrics["last_ssrc"] > 0, "SSRC must be positive non-zero"
+        assert metrics["last_ssrc"] == negotiated_ssrc, f"SSRC mismatch! Negotiated: {negotiated_ssrc}, Received: {metrics['last_ssrc']}"
         assert metrics.get("source_port", 0) > 0, "Local source port from Micro must be positive non-zero"
-        print(f"  ✅ Stream Standard Simulator verified reception of {metrics['packets_received']} RTP packets (size=1920, PT=97, SSRC={metrics['last_ssrc']}, src_port={metrics.get('source_port')})")
+        print(f"  ✅ Stream Standard Simulator verified reception of {metrics['packets_received']} RTP packets (size=1920, PT=97, SSRC={metrics['last_ssrc']} == Negotiated {negotiated_ssrc}, src_port={metrics.get('source_port')})")
 
         # =====================================================================
         # PHASE 5: Mobile ➔ Micro: Volume Control & Heartbeats
