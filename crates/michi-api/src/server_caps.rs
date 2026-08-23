@@ -177,7 +177,6 @@ impl ServerCapabilities {
     }
 
     /// Derives the discovery announcement features map directly from the canonical capabilities.
-    #[allow(dead_code)]
     pub fn discovery_features(&self) -> std::collections::BTreeMap<String, bool> {
         let mut map = std::collections::BTreeMap::new();
         map.insert("library".to_string(), self.feature_enabled("library"));

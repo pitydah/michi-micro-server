@@ -744,6 +744,14 @@ impl ReceiverSessionManager {
             .await
             .map_err(|e| format!("write_pcm failed: {e:?}"))
     }
+
+    /// Query the local UDP socket port used by the active RTP transport for a receiver.
+    pub async fn get_rtp_local_port(&self, receiver_id: &str) -> Option<u16> {
+        let transports = self.active_transports.read().await;
+        let transport_lock = transports.get(receiver_id)?.clone();
+        let tr = transport_lock.lock().await;
+        tr.local_port()
+    }
 }
 
 impl Default for ReceiverSessionManager {

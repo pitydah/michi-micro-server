@@ -85,18 +85,22 @@ def main():
 
     try:
         # 1. Start Stream Standard Simulator
-        print("Starting Stream Standard Simulator...")
+        sim_script = os.environ.get("MICHI_STREAM_SIM_PATH")
+        if not sim_script or not os.path.exists(sim_script):
+            sim_script = os.path.abspath("scripts/receiver_sim.py")
+
+        print(f"Starting Stream Standard Simulator from {sim_script}...")
         p_std = subprocess.Popen(
-            [sys.executable, "scripts/receiver_sim.py", "--type", "standard", "--port", str(args.stream_std_port)],
+            [sys.executable, sim_script, "--type", "standard", "--port", str(args.stream_std_port)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
         spawned_procs.append(p_std)
 
         # 2. Start Stream Hi-Fi Simulator
-        print("Starting Stream Hi-Fi Simulator...")
+        print(f"Starting Stream Hi-Fi Simulator from {sim_script}...")
         p_hifi = subprocess.Popen(
-            [sys.executable, "scripts/receiver_sim.py", "--type", "hifi", "--port", str(args.stream_hifi_port)],
+            [sys.executable, sim_script, "--type", "hifi", "--port", str(args.stream_hifi_port)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
@@ -231,8 +235,10 @@ def main():
         assert metrics["last_payload_size"] == 1920, f"Expected 1920 bytes payload size, got {metrics['last_payload_size']}"
         assert metrics["last_payload_type"] == 97, f"Expected PT 97, got {metrics['last_payload_type']}"
         assert metrics["last_ssrc"] == negotiated_ssrc, f"SSRC mismatch! Negotiated: {negotiated_ssrc}, Received: {metrics['last_ssrc']}"
+        micro_rtp_port = sess_start.get("rtp_local_port")
+        assert micro_rtp_port is not None and micro_rtp_port > 0, f"Micro must report valid bound local RTP port, got {micro_rtp_port}"
         initial_source_port = metrics.get("source_port", 0)
-        assert initial_source_port > 0, "Local source port from Micro must be positive non-zero"
+        assert initial_source_port == micro_rtp_port, f"RTP source port mismatch! Micro local socket: {micro_rtp_port}, Stream observed: {initial_source_port}"
 
         # Verify RFC 3550 continuous monotonic progression: seq +1, ts +480 per packet and source-port equality
         pkt_history = metrics.get("packet_history", [])
@@ -246,9 +252,9 @@ def main():
             assert ts_delta == 480, f"RTP timestamp discontinuity: {prev['ts']} -> {curr['ts']} (delta {ts_delta} != 480 frames)"
             assert curr["size"] == 1920, f"Packet payload size != 1920 bytes: {curr['size']}"
             assert curr["ssrc"] == negotiated_ssrc, f"Packet SSRC mismatch in stream: {curr['ssrc']} != {negotiated_ssrc}"
-            assert curr["source_port"] == initial_source_port, f"RTP source port changed mid-session: {curr['source_port']} != {initial_source_port}"
+            assert curr["source_port"] == micro_rtp_port, f"RTP source port changed mid-session: {curr['source_port']} != {micro_rtp_port}"
 
-        print(f"  ✅ Stream Standard Simulator verified reception of {metrics['packets_received']} RTP packets (size=1920, PT=97, SSRC={metrics['last_ssrc']} == Negotiated {negotiated_ssrc}, src_port={initial_source_port}, seq_delta=+1, ts_delta=+480)")
+        print(f"  ✅ Stream Standard Simulator verified reception of {metrics['packets_received']} RTP packets (size=1920, PT=97, SSRC={metrics['last_ssrc']} == Negotiated {negotiated_ssrc}, src_port={initial_source_port} == Micro local_port={micro_rtp_port}, seq_delta=+1, ts_delta=+480)")
 
         # =====================================================================
         # PHASE 5: Mobile ➔ Micro: Volume Control & Heartbeats

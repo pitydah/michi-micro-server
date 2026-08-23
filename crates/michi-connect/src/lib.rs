@@ -225,6 +225,7 @@ impl MichiConnect {
         &self,
         port: u16,
         advertised_host: Option<String>,
+        features: std::collections::BTreeMap<String, bool>,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         let connect = self.clone();
@@ -262,7 +263,7 @@ impl MichiConnect {
                         break;
                     }
                     _ = interval.tick() => {
-                        match connect.build_signed_announce(port, &host) {
+                        match connect.build_signed_announce_with_features(port, &host, features.clone()) {
                             Ok(announce) => {
                                 if let Ok(json_bytes) = serde_json::to_vec(&announce) {
                                     if let Err(e) = socket.send_to(&json_bytes, &target_addr).await {

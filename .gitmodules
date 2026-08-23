@@ -1,3 +1,6 @@
 [submodule "vendor/michi-link"]
 	path = vendor/michi-link
 	url = https://github.com/pitydah/michi-link.git
+[submodule "vendor/michi-music-stream"]
+	path = vendor/michi-music-stream
+	url = https://github.com/pitydah/michi-music-stream.git

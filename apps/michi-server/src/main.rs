@@ -202,8 +202,15 @@ async fn main() -> Result<()> {
 
     // Spawn UDP multicast discovery announcer with cancellation on shutdown
     let announcer_cancel = tokio_util::sync::CancellationToken::new();
-    let announcer_handle =
-        michi_connect.spawn_announcer(actual_port, Some(advertised_host), announcer_cancel.clone());
+    let discovery_features = michi_api::server_caps::ServerCapabilities::from_state(&state)
+        .await
+        .discovery_features();
+    let announcer_handle = michi_connect.spawn_announcer(
+        actual_port,
+        Some(advertised_host),
+        discovery_features,
+        announcer_cancel.clone(),
+    );
 
     // Graceful shutdown: SIGINT + SIGTERM
     let shutdown_state = state.clone();

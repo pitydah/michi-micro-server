@@ -310,18 +310,22 @@ pub async fn receiver_session_start_handler(
         )
         .await
     {
-        Ok(resp) => Ok(Json(serde_json::json!({
-            "status": "session_started",
-            "session_id": resp.session_id,
-            "stream_port": resp.stream_port,
-            "buffer_ms": resp.buffer_ms,
-            "ssrc": resp.ssrc,
-            "transport": resp.transport,
-            "codec": resp.codec,
-            "sample_rate": resp.sample_rate,
-            "bit_depth": resp.bit_depth,
-            "channels": resp.channels,
-        }))),
+        Ok(resp) => {
+            let rtp_local_port = state.receiver_manager.get_rtp_local_port(&id).await;
+            Ok(Json(serde_json::json!({
+                "status": "session_started",
+                "session_id": resp.session_id,
+                "stream_port": resp.stream_port,
+                "buffer_ms": resp.buffer_ms,
+                "ssrc": resp.ssrc,
+                "transport": resp.transport,
+                "codec": resp.codec,
+                "sample_rate": resp.sample_rate,
+                "bit_depth": resp.bit_depth,
+                "channels": resp.channels,
+                "rtp_local_port": rtp_local_port,
+            })))
+        }
         Err(e) => Err(v1_error(
             StatusCode::BAD_REQUEST,
             "SESSION_START_FAILED",

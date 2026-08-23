@@ -136,10 +136,15 @@ pub trait AudioTransport: Send + Sync {
 
     /// Terminate the active session gracefully (sends teardown to the endpoint).
     async fn stop(&mut self) -> TransportResult<()>;
+
+    /// Returns the local UDP socket port bound for RTP streaming, if active.
+    fn local_port(&self) -> Option<u16> {
+        None
+    }
 }
 
 /// Concrete RTP/UDP audio transport implementation for Michi Music Stream (v1-lite).
-/// Wire-format: PCM S16LE / 48kHz / 16-bit / 2ch / 10ms packets (960 bytes, 480 stereo samples) / PT 97.
+/// Wire-format: PCM S16LE / 48kHz / 16-bit / 2ch / 10ms packets (1920 bytes, 480 stereo frames) / PT 97.
 #[derive(Debug)]
 pub struct RtpReceiverTransport {
     target_addr: String,
@@ -380,6 +385,12 @@ impl AudioTransport for RtpReceiverTransport {
         self.config = None;
         self.pending_pcm.clear();
         Ok(())
+    }
+
+    fn local_port(&self) -> Option<u16> {
+        self.socket
+            .as_ref()
+            .and_then(|s| s.local_addr().ok().map(|a| a.port()))
     }
 }
 
