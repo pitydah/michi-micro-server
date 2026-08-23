@@ -174,22 +174,21 @@ impl MichiConnect {
 
     /// Resolves the primary non-loopback reachable LAN IP, checking MICHI_ADVERTISE_HOST and local routes offline.
     pub fn resolve_lan_ip() -> String {
-        // 1. Explicit environment variable
+        // 1. Explicit environment variable configuration
         if let Ok(host) = std::env::var("MICHI_ADVERTISE_HOST") {
             if !host.trim().is_empty() {
                 return host.trim().to_string();
             }
         }
 
-        // 2. Offline routing check towards local gateways, container bridges, and DNS resolvers
+        // 2. Offline routing check towards local physical RFC1918 gateways (strictly local-first)
         for probe in &[
             "192.168.1.1:80",
             "192.168.0.1:80",
+            "192.168.2.1:80",
             "10.0.0.1:80",
-            "172.17.0.1:80", // Docker default bridge
+            "10.1.1.1:80",
             "172.16.0.1:80",
-            "1.1.1.1:80",
-            "8.8.8.8:80",
         ] {
             if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
                 if socket.connect(probe).is_ok() {

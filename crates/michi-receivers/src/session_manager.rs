@@ -543,10 +543,13 @@ impl ReceiverSessionManager {
 
         let mgr = self.clone();
         let rec_id = receiver_id.to_string();
-        let interval_secs = (lease_seconds / 3).clamp(2, 10);
+        let interval_secs = (lease_seconds / 6).clamp(1, 4);
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip the immediate first tick so interval starts ticking at interval_secs
+            interval.tick().await;
             loop {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {

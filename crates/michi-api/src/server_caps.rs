@@ -130,7 +130,7 @@ impl ServerCapabilities {
             protocols: vec![
                 ServerProtocol {
                     name: "michi-link",
-                    version: "0.2",
+                    version: "1.0",
                 },
                 ServerProtocol {
                     name: "websocket",

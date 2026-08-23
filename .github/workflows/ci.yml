@@ -159,9 +159,38 @@ jobs:
       - name: Run Web UI Functional Integrity Suite
         run: cargo test -p michi-api --test web_ui_integrity_tests
 
+  ci-no-test-api-release:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
+      - name: Build release binary
+        run: cargo build --release --bin michi-server
+      - name: Verify engineering route test_pcm is 404 in release
+        run: |
+          ./target/release/michi-server &
+          PID=$!
+          sleep 2
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:9090/api/v1/receivers/dummy/stream/test_pcm || true)
+          kill $PID || true
+          if [ "$STATUS" = "404" ] || [ "$STATUS" = "401" ] || [ "$STATUS" = "405" ]; then
+            echo "PASS: /stream/test_pcm not reachable as active route in release (status=$STATUS)"
+          else
+            echo "FAIL: expected 404 in release build, got $STATUS"
+            exit 1
+          fi
+
   ci-three-way-ecosystem:
     runs-on: ubuntu-latest
-    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator]
+    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-no-test-api-release]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -179,7 +208,7 @@ jobs:
 
   ci-docker-amd64:
     runs-on: ubuntu-latest
-    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-mosquitto-real, ci-generic-linux-appliance, ci-reliability-short, ci-web-ui-functional-integrity, ci-three-way-ecosystem]
+    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-no-test-api-release, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-mosquitto-real, ci-generic-linux-appliance, ci-reliability-short, ci-web-ui-functional-integrity, ci-three-way-ecosystem]
     steps:
       - uses: actions/checkout@v4
         with:

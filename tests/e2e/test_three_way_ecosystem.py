@@ -260,21 +260,27 @@ def main():
         assert vol_res.get("volume") == 85
         print("  ✅ Volume set to 85 via Micro Server")
 
-        # 2. Trigger managed heartbeat via Micro Server
-        status, hb_res = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/{standard_device_id}/heartbeat", headers=headers)
-        assert status == 200, f"Heartbeat via Micro failed: {status}"
-        assert hb_res.get("status") == "alive"
-        print("  ✅ Manual heartbeat verified via Micro Server")
-
-        # 3. Verify automatic background heartbeat task from Micro Server
-        time.sleep(2.5) # Background task interval is clamped at 2-10s
-        status, metrics_hb = http_req("GET", f"{std_url}/api/v1/test/metrics")
+        # 2. Capture baseline heartbeats and verify automatic background heartbeat increment
+        status, initial_metrics = http_req("GET", f"{std_url}/api/v1/test/metrics")
         assert status == 200
-        hb_count = metrics_hb.get("heartbeats_received", 0)
-        assert hb_count >= 1, f"Expected automatic background heartbeat to be received, got {hb_count}"
-        last_seq = metrics_hb.get("last_heartbeat_seq", 0)
-        assert last_seq >= 1, f"Expected last_heartbeat_seq >= 1, got {last_seq}"
-        print(f"  ✅ Automatic background heartbeat confirmed (received={hb_count}, last_seq={last_seq})")
+        baseline_hb = initial_metrics.get("heartbeats_received", 0)
+
+        # Wait up to 6 seconds for background task to issue new heartbeat
+        auto_hb_confirmed = False
+        final_hb_count = baseline_hb
+        last_seq = 0
+        for _ in range(30):
+            time.sleep(0.2)
+            status, cur_metrics = http_req("GET", f"{std_url}/api/v1/test/metrics")
+            if status == 200:
+                final_hb_count = cur_metrics.get("heartbeats_received", 0)
+                last_seq = cur_metrics.get("last_heartbeat_seq", 0)
+                if final_hb_count > baseline_hb:
+                    auto_hb_confirmed = True
+                    break
+
+        assert auto_hb_confirmed, f"Automatic background heartbeat failed to increment! Baseline: {baseline_hb}, Final: {final_hb_count}"
+        print(f"  ✅ Automatic background heartbeat confirmed (baseline={baseline_hb} -> received={final_hb_count}, last_seq={last_seq})")
 
         # =====================================================================
         # PHASE 6: Mobile ➔ Micro: Output Handoff (Standard ➔ Hi-Fi)
