@@ -129,8 +129,13 @@ impl Config {
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false);
 
-        let auth_username = env::var("MICHI_AUTH_USERNAME").ok();
-        let auth_password = env::var("MICHI_AUTH_PASSWORD").ok();
+        let auth_username = env::var("MICHI_AUTH_USERNAME")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let auth_password = env::var("MICHI_AUTH_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty());
         let auth_enabled = auth_username.is_some() && auth_password.is_some();
         let allow_registration = env::var("MICHI_ALLOW_REGISTRATION")
             .ok()
@@ -527,5 +532,51 @@ impl<'de> Deserialize<'de> for Config {
             cfg.cors_origin = Some(v);
         }
         Ok(cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_auth_vars_do_not_enable_auth() {
+        temp_env::with_vars(
+            [
+                ("MICHI_AUTH_USERNAME", Some("")),
+                ("MICHI_AUTH_PASSWORD", Some("")),
+            ],
+            || {
+                let cfg = Config::from_env();
+                assert!(!cfg.auth_enabled);
+                assert_eq!(cfg.auth_username, None);
+                assert_eq!(cfg.auth_password, None);
+            },
+        );
+
+        temp_env::with_vars(
+            [
+                ("MICHI_AUTH_USERNAME", Some("admin")),
+                ("MICHI_AUTH_PASSWORD", Some("")),
+            ],
+            || {
+                let cfg = Config::from_env();
+                assert!(!cfg.auth_enabled);
+                assert_eq!(cfg.auth_password, None);
+            },
+        );
+
+        temp_env::with_vars(
+            [
+                ("MICHI_AUTH_USERNAME", Some("admin")),
+                ("MICHI_AUTH_PASSWORD", Some("securepass123")),
+            ],
+            || {
+                let cfg = Config::from_env();
+                assert!(cfg.auth_enabled);
+                assert_eq!(cfg.auth_username.as_deref(), Some("admin"));
+                assert_eq!(cfg.auth_password.as_deref(), Some("securepass123"));
+            },
+        );
     }
 }

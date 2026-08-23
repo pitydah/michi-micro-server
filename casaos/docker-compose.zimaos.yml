@@ -1,7 +1,7 @@
 name: michi-micro-server
 services:
   michi-micro-server:
-    image: ghcr.io/pitydah/michi-micro-server:v0.2.0
+    image: ghcr.io/pitydah/michi-micro-server:r3.1-zima
     container_name: michi-micro-server
     network_mode: host
     volumes:
@@ -24,7 +24,7 @@ services:
       - MICHI_CACHE_PATH=/cache
       - MICHI_DATABASE=sqlite:///config/michi.db
       - MICHI_AUTH_USERNAME=${MICHI_AUTH_USERNAME:-admin}
-      - MICHI_AUTH_PASSWORD=${MICHI_AUTH_PASSWORD:-}
+      - MICHI_AUTH_PASSWORD=${MICHI_AUTH_PASSWORD:?A strong Michi administrator password is required}
       - MICHI_ADVERTISE_HOST=${MICHI_ADVERTISE_HOST:-}
     restart: unless-stopped
     devices: []

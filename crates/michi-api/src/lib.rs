@@ -700,8 +700,12 @@ pub async fn init_admin_user(config: &Config, db: &SqlitePool) -> Option<Uuid> {
     if !config.auth_enabled {
         return None;
     }
-    let username = config.auth_username.as_deref()?;
-    let password = config.auth_password.as_deref()?;
+    let username = config
+        .auth_username
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())?;
+    let password = config.auth_password.as_deref().filter(|s| !s.is_empty())?;
 
     match michi_db::get_user_by_username(db, username)
         .await
