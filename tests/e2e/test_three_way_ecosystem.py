@@ -220,14 +220,15 @@ def main():
         assert bytes_sent == 9600 # 50ms = 5 packets * 1920 bytes = 9600 bytes
         print(f"  ✅ Micro Server streamed {bytes_sent} bytes of real RTP/UDP PCM to Stream Standard")
 
-        # Query Stream Standard Simulator test metrics to verify UDP arrival
+        # Query Stream Standard Simulator test metrics to verify UDP arrival and RFC 3550 contract
         time.sleep(0.2)
         status, metrics = http_req("GET", f"{std_url}/api/v1/test/metrics")
         assert status == 200
         assert metrics["packets_received"] >= 5, f"Expected >=5 packets, got {metrics['packets_received']}"
         assert metrics["last_payload_size"] == 1920, f"Expected 1920 bytes payload size, got {metrics['last_payload_size']}"
         assert metrics["last_payload_type"] == 97, f"Expected PT 97, got {metrics['last_payload_type']}"
-        print(f"  ✅ Stream Standard Simulator verified reception of {metrics['packets_received']} RTP packets (size=1920, PT=97)")
+        assert metrics["last_ssrc"] > 0, "SSRC must be positive non-zero"
+        print(f"  ✅ Stream Standard Simulator verified reception of {metrics['packets_received']} RTP packets (size=1920, PT=97, SSRC={metrics['last_ssrc']})")
 
         # =====================================================================
         # PHASE 5: Mobile ➔ Micro: Volume Control & Heartbeats
