@@ -445,7 +445,7 @@ pub async fn playback_session_handler(
         current_track_id: body.current_track_id,
         position_ms: body.position_ms,
         playing: body.playing,
-        repeat_mode: "none".into(),
+        repeat_mode: "off".into(),
         shuffle: false,
         volume: body.volume.unwrap_or(0.8),
         source: body.source.unwrap_or_else(|| "player".into()),
