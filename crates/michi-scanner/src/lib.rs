@@ -18,6 +18,10 @@ fn is_audio_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub fn scan_single_file(library_root: &Path, entry_path: &Path) -> Option<Track> {
+    track_from_file(library_root, entry_path)
+}
+
 fn track_from_file(library_root: &Path, entry_path: &Path) -> Option<Track> {
     if !entry_path.is_file() || !is_audio_file(entry_path) {
         return None;

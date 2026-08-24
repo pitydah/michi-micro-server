@@ -44,6 +44,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ImportFile {
+    pub local_track_id: Option<Uuid>,
+    pub filename: String,
+    pub safe_name: String,
+    pub checksum: String,
+    pub size_bytes: u64,
+    pub remote_track_id: Uuid,
+}
+
 #[derive(Debug, Clone)]
 pub struct ImportSessionState {
     pub session_id: Uuid,
@@ -53,6 +63,7 @@ pub struct ImportSessionState {
     pub total_size_bytes: u64,
     pub device_id: Uuid,
     pub seen_hashes: Vec<String>,
+    pub files: Vec<ImportFile>,
 }
 
 use lazy_static::lazy_static;
@@ -187,6 +198,7 @@ pub async fn import_session_handler(
                 total_size_bytes: 0,
                 device_id,
                 seen_hashes: Vec::new(),
+                files: Vec::new(),
             },
         );
     }
@@ -325,19 +337,6 @@ pub async fn import_upload_handler(
         .await
         .ok();
 
-    {
-        let mut sessions = IMPORT_SESSIONS.write().await;
-        if let Some(s) = sessions.get_mut(&session_id) {
-            s.imported_tracks += 1;
-            s.total_size_bytes += data.len() as u64;
-            s.seen_hashes.push(data_hash.clone());
-        }
-    }
-
-    michi_db::update_import_session_progress(&state.db, &session_id, 1, data.len() as u64)
-        .await
-        .ok();
-
     let ext = std::path::Path::new(&safe_name)
         .extension()
         .and_then(|e| e.to_str())
@@ -352,11 +351,40 @@ pub async fn import_upload_handler(
             .cloned()
             .unwrap_or_else(|| import_dir.clone());
         let final_path = final_dir.join(&safe_name);
-        let tid = michi_core::track_id_from_path(final_path.to_str().unwrap_or(""));
+        let tid = michi_core::track_id_from_library_path(&final_dir, &final_path);
         Some(tid)
     } else {
         None
     };
+
+    if let Some(r_id) = remote_track_id {
+        let import_file = ImportFile {
+            local_track_id,
+            filename: body.filename.clone(),
+            safe_name: safe_name.clone(),
+            checksum: data_hash.clone(),
+            size_bytes: data.len() as u64,
+            remote_track_id: r_id,
+        };
+        let mut sessions = IMPORT_SESSIONS.write().await;
+        if let Some(s) = sessions.get_mut(&session_id) {
+            s.imported_tracks += 1;
+            s.total_size_bytes += data.len() as u64;
+            s.seen_hashes.push(data_hash.clone());
+            s.files.push(import_file);
+        }
+    } else {
+        let mut sessions = IMPORT_SESSIONS.write().await;
+        if let Some(s) = sessions.get_mut(&session_id) {
+            s.imported_tracks += 1;
+            s.total_size_bytes += data.len() as u64;
+            s.seen_hashes.push(data_hash.clone());
+        }
+    }
+
+    michi_db::update_import_session_progress(&state.db, &session_id, 1, data.len() as u64)
+        .await
+        .ok();
 
     Ok(Json(serde_json::json!({
         "local_track_id": local_track_id,
@@ -555,10 +583,10 @@ pub async fn import_session_status_handler(
 pub async fn import_commit_handler(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
-) -> Result<Json<serde_json::value::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let _session_state = {
-        let mut sessions = IMPORT_SESSIONS.write().await;
-        sessions.remove(&session_id)
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let session_state = {
+        let sessions = IMPORT_SESSIONS.read().await;
+        sessions.get(&session_id).cloned()
     }
     .ok_or_else(|| {
         v1_error(
@@ -584,51 +612,63 @@ pub async fn import_commit_handler(
         .cloned()
         .unwrap_or_else(|| staging_dir.clone());
 
-    if staging_dir.exists() {
-        if let Ok(mut entries) = tokio::fs::read_dir(&staging_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let src = entry.path();
-                if src.is_file() {
-                    let dest = final_dir.join(src.file_name().unwrap());
-                    if !dest.exists() {
-                        let _ = tokio::fs::copy(&src, &dest).await;
-                    }
-                }
+    tokio::fs::create_dir_all(&final_dir).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "IO_ERROR",
+            &format!("failed to ensure destination directory: {e}"),
+        )
+    })?;
+
+    // Safely copy each uploaded file from staging to final library destination
+    let mut copied_files: Vec<(std::path::PathBuf, std::path::PathBuf, ImportFile)> = Vec::new();
+    for file in &session_state.files {
+        let src = staging_dir.join(&file.safe_name);
+        let dest = final_dir.join(&file.safe_name);
+        if src.exists() {
+            if !dest.exists() {
+                tokio::fs::copy(&src, &dest).await.map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "IO_ERROR",
+                        &format!("failed to copy {} to destination: {e}", file.safe_name),
+                    )
+                })?;
+            }
+            copied_files.push((src, dest, file.clone()));
+        }
+    }
+
+    // Scan specifically the imported files and attach their verified content_hash
+    let mut imported_tracks: Vec<michi_core::Track> = Vec::new();
+    for (_src, dest, file) in &copied_files {
+        if let Some(mut track) = michi_scanner::scan_single_file(&final_dir, dest) {
+            track.content_hash = Some(file.checksum.clone());
+            imported_tracks.push(track);
+        }
+    }
+
+    // Check for unresolved conflicts: same content_hash but different duration_ms already in library
+    let mut conflict = false;
+    for track in &imported_tracks {
+        if let Some(ref hash) = track.content_hash {
+            let existing = michi_db::find_tracks_by_content_hash(&state.db, hash)
+                .await
+                .ok()
+                .unwrap_or_default();
+            if existing.iter().any(|t| {
+                t.id != track.id
+                    && t.duration_ms
+                        .map(|d| (d as i64 - track.duration_ms.unwrap_or(0) as i64).abs() > 2000)
+                        .unwrap_or(false)
+            }) {
+                conflict = true;
+                break;
             }
         }
     }
-    cleanup_session_dir(&staging_dir).await;
 
-    let concurrency = state.config.resource_profile.scan_concurrency();
-    let tracks = michi_scanner::scan_directories_with_concurrency(&[final_dir], concurrency).await;
-    let _scanned_count = tracks.len();
-
-    // Check for unresolved conflicts: same content_hash but different duration_ms already in library
-    let has_conflicts = {
-        let mut conflict = false;
-        for track in &tracks {
-            if let Some(ref hash) = track.content_hash {
-                let existing = michi_db::find_tracks_by_content_hash(&state.db, hash)
-                    .await
-                    .ok()
-                    .unwrap_or_default();
-                if existing.iter().any(|t| {
-                    t.id != track.id
-                        && t.duration_ms
-                            .map(|d| {
-                                (d as i64 - track.duration_ms.unwrap_or(0) as i64).abs() > 2000
-                            })
-                            .unwrap_or(false)
-                }) {
-                    conflict = true;
-                    break;
-                }
-            }
-        }
-        conflict
-    };
-
-    if has_conflicts {
+    if conflict {
         michi_db::set_import_session_status(
             &state.db,
             &session_id,
@@ -637,44 +677,48 @@ pub async fn import_commit_handler(
         )
         .await
         .ok();
-        return Err(v1_error(StatusCode::CONFLICT, "UNRESOLVED_CONFLICTS",
-            "Import has duration conflicts with existing tracks. Rollback and fix metadata before retrying."));
+        return Err(v1_error(
+            StatusCode::CONFLICT,
+            "UNRESOLVED_CONFLICTS",
+            "Import has duration conflicts with existing tracks. Rollback and fix metadata before retrying.",
+        ));
     }
 
-    michi_db::upsert_tracks(&state.db, &tracks).await.ok();
-    cleanup_session_dir(&staging_dir).await;
+    // Upsert imported tracks to database
+    if !imported_tracks.is_empty() {
+        michi_db::upsert_tracks(&state.db, &imported_tracks)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &format!("failed to upsert imported tracks: {e}"),
+                )
+            })?;
+    }
 
-    // Build mapping with per-track status
+    // Build per-track mapping strictly for the files in this transaction
     let mut mapping: Vec<serde_json::Value> = Vec::new();
-    for track in &tracks {
-        let existing_by_hash = if let Some(ref h) = track.content_hash {
-            michi_db::find_tracks_by_content_hash(&state.db, h)
-                .await
-                .ok()
-                .unwrap_or_default()
+    for file in &session_state.files {
+        let (status, remote_id) = if let Some(tr) = imported_tracks
+            .iter()
+            .find(|t| t.id == file.remote_track_id)
+        {
+            ("inserted".to_string(), tr.id)
         } else {
-            Vec::new()
+            ("inserted".to_string(), file.remote_track_id)
         };
 
-        let (status, remote_id): (String, Uuid) =
-            if existing_by_hash.iter().any(|t| t.id == track.id) {
-                // This exact track was just inserted
-                ("inserted".into(), track.id)
-            } else if existing_by_hash.iter().any(|t| t.id != track.id) {
-                // Hash matched a different track — merged
-                let existing_id = existing_by_hash.first().map(|t| t.id).unwrap_or(track.id);
-                ("merged".into(), existing_id)
-            } else {
-                ("inserted".into(), track.id)
-            };
-
         mapping.push(serde_json::json!({
-            "local_track_id": track.id,
+            "local_track_id": file.local_track_id.unwrap_or(remote_id),
             "status": status,
             "remote_track_id": remote_id,
-            "checksum": track.content_hash,
+            "checksum": file.checksum,
         }));
     }
+
+    // Cleanup staging ONLY after all files copied and DB updated successfully
+    cleanup_session_dir(&staging_dir).await;
 
     michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Committed, None)
         .await
@@ -682,12 +726,16 @@ pub async fn import_commit_handler(
     michi_db::close_import_session(&state.db, &session_id)
         .await
         .ok();
+
+    // Remove from active memory sessions now that commit succeeded
+    IMPORT_SESSIONS.write().await.remove(&session_id);
+
     let _ = state.tx.send(r#"{"type":"library_updated"}"#.to_string());
 
     Ok(Json(serde_json::json!({
-        "tracks_imported": _session_state.imported_tracks,
+        "tracks_imported": session_state.imported_tracks,
         "playlists_imported": 0,
-        "total_size_bytes": _session_state.total_size_bytes,
+        "total_size_bytes": session_state.total_size_bytes,
         "mapping": mapping,
     })))
 }

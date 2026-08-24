@@ -97,6 +97,30 @@ impl AppState {
 
 impl AppState {
     pub fn new(config: Config, db: SqlitePool, admin_user_id: Option<Uuid>) -> Self {
+        let identity = Arc::new(
+            michi_identity::IdentityManager::load_or_generate(
+                &config.config_path,
+                "Michi Micro Server",
+                "",
+            )
+            .unwrap_or_else(|e| {
+                tracing::warn!("failed to load identity from config dir: {e}; using ephemeral");
+                let ephemeral_dir = std::env::temp_dir()
+                    .join(format!("michi-ephemeral-identity-{}", uuid::Uuid::new_v4()));
+                let _ = std::fs::create_dir_all(&ephemeral_dir);
+                michi_identity::IdentityManager::generate(&ephemeral_dir, "Michi Micro Server", "")
+                    .expect("ephemeral identity generation must not fail")
+            }),
+        );
+        Self::new_with_identity(config, db, admin_user_id, identity)
+    }
+
+    pub fn new_with_identity(
+        config: Config,
+        db: SqlitePool,
+        admin_user_id: Option<Uuid>,
+        identity: Arc<michi_identity::IdentityManager>,
+    ) -> Self {
         let (tx, _) = broadcast::channel(64);
         let (sync_tx, _) = broadcast::channel(64);
         let auth_sessions = auth::AuthState::new();
@@ -140,23 +164,6 @@ impl AppState {
         });
         michi_link::spawn_token_cleanup(token_store.clone());
 
-        let identity = Arc::new(
-            michi_identity::IdentityManager::load_or_generate(
-                &config.config_path,
-                "Michi Micro Server",
-                "",
-            )
-            .unwrap_or_else(|e| {
-                tracing::warn!("failed to load identity from config dir: {e}; using ephemeral");
-                // Unique per-instance dir: tests build many AppStates in
-                // parallel and a fixed path would race on the identity file.
-                let ephemeral_dir = std::env::temp_dir()
-                    .join(format!("michi-ephemeral-identity-{}", uuid::Uuid::new_v4()));
-                let _ = std::fs::create_dir_all(&ephemeral_dir);
-                michi_identity::IdentityManager::generate(&ephemeral_dir, "Michi Micro Server", "")
-                    .expect("ephemeral identity generation must not fail")
-            }),
-        );
         let receiver_manager =
             michi_receivers::ReceiverSessionManager::new_with_identity(identity.clone());
         let pairing_registry = Arc::new(michi_identity::PairingRegistry::new());
@@ -227,73 +234,59 @@ impl AppState {
                     }
                 }
             }
-            info!("DB maintenance scheduler stopped");
+            info!("maintenance scheduler stopped");
         }));
 
-        // Integrity cron (solo si scan habilitado)
-        let integrity_db = db.clone();
-        let integrity_shutdown = shutdown.clone();
-        let integrity_dm = dm.clone();
+        // Library auto-scanner (respeta módulo scan)
+        let scan_paths = self.config.music_paths.clone();
+        let scan_db = db.clone();
+        let scan_profile = self.config.resource_profile;
+        let scan_dm = dm.clone();
+        let scan_shutdown = shutdown.clone();
+        let scan_cancel = self
+            .module_tokens
+            .try_read()
+            .ok()
+            .and_then(|m| m.get("scan").cloned())
+            .unwrap_or_default();
         self.track_task(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(86400));
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
             interval.tick().await;
             loop {
                 tokio::select! {
-                    _ = integrity_shutdown.cancelled() => break,
+                    _ = scan_shutdown.cancelled() => break,
                     _ = interval.tick() => {
-                        if integrity_dm.read().await.contains("scan") {
+                        if scan_cancel.is_cancelled() || scan_dm.read().await.contains("scan") {
                             continue;
                         }
-                        tracing::info!("integrity check: starting daily scan");
-                        let tracks = match michi_db::list_tracks(&integrity_db).await {
-                            Ok(t) => t,
-                            Err(e) => {
-                                tracing::warn!("integrity check: db error: {}", e);
-                                continue;
-                            }
-                        };
-                        let mut missing = 0u64;
-                        for track in &tracks {
-                            if !std::path::Path::new(&track.file_path).exists() {
-                                missing += 1;
-                                tracing::warn!("integrity: missing file: {}", track.file_path);
-                            }
+                        let concurrency = scan_profile.scan_concurrency();
+                        let tracks = michi_scanner::scan_directories_cancellable(
+                            &scan_paths,
+                            concurrency,
+                            scan_cancel.clone(),
+                        )
+                        .await;
+                        if !tracks.is_empty() {
+                            let _ = michi_db::upsert_tracks(&scan_db, &tracks).await;
                         }
-                        tracing::info!(
-                            "integrity check: {}/{} files ok, {} missing",
-                            tracks.len() - missing as usize,
-                            tracks.len(),
-                            missing
-                        );
                     }
                 }
             }
-            info!("integrity cron stopped");
+            info!("auto-scanner stopped");
         }));
 
-        // Library watcher (solo si scan habilitado)
+        // Inotify file system watcher (respeta módulo scan)
         let watch_paths = self.config.music_paths.clone();
         let watch_db = db.clone();
         let watch_shutdown = shutdown.clone();
-        let watch_dm = dm.clone();
-        let watch_tokens = self.module_tokens.clone();
+        let watch_cancel = self
+            .module_tokens
+            .try_read()
+            .ok()
+            .and_then(|m| m.get("scan").cloned())
+            .unwrap_or_default();
         self.track_task(tokio::spawn(async move {
-            loop {
-                if watch_shutdown.is_cancelled() {
-                    break;
-                }
-                if watch_dm.read().await.contains("scan") {
-                    tokio::select! {
-                        _ = watch_shutdown.cancelled() => break,
-                        _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
-                    }
-                }
-                let watch_cancel = watch_tokens
-                    .read()
-                    .await
-                    .get("scan")
-                    .cloned()
-                    .unwrap_or_default();
+            if !watch_paths.is_empty() {
                 let watcher = michi_scanner::watcher::LibraryWatcher::new(
                     watch_paths.clone(),
                     watch_db.clone(),
@@ -303,114 +296,6 @@ impl AppState {
                     .await;
             }
             info!("watcher stopped");
-        }));
-
-        // Receiver heartbeat monitor (siempre corre)
-        let rm = self.receiver_manager.clone();
-        let hb_db = db.clone();
-        let hb_shutdown = shutdown.clone();
-        let hb_dm = dm.clone();
-        self.track_task(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            loop {
-                tokio::select! {
-                    _ = hb_shutdown.cancelled() => break,
-                    _ = interval.tick() => {
-                        if hb_dm.read().await.contains("playback") {
-                            continue;
-                        }
-                        let reg = rm.registry().await;
-                        let reg_read = reg.read().await;
-                        let now = Utc::now();
-                        let mut candidates: Vec<(String, chrono::DateTime<Utc>, String)> = Vec::new();
-                        for e in reg_read.list() {
-                            if let Some(last) = e.last_seen {
-                                if (now - last).num_seconds() > 120 {
-                                    candidates.push((
-                                        e.receiver_id.clone(),
-                                        last,
-                                        e.base_url.clone(),
-                                    ));
-                                }
-                            }
-                        }
-                        drop(reg_read);
-
-                        for (recv_id, _last_seen, base_url) in candidates {
-                            let reg_write = match tokio::time::timeout(
-                                Duration::from_secs(2),
-                                reg.write(),
-                            ).await {
-                                Ok(guard) => guard,
-                                Err(_) => {
-                                    warn!("heartbeat: write lock timeout for {}", recv_id);
-                                    continue;
-                                }
-                            };
-                            let should_ping = reg_write
-                                .get(&recv_id)
-                                .and_then(|e| e.active_session_id.as_ref())
-                                .is_some();
-                            drop(reg_write);
-
-                            if should_ping {
-                                let url = format!("{base_url}/api/v1/receivers/{recv_id}/heartbeat");
-                                match reqwest::Client::new()
-                                    .post(&url)
-                                    .timeout(Duration::from_secs(5))
-                                    .send()
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        let mut reg_w2 = match tokio::time::timeout(
-                                            Duration::from_secs(1),
-                                            reg.write(),
-                                        ).await {
-                                            Ok(g) => g,
-                                            Err(_) => continue,
-                                        };
-                                        if let Some(e) = reg_w2.get_mut(&recv_id) {
-                                            e.last_seen = Some(Utc::now());
-                                        }
-                                    }
-                                    Err(_) => {
-                                        let mut reg_w2 = match tokio::time::timeout(
-                                            Duration::from_secs(1),
-                                            reg.write(),
-                                        ).await {
-                                            Ok(g) => g,
-                                            Err(_) => continue,
-                                        };
-                                        if let Some(e) = reg_w2.get_mut(&recv_id) {
-                                            e.active_session_id = None;
-                                        }
-                                        record_audit(
-                                            &hb_db,
-                                            "receiver_offline",
-                                            Some("receiver"),
-                                            Some(&recv_id),
-                                            None,
-                                        )
-                                        .await;
-                                    }
-                                }
-                            } else {
-                                let mut reg_w2 = match tokio::time::timeout(
-                                    Duration::from_secs(1),
-                                    reg.write(),
-                                ).await {
-                                    Ok(g) => g,
-                                    Err(_) => continue,
-                                };
-                                if let Some(e) = reg_w2.get_mut(&recv_id) {
-                                    e.active_session_id = None;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            info!("heartbeat monitor stopped");
         }));
 
         // Job Queue supervisor

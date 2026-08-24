@@ -136,7 +136,12 @@ async fn main() -> Result<()> {
     });
 
     let admin_user_id = michi_api::init_admin_user(&config, &pool).await;
-    let state = michi_api::AppState::new(config.clone(), pool, admin_user_id);
+    let state = michi_api::AppState::new_with_identity(
+        config.clone(),
+        pool,
+        admin_user_id,
+        identity.clone(),
+    );
     let app = michi_api::create_router(state.clone());
 
     let app = if config.opensubsonic_enabled {
