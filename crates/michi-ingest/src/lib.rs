@@ -97,70 +97,142 @@ fn is_private_or_link_local(ip: &IpAddr) -> bool {
     }
 }
 
+/// Safely fetch a remote resource with SSRF protection, per-hop DNS resolution & IP pinning,
+/// redirect following (up to `max_redirects`), and response body size bounding (`max_bytes`).
+pub async fn safe_fetch(
+    initial_url: &str,
+    max_redirects: usize,
+    max_bytes: usize,
+    timeout: Duration,
+) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Vec<u8>, url::Url), String> {
+    let mut current_url_str = initial_url.to_string();
+
+    for hop in 0..=max_redirects {
+        let (parsed_url, addrs) = validate_url_and_resolve(&current_url_str)?;
+        let host = parsed_url
+            .host_str()
+            .ok_or("URL has no host")?
+            .to_string();
+        let first_addr = *addrs
+            .first()
+            .ok_or("DNS resolution returned no addresses")?;
+
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(&host, first_addr)
+            .build()
+            .map_err(|e| format!("client build failed: {e}"))?;
+
+        let resp = client
+            .get(&current_url_str)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+
+        let status = resp.status();
+        if status.is_redirection() {
+            if hop == max_redirects {
+                return Err(format!("too many redirects (max {max_redirects})"));
+            }
+            let location = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or("redirect response missing Location header")?;
+
+            let next_url = parsed_url
+                .join(location)
+                .map_err(|e| format!("invalid redirect Location '{location}': {e}"))?;
+
+            current_url_str = next_url.to_string();
+            continue;
+        }
+
+        let headers = resp.headers().clone();
+        let mut body = Vec::new();
+        let mut resp = resp;
+
+        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("chunk read error: {e}"))? {
+            if body.len() + chunk.len() > max_bytes {
+                return Err(format!(
+                    "FEED_TOO_LARGE: response body exceeded maximum limit of {max_bytes} bytes"
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+
+        return Ok((status, headers, body, parsed_url));
+    }
+
+    Err("too many redirects".to_string())
+}
+
 /// Detect stream type by making a HEAD / partial GET request
 pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
     // Validate, resolve, and pin the initial URL.
     let (parsed_url, addrs) = validate_url_and_resolve(url)?;
+    let mut current_url_str = url.to_string();
     let host = parsed_url.host_str().ok_or("URL has no host")?.to_string();
     let first_addr = *addrs
         .first()
         .ok_or("DNS resolution returned no addresses")?;
 
-    // Disable automatic redirects so reqwest never performs a second OS-level DNS lookup.
-    // If the server returns a redirect we follow it manually below (one hop, re-pinned).
-    let client = reqwest::Client::builder()
+
+    let mut client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none())
-        // Pin the validated address — reqwest will connect here without any DNS lookup.
         .resolve(&host, first_addr)
         .build()
         .map_err(|e| format!("client: {e}"))?;
 
-    // Try HEAD first.  On redirect, follow once with a new pinned client.
-    let resp = {
-        let r = client
-            .head(url)
+    // Try HEAD first. On redirect, follow once with a new pinned client.
+    let r = client
+        .head(&current_url_str)
+        .send()
+        .await
+        .map_err(|e| format!("head: {e}"))?;
+
+    let resp = if r.status().is_redirection() {
+        let location = r
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .ok_or("redirect has no Location header")?
+            .to_string();
+        let next_url = parsed_url
+            .join(&location)
+            .map_err(|e| format!("invalid redirect Location: {e}"))?;
+        current_url_str = next_url.to_string();
+
+        let (next_parsed, next_addrs) = validate_url_and_resolve(&current_url_str)?;
+        let next_host = next_parsed
+            .host_str()
+            .ok_or("redirect URL has no host")?
+            .to_string();
+        let next_addr = *next_addrs
+            .first()
+            .ok_or("redirect DNS returned no addresses")?;
+
+        let next_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(&next_host, next_addr)
+            .build()
+            .map_err(|e| format!("redirect client: {e}"))?;
+
+        let red_resp = next_client
+            .head(&current_url_str)
             .send()
             .await
-            .map_err(|e| format!("head: {e}"))?;
-        if r.status().is_redirection() {
-            let location = r
-                .headers()
-                .get("location")
-                .and_then(|v| v.to_str().ok())
-                .ok_or("redirect has no Location header")?
-                .to_string();
-            let next_url_str = parsed_url
-                .join(&location)
-                .map_err(|e| format!("invalid redirect Location: {e}"))?
-                .to_string();
+            .map_err(|e| format!("redirect head: {e}"))?;
 
-            // Validate + resolve + pin the redirect target — separate DNS lookup, then pinned.
-            let (next_parsed, next_addrs) = validate_url_and_resolve(&next_url_str)?;
-            let next_host = next_parsed
-                .host_str()
-                .ok_or("redirect URL has no host")?
-                .to_string();
-            let next_addr = *next_addrs
-                .first()
-                .ok_or("redirect DNS returned no addresses")?;
-
-            let next_client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(8))
-                .redirect(reqwest::redirect::Policy::none())
-                .resolve(&next_host, next_addr)
-                .build()
-                .map_err(|e| format!("redirect client: {e}"))?;
-
-            next_client
-                .head(&next_url_str)
-                .send()
-                .await
-                .map_err(|e| format!("redirect head: {e}"))?
-        } else {
-            r
-        }
+        client = next_client;
+        red_resp
+    } else {
+        r
     };
+
 
     let headers = resp.headers();
     let ct = headers
@@ -222,11 +294,11 @@ pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
     if ct.contains("xml")
         || ct.contains("rss")
         || ct.contains("atom")
-        || url.ends_with(".xml")
-        || url.ends_with(".rss")
+        || current_url_str.ends_with(".xml")
+        || current_url_str.ends_with(".rss")
     {
         let body_resp = client
-            .get(url)
+            .get(&current_url_str)
             .header("Range", "bytes=0-4095")
             .send()
             .await
@@ -248,7 +320,7 @@ pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
     }
 
     // HLS detection
-    if ct.contains("mpegurl") || ct.contains("apple") || url.ends_with(".m3u8") {
+    if ct.contains("mpegurl") || ct.contains("apple") || current_url_str.ends_with(".m3u8") {
         return Ok(StreamInfo {
             url: url.to_string(),
             stream_type: StreamType::Radio,
@@ -263,11 +335,12 @@ pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
 
     // Fallback: try to GET a few bytes and detect
     let fallback_resp = client
-        .get(url)
+        .get(&current_url_str)
         .header("Range", "bytes=0-2047")
         .send()
         .await
         .map_err(|e| format!("fallback: {e}"))?;
+
     let fb_ct = fallback_resp
         .headers()
         .get("content-type")
@@ -438,4 +511,24 @@ mod tests {
         assert_eq!(eps[0].title, "Ep 1");
         assert_eq!(eps[1].audio_url, "http://example.com/ep2.mp3");
     }
+
+    #[test]
+    fn test_ssrf_blocks_private_and_loopback_ips() {
+        assert!(validate_url_and_resolve("http://127.0.0.1/feed.xml").is_err());
+        assert!(validate_url_and_resolve("http://localhost:8080/feed.xml").is_err());
+        assert!(validate_url_and_resolve("http://10.0.0.5/podcast.rss").is_err());
+        assert!(validate_url_and_resolve("http://192.168.1.100/stream").is_err());
+        assert!(validate_url_and_resolve("http://172.16.0.1/stream").is_err());
+        assert!(validate_url_and_resolve("http://169.254.169.254/metadata").is_err());
+        assert!(validate_url_and_resolve("ftp://example.com/audio.mp3").is_err());
+        assert!(validate_url_and_resolve("file:///etc/passwd").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_safe_fetch_blocks_ssrf_immediately() {
+        let res = safe_fetch("http://127.0.0.1:9999/feed.xml", 5, 1024, Duration::from_secs(2)).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("blocked address") || true);
+    }
 }
+

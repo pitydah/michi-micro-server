@@ -64,47 +64,51 @@ pub async fn add_source_handler(
             )
         })?;
 
-    // If podcast, fetch and store episodes
+    // If podcast, fetch and store episodes using SSRF-safe pinned fetch
     let mut episodes_imported = 0usize;
     let mut episodes_failed = 0usize;
     let mut feed_status = "not_applicable";
 
     if source.stream_type == "podcast" {
-        match reqwest::get(&source.url).await {
-            Ok(body) => match body.text().await {
-                Ok(text) => {
-                    let episodes = michi_ingest::parse_rss_episodes(&text);
-                    if episodes.is_empty() {
-                        feed_status = "empty_feed";
-                    } else {
-                        feed_status = "success";
-                        for ep in episodes {
-                            let db_ep = michi_core::PodcastEpisodeDb {
-                                id: Uuid::new_v4(),
-                                source_id: source.id,
-                                title: ep.title,
-                                audio_url: ep.audio_url,
-                                pub_date: Some(ep.pub_date),
-                                duration_secs: ep.duration_secs,
-                                played: false,
-                                position_ms: 0,
-                            };
-                            match michi_db::upsert_podcast_episode(&state.db, &db_ep).await {
-                                Ok(_) => episodes_imported += 1,
-                                Err(_) => episodes_failed += 1,
-                            }
+        match michi_ingest::safe_fetch(
+            &source.url,
+            5,
+            10 * 1024 * 1024,
+            std::time::Duration::from_secs(15),
+        )
+        .await
+        {
+            Ok((status, _, body_bytes, _)) if status.is_success() => {
+                let text = String::from_utf8_lossy(&body_bytes);
+                let episodes = michi_ingest::parse_rss_episodes(&text);
+                if episodes.is_empty() {
+                    feed_status = "empty_feed";
+                } else {
+                    feed_status = "success";
+                    for ep in episodes {
+                        let db_ep = michi_core::PodcastEpisodeDb {
+                            id: Uuid::new_v4(),
+                            source_id: source.id,
+                            title: ep.title,
+                            audio_url: ep.audio_url,
+                            pub_date: Some(ep.pub_date),
+                            duration_secs: ep.duration_secs,
+                            played: false,
+                            position_ms: 0,
+                        };
+                        match michi_db::upsert_podcast_episode(&state.db, &db_ep).await {
+                            Ok(_) => episodes_imported += 1,
+                            Err(_) => episodes_failed += 1,
                         }
                     }
                 }
-                Err(_) => {
-                    feed_status = "read_failed";
-                }
-            },
-            Err(_) => {
+            }
+            _ => {
                 feed_status = "fetch_failed";
             }
         }
     }
+
 
     Ok(Json(serde_json::json!({
         "source": source,
