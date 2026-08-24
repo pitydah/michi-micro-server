@@ -95,8 +95,9 @@ def main():
     parser = argparse.ArgumentParser(description="Player-Micro Server Contract Test")
     parser.add_argument("--url", default=os.getenv("MICHI_SERVER_URL", DEFAULT_URL), help="Micro Server base URL")
     parser.add_argument("--username", default=os.getenv("MICHI_AUTH_USERNAME", "admin"), help="Auth username")
-    parser.add_argument("--password", default=os.getenv("MICHI_AUTH_PASSWORD", "admin"), help="Auth password")
+    parser.add_argument("--password", default=os.getenv("MICHI_AUTH_PASSWORD", "admin123"), help="Auth password")
     args = parser.parse_args()
+
 
     base_url = args.url.rstrip("/")
 

@@ -102,7 +102,7 @@ def main():
         env["MICHI_MQTT_HOST"] = "127.0.0.1"
         env["MICHI_MQTT_PORT"] = str(args.broker_port)
         env["MICHI_AUTH_USERNAME"] = "admin"
-        env["MICHI_AUTH_PASSWORD"] = "admin"
+        env["MICHI_AUTH_PASSWORD"] = "admin123"
         env["MICHI_DATABASE_URL"] = f"sqlite:///tmp/michi_mqtt_test_{args.server_port}.db?mode=rwc"
         env["MICHI_CONFIG_PATH"] = f"/tmp/michi_mqtt_conf_{args.server_port}"
         os.makedirs(env["MICHI_CONFIG_PATH"], exist_ok=True)

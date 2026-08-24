@@ -289,7 +289,7 @@ jobs:
             -e PGID=1000 \
             -e MICHI_PORT=9090 \
             -e MICHI_AUTH_USERNAME=admin \
-            -e MICHI_AUTH_PASSWORD=admin \
+            -e MICHI_AUTH_PASSWORD=admin123 \
             michi-server:test
 
           READY=0
@@ -313,7 +313,8 @@ jobs:
           python3 tests/e2e/test_player_micro_contract_compatibility.py \
             --url http://127.0.0.1:9090 \
             --username admin \
-            --password admin
+            --password admin123
+
 
   ci-arm64-qemu:
     runs-on: ubuntu-latest
@@ -354,7 +355,7 @@ jobs:
             -e PGID=1000 \
             -e MICHI_PORT=9091 \
             -e MICHI_AUTH_USERNAME=admin \
-            -e MICHI_AUTH_PASSWORD=admin \
+            -e MICHI_AUTH_PASSWORD=admin123 \
             michi-server:arm64
 
           READY=0
@@ -397,7 +398,8 @@ jobs:
           python3 tests/e2e/test_player_micro_contract_compatibility.py \
             --url http://127.0.0.1:9091 \
             --username admin \
-            --password admin
+            --password admin123
+
 
   release-ghcr:
     needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-mosquitto-real, ci-generic-linux-appliance, ci-reliability-short, ci-web-ui-functional-integrity, ci-three-way-ecosystem, ci-docker-amd64, ci-arm64-qemu]
