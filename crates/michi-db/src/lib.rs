@@ -96,12 +96,14 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
     macro_rules! run_migration_step {
         ($pool:expr, $version:expr, $name:expr, $mig:ident) => {{
             info!("applying migration {}: {}", $version, $name);
-            $mig($pool).await?;
+            let mut tx = $pool.begin().await?;
+            $mig(&mut tx).await?;
             sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)")
                 .bind($version)
                 .bind(Utc::now().to_rfc3339())
-                .execute($pool)
+                .execute(&mut *tx)
                 .await?;
+            tx.commit().await?;
             info!("migration {} applied", $version);
         }};
     }
@@ -225,7 +227,7 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
     Ok(())
 }
 
-async fn migration_001(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_001(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS tracks (
             id TEXT PRIMARY KEY,
@@ -244,13 +246,13 @@ async fn migration_001(pool: &SqlitePool) -> Result<(), DbError> {
             updated_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(())
 }
 
-async fn migration_002(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_002(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS playlists (
             id TEXT PRIMARY KEY,
@@ -261,7 +263,7 @@ async fn migration_002(pool: &SqlitePool) -> Result<(), DbError> {
             updated_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     sqlx::query(
@@ -273,41 +275,41 @@ async fn migration_002(pool: &SqlitePool) -> Result<(), DbError> {
             added_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_id ON playlist_tracks(playlist_id)",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_playlist_tracks_position ON playlist_tracks(playlist_id, position)",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(())
 }
 
-async fn migration_003(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_003(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title)")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist)")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album)")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracks_album_artist ON tracks(album_artist)")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     Ok(())
 }
 
-async fn migration_004(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_004(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS play_history (
             id TEXT PRIMARY KEY,
@@ -317,21 +319,21 @@ async fn migration_004(pool: &SqlitePool) -> Result<(), DbError> {
             scrobbled INTEGER NOT NULL DEFAULT 0
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at)")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_play_history_track_id ON play_history(track_id)")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
 
     Ok(())
 }
 
-async fn migration_005(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_005(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS users (
             id BLOB PRIMARY KEY,
@@ -341,41 +343,41 @@ async fn migration_005(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(())
 }
 
-async fn migration_006(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_006(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query("ALTER TABLE playlists ADD COLUMN user_id BLOB REFERENCES users(id)")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
 
     Ok(())
 }
 
-async fn migration_007(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_007(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query("ALTER TABLE play_history ADD COLUMN user_id BLOB REFERENCES users(id)")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
 
     Ok(())
 }
 
-async fn migration_008(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_008(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query("ALTER TABLE playlists ADD COLUMN share_code TEXT")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
 
     sqlx::query("ALTER TABLE playlists ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
 
     Ok(())
 }
 
-async fn migration_009(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_009(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS sync_devices (
             id TEXT PRIMARY KEY,
@@ -387,12 +389,12 @@ async fn migration_009(pool: &SqlitePool) -> Result<(), DbError> {
             revoked INTEGER NOT NULL DEFAULT 0
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_010(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_010(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS sync_pairing_tokens (
             id TEXT PRIMARY KEY,
@@ -402,12 +404,12 @@ async fn migration_010(pool: &SqlitePool) -> Result<(), DbError> {
             used INTEGER NOT NULL DEFAULT 0
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_011(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_011(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS sync_jobs (
             id TEXT PRIMARY KEY,
@@ -419,12 +421,12 @@ async fn migration_011(pool: &SqlitePool) -> Result<(), DbError> {
             updated_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_012(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_012(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS sync_job_items (
             id TEXT PRIMARY KEY,
@@ -434,12 +436,12 @@ async fn migration_012(pool: &SqlitePool) -> Result<(), DbError> {
             error TEXT
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_013(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_013(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS players (
             id TEXT PRIMARY KEY,
@@ -455,12 +457,12 @@ async fn migration_013(pool: &SqlitePool) -> Result<(), DbError> {
             updated_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_014(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_014(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS queues (
             id TEXT PRIMARY KEY,
@@ -473,7 +475,7 @@ async fn migration_014(pool: &SqlitePool) -> Result<(), DbError> {
             updated_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     sqlx::query(
@@ -486,13 +488,13 @@ async fn migration_014(pool: &SqlitePool) -> Result<(), DbError> {
             added_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(())
 }
 
-async fn migration_016(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_016(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS link_devices (
             device_id TEXT PRIMARY KEY,
@@ -506,12 +508,12 @@ async fn migration_016(pool: &SqlitePool) -> Result<(), DbError> {
             revoked INTEGER NOT NULL DEFAULT 0
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_017(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_017(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS pairing_sessions (
             pairing_id TEXT PRIMARY KEY,
@@ -522,15 +524,15 @@ async fn migration_017(pool: &SqlitePool) -> Result<(), DbError> {
             confirmed INTEGER NOT NULL DEFAULT 0
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_pairing_code ON pairing_sessions(code)")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     Ok(())
 }
 
-async fn migration_018(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_018(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS import_sessions (
             session_id TEXT PRIMARY KEY,
@@ -545,12 +547,12 @@ async fn migration_018(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_019(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_019(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS receivers (
             id TEXT PRIMARY KEY,
@@ -564,12 +566,12 @@ async fn migration_019(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_020(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_020(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS playback_sessions (
             id TEXT PRIMARY KEY,
@@ -582,101 +584,86 @@ async fn migration_020(pool: &SqlitePool) -> Result<(), DbError> {
             repeat_mode TEXT NOT NULL DEFAULT 'none',
             shuffle INTEGER NOT NULL DEFAULT 0,
             volume REAL NOT NULL DEFAULT 0.8,
-            source TEXT NOT NULL DEFAULT 'player',
-            resume_policy TEXT NOT NULL DEFAULT 'manual',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_021(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_021(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     // Add status text field to import_sessions for state machine
     sqlx::query(
         "ALTER TABLE import_sessions ADD COLUMN status_text TEXT NOT NULL DEFAULT 'created'",
     )
-    .execute(pool)
-    .await
-    .ok();
+    .execute(&mut **tx)
+    .await?;
     sqlx::query("ALTER TABLE import_sessions ADD COLUMN error_message TEXT")
-        .execute(pool)
-        .await
-        .ok();
+        .execute(&mut **tx)
+        .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_import_sessions_status ON import_sessions(status)")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     Ok(())
 }
 
-async fn migration_022(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_022(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query("ALTER TABLE playback_sessions ADD COLUMN queue_id TEXT")
-        .execute(pool)
-        .await
-        .ok();
+        .execute(&mut **tx)
+        .await?;
     sqlx::query("ALTER TABLE playback_sessions ADD COLUMN source TEXT NOT NULL DEFAULT 'player'")
-        .execute(pool)
-        .await
-        .ok();
+        .execute(&mut **tx)
+        .await?;
     sqlx::query(
         "ALTER TABLE playback_sessions ADD COLUMN resume_policy TEXT NOT NULL DEFAULT 'manual'",
     )
-    .execute(pool)
-    .await
-    .ok();
+    .execute(&mut **tx)
+    .await?;
     sqlx::query("ALTER TABLE playback_sessions ADD COLUMN restored INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await
-        .ok();
+        .execute(&mut **tx)
+        .await?;
     sqlx::query("ALTER TABLE queues ADD COLUMN source_device_id TEXT")
-        .execute(pool)
-        .await
-        .ok();
-    Ok(())
-}
-
-async fn migration_023(pool: &SqlitePool) -> Result<(), DbError> {
-    sqlx::query("ALTER TABLE tracks ADD COLUMN content_hash TEXT")
-        .execute(pool)
-        .await
-        .ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracks_content_hash ON tracks(content_hash)")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     Ok(())
 }
 
-async fn migration_024(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_023(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    sqlx::query("ALTER TABLE tracks ADD COLUMN content_hash TEXT")
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracks_content_hash ON tracks(content_hash)")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn migration_024(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query("ALTER TABLE tracks ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await
-        .ok();
+        .execute(&mut **tx)
+        .await?;
     sqlx::query("ALTER TABLE tracks ADD COLUMN rating INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await
-        .ok();
+        .execute(&mut **tx)
+        .await?;
     sqlx::query("ALTER TABLE tracks ADD COLUMN starred_at TEXT")
-        .execute(pool)
-        .await
-        .ok();
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
-async fn migration_025(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_025(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query("ALTER TABLE tracks ADD COLUMN replaygain_track_gain REAL")
-        .execute(pool)
-        .await
-        .ok();
+        .execute(&mut **tx)
+        .await?;
     sqlx::query("ALTER TABLE tracks ADD COLUMN replaygain_track_peak REAL")
-        .execute(pool)
-        .await
-        .ok();
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
-async fn migration_026(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_026(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS playback_chains (
             id TEXT PRIMARY KEY,
@@ -690,7 +677,7 @@ async fn migration_026(pool: &SqlitePool) -> Result<(), DbError> {
             updated_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     sqlx::query(
@@ -704,13 +691,13 @@ async fn migration_026(pool: &SqlitePool) -> Result<(), DbError> {
             delay_ms INTEGER NOT NULL DEFAULT 0
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(())
 }
 
-async fn migration_027(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_027(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS bookmarks (
             id TEXT PRIMARY KEY,
@@ -724,19 +711,19 @@ async fn migration_027(pool: &SqlitePool) -> Result<(), DbError> {
             updated_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_bookmarks_track_user ON bookmarks(track_id, user_id)",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(())
 }
 
-async fn migration_028(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_028(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS radio_stations (
             id TEXT PRIMARY KEY,
@@ -752,12 +739,12 @@ async fn migration_028(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_029(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_029(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS shared_links (
             id TEXT PRIMARY KEY,
@@ -775,12 +762,12 @@ async fn migration_029(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_030(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_030(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS pairing_qr_codes (
             id TEXT PRIMARY KEY,
@@ -792,15 +779,15 @@ async fn migration_030(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_pairing_qr_code ON pairing_qr_codes(qr_code)")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     Ok(())
 }
 
-async fn migration_031(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_031(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS stream_sources (
             id TEXT PRIMARY KEY,
@@ -816,7 +803,7 @@ async fn migration_031(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS podcast_episodes (
@@ -831,12 +818,12 @@ async fn migration_031(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_032(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_032(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS mount_guard (
             path TEXT PRIMARY KEY,
@@ -846,12 +833,12 @@ async fn migration_032(pool: &SqlitePool) -> Result<(), DbError> {
             error_message TEXT
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_033(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_033(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS job_queue (
             id TEXT PRIMARY KEY,
@@ -866,12 +853,12 @@ async fn migration_033(pool: &SqlitePool) -> Result<(), DbError> {
             finished_at TEXT
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_034(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_034(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS audit_log (
             id TEXT PRIMARY KEY,
@@ -883,15 +870,15 @@ async fn migration_034(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC)")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     Ok(())
 }
 
-async fn migration_035(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_035(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS change_journal (
             id TEXT PRIMARY KEY,
@@ -902,12 +889,12 @@ async fn migration_035(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_036(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_036(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS backup_snapshots (
             id TEXT PRIMARY KEY,
@@ -915,24 +902,24 @@ async fn migration_036(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_037(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_037(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS server_config (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn migration_038(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_038(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS room_groups (
             id TEXT PRIMARY KEY,
@@ -943,7 +930,7 @@ async fn migration_038(pool: &SqlitePool) -> Result<(), DbError> {
             created_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
@@ -1053,18 +1040,18 @@ pub async fn get_server_config(pool: &SqlitePool, key: &str) -> Result<Option<St
     Ok(row)
 }
 
-async fn migration_015(pool: &SqlitePool) -> Result<(), DbError> {
+async fn migration_015(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query("ALTER TABLE tracks ADD COLUMN genre TEXT")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     sqlx::query("ALTER TABLE tracks ADD COLUMN year INTEGER")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     sqlx::query("ALTER TABLE tracks ADD COLUMN track_number INTEGER")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     sqlx::query("ALTER TABLE tracks ADD COLUMN disc_number INTEGER")
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     Ok(())
 }
@@ -1724,6 +1711,38 @@ pub async fn create_playlist(
     })
 }
 
+pub async fn create_playlist_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    input: &PlaylistCreate,
+    user_id: Option<&Uuid>,
+) -> Result<Playlist, DbError> {
+    let id = Uuid::new_v4();
+    let now = Utc::now().to_rfc3339();
+    let uid_str = user_id.map(|u| u.to_string());
+    sqlx::query(
+        "INSERT INTO playlists (id, name, description, track_count, created_at, updated_at, user_id, share_code, is_public) VALUES (?, ?, ?, 0, ?, ?, ?, NULL, 0)",
+    )
+    .bind(id.to_string())
+    .bind(&input.name)
+    .bind(&input.description)
+    .bind(&now)
+    .bind(&now)
+    .bind(&uid_str)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(Playlist {
+        id,
+        name: input.name.clone(),
+        description: input.description.clone(),
+        track_count: 0,
+        share_code: None,
+        is_public: false,
+        created_at: now.parse().unwrap_or_else(|_| Utc::now()),
+        updated_at: Utc::now(),
+    })
+}
+
 pub async fn list_playlists(
     pool: &SqlitePool,
     user_id: Option<&Uuid>,
@@ -1858,6 +1877,52 @@ pub async fn add_track_to_playlist(
         Some(&track_id.to_string()),
     )
     .await;
+
+    Ok(PlaylistTrack {
+        id,
+        playlist_id: *playlist_id,
+        track_id: *track_id,
+        position,
+        added_at: Utc::now(),
+    })
+}
+
+pub async fn add_track_to_playlist_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    playlist_id: &Uuid,
+    track_id: &Uuid,
+) -> Result<PlaylistTrack, DbError> {
+    let id = Uuid::new_v4();
+    let now = Utc::now().to_rfc3339();
+    let p_id = playlist_id.to_string();
+    let t_id = track_id.to_string();
+
+    let max_pos: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(position) FROM playlist_tracks WHERE playlist_id = ?")
+            .bind(&p_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    let position = max_pos.unwrap_or(-1) + 1;
+
+    sqlx::query(
+        "INSERT INTO playlist_tracks (id, playlist_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(id.to_string())
+    .bind(&p_id)
+    .bind(&t_id)
+    .bind(position)
+    .bind(&now)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE playlists SET track_count = (SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?), updated_at = ? WHERE id = ?",
+    )
+    .bind(&p_id)
+    .bind(&now)
+    .bind(&p_id)
+    .execute(&mut **tx)
+    .await?;
 
     Ok(PlaylistTrack {
         id,
@@ -2086,6 +2151,26 @@ pub async fn find_tracks_by_content_hash(
     .fetch_all(pool)
     .await?;
     Ok(rows.iter().map(row_to_track).collect())
+}
+
+pub async fn star_track_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    track_id: &Uuid,
+    starred: bool,
+) -> Result<bool, DbError> {
+    let result = if starred {
+        sqlx::query("UPDATE tracks SET starred = 1, starred_at = ? WHERE id = ?")
+            .bind(Utc::now().to_rfc3339())
+            .bind(track_id.to_string())
+            .execute(&mut **tx)
+            .await?
+    } else {
+        sqlx::query("UPDATE tracks SET starred = 0, starred_at = NULL WHERE id = ?")
+            .bind(track_id.to_string())
+            .execute(&mut **tx)
+            .await?
+    };
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn star_track(
@@ -2418,6 +2503,13 @@ pub async fn delete_all_tracks(pool: &SqlitePool) -> Result<u64, DbError> {
         let _ = record_change(pool, "track", "all", "delete_all", None).await;
     }
     Ok(count)
+}
+
+pub async fn delete_all_tracks_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<u64, DbError> {
+    let result = sqlx::query("DELETE FROM tracks").execute(&mut **tx).await?;
+    Ok(result.rows_affected())
 }
 
 pub async fn find_track_by_path(

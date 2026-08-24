@@ -15,6 +15,7 @@ jobs:
       - name: Checkout R3.1-ZIMA baseline
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           submodules: recursive
 
       - name: Set up QEMU
@@ -31,6 +32,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish ZimaOS image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -44,3 +46,11 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Record certification image digest
+        run: |
+          echo "### ZimaOS Release Image Certification" >> $GITHUB_STEP_SUMMARY
+          echo "- **Source SHA**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image Digest**: \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Pinned URI**: \`ghcr.io/pitydah/michi-micro-server@${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Certified digest: ${{ steps.build.outputs.digest }}"

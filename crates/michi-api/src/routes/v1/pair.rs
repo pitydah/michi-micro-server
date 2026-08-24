@@ -97,37 +97,46 @@ fn pairing_error(e: &IdentityError) -> (StatusCode, Json<serde_json::Value>) {
     }
 }
 
-fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
+fn extract_client_ip(
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: &axum::http::HeaderMap,
+) -> String {
     let trust_proxy = std::env::var("MICHI_TRUST_PROXY")
         .map(|v| v == "1" || v.to_lowercase() == "true")
         .unwrap_or(false);
 
     if trust_proxy {
-        headers
+        if let Some(forwarded) = headers
             .get("X-Forwarded-For")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.split(',').next())
             .map(|s| s.trim().to_string())
-            .or_else(|| {
-                headers
-                    .get("X-Real-IP")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.trim().to_string())
-            })
-            .unwrap_or_else(|| "127.0.0.1".to_string())
-    } else {
-        "127.0.0.1".to_string()
+        {
+            return forwarded;
+        }
+        if let Some(real_ip) = headers
+            .get("X-Real-IP")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+        {
+            return real_ip;
+        }
     }
+
+    connect_info
+        .map(|axum::extract::ConnectInfo(addr)| addr.ip().to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
 pub async fn link_pair_start(
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<PairStartRequest>,
 ) -> Result<Json<PairStartResponse>, (StatusCode, Json<serde_json::Value>)> {
     // Rate limit por IP: 10 intentos/minuto en pair/start (gate local, más
     // tolerante que confirm para permitir reintentos legítimos).
-    let client_ip = extract_client_ip(&headers);
+    let client_ip = extract_client_ip(connect_info, &headers);
 
     {
         let now = std::time::Instant::now();
@@ -185,12 +194,13 @@ pub async fn link_pair_start(
 }
 
 pub async fn link_pair_confirm(
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<PairConfirmRequest>,
 ) -> Result<Json<PairConfirmResponse>, (StatusCode, Json<serde_json::Value>)> {
     // Rate limit por IP: 5 intentos/minuto (gate local, se mantiene).
-    let client_ip = extract_client_ip(&headers);
+    let client_ip = extract_client_ip(connect_info, &headers);
 
     {
         let now = std::time::Instant::now();

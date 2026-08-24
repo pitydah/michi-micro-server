@@ -27,30 +27,42 @@ pub struct StreamInfo {
     pub sample_rate: Option<u32>,
 }
 
-/// Validate URL is safe: only http/https, no private/reserved IPs, no DNS rebinding
-pub fn validate_url(url_str: &str) -> Result<String, String> {
+/// Validate URL is safe and resolve DNS addresses
+pub fn validate_url_and_resolve(
+    url_str: &str,
+) -> Result<(url::Url, Vec<std::net::SocketAddr>), String> {
     if !url_str.starts_with("http://") && !url_str.starts_with("https://") {
         return Err("only http and https are allowed".into());
     }
 
     let parsed = url::Url::parse(url_str).map_err(|e| format!("invalid URL: {e}"))?;
-
     let host = parsed.host_str().ok_or("URL has no host")?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
 
-    // Resolve DNS and check every address
-    let addr_str = format!("{host}:80");
-    let addrs = addr_str
+    let addr_str = format!("{host}:{port}");
+    let addrs: Vec<std::net::SocketAddr> = addr_str
         .to_socket_addrs()
-        .map_err(|e| format!("DNS resolution failed: {e}"))?;
+        .map_err(|e| format!("DNS resolution failed: {e}"))?
+        .collect();
 
-    for addr in addrs {
+    if addrs.is_empty() {
+        return Err("DNS resolution returned no addresses".into());
+    }
+
+    for addr in &addrs {
         let ip = addr.ip();
         if is_private_or_link_local(&ip) {
             return Err(format!("blocked address: {ip}"));
         }
     }
 
-    Ok(url_str.to_string())
+    Ok((parsed, addrs))
+}
+
+/// Validate URL is safe: only http/https, no private/reserved IPs, no DNS rebinding
+pub fn validate_url(url_str: &str) -> Result<String, String> {
+    let (url, _) = validate_url_and_resolve(url_str)?;
+    Ok(url.to_string())
 }
 
 fn is_private_or_link_local(ip: &IpAddr) -> bool {
@@ -87,20 +99,27 @@ fn is_private_or_link_local(ip: &IpAddr) -> bool {
 
 /// Detect stream type by making a HEAD / partial GET request
 pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
-    let _safe_url = validate_url(url)?;
-    let client = reqwest::Client::builder()
+    let (parsed_url, addrs) = validate_url_and_resolve(url)?;
+    let host = parsed_url.host_str().ok_or("URL has no host")?;
+
+    let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 5 {
                 attempt.error("too many redirects")
-            } else if let Err(e) = validate_url(attempt.url().as_str()) {
+            } else if let Err(e) = validate_url_and_resolve(attempt.url().as_str()) {
                 attempt.error(format!("redirect to unsafe target blocked: {e}"))
             } else {
                 attempt.follow()
             }
-        }))
-        .build()
-        .map_err(|e| format!("client: {e}"))?;
+        }));
+
+    // Pin DNS resolution to pre-validated socket address to prevent DNS rebinding TOCTOU
+    if let Some(&first_addr) = addrs.first() {
+        builder = builder.resolve(host, first_addr);
+    }
+
+    let client = builder.build().map_err(|e| format!("client: {e}"))?;
 
     // Try HEAD first
     let resp = client

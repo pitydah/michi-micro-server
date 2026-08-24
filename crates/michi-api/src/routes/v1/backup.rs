@@ -268,13 +268,21 @@ pub async fn restore_handler(
         ));
     }
 
+    let mut tx = state.db.begin().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
     let mut restored_tracks = 0u64;
     let mut restored_playlists = 0u64;
     let mut restored_starred = 0u64;
     let mut restored_history = 0u64;
 
     if body.force && !existing_tracks.is_empty() {
-        michi_db::delete_all_tracks(&state.db).await.map_err(|e| {
+        michi_db::delete_all_tracks_tx(&mut tx).await.map_err(|e| {
             v1_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "DATABASE_ERROR",
@@ -284,7 +292,7 @@ pub async fn restore_handler(
     }
 
     for track in &body.tracks {
-        michi_db::upsert_track(&state.db, track)
+        michi_db::upsert_track_tx(&mut tx, track)
             .await
             .map_err(|e| {
                 v1_error(
@@ -297,8 +305,8 @@ pub async fn restore_handler(
     }
 
     for pl in &body.playlists {
-        let playlist = michi_db::create_playlist(
-            &state.db,
+        let playlist = michi_db::create_playlist_tx(
+            &mut tx,
             &michi_core::PlaylistCreate {
                 name: pl.name.clone(),
                 description: pl.description.clone(),
@@ -316,13 +324,13 @@ pub async fn restore_handler(
         restored_playlists += 1;
 
         for track in pl.tracks.iter() {
-            let _ = michi_db::add_track_to_playlist(&state.db, &playlist.id, &track.id).await;
+            let _ = michi_db::add_track_to_playlist_tx(&mut tx, &playlist.id, &track.id).await;
         }
     }
 
     for track in &body.starred_tracks {
-        if michi_db::upsert_track(&state.db, track).await.is_ok()
-            && michi_db::star_track(&state.db, &track.id, true)
+        if michi_db::upsert_track_tx(&mut tx, track).await.is_ok()
+            && michi_db::star_track_tx(&mut tx, &track.id, true)
                 .await
                 .is_ok()
         {
@@ -331,14 +339,24 @@ pub async fn restore_handler(
     }
 
     for entry in &body.play_history {
-        let _ =
+        let res =
             sqlx::query("INSERT OR IGNORE INTO play_history (track_id, played_at) VALUES (?, ?)")
                 .bind(&entry.track_id)
                 .bind(&entry.played_at)
-                .execute(&state.db)
+                .execute(&mut *tx)
                 .await;
-        restored_history += 1;
+        if res.is_ok() {
+            restored_history += 1;
+        }
     }
+
+    tx.commit().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     Ok(Json(serde_json::json!({
         "status": "restored",

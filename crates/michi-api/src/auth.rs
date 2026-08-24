@@ -286,6 +286,37 @@ pub(crate) fn verify_password(
         .is_ok())
 }
 
+fn extract_auth_client_ip(
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: &axum::http::HeaderMap,
+) -> String {
+    let trust_proxy = std::env::var("MICHI_TRUST_PROXY")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    if trust_proxy {
+        if let Some(forwarded) = headers
+            .get("X-Forwarded-For")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(|s| s.trim().to_string())
+        {
+            return forwarded;
+        }
+        if let Some(real_ip) = headers
+            .get("X-Real-IP")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+        {
+            return real_ip;
+        }
+    }
+
+    connect_info
+        .map(|axum::extract::ConnectInfo(addr)| addr.ip().to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
 #[utoipa::path(
     post,
     path = "/api/auth/login",
@@ -294,10 +325,13 @@ pub(crate) fn verify_password(
     responses(
         (status = 200, description = "Login successful", body = LoginResponse),
         (status = 400, description = "Auth not configured"),
-        (status = 401, description = "Invalid credentials")
+        (status = 401, description = "Invalid credentials"),
+        (status = 429, description = "Too many requests")
     )
 )]
 pub(crate) async fn login_handler(
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<serde_json::Value>)> {
@@ -306,6 +340,33 @@ pub(crate) async fn login_handler(
             StatusCode::BAD_REQUEST,
             Json(json!({"status": "error", "message": "auth not configured"})),
         ));
+    }
+
+    let client_ip = extract_auth_client_ip(connect_info, &headers);
+    {
+        let now = std::time::Instant::now();
+        let mut entry = state
+            .security_state
+            .pairing_attempts
+            .entry(format!("login_{client_ip}"))
+            .or_insert((0u32, now));
+        let (count, last_reset) = entry.value();
+        let elapsed = now.duration_since(*last_reset);
+
+        if elapsed.as_secs() > 60 {
+            *entry = (1, now);
+        } else if *count >= 10 {
+            tracing::warn!("Login rate limit exceeded for IP: {}", client_ip);
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({
+                    "status": "error",
+                    "message": "too many login attempts, please wait 60 seconds"
+                })),
+            ));
+        } else {
+            *entry = (count + 1, *last_reset);
+        }
     }
 
     let user = michi_db::get_user_by_username(&state.db, &body.username)
@@ -355,6 +416,8 @@ pub(crate) async fn login_handler(
     )
 )]
 pub(crate) async fn register_handler(
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<serde_json::Value>)> {
@@ -363,6 +426,33 @@ pub(crate) async fn register_handler(
             StatusCode::BAD_REQUEST,
             Json(json!({"status": "error", "message": "auth not configured"})),
         ));
+    }
+
+    let client_ip = extract_auth_client_ip(connect_info, &headers);
+    {
+        let now = std::time::Instant::now();
+        let mut entry = state
+            .security_state
+            .pairing_attempts
+            .entry(format!("register_{client_ip}"))
+            .or_insert((0u32, now));
+        let (count, last_reset) = entry.value();
+        let elapsed = now.duration_since(*last_reset);
+
+        if elapsed.as_secs() > 60 {
+            *entry = (1, now);
+        } else if *count >= 5 {
+            tracing::warn!("Register rate limit exceeded for IP: {}", client_ip);
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({
+                    "status": "error",
+                    "message": "too many registration attempts, please wait 60 seconds"
+                })),
+            ));
+        } else {
+            *entry = (count + 1, *last_reset);
+        }
     }
 
     if !state.config.allow_registration {

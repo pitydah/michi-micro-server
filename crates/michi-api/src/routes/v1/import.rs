@@ -196,6 +196,17 @@ pub async fn import_session_handler(
         ));
     }
 
+    {
+        let sessions = IMPORT_SESSIONS.read().await;
+        if sessions.len() >= MAX_IMPORT_SESSIONS {
+            return Err(v1_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "TOO_MANY_SESSIONS",
+                "Too many active import sessions. Complete or cancel existing sessions first.",
+            ));
+        }
+    }
+
     let db_session = michi_core::ImportSessionDb {
         session_id,
         device_id,
@@ -249,13 +260,6 @@ pub async fn import_session_handler(
 
     {
         let mut sessions = IMPORT_SESSIONS.write().await;
-        if sessions.len() >= MAX_IMPORT_SESSIONS {
-            return Err(v1_error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "TOO_MANY_SESSIONS",
-                "Too many active import sessions. Complete or cancel existing sessions first.",
-            ));
-        }
         sessions.insert(session_id, session_state);
     }
 
@@ -274,7 +278,7 @@ pub async fn import_upload_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     use base64::Engine;
 
-    let session_state = get_or_recover_session(
+    let _session_state = get_or_recover_session(
         &session_id,
         &state.config.music_paths,
         &state.config.cache_path,
@@ -328,13 +332,6 @@ pub async fn import_upload_handler(
             &format!("file exceeds max size of {MAX_FILE_SIZE} bytes"),
         ));
     }
-    if session_state.total_size_bytes + data.len() as u64 > MAX_SESSION_SIZE {
-        return Err(v1_error(
-            StatusCode::BAD_REQUEST,
-            "SESSION_SIZE_EXCEEDED",
-            &format!("session exceeds max total size of {MAX_SESSION_SIZE} bytes"),
-        ));
-    }
 
     let data_hash = compute_sha256(&data);
 
@@ -350,13 +347,25 @@ pub async fn import_upload_handler(
         }
     }
 
-    if session_state.seen_hashes.contains(&data_hash) {
-        return Ok(Json(serde_json::json!({
-            "local_track_id": local_track_id,
-            "status": "duplicate",
-            "remote_track_id": null,
-            "checksum": data_hash,
-        })));
+    {
+        let sessions = IMPORT_SESSIONS.read().await;
+        if let Some(s) = sessions.get(&session_id) {
+            if s.total_size_bytes + data.len() as u64 > MAX_SESSION_SIZE {
+                return Err(v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "SESSION_SIZE_EXCEEDED",
+                    &format!("session exceeds max total size of {MAX_SESSION_SIZE} bytes"),
+                ));
+            }
+            if s.seen_hashes.contains(&data_hash) {
+                return Ok(Json(serde_json::json!({
+                    "local_track_id": local_track_id,
+                    "status": "duplicate",
+                    "remote_track_id": null,
+                    "checksum": data_hash,
+                })));
+            }
+        }
     }
 
     let ext = std::path::Path::new(&body.filename)

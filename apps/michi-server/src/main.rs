@@ -232,43 +232,45 @@ async fn main() -> Result<()> {
     let shutdown_tx = state.tx.clone();
     let shutdown_db = state.db.clone();
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            use tokio::signal::unix::{signal, SignalKind};
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        use tokio::signal::unix::{signal, SignalKind};
 
-            let mut sigint =
-                signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
-            let mut sigterm =
-                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
 
-            tokio::select! {
-                _ = sigint.recv() => {
-                    info!("received SIGINT, starting graceful shutdown...");
-                }
-                _ = sigterm.recv() => {
-                    info!("received SIGTERM, starting graceful shutdown...");
-                }
+        tokio::select! {
+            _ = sigint.recv() => {
+                info!("received SIGINT, starting graceful shutdown...");
             }
+            _ = sigterm.recv() => {
+                info!("received SIGTERM, starting graceful shutdown...");
+            }
+        }
 
-            announcer_cancel.cancel();
-            let _ = announcer_handle.await;
-            michi_connect.stop_mdns().await;
+        announcer_cancel.cancel();
+        let _ = announcer_handle.await;
+        michi_connect.stop_mdns().await;
 
-            shutdown_state
-                .shutdown_and_wait(Duration::from_secs(15))
-                .await;
+        shutdown_state
+            .shutdown_and_wait(Duration::from_secs(15))
+            .await;
 
-            let _ = shutdown_tx.send("shutdown".to_string());
-            tokio::time::sleep(Duration::from_millis(500)).await;
+        let _ = shutdown_tx.send("shutdown".to_string());
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
-            let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-                .execute(&shutdown_db)
-                .await;
-            info!("WAL checkpoint complete");
+        let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&shutdown_db)
+            .await;
+        info!("WAL checkpoint complete");
 
-            info!("shutdown complete");
-        })
-        .await?;
+        info!("shutdown complete");
+    })
+    .await?;
 
     Ok(())
 }

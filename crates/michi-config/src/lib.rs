@@ -137,6 +137,16 @@ impl Config {
         let auth_password = env::var("MICHI_AUTH_PASSWORD")
             .ok()
             .filter(|s| !s.is_empty());
+
+        if let Some(ref pwd) = auth_password {
+            if pwd.trim().len() < 8 {
+                panic!("CRITICAL: MICHI_AUTH_PASSWORD must be at least 8 non-whitespace characters for fail-closed security");
+            }
+        }
+        if auth_username.is_some() && auth_password.is_none() {
+            panic!("CRITICAL: MICHI_AUTH_USERNAME provided without MICHI_AUTH_PASSWORD (fail-closed startup)");
+        }
+
         let auth_enabled = auth_username.is_some() && auth_password.is_some();
         let allow_registration = env::var("MICHI_ALLOW_REGISTRATION")
             .ok()
@@ -376,22 +386,44 @@ pub fn load_or_create_server_id(config_path: &Path) -> Uuid {
     }
     let id = Uuid::new_v4();
     if let Some(parent) = file_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match std::fs::File::create(&file_path) {
-        Ok(mut f) => {
-            if let Err(e) = f.write_all(id.to_string().as_bytes()) {
-                eprintln!(
-                    "CRITICAL: Failed to write server_id to {file_path:?}: {e}. Server identity may not persist across restarts!"
-                );
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            let fallback_path = std::env::temp_dir().join("michi_config").join("server_id");
+            if let Some(fb_parent) = fallback_path.parent() {
+                let _ = std::fs::create_dir_all(fb_parent);
             }
-        }
-        Err(e) => {
-            eprintln!(
-                "CRITICAL: Failed to create server_id file at {file_path:?}: {e}. /config directory is not writable!"
+            if let Ok(mut f) = std::fs::File::create(&fallback_path) {
+                let _ = f.write_all(id.to_string().as_bytes());
+                let _ = f.sync_all();
+                return id;
+            }
+            panic!(
+                "CRITICAL: Failed to create config directory at {parent:?}: {e}. (fail-closed startup)"
             );
         }
     }
+    let mut f = match std::fs::File::create(&file_path) {
+        Ok(f) => f,
+        Err(e) => {
+            let fallback_path = std::env::temp_dir().join("michi_config").join("server_id");
+            if let Some(fb_parent) = fallback_path.parent() {
+                let _ = std::fs::create_dir_all(fb_parent);
+            }
+            if let Ok(mut f) = std::fs::File::create(&fallback_path) {
+                let _ = f.write_all(id.to_string().as_bytes());
+                let _ = f.sync_all();
+                return id;
+            }
+            panic!(
+                "CRITICAL: Failed to create server_id file at {file_path:?}: {e}. Directory is not writable! (fail-closed startup)"
+            );
+        }
+    };
+    f.write_all(id.to_string().as_bytes()).unwrap_or_else(|e| {
+        panic!(
+            "CRITICAL: Failed to write server_id to {file_path:?}: {e}. Server identity cannot be persisted! (fail-closed startup)"
+        );
+    });
+    let _ = f.sync_all();
     id
 }
 
@@ -577,16 +609,20 @@ mod tests {
             },
         );
 
-        temp_env::with_vars(
-            [
-                ("MICHI_AUTH_USERNAME", Some("admin")),
-                ("MICHI_AUTH_PASSWORD", Some("")),
-            ],
-            || {
-                let cfg = Config::from_env();
-                assert!(!cfg.auth_enabled);
-                assert_eq!(cfg.auth_password, None);
-            },
+        let res = std::panic::catch_unwind(|| {
+            temp_env::with_vars(
+                [
+                    ("MICHI_AUTH_USERNAME", Some("admin")),
+                    ("MICHI_AUTH_PASSWORD", Some("")),
+                ],
+                || {
+                    let _ = Config::from_env();
+                },
+            );
+        });
+        assert!(
+            res.is_err(),
+            "Must panic on empty password when username is set"
         );
 
         temp_env::with_vars(
