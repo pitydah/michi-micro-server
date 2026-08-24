@@ -148,6 +148,9 @@ impl Config {
         if auth_username.is_some() && auth_password.is_none() {
             panic!("CRITICAL: MICHI_AUTH_USERNAME provided without MICHI_AUTH_PASSWORD (fail-closed startup)");
         }
+        if auth_password.is_some() && auth_username.is_none() {
+            panic!("CRITICAL: MICHI_AUTH_PASSWORD provided without MICHI_AUTH_USERNAME (fail-closed startup)");
+        }
 
         let auth_enabled = auth_username.is_some() && auth_password.is_some();
         let allow_registration = env::var("MICHI_ALLOW_REGISTRATION")
@@ -167,6 +170,11 @@ impl Config {
             .ok()
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false);
+
+        if opensubsonic_enabled && !auth_enabled && !dev_mode {
+            panic!("CRITICAL: OpenSubsonic requires authentication to be configured unless MICHI_DEV_MODE=true");
+        }
+
 
         let trust_proxy = env::var("MICHI_TRUST_PROXY")
             .ok()
@@ -252,9 +260,14 @@ impl Config {
                 self.backup_max_keep = file_cfg.backup_max_keep;
                 self.job_max_concurrent = file_cfg.job_max_concurrent;
                 self.reconnect_delay_max = file_cfg.reconnect_delay_max;
+                self.trust_proxy = file_cfg.trust_proxy;
+                if !file_cfg.trusted_proxies.is_empty() {
+                    self.trusted_proxies = file_cfg.trusted_proxies;
+                }
             }
         }
     }
+
 
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = env::var("MICHI_PORT") {
@@ -676,4 +689,81 @@ mod tests {
             },
         );
     }
+
+    #[test]
+    fn test_password_without_username_panics() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().to_str().unwrap().to_string();
+
+        let res = std::panic::catch_unwind(|| {
+            temp_env::with_vars(
+                [
+                    ("MICHI_AUTH_USERNAME", None),
+                    ("MICHI_AUTH_PASSWORD", Some("password123")),
+                    ("MICHI_CONFIG_PATH", Some(config_path.as_str())),
+                ],
+                || {
+                    let _ = Config::from_env();
+                },
+            );
+        });
+        assert!(
+            res.is_err(),
+            "Must panic when password is provided without username"
+        );
+    }
+
+    #[test]
+    fn test_opensubsonic_without_auth_panics_in_non_dev_mode() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().to_str().unwrap().to_string();
+
+        let res = std::panic::catch_unwind(|| {
+            temp_env::with_vars(
+                [
+                    ("MICHI_OPENSUBSONIC_ENABLED", Some("true")),
+                    ("MICHI_DEV_MODE", Some("false")),
+                    ("MICHI_AUTH_USERNAME", None),
+                    ("MICHI_AUTH_PASSWORD", None),
+                    ("MICHI_CONFIG_PATH", Some(config_path.as_str())),
+                ],
+                || {
+                    let _ = Config::from_env();
+                },
+            );
+        });
+        assert!(
+            res.is_err(),
+            "Must panic when OpenSubsonic is enabled without auth in non-dev mode"
+        );
+    }
+
+    #[test]
+    fn test_load_file_overrides_trusted_proxies() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().to_str().unwrap().to_string();
+
+        let json_content = r#"{
+            "trust_proxy": true,
+            "trusted_proxies": ["10.0.0.1", "192.168.1.50"]
+        }"#;
+        std::fs::write(tmp.path().join("config.json"), json_content).unwrap();
+
+        temp_env::with_vars(
+            [
+                ("MICHI_CONFIG_PATH", Some(config_path.as_str())),
+                ("MICHI_TRUST_PROXY", None),
+                ("MICHI_TRUSTED_PROXIES", None),
+            ],
+            || {
+                let cfg = Config::from_env();
+                assert!(cfg.trust_proxy);
+                assert_eq!(cfg.trusted_proxies.len(), 2);
+                assert!(cfg.is_trusted_proxy(&"10.0.0.1".parse().unwrap()));
+                assert!(cfg.is_trusted_proxy(&"192.168.1.50".parse().unwrap()));
+                assert!(!cfg.is_trusted_proxy(&"1.1.1.1".parse().unwrap()));
+            },
+        );
+    }
 }
+

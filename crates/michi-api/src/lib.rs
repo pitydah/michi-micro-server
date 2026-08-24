@@ -237,7 +237,24 @@ impl AppState {
             info!("maintenance scheduler stopped");
         }));
 
+        // Periodic rate limiter & pairing attempt cache pruner (runs every 60s)
+        let sec_state_for_prune = self.security_state.clone();
+        let sec_prune_shutdown = shutdown.clone();
+        self.track_task(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = sec_prune_shutdown.cancelled() => break,
+                    _ = interval.tick() => {
+                        sec_state_for_prune.prune_stale_limiters();
+                    }
+                }
+            }
+        }));
+
         // Daily library integrity & reconciliation cron (solo si scan habilitado)
+
         let integrity_db = db.clone();
         let integrity_paths = self.config.music_paths.clone();
         let integrity_profile = self.config.resource_profile;
