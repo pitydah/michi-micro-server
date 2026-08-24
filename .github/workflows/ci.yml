@@ -46,10 +46,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Fetch canonical Michi Link contracts (michi-music-stream)
-        run: git clone --depth 1 https://github.com/pitydah/michi-music-stream.git /tmp/michi-music-stream
-      - name: Validate Michi Link v1-lite Stream Contract Drift & Full OpenAPI
-        run: python3 scripts/test_stream_contract_drift.py --contract-dir /tmp/michi-music-stream/contracts/michi-link
+      - name: Validate Michi Link v1-lite Stream Contract Drift & Full OpenAPI (Pinned Submodule)
+        run: python3 scripts/test_stream_contract_drift.py --contract-dir vendor/michi-music-stream/contracts/michi-link
 
   ci-receiver-contract-simulator:
     runs-on: ubuntu-latest

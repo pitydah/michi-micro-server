@@ -372,6 +372,15 @@ pub(crate) async fn register_handler(
         ));
     }
 
+    if body.password.trim().len() < 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({"status": "error", "message": "password must be at least 8 non-whitespace characters"}),
+            ),
+        ));
+    }
+
     if michi_db::get_user_by_username(&state.db, &body.username)
         .await
         .map_err(|e| {

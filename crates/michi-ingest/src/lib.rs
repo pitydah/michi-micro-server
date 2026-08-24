@@ -90,7 +90,15 @@ pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
     let _safe_url = validate_url(url)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many redirects")
+            } else if let Err(e) = validate_url(attempt.url().as_str()) {
+                attempt.error(format!("redirect to unsafe target blocked: {e}"))
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()
         .map_err(|e| format!("client: {e}"))?;
 
