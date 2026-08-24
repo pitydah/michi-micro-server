@@ -263,21 +263,20 @@ impl AppState {
                         if current_cancel.is_cancelled() {
                             continue;
                         }
-                        let concurrency = integrity_profile.scan_concurrency();
+                        let _concurrency = integrity_profile.scan_concurrency();
                         for path in &integrity_paths {
                             if current_cancel.is_cancelled() {
                                 break;
                             }
-                            let tracks = michi_scanner::scan_directories_cancellable(
-                                std::slice::from_ref(path),
-                                concurrency,
+                            let scan_res = michi_scanner::scan_root_cancellable(
+                                path,
                                 current_cancel.clone(),
                             )
                             .await;
                             let _ = michi_scanner::reconcile_root(
                                 &integrity_db,
                                 path,
-                                &tracks,
+                                &scan_res,
                                 &current_cancel,
                             )
                             .await;
@@ -333,16 +332,15 @@ impl AppState {
                                 if current_cancel.is_cancelled() {
                                     break;
                                 }
-                                let tracks = michi_scanner::scan_directories_cancellable(
-                                    std::slice::from_ref(path),
-                                    1,
+                                let scan_res = michi_scanner::scan_root_cancellable(
+                                    path,
                                     current_cancel.clone(),
                                 )
                                 .await;
                                 let _ = michi_scanner::reconcile_root(
                                     &watch_db,
                                     path,
-                                    &tracks,
+                                    &scan_res,
                                     &current_cancel,
                                 )
                                 .await;
@@ -567,18 +565,11 @@ async fn run_job_worker(
                     tracing::warn!(path = %path.display(), %error, "scan skipped unavailable mount");
                     continue;
                 }
-                let _ = michi_db::update_mount_state(db, &path.display().to_string(), "online", "")
-                    .await;
-                let tracks = michi_scanner::scan_directories_cancellable(
-                    std::slice::from_ref(path),
-                    1,
-                    cancel.clone(),
-                )
-                .await;
-                michi_scanner::reconcile_root(db, path, &tracks, cancel)
+                let scan_res = michi_scanner::scan_root_cancellable(path, cancel.clone()).await;
+                michi_scanner::reconcile_root(db, path, &scan_res, cancel)
                     .await
                     .map_err(|error| format!("reconcile error: {error}"))?;
-                total += tracks.len();
+                total += scan_res.tracks().len();
                 let progress = (index + 1) as f64 / paths.len().max(1) as f64;
                 let _ = michi_db::update_job_progress(db, job_id, progress).await;
             }

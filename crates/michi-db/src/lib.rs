@@ -2110,7 +2110,7 @@ pub async fn upsert_track(pool: &SqlitePool, track: &Track) -> Result<(), DbErro
             year = excluded.year,
             track_number = excluded.track_number,
             disc_number = excluded.disc_number,
-            content_hash = excluded.content_hash,
+            content_hash = COALESCE(excluded.content_hash, tracks.content_hash),
             updated_at = excluded.updated_at",
     )
     .bind(&id)
@@ -2256,7 +2256,7 @@ pub async fn upsert_track_tx(
             year = excluded.year,
             track_number = excluded.track_number,
             disc_number = excluded.disc_number,
-            content_hash = excluded.content_hash,
+            content_hash = COALESCE(excluded.content_hash, tracks.content_hash),
             updated_at = excluded.updated_at",
     )
     .bind(&id)

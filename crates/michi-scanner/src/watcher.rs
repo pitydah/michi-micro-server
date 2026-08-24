@@ -86,9 +86,8 @@ impl LibraryWatcher {
         };
         let Some(previous) = previous else {
             info!(path = %root.display(), "library mount restored; reconciling root");
-            let tracks =
-                crate::scan_directories_cancellable(&[root.to_path_buf()], 1, cancel.clone()).await;
-            if let Err(error) = crate::reconcile_root(&self.db, root, &tracks, cancel).await {
+            let scan_res = crate::scan_root_cancellable(root, cancel.clone()).await;
+            if let Err(error) = crate::reconcile_root(&self.db, root, &scan_res, cancel).await {
                 warn!(path = %root.display(), %error, "failed to reconcile restored mount");
             }
             return;
@@ -102,7 +101,13 @@ impl LibraryWatcher {
             if cancel.is_cancelled() {
                 return;
             }
-            if let Some(track) = crate::scan_file(root.to_path_buf(), path.clone()).await {
+            if let Some(mut track) = crate::scan_file(root.to_path_buf(), path.clone()).await {
+                // If the file was modified, compute its new content hash
+                if previous.contains_key(path) {
+                    if let Some(new_hash) = crate::compute_file_content_hash(path) {
+                        track.content_hash = Some(new_hash);
+                    }
+                }
                 if let Err(error) = michi_db::upsert_track(&self.db, &track).await {
                     warn!(path = %path.display(), %error, "failed to persist changed track");
                 }
