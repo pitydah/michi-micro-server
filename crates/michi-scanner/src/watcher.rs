@@ -116,7 +116,6 @@ impl LibraryWatcher {
                 if let Err(error) = michi_db::upsert_track(&self.db, &track).await {
                     warn!(path = %path.display(), %error, "failed to persist changed track");
                 }
-
             }
         }
 
@@ -241,4 +240,3 @@ mod tests {
         assert!(michi_db::get_track(&db, &track.id).await.unwrap().is_none());
     }
 }
-

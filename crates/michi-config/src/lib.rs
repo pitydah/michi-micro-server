@@ -175,7 +175,6 @@ impl Config {
             panic!("CRITICAL: OpenSubsonic requires authentication to be configured unless MICHI_DEV_MODE=true");
         }
 
-
         let trust_proxy = env::var("MICHI_TRUST_PROXY")
             .ok()
             .map(|v| v == "1" || v.to_lowercase() == "true")
@@ -267,7 +266,6 @@ impl Config {
             }
         }
     }
-
 
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = env::var("MICHI_PORT") {
@@ -766,4 +764,3 @@ mod tests {
         );
     }
 }
-

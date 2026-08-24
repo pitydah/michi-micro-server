@@ -1032,4 +1032,3 @@ pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool)
         }
     });
 }
-

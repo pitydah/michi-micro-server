@@ -172,7 +172,6 @@ pub struct Track {
     pub updated_at: DateTime<Utc>,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackIdentity {
     pub content_hash: String,

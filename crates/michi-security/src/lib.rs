@@ -96,12 +96,10 @@ impl SecurityState {
         self.ip_rate_limiter.retain(|_, (_, last_used)| {
             now.duration_since(*last_used).as_secs() <= IP_LIMITER_IDLE_TTL_SECS
         });
-        self.pairing_attempts.retain(|_, (_, last_reset)| {
-            now.duration_since(*last_reset).as_secs() <= 300
-        });
+        self.pairing_attempts
+            .retain(|_, (_, last_reset)| now.duration_since(*last_reset).as_secs() <= 300);
     }
 }
-
 
 /// Rate limiting middleware — per client IP (raw TCP peer address, not forwarded headers).
 ///
@@ -304,15 +302,18 @@ mod tests {
     #[test]
     fn test_prune_stale_limiters_evicts_expired_entries() {
         let state = SecurityState::new(SecurityConfig::default());
-        let stale_instant = Instant::now() - std::time::Duration::from_secs(IP_LIMITER_IDLE_TTL_SECS + 10);
+        let stale_instant =
+            Instant::now() - std::time::Duration::from_secs(IP_LIMITER_IDLE_TTL_SECS + 10);
         let fresh_instant = Instant::now();
 
-        state
-            .ip_rate_limiter
-            .insert("192.168.1.1".to_string(), (state.make_limiter(), stale_instant));
-        state
-            .ip_rate_limiter
-            .insert("192.168.1.2".to_string(), (state.make_limiter(), fresh_instant));
+        state.ip_rate_limiter.insert(
+            "192.168.1.1".to_string(),
+            (state.make_limiter(), stale_instant),
+        );
+        state.ip_rate_limiter.insert(
+            "192.168.1.2".to_string(),
+            (state.make_limiter(), fresh_instant),
+        );
 
         assert_eq!(state.ip_rate_limiter.len(), 2);
         state.prune_stale_limiters();
@@ -321,4 +322,3 @@ mod tests {
         assert!(!state.ip_rate_limiter.contains_key("192.168.1.1"));
     }
 }
-

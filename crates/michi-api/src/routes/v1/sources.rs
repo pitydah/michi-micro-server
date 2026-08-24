@@ -109,7 +109,6 @@ pub async fn add_source_handler(
         }
     }
 
-
     Ok(Json(serde_json::json!({
         "source": source,
         "feed_status": feed_status,

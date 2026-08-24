@@ -104,15 +104,20 @@ pub async fn safe_fetch(
     max_redirects: usize,
     max_bytes: usize,
     timeout: Duration,
-) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Vec<u8>, url::Url), String> {
+) -> Result<
+    (
+        reqwest::StatusCode,
+        reqwest::header::HeaderMap,
+        Vec<u8>,
+        url::Url,
+    ),
+    String,
+> {
     let mut current_url_str = initial_url.to_string();
 
     for hop in 0..=max_redirects {
         let (parsed_url, addrs) = validate_url_and_resolve(&current_url_str)?;
-        let host = parsed_url
-            .host_str()
-            .ok_or("URL has no host")?
-            .to_string();
+        let host = parsed_url.host_str().ok_or("URL has no host")?.to_string();
         let first_addr = *addrs
             .first()
             .ok_or("DNS resolution returned no addresses")?;
@@ -153,7 +158,11 @@ pub async fn safe_fetch(
         let mut body = Vec::new();
         let mut resp = resp;
 
-        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("chunk read error: {e}"))? {
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("chunk read error: {e}"))?
+        {
             if body.len() + chunk.len() > max_bytes {
                 return Err(format!(
                     "FEED_TOO_LARGE: response body exceeded maximum limit of {max_bytes} bytes"
@@ -177,7 +186,6 @@ pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
     let first_addr = *addrs
         .first()
         .ok_or("DNS resolution returned no addresses")?;
-
 
     let mut client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
@@ -232,7 +240,6 @@ pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
     } else {
         r
     };
-
 
     let headers = resp.headers();
     let ct = headers
@@ -526,9 +533,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_safe_fetch_blocks_ssrf_immediately() {
-        let res = safe_fetch("http://127.0.0.1:9999/feed.xml", 5, 1024, Duration::from_secs(2)).await;
+        let res = safe_fetch(
+            "http://127.0.0.1:9999/feed.xml",
+            5,
+            1024,
+            Duration::from_secs(2),
+        )
+        .await;
         assert!(res.is_err());
-        assert!(res.unwrap_err().contains("blocked address") || true);
+        let err = res.unwrap_err();
+        assert!(err.contains("blocked address") || err.contains("DNS"));
     }
 }
-

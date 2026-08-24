@@ -67,7 +67,6 @@ fn track_from_file(library_root: &Path, entry_path: &Path) -> Option<Track> {
     })
 }
 
-
 #[derive(Debug, Clone)]
 pub enum ScanResult {
     Success(Vec<Track>),
@@ -361,10 +360,9 @@ pub async fn reconcile_root(
             } else if !fingerprint_unchanged {
                 // File modified on disk while server was off/disabled; recompute hash
                 let path_buf = PathBuf::from(&track.file_path);
-                if let Ok(Some(new_hash)) = tokio::task::spawn_blocking(move || {
-                    crate::compute_file_content_hash(&path_buf)
-                })
-                .await
+                if let Ok(Some(new_hash)) =
+                    tokio::task::spawn_blocking(move || crate::compute_file_content_hash(&path_buf))
+                        .await
                 {
                     track.content_hash = Some(new_hash);
                 }
@@ -392,7 +390,6 @@ pub async fn reconcile_root(
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -583,14 +580,9 @@ mod tests {
         // Simulate mount drop: the mountpoint directory exists on disk, but is empty (0 tracks found)
         // scan_root_cancellable on the empty dir returns ScanResult::Success(vec![])
         let empty_scan = ScanResult::Success(vec![]);
-        reconcile_root(
-            &pool,
-            mount_path,
-            &empty_scan,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
+        reconcile_root(&pool, mount_path, &empty_scan, &CancellationToken::new())
+            .await
+            .unwrap();
 
         // Verify tracks are STILL in the database (not wiped out by suspicious empty scan)
         let in_db = michi_db::get_track(&pool, &track_id).await.unwrap();
@@ -656,7 +648,10 @@ mod tests {
 
         // Track 2 must still be present in DB
         let t2_in_db = michi_db::get_track(&pool, &track2_id).await.unwrap();
-        assert!(t2_in_db.is_some(), "partial scan must NOT delete missing tracks");
+        assert!(
+            t2_in_db.is_some(),
+            "partial scan must NOT delete missing tracks"
+        );
     }
 
     #[tokio::test]
@@ -719,9 +714,15 @@ mod tests {
             .unwrap();
 
         // Track 1 should still exist
-        assert!(michi_db::get_track(&pool, &track1_id).await.unwrap().is_some());
+        assert!(michi_db::get_track(&pool, &track1_id)
+            .await
+            .unwrap()
+            .is_some());
         // Track 2 should be deleted because root is active (track1 is there) and track2 is gone from disk
-        assert!(michi_db::get_track(&pool, &track2_id).await.unwrap().is_none());
+        assert!(michi_db::get_track(&pool, &track2_id)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -795,5 +796,3 @@ mod tests {
         );
     }
 }
-
-

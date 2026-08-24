@@ -230,7 +230,6 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
     Ok(())
 }
 
-
 async fn migration_001(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS tracks (
@@ -948,7 +947,6 @@ async fn migration_039(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
         .await?;
     Ok(())
 }
-
 
 pub async fn save_room_group_db(
     pool: &SqlitePool,
@@ -2080,7 +2078,11 @@ pub async fn get_playlist_tracks(
                 track_number: r.get::<Option<i64>, _>("track_number").map(|v| v as u32),
                 disc_number: r.get::<Option<i64>, _>("disc_number").map(|v| v as u32),
                 content_hash: r.get("content_hash"),
-                file_size: r.try_get::<Option<i64>, _>("file_size").ok().flatten().map(|v| v as u64),
+                file_size: r
+                    .try_get::<Option<i64>, _>("file_size")
+                    .ok()
+                    .flatten()
+                    .map(|v| v as u64),
                 file_mtime_ns: r.try_get::<Option<i64>, _>("file_mtime_ns").ok().flatten(),
                 starred: false,
                 rating: 0,
@@ -2095,7 +2097,6 @@ pub async fn get_playlist_tracks(
                     .get::<&str, _>("t_updated_at")
                     .parse()
                     .unwrap_or_else(|_| Utc::now()),
-
             };
             (playlist_track, track)
         })
@@ -2161,7 +2162,6 @@ pub async fn upsert_track(pool: &SqlitePool, track: &Track) -> Result<(), DbErro
 
     Ok(())
 }
-
 
 pub async fn find_tracks_by_content_hash(
     pool: &SqlitePool,
@@ -2310,7 +2310,6 @@ pub async fn upsert_track_tx(
 
     Ok(())
 }
-
 
 pub async fn upsert_tracks(pool: &SqlitePool, tracks: &[Track]) -> Result<usize, DbError> {
     if tracks.is_empty() {
@@ -3371,8 +3370,15 @@ fn row_to_track(row: &sqlx::sqlite::SqliteRow) -> Track {
             .map(|d| d.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now()),
         content_hash: row.get("content_hash"),
-        file_size: row.try_get::<Option<i64>, _>("file_size").ok().flatten().map(|v| v as u64),
-        file_mtime_ns: row.try_get::<Option<i64>, _>("file_mtime_ns").ok().flatten(),
+        file_size: row
+            .try_get::<Option<i64>, _>("file_size")
+            .ok()
+            .flatten()
+            .map(|v| v as u64),
+        file_mtime_ns: row
+            .try_get::<Option<i64>, _>("file_mtime_ns")
+            .ok()
+            .flatten(),
         starred: row.get::<i64, _>("starred") != 0,
         rating: row.get::<i64, _>("rating") as u8,
         starred_at: row.get("starred_at"),
@@ -3380,7 +3386,6 @@ fn row_to_track(row: &sqlx::sqlite::SqliteRow) -> Track {
         replaygain_track_peak: row.get("replaygain_track_peak"),
     }
 }
-
 
 fn row_to_playlist(row: &sqlx::sqlite::SqliteRow) -> Playlist {
     Playlist {
@@ -3434,8 +3439,15 @@ fn row_to_play_history_with_track(row: &sqlx::sqlite::SqliteRow) -> (PlayHistory
         track_number: row.get::<Option<i64>, _>("track_number").map(|v| v as u32),
         disc_number: row.get::<Option<i64>, _>("disc_number").map(|v| v as u32),
         content_hash: row.get("content_hash"),
-        file_size: row.try_get::<Option<i64>, _>("file_size").ok().flatten().map(|v| v as u64),
-        file_mtime_ns: row.try_get::<Option<i64>, _>("file_mtime_ns").ok().flatten(),
+        file_size: row
+            .try_get::<Option<i64>, _>("file_size")
+            .ok()
+            .flatten()
+            .map(|v| v as u64),
+        file_mtime_ns: row
+            .try_get::<Option<i64>, _>("file_mtime_ns")
+            .ok()
+            .flatten(),
         starred: false,
         rating: 0,
         starred_at: None,
@@ -3516,7 +3528,6 @@ mod tests {
             updated_at: chrono::Utc::now(),
         }
     }
-
 
     #[tokio::test]
     async fn test_upsert_and_get_track() {
