@@ -93,383 +93,132 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         .fetch_one(pool)
         .await?;
 
+    macro_rules! run_migration_step {
+        ($pool:expr, $version:expr, $name:expr, $mig:ident) => {{
+            info!("applying migration {}: {}", $version, $name);
+            $mig($pool).await?;
+            sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)")
+                .bind($version)
+                .bind(Utc::now().to_rfc3339())
+                .execute($pool)
+                .await?;
+            info!("migration {} applied", $version);
+        }};
+    }
+
     if current < 1 {
-        info!("applying migration 1: initial schema");
-        migration_001(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (1, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
+        run_migration_step!(pool, 1, "initial schema", migration_001);
     }
-
     if current < 2 {
-        info!("applying migration 2: playlists");
-        migration_002(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (2, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 2 applied");
+        run_migration_step!(pool, 2, "playlists", migration_002);
     }
-
     if current < 3 {
-        info!("applying migration 3: indices");
-        migration_003(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (3, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 3 applied");
+        run_migration_step!(pool, 3, "indices", migration_003);
     }
-
     if current < 4 {
-        info!("applying migration 4: play history");
-        migration_004(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (4, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 4 applied");
+        run_migration_step!(pool, 4, "play history", migration_004);
     }
-
     if current < 5 {
-        info!("applying migration 5: users");
-        migration_005(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (5, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 5 applied");
+        run_migration_step!(pool, 5, "users", migration_005);
     }
-
     if current < 6 {
-        info!("applying migration 6: user_id on playlists");
-        migration_006(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (6, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 6 applied");
+        run_migration_step!(pool, 6, "user_id on playlists", migration_006);
     }
-
     if current < 7 {
-        info!("applying migration 7: user_id on play_history");
-        migration_007(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (7, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 7 applied");
+        run_migration_step!(pool, 7, "user_id on play_history", migration_007);
     }
-
     if current < 8 {
-        info!("applying migration 8: playlist sharing");
-        migration_008(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (8, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 8 applied");
+        run_migration_step!(pool, 8, "playlist sharing", migration_008);
     }
-
     if current < 9 {
-        info!("applying migration 9: sync devices");
-        migration_009(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (9, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 9 applied");
+        run_migration_step!(pool, 9, "sync devices", migration_009);
     }
-
     if current < 10 {
-        info!("applying migration 10: sync pairing tokens");
-        migration_010(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (10, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 10 applied");
+        run_migration_step!(pool, 10, "sync pairing tokens", migration_010);
     }
-
     if current < 11 {
-        info!("applying migration 11: sync jobs");
-        migration_011(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (11, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 11 applied");
+        run_migration_step!(pool, 11, "sync jobs", migration_011);
     }
-
     if current < 12 {
-        info!("applying migration 12: sync job items");
-        migration_012(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (12, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 12 applied");
+        run_migration_step!(pool, 12, "sync job items", migration_012);
     }
-
     if current < 13 {
-        info!("applying migration 13: players");
-        migration_013(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (13, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 13 applied");
+        run_migration_step!(pool, 13, "players", migration_013);
     }
-
     if current < 14 {
-        info!("applying migration 14: queues");
-        migration_014(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (14, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 14 applied");
+        run_migration_step!(pool, 14, "queues", migration_014);
     }
-
     if current < 15 {
-        info!("applying migration 15: track metadata fields");
-        migration_015(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (15, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 15 applied");
+        run_migration_step!(pool, 15, "track metadata fields", migration_015);
     }
-
     if current < 16 {
-        info!("applying migration 16: link devices");
-        migration_016(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (16, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 16 applied");
+        run_migration_step!(pool, 16, "link devices", migration_016);
     }
-
     if current < 17 {
-        info!("applying migration 17: pairing sessions");
-        migration_017(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (17, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 17 applied");
+        run_migration_step!(pool, 17, "pairing sessions", migration_017);
     }
-
     if current < 18 {
-        info!("applying migration 18: import sessions");
-        migration_018(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (18, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 18 applied");
+        run_migration_step!(pool, 18, "import sessions", migration_018);
     }
-
     if current < 19 {
-        info!("applying migration 19: receivers");
-        migration_019(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (19, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 19 applied");
+        run_migration_step!(pool, 19, "receivers", migration_019);
     }
-
     if current < 20 {
-        info!("applying migration 20: playback sessions");
-        migration_020(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (20, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 20 applied");
+        run_migration_step!(pool, 20, "playback sessions", migration_020);
     }
-
     if current < 21 {
-        info!("applying migration 21: import sessions extended");
-        migration_021(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (21, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 21 applied");
+        run_migration_step!(pool, 21, "import sessions extended", migration_021);
     }
-
     if current < 22 {
-        info!("applying migration 22: playback sessions extended");
-        migration_022(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (22, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 22 applied");
+        run_migration_step!(pool, 22, "playback sessions extended", migration_022);
     }
-
     if current < 23 {
-        info!("applying migration 23: content_hash on tracks");
-        migration_023(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (23, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 23 applied");
+        run_migration_step!(pool, 23, "content_hash on tracks", migration_023);
     }
-
     if current < 24 {
-        info!("applying migration 24: star/rating on tracks");
-        migration_024(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (24, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 24 applied");
+        run_migration_step!(pool, 24, "star/rating on tracks", migration_024);
     }
-
     if current < 25 {
-        info!("applying migration 25: replaygain on tracks");
-        migration_025(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (25, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 25 applied");
+        run_migration_step!(pool, 25, "replaygain on tracks", migration_025);
     }
-
     if current < 26 {
-        info!("applying migration 26: playback chains");
-        migration_026(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (26, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 26 applied");
+        run_migration_step!(pool, 26, "playback chains", migration_026);
     }
-
     if current < 27 {
-        info!("applying migration 27: bookmarks");
-        migration_027(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (27, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 27 applied");
+        run_migration_step!(pool, 27, "bookmarks", migration_027);
     }
-
     if current < 28 {
-        info!("applying migration 28: radio stations");
-        migration_028(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (28, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 28 applied");
+        run_migration_step!(pool, 28, "radio stations", migration_028);
     }
-
     if current < 29 {
-        info!("applying migration 29: shared links");
-        migration_029(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (29, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 29 applied");
+        run_migration_step!(pool, 29, "shared links", migration_029);
     }
-
     if current < 30 {
-        info!("applying migration 30: pairing QR codes");
-        migration_030(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (30, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 30 applied");
+        run_migration_step!(pool, 30, "pairing QR codes", migration_030);
     }
-
     if current < 31 {
-        info!("applying migration 31: stream sources");
-        migration_031(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (31, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 31 applied");
+        run_migration_step!(pool, 31, "stream sources", migration_031);
     }
-
     if current < 32 {
-        info!("applying migration 32: mount guard");
-        migration_032(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (32, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 32 applied");
+        run_migration_step!(pool, 32, "mount guard", migration_032);
     }
-
     if current < 33 {
-        info!("applying migration 33: job queue");
-        migration_033(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (33, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 33 applied");
+        run_migration_step!(pool, 33, "job queue", migration_033);
     }
-
     if current < 34 {
-        info!("applying migration 34: audit log");
-        migration_034(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (34, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 34 applied");
+        run_migration_step!(pool, 34, "audit log", migration_034);
     }
-
     if current < 35 {
-        info!("applying migration 35: change journal");
-        migration_035(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (35, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 35 applied");
+        run_migration_step!(pool, 35, "change journal", migration_035);
     }
-
     if current < 36 {
-        info!("applying migration 36: backup snapshots");
-        migration_036(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (36, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 36 applied");
+        run_migration_step!(pool, 36, "backup snapshots", migration_036);
     }
-
     if current < 37 {
-        info!("applying migration 37: server config");
-        migration_037(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (37, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 37 applied");
+        run_migration_step!(pool, 37, "server config", migration_037);
     }
-
     if current < 38 {
-        info!("applying migration 38: room groups");
-        migration_038(pool).await?;
-        sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (38, ?)")
-            .bind(Utc::now().to_rfc3339())
-            .execute(pool)
-            .await?;
-        info!("migration 38 applied");
+        run_migration_step!(pool, 38, "room groups", migration_038);
     }
 
     info!("database schema at version 38");

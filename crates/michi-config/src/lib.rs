@@ -378,8 +378,19 @@ pub fn load_or_create_server_id(config_path: &Path) -> Uuid {
     if let Some(parent) = file_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(mut f) = std::fs::File::create(&file_path) {
-        let _ = f.write_all(id.to_string().as_bytes());
+    match std::fs::File::create(&file_path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(id.to_string().as_bytes()) {
+                eprintln!(
+                    "CRITICAL: Failed to write server_id to {file_path:?}: {e}. Server identity may not persist across restarts!"
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "CRITICAL: Failed to create server_id file at {file_path:?}: {e}. /config directory is not writable!"
+            );
+        }
     }
     id
 }

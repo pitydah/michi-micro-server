@@ -256,19 +256,24 @@ pub async fn restore_handler(
         ));
     }
 
+    if body.force
+        && !existing_tracks.is_empty()
+        && body.tracks.is_empty()
+        && body.starred_tracks.is_empty()
+    {
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "EMPTY_RESTORE",
+            "force=true but no tracks or starred_tracks provided to restore",
+        ));
+    }
+
     let mut restored_tracks = 0u64;
     let mut restored_playlists = 0u64;
     let mut restored_starred = 0u64;
     let mut restored_history = 0u64;
 
     if body.force && !existing_tracks.is_empty() {
-        if body.tracks.is_empty() && body.starred_tracks.is_empty() {
-            return Err(v1_error(
-                StatusCode::BAD_REQUEST,
-                "EMPTY_RESTORE",
-                "force=true but no tracks or starred_tracks provided to restore",
-            ));
-        }
         michi_db::delete_all_tracks(&state.db).await.map_err(|e| {
             v1_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
