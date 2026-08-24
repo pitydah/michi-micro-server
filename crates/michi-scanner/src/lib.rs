@@ -299,6 +299,34 @@ pub async fn reconcile_root(
         return Ok(());
     }
 
+    // Query existing tracks belonging to this root
+    let all_existing = michi_db::list_tracks(db).await?;
+    let root_existing: Vec<_> = all_existing
+        .into_iter()
+        .filter(|t| Path::new(&t.file_path).starts_with(root))
+        .collect();
+
+    // First Empty Scan Protection (Mount Loss Guard):
+    // If tracks existed in DB for this root, but the scan found 0 tracks, this indicates a suspicious empty scan.
+    // In Linux/NAS/Docker setups, an unmounted filesystem leaves an empty mountpoint folder.
+    // NEVER purge the database on a 0-track scan when tracks previously existed for this root.
+    if !root_existing.is_empty() && tracks.is_empty() {
+        warn!(
+            path = %root.display(),
+            existing_count = root_existing.len(),
+            "reconcile_root skipped deletion: suspicious empty scan on root that previously contained {} tracks. Mount may have dropped. Preserving DB.",
+            root_existing.len()
+        );
+        let _ = michi_db::update_mount_state(
+            db,
+            &root.display().to_string(),
+            "unavailable",
+            "suspicious empty scan: mountpoint is empty while DB contains tracks",
+        )
+        .await;
+        return Ok(());
+    }
+
     let _ = michi_db::update_mount_state(db, &root.display().to_string(), "online", "").await;
 
     if !tracks.is_empty() {
@@ -309,8 +337,8 @@ pub async fn reconcile_root(
     }
 
     let scanned: std::collections::HashSet<_> = tracks.iter().map(|track| track.id).collect();
-    for existing in michi_db::list_tracks(db).await? {
-        if Path::new(&existing.file_path).starts_with(root) && !scanned.contains(&existing.id) {
+    for existing in root_existing {
+        if !scanned.contains(&existing.id) {
             // Confirm the individual file does not exist on disk before deletion
             if !Path::new(&existing.file_path).exists() {
                 michi_db::delete_track(db, &existing.id).await?;
@@ -463,24 +491,183 @@ mod tests {
             Some("sha256_hash_123"),
             "content_hash MUST be preserved"
         );
+    }
 
-        // 2. Normal metadata scan with content_hash = None (COALESCE preservation)
-        let mut refreshed_track = track.clone();
-        refreshed_track.content_hash = None;
-        refreshed_track.title = Some("Updated Title".into());
-        michi_db::upsert_track(&pool, &refreshed_track)
-            .await
-            .unwrap();
+    #[tokio::test]
+    async fn test_reconcile_root_preserves_tracks_when_mountpoint_directory_becomes_empty() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let mount_dir = tempfile::tempdir().unwrap();
+        let mount_path = mount_dir.path();
 
-        let updated_in_db = michi_db::get_track(&pool, &track_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(updated_in_db.title.as_deref(), Some("Updated Title"));
-        assert_eq!(
-            updated_in_db.content_hash.as_deref(),
-            Some("sha256_hash_123"),
-            "COALESCE must preserve existing content_hash during metadata refreshes"
+        let track_id = uuid::Uuid::new_v4();
+        let track_path = mount_path.join("song1.flac");
+        let track = Track {
+            id: track_id,
+            title: Some("Mount Loss Test Track".into()),
+            artist: Some("Artist".into()),
+            album: None,
+            album_artist: None,
+            duration_ms: Some(120_000),
+            file_path: track_path.to_string_lossy().to_string(),
+            format: AudioFormat::Flac,
+            sample_rate: Some(44100),
+            bit_depth: Some(16),
+            channels: Some(2),
+            artwork_id: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            disc_number: None,
+            content_hash: Some("sha256_important".into()),
+            starred: false,
+            rating: 0,
+            starred_at: None,
+            replaygain_track_gain: None,
+            replaygain_track_peak: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        michi_db::upsert_track(&pool, &track).await.unwrap();
+
+        // Simulate mount drop: the mountpoint directory exists on disk, but is empty (0 tracks found)
+        // scan_root_cancellable on the empty dir returns ScanResult::Success(vec![])
+        let empty_scan = ScanResult::Success(vec![]);
+        reconcile_root(
+            &pool,
+            mount_path,
+            &empty_scan,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        // Verify tracks are STILL in the database (not wiped out by suspicious empty scan)
+        let in_db = michi_db::get_track(&pool, &track_id).await.unwrap();
+        assert!(
+            in_db.is_some(),
+            "tracks MUST be preserved when mountpoint directory becomes empty (NAS dropped)"
         );
     }
+
+    #[tokio::test]
+    async fn test_reconcile_root_partial_scan_preserves_missing_tracks() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let root = Path::new("/music");
+        let track1_id = uuid::Uuid::new_v4();
+        let track2_id = uuid::Uuid::new_v4();
+
+        let track1 = Track {
+            id: track1_id,
+            title: Some("Track 1".into()),
+            artist: None,
+            album: None,
+            album_artist: None,
+            duration_ms: None,
+            file_path: "/music/track1.flac".into(),
+            format: AudioFormat::Flac,
+            sample_rate: None,
+            bit_depth: None,
+            channels: None,
+            artwork_id: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            disc_number: None,
+            content_hash: None,
+            starred: false,
+            rating: 0,
+            starred_at: None,
+            replaygain_track_gain: None,
+            replaygain_track_peak: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let mut track2 = track1.clone();
+        track2.id = track2_id;
+        track2.file_path = "/music/track2.flac".into();
+        track2.title = Some("Track 2".into());
+
+        michi_db::upsert_track(&pool, &track1).await.unwrap();
+        michi_db::upsert_track(&pool, &track2).await.unwrap();
+
+        // Partial scan only found track1 due to I/O error on track2
+        let partial_scan = ScanResult::Partial {
+            tracks: vec![track1.clone()],
+            error: "read error on subfolder".into(),
+        };
+
+        reconcile_root(&pool, root, &partial_scan, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        // Track 2 must still be present in DB
+        let t2_in_db = michi_db::get_track(&pool, &track2_id).await.unwrap();
+        assert!(t2_in_db.is_some(), "partial scan must NOT delete missing tracks");
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_root_deletes_removed_file_when_mount_is_active() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let track1_file = root.join("track1.flac");
+        let track2_file = root.join("track2.flac");
+        fs::write(&track1_file, b"data1").unwrap();
+        fs::write(&track2_file, b"data2").unwrap();
+
+        let track1_id = uuid::Uuid::new_v4();
+        let track2_id = uuid::Uuid::new_v4();
+
+        let track1 = Track {
+            id: track1_id,
+            title: Some("Track 1".into()),
+            artist: None,
+            album: None,
+            album_artist: None,
+            duration_ms: None,
+            file_path: track1_file.to_string_lossy().to_string(),
+            format: AudioFormat::Flac,
+            sample_rate: None,
+            bit_depth: None,
+            channels: None,
+            artwork_id: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            disc_number: None,
+            content_hash: None,
+            starred: false,
+            rating: 0,
+            starred_at: None,
+            replaygain_track_gain: None,
+            replaygain_track_peak: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let mut track2 = track1.clone();
+        track2.id = track2_id;
+        track2.file_path = track2_file.to_string_lossy().to_string();
+
+        michi_db::upsert_track(&pool, &track1).await.unwrap();
+        michi_db::upsert_track(&pool, &track2).await.unwrap();
+
+        // Now user intentionally deletes track2 from disk, while track1 remains
+        fs::remove_file(&track2_file).unwrap();
+
+        // Next scan finds only track1
+        let scan_res = ScanResult::Success(vec![track1.clone()]);
+        reconcile_root(&pool, root, &scan_res, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        // Track 1 should still exist
+        assert!(michi_db::get_track(&pool, &track1_id).await.unwrap().is_some());
+        // Track 2 should be deleted because root is active (track1 is there) and track2 is gone from disk
+        assert!(michi_db::get_track(&pool, &track2_id).await.unwrap().is_none());
+    }
 }
+

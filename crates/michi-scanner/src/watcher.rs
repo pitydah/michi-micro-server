@@ -203,6 +203,7 @@ mod tests {
         let mut snapshots = HashMap::new();
         watcher.poll_root(&root, &mut snapshots, &cancel).await;
 
+        // 1. Mount detached (directory renamed/missing) -> tracks preserved, mount unavailable
         let detached = parent.path().join("detached");
         std::fs::rename(&root, &detached).unwrap();
         watcher.poll_root(&root, &mut snapshots, &cancel).await;
@@ -212,12 +213,26 @@ mod tests {
             "unavailable"
         );
 
+        // 2. Underlying mountpoint directory is recreated empty (mount lost) -> tracks MUST BE PRESERVED
         std::fs::create_dir(&root).unwrap();
         watcher.poll_root(&root, &mut snapshots, &cancel).await;
-        assert!(michi_db::get_track(&db, &track.id).await.unwrap().is_none());
+        assert!(
+            michi_db::get_track(&db, &track.id).await.unwrap().is_some(),
+            "empty mountpoint directory must NOT delete existing tracks"
+        );
+
+        // 3. Mount restored with new active file (e.g. song2.mp3) -> online, song.mp3 reconciled
+        let song2 = root.join("song2.mp3");
+        std::fs::write(&song2, b"new audio").unwrap();
+        // Reset snapshots to simulate restored mount
+        snapshots.insert(root.clone(), None);
+        watcher.poll_root(&root, &mut snapshots, &cancel).await;
         assert_eq!(
             michi_db::get_mount_states(&db).await.unwrap()[0].1,
             "online"
         );
+        // song.mp3 is now legitimately removed because the mount is online with song2.mp3
+        assert!(michi_db::get_track(&db, &track.id).await.unwrap().is_none());
     }
 }
+
