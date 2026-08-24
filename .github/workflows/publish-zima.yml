@@ -15,21 +15,47 @@ permissions:
 
 jobs:
   publish-zima:
-    # For workflow_run: only proceed if CI passed.
+    # For workflow_run: only proceed if CI passed on main branch.
     if: |
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
 
     steps:
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            SOURCE_SHA="${{ github.event.workflow_run.head_sha }}"
+          else
+            SOURCE_SHA="${{ github.sha }}"
+          fi
+
+          if [ -z "$SOURCE_SHA" ]; then
+            echo "ERROR: unable to resolve source SHA"
+            exit 1
+          fi
+
+          echo "Event: ${{ github.event_name }}"
+          echo "CI run ID: ${{ github.event.workflow_run.id || 'N/A' }}"
+          echo "CI head SHA: ${{ github.event.workflow_run.head_sha || 'N/A' }}"
+          echo "CI head branch: ${{ github.event.workflow_run.head_branch || 'N/A' }}"
+          echo "CI conclusion: ${{ github.event.workflow_run.conclusion || 'N/A' }}"
+          echo "Resolved SOURCE_SHA: $SOURCE_SHA"
+
+          echo "sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
       - name: Checkout R3.1-ZIMA baseline
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ steps.source.outputs.sha }}
           submodules: recursive
 
       # Guard for manual workflow_dispatch: verify CI is green on the exact SHA being published.
-      # This prevents the "run workflow" button from racing a red commit to production.
+      # Treats legitimate skipped and neutral jobs (e.g. release-ghcr) as non-failures.
       - name: Guard — verify CI is green on this SHA (manual dispatch only)
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -37,22 +63,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          SHA="${{ github.sha }}"
+          SHA="${{ steps.source.outputs.sha }}"
           REPO="${{ github.repository }}"
 
           echo "Verifying CI status for SHA: ${SHA}"
 
-          # Fetch the combined check status for this SHA.
           STATUS=$(gh api \
             "repos/${REPO}/commits/${SHA}/check-runs" \
             --jq '[.check_runs[] | select(.name != "Publish ZimaOS Image")] | 
                   if length == 0 then "no_checks"
-                  elif all(.[]; .conclusion == "success") then "success"
-                  elif any(.[]; .conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") then "failure"
-                  else "pending"
+                  elif any(.[]; .status != "completed") then "pending"
+                  elif any(.[]; .conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure" or .conclusion == "stale") then "failure"
+                  elif all(.[]; .conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral") then "success"
+                  else "failure"
                   end')
 
-          echo "CI status: ${STATUS}"
+          echo "CI check status: ${STATUS}"
 
           if [ "${STATUS}" = "no_checks" ]; then
             echo "ERROR: No CI check runs found for SHA ${SHA}."
@@ -90,17 +116,18 @@ jobs:
           push: true
           tags: |
             ghcr.io/pitydah/michi-micro-server:r3.1-zima
-            ghcr.io/pitydah/michi-micro-server:r3.1-zima-${{ github.sha }}
+            ghcr.io/pitydah/michi-micro-server:r3.1-zima-${{ steps.source.outputs.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/pitydah/michi-micro-server
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Record certification image digest
         run: |
           echo "### ZimaOS Release Image Certification" >> $GITHUB_STEP_SUMMARY
-          echo "- **Source SHA**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Source SHA**: \`${{ steps.source.outputs.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Image Digest**: \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Pinned URI**: \`ghcr.io/pitydah/michi-micro-server@${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Certified digest: ${{ steps.build.outputs.digest }}"
+
