@@ -17,6 +17,9 @@ pub struct OsAppState {
     pub db: sqlx::SqlitePool,
     pub music_paths: Vec<std::path::PathBuf>,
     pub cache_path: std::path::PathBuf,
+    pub auth_username: Option<String>,
+    pub auth_password: Option<String>,
+    pub auth_enabled: bool,
 }
 
 pub fn router(state: OsAppState) -> Router {
@@ -47,18 +50,18 @@ pub fn router(state: OsAppState) -> Router {
 }
 
 async fn ping(
-    State(_state): State<OsAppState>,
+    State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
+    check_auth(&state, &query).await?;
     Ok(json_ok(None))
 }
 
 async fn get_license(
-    State(_state): State<OsAppState>,
+    State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
+    check_auth(&state, &query).await?;
     Ok(json_ok(Some(json!({
         "license": {
             "valid": true,
@@ -74,7 +77,7 @@ async fn get_music_folders(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
+    check_auth(&state, &query).await?;
     let folders: Vec<Value> = state
         .music_paths
         .iter()
@@ -95,7 +98,7 @@ async fn get_artists(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
+    check_auth(&state, &query).await?;
     match michi_db::list_artists(&state.db).await {
         Ok(artists) => {
             let indexes = build_artist_index(&artists);
@@ -131,8 +134,8 @@ async fn get_artist(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
-    let id = query.u.as_deref().unwrap_or("");
+    check_auth(&state, &query).await?;
+    let id = query.get_id().or(query.artist.as_deref()).unwrap_or("");
     let tracks = michi_db::get_artist_tracks(&state.db, id)
         .await
         .map_err(|e| json_err(errors::GENERIC, &format!("db error: {e}")))?;
@@ -164,8 +167,8 @@ async fn get_album(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
-    let id = query.u.as_deref().unwrap_or("");
+    check_auth(&state, &query).await?;
+    let id = query.get_id().or(query.album.as_deref()).unwrap_or("");
     let tracks = michi_db::get_album_tracks(&state.db, id)
         .await
         .map_err(|e| json_err(errors::GENERIC, &format!("db error: {e}")))?;
@@ -197,8 +200,10 @@ async fn get_song(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
-    let id_str = query.u.as_deref().unwrap_or("");
+    check_auth(&state, &query).await?;
+    let id_str = query
+        .get_id()
+        .ok_or_else(|| json_err(errors::MISSING_PARAMETER, "id parameter required"))?;
     let id = Uuid::parse_str(id_str).map_err(|_| json_err(errors::NOT_FOUND, "invalid song id"))?;
 
     let track = michi_db::get_track(&state.db, &id)
@@ -223,8 +228,8 @@ async fn search3(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
-    let query_q = query.u.as_deref().unwrap_or("");
+    check_auth(&state, &query).await?;
+    let query_q = query.get_search_query();
     if query_q.is_empty() {
         return Ok(json_ok(Some(json!({
             "searchResult3": {
@@ -265,8 +270,10 @@ async fn stream(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Response, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
-    let id_str = query.u.as_deref().unwrap_or("");
+    check_auth(&state, &query).await?;
+    let id_str = query
+        .get_id()
+        .ok_or_else(|| json_err(errors::MISSING_PARAMETER, "id parameter required"))?;
     let id = Uuid::parse_str(id_str).map_err(|_| json_err(errors::NOT_FOUND, "invalid id"))?;
 
     let track = michi_db::get_track(&state.db, &id)
@@ -298,8 +305,10 @@ async fn download(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Response, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
-    let id_str = query.u.as_deref().unwrap_or("");
+    check_auth(&state, &query).await?;
+    let id_str = query
+        .get_id()
+        .ok_or_else(|| json_err(errors::MISSING_PARAMETER, "id parameter required"))?;
     let id = Uuid::parse_str(id_str).map_err(|_| json_err(errors::NOT_FOUND, "invalid id"))?;
 
     let track = michi_db::get_track(&state.db, &id)
@@ -334,7 +343,10 @@ async fn get_cover_art(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Response, (StatusCode, Json<SubsonicResponse>)> {
-    let id_str = query.u.as_deref().unwrap_or("");
+    check_auth(&state, &query).await?;
+    let id_str = query
+        .get_id()
+        .ok_or_else(|| json_err(errors::MISSING_PARAMETER, "id parameter required"))?;
     let id = Uuid::parse_str(id_str).map_err(|_| json_err(errors::NOT_FOUND, "invalid id"))?;
 
     // Try to find the track and extract artwork
@@ -385,14 +397,17 @@ async fn get_cover_art(
 }
 
 async fn get_lyrics(
-    State(_state): State<OsAppState>,
+    State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
+    check_auth(&state, &query).await?;
+    let artist_name = query.artist.as_deref().or(query.get_id()).unwrap_or("");
+    let song_title = query.title.as_deref().unwrap_or("");
+
     Ok(json_ok(Some(json!({
         "lyrics": {
-            "artist": query.u.as_deref().unwrap_or(""),
-            "title": "",
+            "artist": artist_name,
+            "title": song_title,
             "value": "",
         }
     }))))
@@ -402,7 +417,7 @@ async fn get_playlists(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
+    check_auth(&state, &query).await?;
     match michi_db::list_playlists(&state.db, None).await {
         Ok(playlists) => {
             let items: Vec<Value> = playlists
@@ -426,8 +441,10 @@ async fn get_playlist(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
-    let id_str = query.u.as_deref().unwrap_or("");
+    check_auth(&state, &query).await?;
+    let id_str = query
+        .get_id()
+        .ok_or_else(|| json_err(errors::MISSING_PARAMETER, "id parameter required"))?;
     let id =
         Uuid::parse_str(id_str).map_err(|_| json_err(errors::NOT_FOUND, "invalid playlist id"))?;
 
@@ -467,8 +484,10 @@ async fn scrobble(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
-    let id_str = query.u.as_deref().unwrap_or("");
+    check_auth(&state, &query).await?;
+    let id_str = query
+        .get_id()
+        .ok_or_else(|| json_err(errors::MISSING_PARAMETER, "id parameter required"))?;
     let id = Uuid::parse_str(id_str).map_err(|_| json_err(errors::NOT_FOUND, "invalid id"))?;
 
     let _ = michi_db::record_play(&state.db, &id, None, &chrono::Utc::now(), None).await;
@@ -480,10 +499,11 @@ async fn star_handler(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
-    let id_str = query.u.as_deref().unwrap_or("");
-    if let Ok(id) = Uuid::parse_str(id_str) {
-        let _ = michi_db::star_track(&state.db, &id, true).await;
+    check_auth(&state, &query).await?;
+    if let Some(id_str) = query.get_id() {
+        if let Ok(id) = Uuid::parse_str(id_str) {
+            let _ = michi_db::star_track(&state.db, &id, true).await;
+        }
     }
     Ok(json_ok(None))
 }
@@ -492,10 +512,11 @@ async fn unstar_handler(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
-    let id_str = query.u.as_deref().unwrap_or("");
-    if let Ok(id) = Uuid::parse_str(id_str) {
-        let _ = michi_db::star_track(&state.db, &id, false).await;
+    check_auth(&state, &query).await?;
+    if let Some(id_str) = query.get_id() {
+        if let Ok(id) = Uuid::parse_str(id_str) {
+            let _ = michi_db::star_track(&state.db, &id, false).await;
+        }
     }
     Ok(json_ok(None))
 }
@@ -504,11 +525,15 @@ async fn set_rating(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
-    let id_str = query.u.as_deref().unwrap_or("");
-    if let (Ok(id), Some(rating_str)) = (Uuid::parse_str(id_str), query.t.as_ref()) {
-        if let Ok(rating) = rating_str.parse::<u8>() {
-            let _ = michi_db::rate_track(&state.db, &id, rating).await;
+    check_auth(&state, &query).await?;
+    if let Some(id_str) = query.get_id() {
+        if let Ok(id) = Uuid::parse_str(id_str) {
+            let rating_val = query
+                .rating
+                .or_else(|| query.query.as_deref().and_then(|r| r.parse::<u8>().ok()));
+            if let Some(rating) = rating_val {
+                let _ = michi_db::rate_track(&state.db, &id, rating).await;
+            }
         }
     }
     Ok(json_ok(None))
@@ -516,16 +541,19 @@ async fn set_rating(
 
 async fn get_random_songs(
     State(state): State<OsAppState>,
-    Query(_query): Query<SubsonicQuery>,
+    Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
+    check_auth(&state, &query).await?;
     let tracks = michi_db::list_tracks(&state.db)
         .await
         .map_err(|e| json_err(errors::GENERIC, &format!("db error: {e}")))?;
 
+    let size = query.size.unwrap_or(10).clamp(1, 500);
+
     use rand::seq::SliceRandom;
     let mut rng = rand::thread_rng();
     let selected: Vec<Value> = tracks
-        .choose_multiple(&mut rng, 10)
+        .choose_multiple(&mut rng, size)
         .map(|t| {
             json!({
                 "id": t.id.to_string(),
@@ -543,10 +571,10 @@ async fn get_random_songs(
 }
 
 async fn get_now_playing(
-    State(_state): State<OsAppState>,
+    State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
+    check_auth(&state, &query).await?;
     Ok(json_ok(Some(json!({ "nowPlaying": { "entry": [] } }))))
 }
 
@@ -554,7 +582,7 @@ async fn start_scan(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
+    check_auth(&state, &query).await?;
     let music_paths = state.music_paths.clone();
     let db = state.db.clone();
 
@@ -575,7 +603,7 @@ async fn get_scan_status(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
-    check_auth(&query)?;
+    check_auth(&state, &query).await?;
     let count = michi_db::count_tracks(&state.db).await.unwrap_or(0);
     Ok(json_ok(Some(json!({
         "scanStatus": {

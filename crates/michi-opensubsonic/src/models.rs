@@ -31,7 +31,7 @@ pub struct SubsonicError {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct SubsonicQuery {
     pub u: Option<String>,
     pub p: Option<String>,
@@ -40,11 +40,39 @@ pub struct SubsonicQuery {
     pub c: Option<String>,
     pub v: Option<String>,
     pub f: Option<String>,
+    pub id: Option<String>,
+    pub query: Option<String>,
+    pub size: Option<usize>,
+    pub offset: Option<usize>,
+    #[serde(alias = "songId")]
+    pub song_id: Option<String>,
+    #[serde(alias = "musicFolderId")]
+    pub music_folder_id: Option<String>,
+    #[serde(alias = "artistId")]
+    pub artist_id: Option<String>,
+    #[serde(alias = "albumId")]
+    pub album_id: Option<String>,
+    pub rating: Option<u8>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub title: Option<String>,
 }
 
 impl SubsonicQuery {
     pub fn format(&self) -> &str {
         self.f.as_deref().unwrap_or("xml")
+    }
+
+    pub fn get_id(&self) -> Option<&str> {
+        self.id
+            .as_deref()
+            .or(self.song_id.as_deref())
+            .or(self.album_id.as_deref())
+            .or(self.artist_id.as_deref())
+    }
+
+    pub fn get_search_query(&self) -> &str {
+        self.query.as_deref().unwrap_or("")
     }
 }
 

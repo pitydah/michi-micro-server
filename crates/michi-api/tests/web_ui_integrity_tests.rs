@@ -57,6 +57,7 @@ fn test_config() -> Config {
         backup_max_keep: 7,
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
+        opensubsonic_enabled: false,
     }
 }
 

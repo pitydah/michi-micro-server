@@ -25,3 +25,5 @@ infer.workspace = true
 tokio-util.workspace = true
 hex = "0.4"
 md5 = "0.7"
+argon2.workspace = true
+

@@ -56,6 +56,7 @@ fn test_config() -> Config {
         backup_max_keep: 7,
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
+        opensubsonic_enabled: false,
     }
 }
 
@@ -418,6 +419,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         backup_max_keep: 7,
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
+        opensubsonic_enabled: false,
     };
     let id = track_id_from_path(file_path.to_str().unwrap());
     let track = Track {
@@ -636,6 +638,7 @@ async fn test_stream_file_not_on_disk() {
         backup_max_keep: 7,
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
+        opensubsonic_enabled: false,
     };
 
     let id = track_id_from_path("/nonexistent/path/file.flac");
@@ -1393,6 +1396,7 @@ async fn test_full_pipeline_scan_and_stream() {
         backup_max_keep: 7,
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
+        opensubsonic_enabled: false,
     };
     let state = michi_api::AppState::new(config, pool.clone(), None);
     let test_app = create_router(state);
@@ -1856,6 +1860,7 @@ async fn test_v1_stream_range_not_satisfiable() {
         backup_max_keep: 7,
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
+        opensubsonic_enabled: false,
     };
     let state = michi_api::AppState::new(config, pool.clone(), None);
     let app = router_with_test_admin(state, &pool).await;
@@ -3041,6 +3046,7 @@ async fn test_v1_stream_and_download_range() {
         backup_max_keep: 7,
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
+        opensubsonic_enabled: false,
     };
     let state = michi_api::AppState::new(config, pool.clone(), None);
     let app = router_with_test_admin(state, &pool).await;

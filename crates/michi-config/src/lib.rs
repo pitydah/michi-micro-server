@@ -52,6 +52,7 @@ pub struct Config {
     pub backup_max_keep: u32,
     pub job_max_concurrent: u32,
     pub reconnect_delay_max: u32,
+    pub opensubsonic_enabled: bool,
 }
 
 #[allow(dead_code)]
@@ -150,6 +151,11 @@ impl Config {
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false);
 
+        let opensubsonic_enabled = env::var("MICHI_OPENSUBSONIC_ENABLED")
+            .ok()
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
+
         let mut config = Self {
             port,
             music_paths,
@@ -184,6 +190,7 @@ impl Config {
             backup_max_keep: 7,
             job_max_concurrent: 3,
             reconnect_delay_max: 300,
+            opensubsonic_enabled,
         };
 
         // Load from config.json if present (env vars override)
@@ -436,6 +443,7 @@ impl<'de> Deserialize<'de> for Config {
             job_max_concurrent: Option<u32>,
             reconnect_delay_max: Option<u32>,
             cors_origin: Option<String>,
+            opensubsonic_enabled: Option<bool>,
         }
 
         let h = ConfigHelper::deserialize(deserializer)?;
@@ -471,6 +479,7 @@ impl<'de> Deserialize<'de> for Config {
             backup_max_keep: 7,
             job_max_concurrent: 3,
             reconnect_delay_max: 300,
+            opensubsonic_enabled: false,
         };
         if let Some(v) = h.port {
             cfg.port = v;
@@ -530,6 +539,9 @@ impl<'de> Deserialize<'de> for Config {
         }
         if let Some(v) = h.cors_origin {
             cfg.cors_origin = Some(v);
+        }
+        if let Some(v) = h.opensubsonic_enabled {
+            cfg.opensubsonic_enabled = v;
         }
         Ok(cfg)
     }
