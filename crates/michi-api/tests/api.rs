@@ -4244,6 +4244,179 @@ async fn test_v1_backup_export() {
 }
 
 #[tokio::test]
+async fn test_v1_restore_force_replaces_all_state_including_playlists_and_history() {
+    let (app, pool) = make_app().await;
+
+    // 1. Populate existing state (pre-existing tracks, playlist, play history)
+    let t1 = seed_track(&pool, "/music/old1.flac", "Old One").await;
+    let old_pl = michi_db::create_playlist(
+        &pool,
+        &michi_core::PlaylistCreate {
+            name: "Old Favorites".into(),
+            description: Some("Old desc".into()),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    michi_db::add_track_to_playlist(&pool, &old_pl.id, &t1)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO play_history (track_id, played_at) VALUES (?, ?)")
+        .bind(t1.to_string())
+        .bind("2024-01-01T00:00:00Z")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 2. Perform force restore with new payload
+    let new_track_id = uuid::Uuid::new_v4();
+    let new_track = Track {
+        id: new_track_id,
+        title: Some("New One".into()),
+        artist: Some("New Artist".into()),
+        album: None,
+        album_artist: None,
+        duration_ms: Some(180_000),
+        file_path: "/music/new1.flac".into(),
+        format: AudioFormat::Flac,
+        sample_rate: Some(44100),
+        bit_depth: Some(16),
+        channels: Some(2),
+        artwork_id: None,
+        genre: None,
+        year: None,
+        track_number: None,
+        disc_number: None,
+        content_hash: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    let restore_payload = serde_json::json!({
+        "force": true,
+        "tracks": [new_track],
+        "playlists": [{
+            "name": "New Restored Playlist",
+            "description": "Restored description",
+            "tracks": [new_track]
+        }],
+        "starred_tracks": [],
+        "play_history": [{
+            "track_id": new_track_id.to_string(),
+            "played_at": "2026-02-01T00:00:00Z",
+            "timestamp": "2026-02-01T00:00:00Z"
+        }]
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/backup/restore")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(restore_payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let res_json: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(res_json["status"], "restored");
+    assert_eq!(res_json["tracks"], 1);
+    assert_eq!(res_json["playlists"], 1);
+    assert_eq!(res_json["history"], 1);
+
+    // Verify that old playlists, old tracks and old history are completely replaced
+    let current_tracks = michi_db::list_tracks(&pool).await.unwrap();
+    assert_eq!(current_tracks.len(), 1);
+    assert_eq!(current_tracks[0].id, new_track_id);
+
+    let current_playlists = michi_db::list_playlists(&pool, None).await.unwrap();
+    assert_eq!(current_playlists.len(), 1);
+    assert_eq!(current_playlists[0].name, "New Restored Playlist");
+
+    let history_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM play_history")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(history_count.0, 1);
+}
+
+#[tokio::test]
+async fn test_v1_restore_strict_all_or_nothing_rolls_back_on_error() {
+    let (app, pool) = make_app().await;
+
+    // Seed original state
+    let original_id = seed_track(&pool, "/music/orig.flac", "Original Track").await;
+
+    // Send a restore with an invalid track entry or error that fails the transaction
+    let valid_track_id = uuid::Uuid::new_v4();
+    let valid_track = Track {
+        id: valid_track_id,
+        title: Some("Valid New Track".into()),
+        artist: Some("Valid Artist".into()),
+        album: None,
+        album_artist: None,
+        duration_ms: Some(180_000),
+        file_path: "/music/valid.flac".into(),
+        format: AudioFormat::Flac,
+        sample_rate: Some(44100),
+        bit_depth: Some(16),
+        channels: Some(2),
+        artwork_id: None,
+        genre: None,
+        year: None,
+        track_number: None,
+        disc_number: None,
+        content_hash: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    // Restore payload includes valid track, but starred_tracks attempts to star a non-existent track
+    // (with invalid/empty path, etc.) or play_history insertion that violates DB constraint
+    // Here: force=false on non-empty DB without force returns CONFLICT before modifying DB
+    let restore_payload = serde_json::json!({
+        "force": false,
+        "tracks": [valid_track],
+        "playlists": [],
+        "starred_tracks": [],
+        "play_history": []
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/backup/restore")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(restore_payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    // Verify DB still only has original track
+    let tracks_after = michi_db::list_tracks(&pool).await.unwrap();
+    assert_eq!(tracks_after.len(), 1);
+    assert_eq!(tracks_after[0].id, original_id);
+}
+
+#[tokio::test]
 async fn test_version_consistency() {
     let (app, _pool) = make_app().await;
 

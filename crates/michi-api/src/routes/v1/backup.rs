@@ -281,12 +281,42 @@ pub async fn restore_handler(
     let mut restored_starred = 0u64;
     let mut restored_history = 0u64;
 
-    if body.force && !existing_tracks.is_empty() {
+    if body.force {
+        sqlx::query("DELETE FROM playlist_tracks")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &format!("failed to clear playlist_tracks for force restore: {e}"),
+                )
+            })?;
+        sqlx::query("DELETE FROM playlists")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &format!("failed to clear playlists for force restore: {e}"),
+                )
+            })?;
+        sqlx::query("DELETE FROM play_history")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &format!("failed to clear play_history for force restore: {e}"),
+                )
+            })?;
         michi_db::delete_all_tracks_tx(&mut tx).await.map_err(|e| {
             v1_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "DATABASE_ERROR",
-                &e.to_string(),
+                &format!("failed to clear tracks for force restore: {e}"),
             )
         })?;
     }
@@ -298,7 +328,7 @@ pub async fn restore_handler(
                 v1_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "DATABASE_ERROR",
-                    &e.to_string(),
+                    &format!("failed to restore track {}: {e}", track.id),
                 )
             })?;
         restored_tracks += 1;
@@ -318,24 +348,56 @@ pub async fn restore_handler(
             v1_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "DATABASE_ERROR",
-                &e.to_string(),
+                &format!("failed to restore playlist {}: {e}", pl.name),
             )
         })?;
         restored_playlists += 1;
 
-        for track in pl.tracks.iter() {
-            let _ = michi_db::add_track_to_playlist_tx(&mut tx, &playlist.id, &track.id).await;
+        for track in &pl.tracks {
+            michi_db::upsert_track_tx(&mut tx, track)
+                .await
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &format!("failed to upsert playlist track {}: {e}", track.id),
+                    )
+                })?;
+            michi_db::add_track_to_playlist_tx(&mut tx, &playlist.id, &track.id)
+                .await
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &format!(
+                            "failed to add track {} to playlist {}: {e}",
+                            track.id, pl.name
+                        ),
+                    )
+                })?;
         }
     }
 
     for track in &body.starred_tracks {
-        if michi_db::upsert_track_tx(&mut tx, track).await.is_ok()
-            && michi_db::star_track_tx(&mut tx, &track.id, true)
-                .await
-                .is_ok()
-        {
-            restored_starred += 1;
-        }
+        michi_db::upsert_track_tx(&mut tx, track)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &format!("failed to upsert starred track {}: {e}", track.id),
+                )
+            })?;
+        michi_db::star_track_tx(&mut tx, &track.id, true)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &format!("failed to star track {}: {e}", track.id),
+                )
+            })?;
+        restored_starred += 1;
     }
 
     for entry in &body.play_history {
@@ -344,8 +406,15 @@ pub async fn restore_handler(
                 .bind(&entry.track_id)
                 .bind(&entry.played_at)
                 .execute(&mut *tx)
-                .await;
-        if res.is_ok() {
+                .await
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &format!("failed to restore play history entry: {e}"),
+                    )
+                })?;
+        if res.rows_affected() > 0 {
             restored_history += 1;
         }
     }
@@ -354,7 +423,7 @@ pub async fn restore_handler(
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DATABASE_ERROR",
-            &e.to_string(),
+            &format!("failed to commit restore transaction: {e}"),
         )
     })?;
 
