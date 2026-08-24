@@ -58,6 +58,8 @@ fn test_config() -> Config {
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
         opensubsonic_enabled: false,
+        trust_proxy: false,
+        trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
     }
 }
 

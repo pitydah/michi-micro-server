@@ -1,6 +1,12 @@
 name: Publish ZimaOS Image
 
 on:
+  # Auto-trigger when CI completes successfully on main.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  # Manual trigger is kept for emergency deploys but is guarded by the CI-green check below.
   workflow_dispatch:
 
 permissions:
@@ -9,6 +15,10 @@ permissions:
 
 jobs:
   publish-zima:
+    # For workflow_run: only proceed if CI passed.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
 
     steps:
@@ -17,6 +27,46 @@ jobs:
         with:
           ref: ${{ github.sha }}
           submodules: recursive
+
+      # Guard for manual workflow_dispatch: verify CI is green on the exact SHA being published.
+      # This prevents the "run workflow" button from racing a red commit to production.
+      - name: Guard — verify CI is green on this SHA (manual dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          SHA="${{ github.sha }}"
+          REPO="${{ github.repository }}"
+
+          echo "Verifying CI status for SHA: ${SHA}"
+
+          # Fetch the combined check status for this SHA.
+          STATUS=$(gh api \
+            "repos/${REPO}/commits/${SHA}/check-runs" \
+            --jq '[.check_runs[] | select(.name != "Publish ZimaOS Image")] | 
+                  if length == 0 then "no_checks"
+                  elif all(.[]; .conclusion == "success") then "success"
+                  elif any(.[]; .conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") then "failure"
+                  else "pending"
+                  end')
+
+          echo "CI status: ${STATUS}"
+
+          if [ "${STATUS}" = "no_checks" ]; then
+            echo "ERROR: No CI check runs found for SHA ${SHA}."
+            echo "       Run the CI workflow first, or use a SHA that has passed CI."
+            exit 1
+          fi
+
+          if [ "${STATUS}" != "success" ]; then
+            echo "ERROR: CI is not green for SHA ${SHA} (status: ${STATUS})."
+            echo "       Resolve all failing checks before publishing the ZimaOS image."
+            exit 1
+          fi
+
+          echo "CI is green for SHA ${SHA}. Proceeding with publish."
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

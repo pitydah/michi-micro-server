@@ -57,6 +57,8 @@ fn test_config() -> Config {
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
         opensubsonic_enabled: false,
+        trust_proxy: false,
+        trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
     }
 }
 
@@ -420,6 +422,8 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
         opensubsonic_enabled: false,
+        trust_proxy: false,
+        trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
     };
     let id = track_id_from_path(file_path.to_str().unwrap());
     let track = Track {
@@ -639,6 +643,8 @@ async fn test_stream_file_not_on_disk() {
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
         opensubsonic_enabled: false,
+        trust_proxy: false,
+        trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
     };
 
     let id = track_id_from_path("/nonexistent/path/file.flac");
@@ -1397,6 +1403,8 @@ async fn test_full_pipeline_scan_and_stream() {
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
         opensubsonic_enabled: false,
+        trust_proxy: false,
+        trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
     };
     let state = michi_api::AppState::new(config, pool.clone(), None);
     let test_app = create_router(state);
@@ -1861,6 +1869,8 @@ async fn test_v1_stream_range_not_satisfiable() {
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
         opensubsonic_enabled: false,
+        trust_proxy: false,
+        trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
     };
     let state = michi_api::AppState::new(config, pool.clone(), None);
     let app = router_with_test_admin(state, &pool).await;
@@ -3047,6 +3057,8 @@ async fn test_v1_stream_and_download_range() {
         job_max_concurrent: 3,
         reconnect_delay_max: 300,
         opensubsonic_enabled: false,
+        trust_proxy: false,
+        trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
     };
     let state = michi_api::AppState::new(config, pool.clone(), None);
     let app = router_with_test_admin(state, &pool).await;

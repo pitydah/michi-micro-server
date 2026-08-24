@@ -99,34 +99,68 @@ fn is_private_or_link_local(ip: &IpAddr) -> bool {
 
 /// Detect stream type by making a HEAD / partial GET request
 pub async fn sniff_stream(url: &str) -> Result<StreamInfo, String> {
+    // Validate, resolve, and pin the initial URL.
     let (parsed_url, addrs) = validate_url_and_resolve(url)?;
-    let host = parsed_url.host_str().ok_or("URL has no host")?;
+    let host = parsed_url.host_str().ok_or("URL has no host")?.to_string();
+    let first_addr = *addrs
+        .first()
+        .ok_or("DNS resolution returned no addresses")?;
 
-    let mut builder = reqwest::Client::builder()
+    // Disable automatic redirects so reqwest never performs a second OS-level DNS lookup.
+    // If the server returns a redirect we follow it manually below (one hop, re-pinned).
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 {
-                attempt.error("too many redirects")
-            } else if let Err(e) = validate_url_and_resolve(attempt.url().as_str()) {
-                attempt.error(format!("redirect to unsafe target blocked: {e}"))
-            } else {
-                attempt.follow()
-            }
-        }));
+        .redirect(reqwest::redirect::Policy::none())
+        // Pin the validated address — reqwest will connect here without any DNS lookup.
+        .resolve(&host, first_addr)
+        .build()
+        .map_err(|e| format!("client: {e}"))?;
 
-    // Pin DNS resolution to pre-validated socket address to prevent DNS rebinding TOCTOU
-    if let Some(&first_addr) = addrs.first() {
-        builder = builder.resolve(host, first_addr);
-    }
+    // Try HEAD first.  On redirect, follow once with a new pinned client.
+    let resp = {
+        let r = client
+            .head(url)
+            .send()
+            .await
+            .map_err(|e| format!("head: {e}"))?;
+        if r.status().is_redirection() {
+            let location = r
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or("redirect has no Location header")?
+                .to_string();
+            let next_url_str = parsed_url
+                .join(&location)
+                .map_err(|e| format!("invalid redirect Location: {e}"))?
+                .to_string();
 
-    let client = builder.build().map_err(|e| format!("client: {e}"))?;
+            // Validate + resolve + pin the redirect target — separate DNS lookup, then pinned.
+            let (next_parsed, next_addrs) = validate_url_and_resolve(&next_url_str)?;
+            let next_host = next_parsed
+                .host_str()
+                .ok_or("redirect URL has no host")?
+                .to_string();
+            let next_addr = *next_addrs
+                .first()
+                .ok_or("redirect DNS returned no addresses")?;
 
-    // Try HEAD first
-    let resp = client
-        .head(url)
-        .send()
-        .await
-        .map_err(|e| format!("head: {e}"))?;
+            let next_client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(8))
+                .redirect(reqwest::redirect::Policy::none())
+                .resolve(&next_host, next_addr)
+                .build()
+                .map_err(|e| format!("redirect client: {e}"))?;
+
+            next_client
+                .head(&next_url_str)
+                .send()
+                .await
+                .map_err(|e| format!("redirect head: {e}"))?
+        } else {
+            r
+        }
+    };
 
     let headers = resp.headers();
     let ct = headers

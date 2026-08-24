@@ -1631,3 +1631,135 @@ fn cors_layer(state: &AppState) -> CorsLayer {
         CorsLayer::new()
     }
 }
+
+pub fn extract_client_ip(
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: &axum::http::HeaderMap,
+    config: &michi_config::Config,
+) -> String {
+    let peer_addr = connect_info.map(|axum::extract::ConnectInfo(addr)| addr);
+    let peer_ip = peer_addr.map(|a| a.ip());
+
+    if let Some(ref ip) = peer_ip {
+        if config.is_trusted_proxy(ip) {
+            if let Some(forwarded) = headers
+                .get("X-Forwarded-For")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(',').next())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                return forwarded;
+            }
+            if let Some(real_ip) = headers
+                .get("X-Real-IP")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                return real_ip;
+            }
+        }
+        return ip.to_string();
+    }
+
+    "127.0.0.1".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::ConnectInfo;
+    use axum::http::{HeaderMap, HeaderValue};
+    use std::net::SocketAddr;
+
+    fn make_test_config(trust_proxy: bool, trusted_proxies: Vec<&str>) -> michi_config::Config {
+        michi_config::Config {
+            port: 9090,
+            music_paths: vec![std::path::PathBuf::from("/music")],
+            config_path: std::path::PathBuf::from("/config"),
+            cache_path: std::path::PathBuf::from("/cache"),
+            database_url: "sqlite::memory:".to_string(),
+            version: "test",
+            sync_peers: Vec::new(),
+            sync_name: "test".to_string(),
+            listenbrainz_token: None,
+            lastfm_token: None,
+            scrobble_enabled: false,
+            auth_username: None,
+            auth_password: None,
+            auth_enabled: false,
+            allow_registration: false,
+            server_id: uuid::Uuid::new_v4(),
+            cors_origin: None,
+            dev_mode: false,
+            resource_profile: michi_core::ResourceProfile::from_config_str("eco"),
+            stream_profile: michi_core::StreamProfile::from_config_str("original"),
+            format_policy: michi_core::AudioFormatPolicy::from_config_str("lossless"),
+            max_remote_bitrate: 320_000,
+            remote_sync: false,
+            language: "en".into(),
+            ui: michi_config::UiConfig::default(),
+            auto_backup_enabled: false,
+            backup_max_keep: 7,
+            job_max_concurrent: 3,
+            reconnect_delay_max: 300,
+            opensubsonic_enabled: false,
+            trust_proxy,
+            trusted_proxies: trusted_proxies
+                .into_iter()
+                .map(|s| s.parse().unwrap())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_extract_client_ip_no_trust_proxy_ignores_headers() {
+        let cfg = make_test_config(false, vec!["127.0.0.1"]);
+        let addr: SocketAddr = "192.168.1.100:54321".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Forwarded-For", HeaderValue::from_static("8.8.8.8"));
+        headers.insert("X-Real-IP", HeaderValue::from_static("8.8.4.4"));
+
+        let ip = extract_client_ip(Some(ConnectInfo(addr)), &headers, &cfg);
+        assert_eq!(ip, "192.168.1.100");
+    }
+
+    #[test]
+    fn test_extract_client_ip_untrusted_peer_cannot_spoof() {
+        let cfg = make_test_config(true, vec!["127.0.0.1", "10.0.0.1"]);
+        // Untrusted LAN attacker connecting directly
+        let addr: SocketAddr = "192.168.1.50:41234".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Forwarded-For", HeaderValue::from_static("1.1.1.1"));
+
+        let ip = extract_client_ip(Some(ConnectInfo(addr)), &headers, &cfg);
+        assert_eq!(ip, "192.168.1.50");
+    }
+
+    #[test]
+    fn test_extract_client_ip_trusted_proxy_accepts_forwarded() {
+        let cfg = make_test_config(true, vec!["127.0.0.1", "10.0.0.1"]);
+        // Trusted proxy connecting
+        let addr: SocketAddr = "10.0.0.1:41234".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Forwarded-For",
+            HeaderValue::from_static("203.0.113.195, 10.0.0.1"),
+        );
+
+        let ip = extract_client_ip(Some(ConnectInfo(addr)), &headers, &cfg);
+        assert_eq!(ip, "203.0.113.195");
+    }
+
+    #[test]
+    fn test_extract_client_ip_trusted_proxy_accepts_real_ip() {
+        let cfg = make_test_config(true, vec!["127.0.0.1"]);
+        let addr: SocketAddr = "127.0.0.1:41234".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Real-IP", HeaderValue::from_static("198.51.100.4"));
+
+        let ip = extract_client_ip(Some(ConnectInfo(addr)), &headers, &cfg);
+        assert_eq!(ip, "198.51.100.4");
+    }
+}

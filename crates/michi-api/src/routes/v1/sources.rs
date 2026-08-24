@@ -225,78 +225,7 @@ pub async fn proxy_stream_handler(
         ));
     }
 
-    // SSRF protection
-    michi_ingest::validate_url(&source.url)
-        .map_err(|e| v1_error(StatusCode::BAD_REQUEST, "SSRF_BLOCKED", &e))?;
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 3 {
-                attempt.error("too many redirects")
-            } else {
-                let next_url = attempt.url().as_str();
-                if let Err(e) = michi_ingest::validate_url(next_url) {
-                    attempt.error(format!("SSRF blocked redirect target: {e}"))
-                } else {
-                    attempt.follow()
-                }
-            }
-        }))
-        .build()
-        .map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "CLIENT_ERROR",
-                &e.to_string(),
-            )
-        })?;
-
-    // Re-validate SSRF on every redirect target via custom policy
-    match client.get(&source.url).send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            let headers = resp.headers().clone();
-            let stream = resp.bytes_stream();
-
-            let mut response = axum::response::Response::builder().status(status);
-
-            // Reject HTML content (SSRF content injection prevention)
-            let content_type = headers
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-            if content_type.contains("text/html") || content_type.contains("application/xhtml") {
-                return Err(v1_error(
-                    StatusCode::BAD_GATEWAY,
-                    "PROXY_BLOCKED",
-                    "stream returned HTML, possible SSRF redirect",
-                ));
-            }
-
-            // Forward relevant headers
-            if !content_type.is_empty() {
-                response = response.header(header::CONTENT_TYPE, content_type);
-            }
-            // Add CORS headers for web playback
-            response = response
-                .header("Access-Control-Allow-Origin", "*")
-                .header("Access-Control-Allow-Methods", "GET, OPTIONS")
-                .header("Access-Control-Allow-Headers", "Range, Content-Type");
-
-            Ok(response
-                .body(Body::from_stream(
-                    stream.map(|chunk| chunk.map_err(std::io::Error::other)),
-                ))
-                .unwrap())
-        }
-        Err(e) => Err(v1_error(
-            StatusCode::BAD_GATEWAY,
-            "PROXY_ERROR",
-            &format!("failed to connect: {e}"),
-        )),
-    }
+    ssrf_proxy_fetch(&source.url).await
 }
 
 /// Proxy a podcast episode audio URL
@@ -304,8 +233,6 @@ pub async fn proxy_episode_handler(
     Path(episode_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
-    // We need to find which source this episode belongs to, then get its audio_url
-    // Simplified: query all episodes to find the one
     let sources = michi_db::list_stream_sources(&state.db)
         .await
         .map_err(|e| {
@@ -319,52 +246,7 @@ pub async fn proxy_episode_handler(
     for source in &sources {
         if let Ok(eps) = michi_db::list_podcast_episodes(&state.db, &source.id).await {
             if let Some(ep) = eps.into_iter().find(|e| e.id == episode_id) {
-                // SSRF protection
-                let _ = michi_ingest::validate_url(&ep.audio_url)
-                    .map_err(|e| v1_error(StatusCode::BAD_REQUEST, "SSRF_BLOCKED", &e))?;
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(60))
-                    .connect_timeout(std::time::Duration::from_secs(5))
-                    .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                        if attempt.previous().len() >= 3 {
-                            attempt.error("too many redirects")
-                        } else {
-                            let next_url = attempt.url().as_str();
-                            if let Err(e) = michi_ingest::validate_url(next_url) {
-                                attempt.error(format!("SSRF blocked redirect target: {e}"))
-                            } else {
-                                attempt.follow()
-                            }
-                        }
-                    }))
-                    .build()
-                    .map_err(|e| {
-                        v1_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "CLIENT_ERROR",
-                            &e.to_string(),
-                        )
-                    })?;
-                match client.get(&ep.audio_url).send().await {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        let headers = resp.headers().clone();
-                        let stream = resp.bytes_stream();
-                        let mut response = axum::response::Response::builder().status(status);
-                        if let Some(ct) = headers.get(header::CONTENT_TYPE) {
-                            response = response.header(header::CONTENT_TYPE, ct);
-                        }
-                        response = response
-                            .header("Access-Control-Allow-Origin", "*")
-                            .header("Access-Control-Allow-Methods", "GET, OPTIONS");
-                        return Ok(response
-                            .body(Body::from_stream(
-                                stream.map(|chunk| chunk.map_err(std::io::Error::other)),
-                            ))
-                            .unwrap());
-                    }
-                    Err(_) => break,
-                }
+                return ssrf_proxy_fetch(&ep.audio_url).await;
             }
         }
     }
@@ -373,5 +255,153 @@ pub async fn proxy_episode_handler(
         StatusCode::NOT_FOUND,
         "NOT_FOUND",
         "episode not found",
+    ))
+}
+
+/// Fetch a URL with full SSRF protection via a manual DNS-pinned redirect loop.
+///
+/// Safety guarantees:
+/// - Each hop calls `validate_url_and_resolve()` which resolves the hostname and checks
+///   all returned IPs against the private/reserved range blocklist.
+/// - The resolved, validated socket address is pinned into the `reqwest::Client` via
+///   `.resolve(host, validated_addr)` so reqwest performs **no** OS-level DNS lookup.
+/// - Automatic redirects are disabled (`Policy::none()`). The `Location` header from
+///   any 3xx response is extracted and re-validated before following — each hop gets
+///   its own fresh client with its own pinned address.
+/// - This closes the DNS rebinding TOCTOU: validate-then-pin is atomic for each hop.
+async fn ssrf_proxy_fetch(
+    initial_url: &str,
+) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
+    const MAX_HOPS: usize = 5;
+
+    let mut current_url = initial_url.to_string();
+
+    for hop in 0..MAX_HOPS {
+        // Step 1: resolve + validate (DNS #1 per hop — this is the only lookup).
+        let (parsed_url, addrs) =
+            michi_ingest::validate_url_and_resolve(&current_url).map_err(|e| {
+                v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "SSRF_BLOCKED",
+                    &format!("hop {hop}: {e}"),
+                )
+            })?;
+
+        let host = parsed_url
+            .host_str()
+            .ok_or_else(|| v1_error(StatusCode::BAD_REQUEST, "SSRF_BLOCKED", "URL has no host"))?
+            .to_string();
+
+        let first_addr = *addrs.first().ok_or_else(|| {
+            v1_error(
+                StatusCode::BAD_REQUEST,
+                "SSRF_BLOCKED",
+                "DNS resolution returned no addresses",
+            )
+        })?;
+
+        // Step 2: build a per-hop client with the validated IP pinned.
+        // `redirect(Policy::none())` ensures reqwest never follows redirects automatically
+        // and therefore never performs a second OS-level DNS lookup for any hostname.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(&host, first_addr) // pin: reqwest will connect to this exact addr
+            .build()
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "CLIENT_ERROR",
+                    &e.to_string(),
+                )
+            })?;
+
+        // Step 3: send — reqwest uses the pinned address, no second DNS lookup.
+        let resp = client.get(&current_url).send().await.map_err(|e| {
+            v1_error(
+                StatusCode::BAD_GATEWAY,
+                "PROXY_ERROR",
+                &format!("hop {hop}: {e}"),
+            )
+        })?;
+
+        let status = resp.status();
+
+        // Step 4: handle redirects manually.
+        if status.is_redirection() {
+            let location = resp
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+                .ok_or_else(|| {
+                    v1_error(
+                        StatusCode::BAD_GATEWAY,
+                        "REDIRECT_ERROR",
+                        "redirect response has no Location header",
+                    )
+                })?;
+
+            // Resolve relative Location against the current URL.
+            let next = parsed_url.join(&location).map_err(|e| {
+                v1_error(
+                    StatusCode::BAD_GATEWAY,
+                    "REDIRECT_ERROR",
+                    &format!("invalid Location: {e}"),
+                )
+            })?;
+
+            current_url = next.to_string();
+            continue; // loop — next hop will validate + pin the new hostname
+        }
+
+        // Step 5: on 2xx, stream body.
+        if status.is_success() {
+            let headers = resp.headers().clone();
+            let stream = resp.bytes_stream();
+
+            let mut response = axum::response::Response::builder().status(status);
+
+            // Reject HTML content (SSRF content injection prevention).
+            let content_type = headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if content_type.contains("text/html") || content_type.contains("application/xhtml") {
+                return Err(v1_error(
+                    StatusCode::BAD_GATEWAY,
+                    "PROXY_BLOCKED",
+                    "stream returned HTML, possible SSRF redirect",
+                ));
+            }
+
+            if !content_type.is_empty() {
+                response = response.header(header::CONTENT_TYPE, content_type);
+            }
+            response = response
+                .header("Access-Control-Allow-Origin", "*")
+                .header("Access-Control-Allow-Methods", "GET, OPTIONS")
+                .header("Access-Control-Allow-Headers", "Range, Content-Type");
+
+            return Ok(response
+                .body(Body::from_stream(
+                    stream.map(|chunk| chunk.map_err(std::io::Error::other)),
+                ))
+                .unwrap());
+        }
+
+        // Any other status (4xx, 5xx) → propagate as error.
+        return Err(v1_error(
+            StatusCode::BAD_GATEWAY,
+            "PROXY_ERROR",
+            &format!("upstream returned status {status} at hop {hop}"),
+        ));
+    }
+
+    Err(v1_error(
+        StatusCode::BAD_GATEWAY,
+        "TOO_MANY_REDIRECTS",
+        &format!("exceeded {MAX_HOPS} redirect hops"),
     ))
 }

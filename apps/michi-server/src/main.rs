@@ -99,6 +99,23 @@ async fn main() -> Result<()> {
 
     let config = michi_config::Config::from_env();
 
+    // Guard: OpenSubsonic must not run without authentication.
+    // An unauthenticated OpenSubsonic endpoint exposes the entire library to anyone on the network.
+    if config.opensubsonic_enabled && !config.auth_enabled {
+        let dev_bypass = std::env::var("MICHI_DEV_ALLOW_OPENSUBSONIC_NO_AUTH")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
+        if !dev_bypass {
+            eprintln!(
+                "FATAL: MICHI_OPENSUBSONIC_ENABLED=true requires authentication to be configured.\n\
+                 Set MICHI_AUTH_USERNAME and MICHI_AUTH_PASSWORD before enabling OpenSubsonic.\n\
+                 To bypass this check in development only, set MICHI_DEV_ALLOW_OPENSUBSONIC_NO_AUTH=true."
+            );
+            std::process::exit(1);
+        }
+        warn!("OpenSubsonic running without authentication — MICHI_DEV_ALLOW_OPENSUBSONIC_NO_AUTH override active. NOT safe for production.");
+    }
+
     info!(
         version = %config.version(),
         port = %config.port(),

@@ -53,6 +53,8 @@ pub struct Config {
     pub job_max_concurrent: u32,
     pub reconnect_delay_max: u32,
     pub opensubsonic_enabled: bool,
+    pub trust_proxy: bool,
+    pub trusted_proxies: Vec<std::net::IpAddr>,
 }
 
 #[allow(dead_code)]
@@ -166,6 +168,17 @@ impl Config {
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false);
 
+        let trust_proxy = env::var("MICHI_TRUST_PROXY")
+            .ok()
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
+
+        let trusted_proxies: Vec<std::net::IpAddr> = env::var("MICHI_TRUSTED_PROXIES")
+            .unwrap_or_else(|_| "127.0.0.1,::1".to_string())
+            .split(',')
+            .filter_map(|s| s.trim().parse::<std::net::IpAddr>().ok())
+            .collect();
+
         let mut config = Self {
             port,
             music_paths,
@@ -201,6 +214,8 @@ impl Config {
             job_max_concurrent: 3,
             reconnect_delay_max: 300,
             opensubsonic_enabled,
+            trust_proxy,
+            trusted_proxies,
         };
 
         // Load from config.json if present (env vars override)
@@ -317,6 +332,22 @@ impl Config {
                 self.reconnect_delay_max = p;
             }
         }
+        if let Ok(v) = env::var("MICHI_TRUST_PROXY") {
+            self.trust_proxy = v == "1" || v.to_lowercase() == "true";
+        }
+        if let Ok(v) = env::var("MICHI_TRUSTED_PROXIES") {
+            self.trusted_proxies = v
+                .split(',')
+                .filter_map(|s| s.trim().parse::<std::net::IpAddr>().ok())
+                .collect();
+        }
+    }
+
+    pub fn is_trusted_proxy(&self, peer_ip: &std::net::IpAddr) -> bool {
+        if !self.trust_proxy {
+            return false;
+        }
+        self.trusted_proxies.contains(peer_ip)
     }
 
     pub fn save_to_file(&self) -> Result<(), String> {
@@ -387,35 +418,23 @@ pub fn load_or_create_server_id(config_path: &Path) -> Uuid {
     let id = Uuid::new_v4();
     if let Some(parent) = file_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            let fallback_path = std::env::temp_dir().join("michi_config").join("server_id");
-            if let Some(fb_parent) = fallback_path.parent() {
-                let _ = std::fs::create_dir_all(fb_parent);
-            }
-            if let Ok(mut f) = std::fs::File::create(&fallback_path) {
-                let _ = f.write_all(id.to_string().as_bytes());
-                let _ = f.sync_all();
-                return id;
-            }
-            panic!(
-                "CRITICAL: Failed to create config directory at {parent:?}: {e}. (fail-closed startup)"
+            eprintln!(
+                "FATAL: Cannot create config directory at {parent:?}: {e}\n\
+                 Mount a persistent volume at the config path (MICHI_CONFIG_PATH).\n\
+                 Server identity cannot be persisted — refusing to start."
             );
+            std::process::exit(1);
         }
     }
     let mut f = match std::fs::File::create(&file_path) {
         Ok(f) => f,
         Err(e) => {
-            let fallback_path = std::env::temp_dir().join("michi_config").join("server_id");
-            if let Some(fb_parent) = fallback_path.parent() {
-                let _ = std::fs::create_dir_all(fb_parent);
-            }
-            if let Ok(mut f) = std::fs::File::create(&fallback_path) {
-                let _ = f.write_all(id.to_string().as_bytes());
-                let _ = f.sync_all();
-                return id;
-            }
-            panic!(
-                "CRITICAL: Failed to create server_id file at {file_path:?}: {e}. Directory is not writable! (fail-closed startup)"
+            eprintln!(
+                "FATAL: Cannot write server_id to {file_path:?}: {e}\n\
+                 The config directory exists but is not writable.\n\
+                 Mount a persistent, writable volume at MICHI_CONFIG_PATH."
             );
+            std::process::exit(1);
         }
     };
     f.write_all(id.to_string().as_bytes()).unwrap_or_else(|e| {
@@ -456,6 +475,8 @@ impl Serialize for Config {
         s.serialize_field("job_max_concurrent", &self.job_max_concurrent)?;
         s.serialize_field("reconnect_delay_max", &self.reconnect_delay_max)?;
         s.serialize_field("cors_origin", &self.cors_origin)?;
+        s.serialize_field("trust_proxy", &self.trust_proxy)?;
+        s.serialize_field("trusted_proxies", &self.trusted_proxies)?;
         s.end()
     }
 }
@@ -487,6 +508,8 @@ impl<'de> Deserialize<'de> for Config {
             reconnect_delay_max: Option<u32>,
             cors_origin: Option<String>,
             opensubsonic_enabled: Option<bool>,
+            trust_proxy: Option<bool>,
+            trusted_proxies: Option<Vec<std::net::IpAddr>>,
         }
 
         let h = ConfigHelper::deserialize(deserializer)?;
@@ -523,6 +546,8 @@ impl<'de> Deserialize<'de> for Config {
             job_max_concurrent: 3,
             reconnect_delay_max: 300,
             opensubsonic_enabled: false,
+            trust_proxy: false,
+            trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
         };
         if let Some(v) = h.port {
             cfg.port = v;
@@ -586,6 +611,12 @@ impl<'de> Deserialize<'de> for Config {
         if let Some(v) = h.opensubsonic_enabled {
             cfg.opensubsonic_enabled = v;
         }
+        if let Some(v) = h.trust_proxy {
+            cfg.trust_proxy = v;
+        }
+        if let Some(v) = h.trusted_proxies {
+            cfg.trusted_proxies = v;
+        }
         Ok(cfg)
     }
 }
@@ -596,10 +627,15 @@ mod tests {
 
     #[test]
     fn test_empty_auth_vars_do_not_enable_auth() {
+        // Use a writable temp dir so load_or_create_server_id can persist server_id.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().to_str().unwrap().to_string();
+
         temp_env::with_vars(
             [
                 ("MICHI_AUTH_USERNAME", Some("")),
                 ("MICHI_AUTH_PASSWORD", Some("")),
+                ("MICHI_CONFIG_PATH", Some(config_path.as_str())),
             ],
             || {
                 let cfg = Config::from_env();
@@ -614,6 +650,7 @@ mod tests {
                 [
                     ("MICHI_AUTH_USERNAME", Some("admin")),
                     ("MICHI_AUTH_PASSWORD", Some("")),
+                    ("MICHI_CONFIG_PATH", Some(config_path.as_str())),
                 ],
                 || {
                     let _ = Config::from_env();
@@ -629,6 +666,7 @@ mod tests {
             [
                 ("MICHI_AUTH_USERNAME", Some("admin")),
                 ("MICHI_AUTH_PASSWORD", Some("securepass123")),
+                ("MICHI_CONFIG_PATH", Some(config_path.as_str())),
             ],
             || {
                 let cfg = Config::from_env();
