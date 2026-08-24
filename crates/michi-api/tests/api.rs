@@ -3834,6 +3834,70 @@ async fn test_v1_import_commit_returns_mapping_with_status() {
 }
 
 #[tokio::test]
+async fn test_v1_import_session_survives_memory_wipe_and_recovers_from_manifest() {
+    let (app, _) = make_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/import/session")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"total_tracks":1,"total_playlists":0}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let session: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let sid = session["session_id"].as_str().unwrap().to_string();
+
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(b"survive memory wipe test");
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"survive memory wipe test");
+    let hash = hex::encode(h.finalize());
+    let fname = format!("survive_{}.flac", Uuid::new_v4());
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/v1/import/upload/{sid}"))
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"filename":"{fname}","data":"{data}","hash":"{hash}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Wipe memory sessions (simulating server restart / power loss)
+    michi_api::routes::v1::import::clear_import_sessions_for_test().await;
+
+    // Commit should seamlessly recover the session from manifest.json on disk
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/v1/import/commit/{sid}"))
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let commit: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let mapping = commit["mapping"].as_array().unwrap();
+    assert!(!mapping.is_empty(), "recovered mapping must have entries");
+    assert_eq!(mapping[0]["status"], "inserted");
+}
+
+#[tokio::test]
 async fn test_v1_auth_real_pair_and_use_token() {
     let (app, _, state) = make_app_with_state().await;
     let client = fresh_test_client("auth-test-player");

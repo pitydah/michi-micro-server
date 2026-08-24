@@ -2142,13 +2142,76 @@ pub async fn get_starred_tracks(pool: &SqlitePool) -> Result<Vec<Track>, DbError
     Ok(rows.iter().map(row_to_track).collect())
 }
 
+pub async fn upsert_track_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    track: &Track,
+) -> Result<(), DbError> {
+    let id = track.id.to_string();
+    let format = track.format.as_str();
+    let now = track.updated_at.to_rfc3339();
+    let created = track.created_at.to_rfc3339();
+    let artwork_id = track.artwork_id.map(|u| u.to_string());
+
+    sqlx::query(
+        "INSERT INTO tracks (id, title, artist, album, album_artist, duration_ms, file_path, format, sample_rate, bit_depth, channels, artwork_id, genre, year, track_number, disc_number, content_hash, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(file_path) DO UPDATE SET
+            id = excluded.id,
+            title = excluded.title,
+            artist = excluded.artist,
+            album = excluded.album,
+            album_artist = excluded.album_artist,
+            duration_ms = excluded.duration_ms,
+            format = excluded.format,
+            sample_rate = excluded.sample_rate,
+            bit_depth = excluded.bit_depth,
+            channels = excluded.channels,
+            artwork_id = excluded.artwork_id,
+            genre = excluded.genre,
+            year = excluded.year,
+            track_number = excluded.track_number,
+            disc_number = excluded.disc_number,
+            content_hash = excluded.content_hash,
+            updated_at = excluded.updated_at",
+    )
+    .bind(&id)
+    .bind(&track.title)
+    .bind(&track.artist)
+    .bind(&track.album)
+    .bind(&track.album_artist)
+    .bind(track.duration_ms.map(|v| v as i64))
+    .bind(&track.file_path)
+    .bind(format)
+    .bind(track.sample_rate.map(|v| v as i64))
+    .bind(track.bit_depth.map(|v| v as i64))
+    .bind(track.channels.map(|v| v as i64))
+    .bind(&artwork_id)
+    .bind(&track.genre)
+    .bind(track.year.map(|v| v as i64))
+    .bind(track.track_number.map(|v| v as i64))
+    .bind(track.disc_number.map(|v| v as i64))
+    .bind(&track.content_hash)
+    .bind(&created)
+    .bind(&now)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn upsert_tracks(pool: &SqlitePool, tracks: &[Track]) -> Result<usize, DbError> {
-    let mut saved = 0usize;
-    for track in tracks {
-        upsert_track(pool, track).await?;
-        saved += 1;
+    if tracks.is_empty() {
+        return Ok(0);
     }
-    Ok(saved)
+    let mut tx = pool.begin().await?;
+    for track in tracks {
+        upsert_track_tx(&mut tx, track).await?;
+    }
+    tx.commit().await?;
+    for track in tracks {
+        let _ = record_change(pool, "track", &track.id.to_string(), "upsert", None).await;
+    }
+    Ok(tracks.len())
 }
 
 pub async fn list_tracks(pool: &SqlitePool) -> Result<Vec<Track>, DbError> {
@@ -3380,6 +3443,23 @@ mod tests {
         upsert_track(&pool, &sample_track()).await.unwrap();
         let tracks = list_tracks(&pool).await.unwrap();
         assert_eq!(tracks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_tracks_transactional_atomicity() {
+        let pool = test_pool().await;
+        let mut t1 = sample_track();
+        t1.id = track_id_from_path("/music/track1.flac");
+        t1.file_path = "/music/track1.flac".into();
+
+        let mut t2 = sample_track();
+        t2.id = track_id_from_path("/music/track2.flac");
+        t2.file_path = "/music/track2.flac".into();
+
+        let saved = upsert_tracks(&pool, &[t1, t2]).await.unwrap();
+        assert_eq!(saved, 2);
+        let all = list_tracks(&pool).await.unwrap();
+        assert_eq!(all.len(), 2);
     }
 
     #[tokio::test]

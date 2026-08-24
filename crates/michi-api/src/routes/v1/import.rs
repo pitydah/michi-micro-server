@@ -55,7 +55,7 @@ pub struct ImportFile {
     pub remote_track_id: Uuid,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImportSessionState {
     pub session_id: Uuid,
     pub total_tracks: u32,
@@ -67,6 +67,47 @@ pub struct ImportSessionState {
     pub files: Vec<ImportFile>,
 }
 
+impl ImportSessionState {
+    pub async fn save_manifest(&self, session_dir: &std::path::Path) {
+        let manifest_path = session_dir.join("manifest.json");
+        if let Ok(data) = serde_json::to_string_pretty(self) {
+            let tmp_path = session_dir.join("manifest.json.tmp");
+            if tokio::fs::write(&tmp_path, data.as_bytes()).await.is_ok() {
+                let _ = tokio::fs::rename(&tmp_path, &manifest_path).await;
+            }
+        }
+    }
+
+    pub async fn load_manifest(session_dir: &std::path::Path) -> Option<Self> {
+        let manifest_path = session_dir.join("manifest.json");
+        if let Ok(data) = tokio::fs::read_to_string(&manifest_path).await {
+            serde_json::from_str(&data).ok()
+        } else {
+            None
+        }
+    }
+}
+
+pub async fn get_or_recover_session(
+    session_id: &Uuid,
+    music_paths: &[std::path::PathBuf],
+    cache_path: &std::path::Path,
+) -> Option<ImportSessionState> {
+    {
+        let sessions = IMPORT_SESSIONS.read().await;
+        if let Some(s) = sessions.get(session_id) {
+            return Some(s.clone());
+        }
+    }
+    let session_dir = get_session_dir(music_paths, cache_path, session_id);
+    if let Some(recovered) = ImportSessionState::load_manifest(&session_dir).await {
+        let mut sessions = IMPORT_SESSIONS.write().await;
+        sessions.insert(*session_id, recovered.clone());
+        return Some(recovered);
+    }
+    None
+}
+
 use lazy_static::lazy_static;
 
 const MAX_IMPORT_SESSIONS: usize = 100;
@@ -74,6 +115,10 @@ const MAX_IMPORT_SESSIONS: usize = 100;
 lazy_static! {
     static ref IMPORT_SESSIONS: Arc<RwLock<HashMap<Uuid, ImportSessionState>>> =
         Arc::new(RwLock::new(HashMap::new()));
+}
+
+pub async fn clear_import_sessions_for_test() {
+    IMPORT_SESSIONS.write().await.clear();
 }
 
 fn sanitize_filename(filename: &str) -> String {
@@ -177,6 +222,31 @@ pub async fn import_session_handler(
         .await
         .ok();
 
+    let session_dir = get_session_dir(
+        &state.config.music_paths,
+        &state.config.cache_path,
+        &session_id,
+    );
+    tokio::fs::create_dir_all(&session_dir).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "IO_ERROR",
+            &format!("failed to initialize session staging: {e}"),
+        )
+    })?;
+
+    let session_state = ImportSessionState {
+        session_id,
+        total_tracks: body.total_tracks,
+        total_playlists: body.total_playlists,
+        imported_tracks: 0,
+        total_size_bytes: 0,
+        device_id,
+        seen_hashes: Vec::new(),
+        files: Vec::new(),
+    };
+    session_state.save_manifest(&session_dir).await;
+
     {
         let mut sessions = IMPORT_SESSIONS.write().await;
         if sessions.len() >= MAX_IMPORT_SESSIONS {
@@ -186,19 +256,7 @@ pub async fn import_session_handler(
                 "Too many active import sessions. Complete or cancel existing sessions first.",
             ));
         }
-        sessions.insert(
-            session_id,
-            ImportSessionState {
-                session_id,
-                total_tracks: body.total_tracks,
-                total_playlists: body.total_playlists,
-                imported_tracks: 0,
-                total_size_bytes: 0,
-                device_id,
-                seen_hashes: Vec::new(),
-                files: Vec::new(),
-            },
-        );
+        sessions.insert(session_id, session_state);
     }
 
     Ok(Json(serde_json::json!({
@@ -216,10 +274,12 @@ pub async fn import_upload_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     use base64::Engine;
 
-    let session_state = {
-        let sessions = IMPORT_SESSIONS.read().await;
-        sessions.get(&session_id).cloned()
-    }
+    let session_state = get_or_recover_session(
+        &session_id,
+        &state.config.music_paths,
+        &state.config.cache_path,
+    )
+    .await
     .ok_or_else(|| {
         v1_error(
             StatusCode::NOT_FOUND,
@@ -368,30 +428,33 @@ pub async fn import_upload_handler(
         None
     };
 
-    if let Some(r_id) = remote_track_id {
-        let import_file = ImportFile {
-            local_track_id,
-            filename: body.filename.clone(),
-            safe_name: safe_name.clone(),
-            staging_filename: staging_filename.clone(),
-            checksum: data_hash.clone(),
-            size_bytes: data.len() as u64,
-            remote_track_id: r_id,
-        };
+    let import_file_opt = remote_track_id.map(|r_id| ImportFile {
+        local_track_id,
+        filename: body.filename.clone(),
+        safe_name: safe_name.clone(),
+        staging_filename: staging_filename.clone(),
+        checksum: data_hash.clone(),
+        size_bytes: data.len() as u64,
+        remote_track_id: r_id,
+    });
+
+    let updated_session = {
         let mut sessions = IMPORT_SESSIONS.write().await;
         if let Some(s) = sessions.get_mut(&session_id) {
             s.imported_tracks += 1;
             s.total_size_bytes += data.len() as u64;
             s.seen_hashes.push(data_hash.clone());
-            s.files.push(import_file);
+            if let Some(imp_file) = import_file_opt {
+                s.files.push(imp_file);
+            }
+            Some(s.clone())
+        } else {
+            None
         }
-    } else {
-        let mut sessions = IMPORT_SESSIONS.write().await;
-        if let Some(s) = sessions.get_mut(&session_id) {
-            s.imported_tracks += 1;
-            s.total_size_bytes += data.len() as u64;
-            s.seen_hashes.push(data_hash.clone());
-        }
+    };
+
+    if let Some(s) = updated_session {
+        s.save_manifest(&import_dir).await;
     }
 
     michi_db::update_import_session_progress(&state.db, &session_id, 1, data.len() as u64)
@@ -596,10 +659,12 @@ pub async fn import_commit_handler(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let session_state = {
-        let sessions = IMPORT_SESSIONS.read().await;
-        sessions.get(&session_id).cloned()
-    }
+    let session_state = get_or_recover_session(
+        &session_id,
+        &state.config.music_paths,
+        &state.config.cache_path,
+    )
+    .await
     .ok_or_else(|| {
         v1_error(
             StatusCode::NOT_FOUND,
