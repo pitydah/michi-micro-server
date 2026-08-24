@@ -237,63 +237,91 @@ impl AppState {
             info!("maintenance scheduler stopped");
         }));
 
-        // Library auto-scanner (respeta módulo scan)
-        let scan_paths = self.config.music_paths.clone();
-        let scan_db = db.clone();
-        let scan_profile = self.config.resource_profile;
-        let scan_dm = dm.clone();
-        let scan_shutdown = shutdown.clone();
-        let scan_cancel = self
-            .module_tokens
-            .try_read()
-            .ok()
-            .and_then(|m| m.get("scan").cloned())
-            .unwrap_or_default();
+        // Daily library integrity & reconciliation cron (solo si scan habilitado)
+        let integrity_db = db.clone();
+        let integrity_paths = self.config.music_paths.clone();
+        let integrity_profile = self.config.resource_profile;
+        let integrity_shutdown = shutdown.clone();
+        let integrity_dm = dm.clone();
+        let integrity_tokens = self.module_tokens.clone();
         self.track_task(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            let mut interval = tokio::time::interval(Duration::from_secs(86400));
             interval.tick().await;
             loop {
                 tokio::select! {
-                    _ = scan_shutdown.cancelled() => break,
+                    _ = integrity_shutdown.cancelled() => break,
                     _ = interval.tick() => {
-                        if scan_cancel.is_cancelled() || scan_dm.read().await.contains("scan") {
+                        if integrity_dm.read().await.contains("scan") {
                             continue;
                         }
-                        let concurrency = scan_profile.scan_concurrency();
+                        let current_cancel = integrity_tokens
+                            .read()
+                            .await
+                            .get("scan")
+                            .cloned()
+                            .unwrap_or_default();
+                        if current_cancel.is_cancelled() {
+                            continue;
+                        }
+                        let concurrency = integrity_profile.scan_concurrency();
                         let tracks = michi_scanner::scan_directories_cancellable(
-                            &scan_paths,
+                            &integrity_paths,
                             concurrency,
-                            scan_cancel.clone(),
+                            current_cancel,
                         )
                         .await;
                         if !tracks.is_empty() {
-                            let _ = michi_db::upsert_tracks(&scan_db, &tracks).await;
+                            let _ = michi_db::upsert_tracks(&integrity_db, &tracks).await;
                         }
                     }
                 }
             }
-            info!("auto-scanner stopped");
+            info!("integrity cron stopped");
         }));
 
-        // Inotify file system watcher (respeta módulo scan)
+        // Inotify file system watcher (respeta módulo scan con re-habilitación dinámica)
         let watch_paths = self.config.music_paths.clone();
         let watch_db = db.clone();
         let watch_shutdown = shutdown.clone();
-        let watch_cancel = self
-            .module_tokens
-            .try_read()
-            .ok()
-            .and_then(|m| m.get("scan").cloned())
-            .unwrap_or_default();
+        let watch_dm = dm.clone();
+        let watch_tokens = self.module_tokens.clone();
         self.track_task(tokio::spawn(async move {
             if !watch_paths.is_empty() {
                 let watcher = michi_scanner::watcher::LibraryWatcher::new(
                     watch_paths.clone(),
                     watch_db.clone(),
                 );
-                watcher
-                    .run(watch_cancel, watch_shutdown.clone(), Duration::from_secs(5))
-                    .await;
+                loop {
+                    if watch_shutdown.is_cancelled() {
+                        break;
+                    }
+                    if watch_dm.read().await.contains("scan") {
+                        tokio::select! {
+                            _ = watch_shutdown.cancelled() => break,
+                            _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
+                        }
+                    }
+                    let current_cancel = watch_tokens
+                        .read()
+                        .await
+                        .get("scan")
+                        .cloned()
+                        .unwrap_or_default();
+                    if current_cancel.is_cancelled() {
+                        tokio::select! {
+                            _ = watch_shutdown.cancelled() => break,
+                            _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
+                        }
+                    } else {
+                        watcher
+                            .run(
+                                current_cancel,
+                                watch_shutdown.clone(),
+                                Duration::from_secs(5),
+                            )
+                            .await;
+                    }
+                }
             }
             info!("watcher stopped");
         }));

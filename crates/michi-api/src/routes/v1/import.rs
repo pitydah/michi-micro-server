@@ -49,6 +49,7 @@ pub struct ImportFile {
     pub local_track_id: Option<Uuid>,
     pub filename: String,
     pub safe_name: String,
+    pub staging_filename: String,
     pub checksum: String,
     pub size_bytes: u64,
     pub remote_track_id: Uuid,
@@ -107,13 +108,10 @@ fn is_allowed_extension(filename: &str) -> bool {
 }
 
 fn get_staging_dir(
-    music_paths: &[std::path::PathBuf],
+    _music_paths: &[std::path::PathBuf],
     cache_path: &std::path::Path,
 ) -> std::path::PathBuf {
-    music_paths
-        .first()
-        .map(|p| p.join(".import"))
-        .unwrap_or_else(|| cache_path.join("import_staging"))
+    cache_path.join("import_staging")
 }
 
 fn get_session_dir(
@@ -301,7 +299,13 @@ pub async fn import_upload_handler(
         })));
     }
 
-    let safe_name = sanitize_filename(&body.filename);
+    let ext = std::path::Path::new(&body.filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let staging_filename = format!("{data_hash}.{ext}");
     let import_dir = get_session_dir(
         &state.config.music_paths,
         &state.config.cache_path,
@@ -315,42 +319,49 @@ pub async fn import_upload_handler(
         )
     })?;
 
-    let file_path = import_dir.join(&safe_name);
-    if file_path.exists() {
-        return Ok(Json(serde_json::json!({
-            "local_track_id": local_track_id,
-            "status": "duplicate",
-            "remote_track_id": null,
-            "checksum": data_hash,
-        })));
+    let file_path = import_dir.join(&staging_filename);
+    if !file_path.exists() {
+        tokio::fs::write(&file_path, &data).await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "IO_ERROR",
+                &e.to_string(),
+            )
+        })?;
     }
 
-    tokio::fs::write(&file_path, &data).await.map_err(|e| {
-        v1_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "IO_ERROR",
-            &e.to_string(),
-        )
-    })?;
+    let mut safe_name = sanitize_filename(&body.filename);
+    // Check if session already has a file with the same safe_name but different checksum
+    {
+        let sessions = IMPORT_SESSIONS.read().await;
+        if let Some(s) = sessions.get(&session_id) {
+            if s.files
+                .iter()
+                .any(|f| f.safe_name == safe_name && f.checksum != data_hash)
+            {
+                let stem = std::path::Path::new(&safe_name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("track");
+                let short_hash = &data_hash[..8.min(data_hash.len())];
+                safe_name = format!("{stem}_{short_hash}.{ext}");
+            }
+        }
+    }
 
     michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Uploading, None)
         .await
         .ok();
 
-    let ext = std::path::Path::new(&safe_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let final_dir = state
+        .config
+        .music_paths
+        .first()
+        .cloned()
+        .unwrap_or_else(|| import_dir.clone());
+    let final_path = final_dir.join(&safe_name);
 
     let remote_track_id = if ALLOWED_AUDIO_EXTS.contains(&ext.as_str()) {
-        let final_dir = state
-            .config
-            .music_paths
-            .first()
-            .cloned()
-            .unwrap_or_else(|| import_dir.clone());
-        let final_path = final_dir.join(&safe_name);
         let tid = michi_core::track_id_from_library_path(&final_dir, &final_path);
         Some(tid)
     } else {
@@ -362,6 +373,7 @@ pub async fn import_upload_handler(
             local_track_id,
             filename: body.filename.clone(),
             safe_name: safe_name.clone(),
+            staging_filename: staging_filename.clone(),
             checksum: data_hash.clone(),
             size_bytes: data.len() as u64,
             remote_track_id: r_id,
@@ -620,35 +632,91 @@ pub async fn import_commit_handler(
         )
     })?;
 
-    // Safely copy each uploaded file from staging to final library destination
-    let mut copied_files: Vec<(std::path::PathBuf, std::path::PathBuf, ImportFile)> = Vec::new();
+    // Step 1: Pre-validate all destination files before modifying library
     for file in &session_state.files {
-        let src = staging_dir.join(&file.safe_name);
         let dest = final_dir.join(&file.safe_name);
-        if src.exists() {
-            if !dest.exists() {
-                tokio::fs::copy(&src, &dest).await.map_err(|e| {
-                    v1_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "IO_ERROR",
-                        &format!("failed to copy {} to destination: {e}", file.safe_name),
-                    )
-                })?;
+        if dest.exists() {
+            let existing_data = tokio::fs::read(&dest).await.map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "IO_ERROR",
+                    &format!("failed to read existing file {}: {e}", file.safe_name),
+                )
+            })?;
+            let existing_hash = compute_sha256(&existing_data);
+            if existing_hash != file.checksum {
+                michi_db::set_import_session_status(
+                    &state.db,
+                    &session_id,
+                    &ImportState::Failed,
+                    Some("destination conflict: file already exists with different content"),
+                )
+                .await
+                .ok();
+                return Err(v1_error(
+                    StatusCode::CONFLICT,
+                    "DESTINATION_CONFLICT",
+                    &format!(
+                        "Destination file {} already exists with different checksum. Commit aborted.",
+                        file.safe_name
+                    ),
+                ));
             }
-            copied_files.push((src, dest, file.clone()));
         }
     }
 
-    // Scan specifically the imported files and attach their verified content_hash
+    // Step 2: Perform copy with compensatory rollback tracking
+    let mut newly_copied_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut committed_files: Vec<(std::path::PathBuf, ImportFile, String)> = Vec::new();
+
+    for file in &session_state.files {
+        let src = staging_dir.join(&file.staging_filename);
+        let dest = final_dir.join(&file.safe_name);
+        let actual_src = if src.exists() {
+            src
+        } else {
+            staging_dir.join(&file.safe_name)
+        };
+
+        if dest.exists() {
+            committed_files.push((dest, file.clone(), "already_present".to_string()));
+        } else {
+            if !actual_src.exists() {
+                for p in &newly_copied_paths {
+                    let _ = tokio::fs::remove_file(p).await;
+                }
+                return Err(v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "IO_ERROR",
+                    &format!("staging source file for {} not found", file.safe_name),
+                ));
+            }
+
+            if let Err(e) = tokio::fs::copy(&actual_src, &dest).await {
+                for p in &newly_copied_paths {
+                    let _ = tokio::fs::remove_file(p).await;
+                }
+                return Err(v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "IO_ERROR",
+                    &format!("failed to copy {} to destination: {e}", file.safe_name),
+                ));
+            }
+            newly_copied_paths.push(dest.clone());
+            committed_files.push((dest, file.clone(), "inserted".to_string()));
+        }
+    }
+
+    // Step 3: Scan imported tracks and attach verified content_hash
     let mut imported_tracks: Vec<michi_core::Track> = Vec::new();
-    for (_src, dest, file) in &copied_files {
+    for (dest, file, _status) in &committed_files {
         if let Some(mut track) = michi_scanner::scan_single_file(&final_dir, dest) {
             track.content_hash = Some(file.checksum.clone());
             imported_tracks.push(track);
         }
     }
 
-    // Check for unresolved conflicts: same content_hash but different duration_ms already in library
+    // Step 4: Check for unresolved conflicts
     let mut conflict = false;
     for track in &imported_tracks {
         if let Some(ref hash) = track.content_hash {
@@ -669,6 +737,9 @@ pub async fn import_commit_handler(
     }
 
     if conflict {
+        for p in &newly_copied_paths {
+            let _ = tokio::fs::remove_file(p).await;
+        }
         michi_db::set_import_session_status(
             &state.db,
             &session_id,
@@ -684,29 +755,30 @@ pub async fn import_commit_handler(
         ));
     }
 
-    // Upsert imported tracks to database
+    // Step 5: Upsert tracks to DB
     if !imported_tracks.is_empty() {
-        michi_db::upsert_tracks(&state.db, &imported_tracks)
-            .await
-            .map_err(|e| {
-                v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "DATABASE_ERROR",
-                    &format!("failed to upsert imported tracks: {e}"),
-                )
-            })?;
+        if let Err(e) = michi_db::upsert_tracks(&state.db, &imported_tracks).await {
+            for p in &newly_copied_paths {
+                let _ = tokio::fs::remove_file(p).await;
+            }
+            return Err(v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("failed to upsert imported tracks: {e}"),
+            ));
+        }
     }
 
-    // Build per-track mapping strictly for the files in this transaction
+    // Step 6: Build mapping with canonical statuses
     let mut mapping: Vec<serde_json::Value> = Vec::new();
-    for file in &session_state.files {
-        let (status, remote_id) = if let Some(tr) = imported_tracks
+    for (_, file, status) in &committed_files {
+        let remote_id = if let Some(tr) = imported_tracks
             .iter()
             .find(|t| t.id == file.remote_track_id)
         {
-            ("inserted".to_string(), tr.id)
+            tr.id
         } else {
-            ("inserted".to_string(), file.remote_track_id)
+            file.remote_track_id
         };
 
         mapping.push(serde_json::json!({

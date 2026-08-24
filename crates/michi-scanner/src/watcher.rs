@@ -23,7 +23,7 @@ impl LibraryWatcher {
     }
 
     pub async fn run(
-        self,
+        &self,
         module_cancel: CancellationToken,
         shutdown: CancellationToken,
         poll_interval: Duration,
@@ -148,6 +148,11 @@ fn snapshot_directory(
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
+        let file_name = entry.file_name();
+        let name_str = file_name.to_string_lossy();
+        if name_str.starts_with('.') {
+            continue;
+        }
         let metadata = std::fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() {
             continue;
