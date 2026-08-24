@@ -29,6 +29,14 @@ fn track_from_file(library_root: &Path, entry_path: &Path) -> Option<Track> {
     let metadata = read_metadata_safe(entry_path);
     let file_path = entry_path.to_string_lossy().to_string();
     let track_id = track_id_from_library_path(library_root, entry_path);
+    let fs_meta = entry_path.metadata().ok();
+    let file_size = fs_meta.as_ref().map(|m| m.len());
+    let file_mtime_ns = fs_meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i64);
+
     Some(Track {
         id: track_id,
         title: metadata.title.clone(),
@@ -47,6 +55,8 @@ fn track_from_file(library_root: &Path, entry_path: &Path) -> Option<Track> {
         track_number: metadata.track_number,
         disc_number: metadata.disc_number,
         content_hash: None,
+        file_size,
+        file_mtime_ns,
         starred: false,
         rating: 0,
         starred_at: None,
@@ -56,6 +66,7 @@ fn track_from_file(library_root: &Path, entry_path: &Path) -> Option<Track> {
         updated_at: chrono::Utc::now(),
     })
 }
+
 
 #[derive(Debug, Clone)]
 pub enum ScanResult {
@@ -327,10 +338,44 @@ pub async fn reconcile_root(
         return Ok(());
     }
 
+    let mut existing_map: std::collections::HashMap<String, &Track> =
+        std::collections::HashMap::new();
+    for existing in &root_existing {
+        existing_map.insert(existing.file_path.clone(), existing);
+    }
+
+    let mut tracks_to_upsert = tracks.to_vec();
+    for track in &mut tracks_to_upsert {
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        if let Some(existing) = existing_map.get(&track.file_path) {
+            let fingerprint_unchanged = existing.file_size.is_some()
+                && existing.file_size == track.file_size
+                && existing.file_mtime_ns.is_some()
+                && existing.file_mtime_ns == track.file_mtime_ns;
+
+            if fingerprint_unchanged && existing.content_hash.is_some() {
+                // File on disk is unchanged physically; preserve existing content_hash
+                track.content_hash = existing.content_hash.clone();
+            } else if !fingerprint_unchanged {
+                // File modified on disk while server was off/disabled; recompute hash
+                let path_buf = PathBuf::from(&track.file_path);
+                if let Ok(Some(new_hash)) = tokio::task::spawn_blocking(move || {
+                    crate::compute_file_content_hash(&path_buf)
+                })
+                .await
+                {
+                    track.content_hash = Some(new_hash);
+                }
+            }
+        }
+    }
+
     let _ = michi_db::update_mount_state(db, &root.display().to_string(), "online", "").await;
 
-    if !tracks.is_empty() {
-        michi_db::upsert_tracks(db, tracks).await?;
+    if !tracks_to_upsert.is_empty() {
+        michi_db::upsert_tracks(db, &tracks_to_upsert).await?;
     }
     if cancel.is_cancelled() {
         return Ok(());
@@ -347,6 +392,7 @@ pub async fn reconcile_root(
     }
     Ok(())
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -458,6 +504,8 @@ mod tests {
             track_number: None,
             disc_number: None,
             content_hash: Some("sha256_hash_123".into()),
+            file_size: None,
+            file_mtime_ns: None,
             starred: false,
             rating: 0,
             starred_at: None,
@@ -519,6 +567,8 @@ mod tests {
             track_number: None,
             disc_number: None,
             content_hash: Some("sha256_important".into()),
+            file_size: None,
+            file_mtime_ns: None,
             starred: false,
             rating: 0,
             starred_at: None,
@@ -575,6 +625,8 @@ mod tests {
             track_number: None,
             disc_number: None,
             content_hash: None,
+            file_size: None,
+            file_mtime_ns: None,
             starred: false,
             rating: 0,
             starred_at: None,
@@ -639,6 +691,8 @@ mod tests {
             track_number: None,
             disc_number: None,
             content_hash: None,
+            file_size: None,
+            file_mtime_ns: None,
             starred: false,
             rating: 0,
             starred_at: None,
@@ -669,5 +723,77 @@ mod tests {
         // Track 2 should be deleted because root is active (track1 is there) and track2 is gone from disk
         assert!(michi_db::get_track(&pool, &track2_id).await.unwrap().is_none());
     }
+
+    #[tokio::test]
+    async fn test_fingerprint_preserves_hash_on_metadata_only_scan() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let song_file = root.join("song.mp3");
+        fs::write(&song_file, b"sample audio content").unwrap();
+
+        // 1. Initial scan
+        let mut track = scan_file(root.to_path_buf(), song_file.clone())
+            .await
+            .unwrap();
+        track.content_hash = Some("hash_aaa_initial".into());
+        michi_db::upsert_track(&pool, &track).await.unwrap();
+
+        // 2. Metadata-only scan without physical file modification
+        let scan_res = ScanResult::Success(vec![track_from_file(root, &song_file).unwrap()]);
+        reconcile_root(&pool, root, &scan_res, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        // Hash MUST be preserved because file_size and file_mtime_ns are identical
+        let in_db = michi_db::get_track(&pool, &track.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_db.content_hash.as_deref(), Some("hash_aaa_initial"));
+    }
+
+    #[tokio::test]
+    async fn test_fingerprint_recomputes_hash_when_file_physically_changes() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let song_file = root.join("song.mp3");
+        fs::write(&song_file, b"content AAA").unwrap();
+
+        // 1. Initial track with hash AAA
+        let mut track = scan_file(root.to_path_buf(), song_file.clone())
+            .await
+            .unwrap();
+        let hash_aaa = compute_file_content_hash(&song_file).unwrap();
+        track.content_hash = Some(hash_aaa.clone());
+        michi_db::upsert_track(&pool, &track).await.unwrap();
+
+        // 2. Modify the file physically (new content -> changes size & mtime)
+        // Ensure mtime change is observable across filesystems
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        fs::write(&song_file, b"content BBB with different bytes and length").unwrap();
+        let expected_hash_bbb = compute_file_content_hash(&song_file).unwrap();
+        assert_ne!(hash_aaa, expected_hash_bbb);
+
+        // 3. Reconcile root (simulating server on scan or watcher)
+        let new_scanned_track = track_from_file(root, &song_file).unwrap();
+        let scan_res = ScanResult::Success(vec![new_scanned_track]);
+        reconcile_root(&pool, root, &scan_res, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        // 4. Verify DB now has updated hash_bbb
+        let in_db = michi_db::get_track(&pool, &track.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            in_db.content_hash.as_deref(),
+            Some(expected_hash_bbb.as_str()),
+            "content_hash MUST be recomputed when file fingerprint changes"
+        );
+    }
 }
+
 

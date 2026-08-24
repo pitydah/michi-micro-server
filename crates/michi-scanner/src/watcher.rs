@@ -102,15 +102,21 @@ impl LibraryWatcher {
                 return;
             }
             if let Some(mut track) = crate::scan_file(root.to_path_buf(), path.clone()).await {
-                // If the file was modified, compute its new content hash
+                // If the file was modified, compute its new content hash in a blocking task
                 if previous.contains_key(path) {
-                    if let Some(new_hash) = crate::compute_file_content_hash(path) {
+                    let path_for_hash = path.clone();
+                    if let Ok(Some(new_hash)) = tokio::task::spawn_blocking(move || {
+                        crate::compute_file_content_hash(&path_for_hash)
+                    })
+                    .await
+                    {
                         track.content_hash = Some(new_hash);
                     }
                 }
                 if let Err(error) = michi_db::upsert_track(&self.db, &track).await {
                     warn!(path = %path.display(), %error, "failed to persist changed track");
                 }
+
             }
         }
 

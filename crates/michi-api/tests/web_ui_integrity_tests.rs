@@ -141,6 +141,8 @@ async fn seed_track(pool: &SqlitePool, path_str: &str, title: &str) -> Track {
         track_number: Some(1),
         disc_number: Some(1),
         content_hash: None,
+        file_size: None,
+        file_mtime_ns: None,
         starred: false,
         rating: 0,
         starred_at: None,
@@ -149,6 +151,7 @@ async fn seed_track(pool: &SqlitePool, path_str: &str, title: &str) -> Track {
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
+
     michi_db::upsert_track(pool, &track).await.unwrap();
     track
 }

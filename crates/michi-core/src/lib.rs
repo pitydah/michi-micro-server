@@ -159,6 +159,10 @@ pub struct Track {
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
     pub content_hash: Option<String>,
+    #[serde(default)]
+    pub file_size: Option<u64>,
+    #[serde(default)]
+    pub file_mtime_ns: Option<i64>,
     pub starred: bool,
     pub rating: u8,
     pub starred_at: Option<String>,
@@ -167,6 +171,7 @@ pub struct Track {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackIdentity {
