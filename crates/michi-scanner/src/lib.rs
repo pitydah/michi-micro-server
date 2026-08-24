@@ -193,11 +193,11 @@ pub async fn reconcile_root(
     tracks: &[Track],
     cancel: &CancellationToken,
 ) -> Result<(), michi_db::DbError> {
-    for track in tracks {
-        if cancel.is_cancelled() {
-            return Ok(());
-        }
-        michi_db::upsert_track(db, track).await?;
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+    if !tracks.is_empty() {
+        michi_db::upsert_tracks(db, tracks).await?;
     }
     if cancel.is_cancelled() {
         return Ok(());

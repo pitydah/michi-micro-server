@@ -264,14 +264,23 @@ impl AppState {
                             continue;
                         }
                         let concurrency = integrity_profile.scan_concurrency();
-                        let tracks = michi_scanner::scan_directories_cancellable(
-                            &integrity_paths,
-                            concurrency,
-                            current_cancel,
-                        )
-                        .await;
-                        if !tracks.is_empty() {
-                            let _ = michi_db::upsert_tracks(&integrity_db, &tracks).await;
+                        for path in &integrity_paths {
+                            if current_cancel.is_cancelled() {
+                                break;
+                            }
+                            let tracks = michi_scanner::scan_directories_cancellable(
+                                std::slice::from_ref(path),
+                                concurrency,
+                                current_cancel.clone(),
+                            )
+                            .await;
+                            let _ = michi_scanner::reconcile_root(
+                                &integrity_db,
+                                path,
+                                &tracks,
+                                &current_cancel,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -291,11 +300,13 @@ impl AppState {
                     watch_paths.clone(),
                     watch_db.clone(),
                 );
+                let mut was_disabled = false;
                 loop {
                     if watch_shutdown.is_cancelled() {
                         break;
                     }
                     if watch_dm.read().await.contains("scan") {
+                        was_disabled = true;
                         tokio::select! {
                             _ = watch_shutdown.cancelled() => break,
                             _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
@@ -308,11 +319,36 @@ impl AppState {
                         .cloned()
                         .unwrap_or_default();
                     if current_cancel.is_cancelled() {
+                        was_disabled = true;
                         tokio::select! {
                             _ = watch_shutdown.cancelled() => break,
                             _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
                         }
                     } else {
+                        if was_disabled {
+                            info!(
+                                "scan module re-enabled; reconciling library roots with filesystem"
+                            );
+                            for path in &watch_paths {
+                                if current_cancel.is_cancelled() {
+                                    break;
+                                }
+                                let tracks = michi_scanner::scan_directories_cancellable(
+                                    std::slice::from_ref(path),
+                                    1,
+                                    current_cancel.clone(),
+                                )
+                                .await;
+                                let _ = michi_scanner::reconcile_root(
+                                    &watch_db,
+                                    path,
+                                    &tracks,
+                                    &current_cancel,
+                                )
+                                .await;
+                            }
+                            was_disabled = false;
+                        }
                         watcher
                             .run(
                                 current_cancel,
