@@ -952,6 +952,9 @@ pub async fn import_commit_handler(
     // Step 8: Best-effort cleanup of staging directory AFTER durable commit
     cleanup_session_dir(&staging_dir).await;
 
+    drop(_session_guard);
+    remove_session_lock(&session_id).await;
+
     let _ = state.tx.send(r#"{"type":"library_updated"}"#.to_string());
 
     Ok(Json(serde_json::json!({
@@ -981,6 +984,8 @@ pub async fn import_rollback_handler(
     michi_db::close_import_session(&state.db, &session_id)
         .await
         .ok();
+    drop(_session_guard);
+    remove_session_lock(&session_id).await;
     Json(serde_json::json!({ "status": "rolled_back" }))
 }
 
@@ -997,6 +1002,8 @@ pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool)
                     michi_db::expire_import_session(&db, &sid).await.ok();
                     let dir = get_session_dir(&music_paths, &cache_path, &sid);
                     cleanup_session_dir(&dir).await;
+                    IMPORT_SESSIONS.write().await.remove(&sid);
+                    remove_session_lock(&sid).await;
                 }
             }
             // Also clean old staging dirs with no DB record
@@ -1014,6 +1021,8 @@ pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool)
                                     .is_none()
                                 {
                                     cleanup_session_dir(&entry.path()).await;
+                                    IMPORT_SESSIONS.write().await.remove(&uid);
+                                    remove_session_lock(&uid).await;
                                 }
                             }
                         }
@@ -1023,3 +1032,4 @@ pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool)
         }
     });
 }
+
