@@ -171,8 +171,13 @@ impl Config {
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false);
 
-        if opensubsonic_enabled && !auth_enabled && !dev_mode {
-            panic!("CRITICAL: OpenSubsonic requires authentication to be configured unless MICHI_DEV_MODE=true");
+        let opensubsonic_dev_bypass = env::var("MICHI_DEV_ALLOW_OPENSUBSONIC_NO_AUTH")
+            .ok()
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
+
+        if opensubsonic_enabled && !auth_enabled && !opensubsonic_dev_bypass {
+            panic!("CRITICAL: MICHI_OPENSUBSONIC_ENABLED=true requires authentication to be configured. Set MICHI_AUTH_USERNAME and MICHI_AUTH_PASSWORD before enabling OpenSubsonic. To bypass in development only, set MICHI_DEV_ALLOW_OPENSUBSONIC_NO_AUTH=true.");
         }
 
         let trust_proxy = env::var("MICHI_TRUST_PROXY")
@@ -720,7 +725,7 @@ mod tests {
             temp_env::with_vars(
                 [
                     ("MICHI_OPENSUBSONIC_ENABLED", Some("true")),
-                    ("MICHI_DEV_MODE", Some("false")),
+                    ("MICHI_DEV_ALLOW_OPENSUBSONIC_NO_AUTH", None),
                     ("MICHI_AUTH_USERNAME", None),
                     ("MICHI_AUTH_PASSWORD", None),
                     ("MICHI_CONFIG_PATH", Some(config_path.as_str())),
@@ -732,7 +737,23 @@ mod tests {
         });
         assert!(
             res.is_err(),
-            "Must panic when OpenSubsonic is enabled without auth in non-dev mode"
+            "Must panic when OpenSubsonic is enabled without auth and without dev bypass"
+        );
+
+        // With explicit dev bypass, it must not panic
+        temp_env::with_vars(
+            [
+                ("MICHI_OPENSUBSONIC_ENABLED", Some("true")),
+                ("MICHI_DEV_ALLOW_OPENSUBSONIC_NO_AUTH", Some("true")),
+                ("MICHI_AUTH_USERNAME", None),
+                ("MICHI_AUTH_PASSWORD", None),
+                ("MICHI_CONFIG_PATH", Some(config_path.as_str())),
+            ],
+            || {
+                let cfg = Config::from_env();
+                assert!(cfg.opensubsonic_enabled);
+                assert!(!cfg.auth_enabled);
+            },
         );
     }
 

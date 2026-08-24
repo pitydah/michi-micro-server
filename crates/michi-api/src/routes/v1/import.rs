@@ -130,15 +130,15 @@ const MAX_IMPORT_SESSIONS: usize = 100;
 lazy_static! {
     static ref IMPORT_SESSIONS: Arc<RwLock<HashMap<Uuid, ImportSessionState>>> =
         Arc::new(RwLock::new(HashMap::new()));
-    static ref SESSION_LOCKS: Arc<RwLock<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>> =
+    static ref SESSION_LOCKS: Arc<RwLock<HashMap<Uuid, Arc<tokio::sync::Mutex<bool>>>>> =
         Arc::new(RwLock::new(HashMap::new()));
 }
 
-pub async fn get_session_lock(session_id: &Uuid) -> Arc<tokio::sync::Mutex<()>> {
+pub async fn get_session_lock(session_id: &Uuid) -> Arc<tokio::sync::Mutex<bool>> {
     let mut locks = SESSION_LOCKS.write().await;
     locks
         .entry(*session_id)
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(false)))
         .clone()
 }
 
@@ -321,6 +321,13 @@ pub async fn import_upload_handler(
     // Acquire exclusive lock for this session to guarantee thread-safe upload & commit serialization
     let session_lock = get_session_lock(&session_id).await;
     let _session_guard = session_lock.lock().await;
+    if *_session_guard {
+        return Err(v1_error(
+            StatusCode::GONE,
+            "SESSION_CLOSED",
+            "import session is already closed or terminal",
+        ));
+    }
 
     let mut session_state = get_or_recover_session(
         &session_id,
@@ -735,7 +742,14 @@ pub async fn import_commit_handler(
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let session_lock = get_session_lock(&session_id).await;
-    let _session_guard = session_lock.lock().await;
+    let mut session_guard = session_lock.lock().await;
+    if *session_guard {
+        return Err(v1_error(
+            StatusCode::GONE,
+            "SESSION_CLOSED",
+            "import session is already closed or terminal",
+        ));
+    }
 
     let session_state = get_or_recover_session(
         &session_id,
@@ -952,7 +966,8 @@ pub async fn import_commit_handler(
     // Step 8: Best-effort cleanup of staging directory AFTER durable commit
     cleanup_session_dir(&staging_dir).await;
 
-    drop(_session_guard);
+    *session_guard = true;
+    drop(session_guard);
     remove_session_lock(&session_id).await;
 
     let _ = state.tx.send(r#"{"type":"library_updated"}"#.to_string());
@@ -970,7 +985,11 @@ pub async fn import_rollback_handler(
     Path(session_id): Path<Uuid>,
 ) -> Json<serde_json::Value> {
     let session_lock = get_session_lock(&session_id).await;
-    let _session_guard = session_lock.lock().await;
+    let mut session_guard = session_lock.lock().await;
+    if *session_guard {
+        return Json(serde_json::json!({ "status": "already_closed" }));
+    }
+    *session_guard = true;
     IMPORT_SESSIONS.write().await.remove(&session_id);
     let staging_dir = get_session_dir(
         &state.config.music_paths,
@@ -984,7 +1003,7 @@ pub async fn import_rollback_handler(
     michi_db::close_import_session(&state.db, &session_id)
         .await
         .ok();
-    drop(_session_guard);
+    drop(session_guard);
     remove_session_lock(&session_id).await;
     Json(serde_json::json!({ "status": "rolled_back" }))
 }
@@ -999,10 +1018,14 @@ pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool)
             let cutoff = (Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
             if let Ok(expired) = michi_db::list_expired_import_sessions(&db, &cutoff).await {
                 for sid in expired {
+                    let session_lock = get_session_lock(&sid).await;
+                    let mut session_guard = session_lock.lock().await;
+                    *session_guard = true;
                     michi_db::expire_import_session(&db, &sid).await.ok();
                     let dir = get_session_dir(&music_paths, &cache_path, &sid);
                     cleanup_session_dir(&dir).await;
                     IMPORT_SESSIONS.write().await.remove(&sid);
+                    drop(session_guard);
                     remove_session_lock(&sid).await;
                 }
             }
@@ -1020,8 +1043,12 @@ pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool)
                                     .flatten()
                                     .is_none()
                                 {
+                                    let session_lock = get_session_lock(&uid).await;
+                                    let mut session_guard = session_lock.lock().await;
+                                    *session_guard = true;
                                     cleanup_session_dir(&entry.path()).await;
                                     IMPORT_SESSIONS.write().await.remove(&uid);
+                                    drop(session_guard);
                                     remove_session_lock(&uid).await;
                                 }
                             }

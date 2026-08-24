@@ -225,8 +225,11 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
     if current < 39 {
         run_migration_step!(pool, 39, "track file fingerprint", migration_039);
     }
+    if current < 40 {
+        run_migration_step!(pool, 40, "mount guard device identity", migration_040);
+    }
 
-    info!("database schema at version 39");
+    info!("database schema at version 40");
     Ok(())
 }
 
@@ -943,6 +946,13 @@ async fn migration_039(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
         .execute(&mut **tx)
         .await?;
     sqlx::query("ALTER TABLE tracks ADD COLUMN file_mtime_ns INTEGER")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn migration_040(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    sqlx::query("ALTER TABLE mount_guard ADD COLUMN device_id INTEGER")
         .execute(&mut **tx)
         .await?;
     Ok(())
@@ -4478,22 +4488,46 @@ pub async fn update_mount_state(
     state: &str,
     error: &str,
 ) -> Result<(), DbError> {
+    update_mount_state_with_device(pool, path, state, error, None).await
+}
+
+pub async fn update_mount_state_with_device(
+    pool: &SqlitePool,
+    path: &str,
+    state: &str,
+    error: &str,
+    device_id: Option<u64>,
+) -> Result<(), DbError> {
     let now = Utc::now().to_rfc3339();
     sqlx::query(
-        "INSERT INTO mount_guard (path, state, last_checked, last_online, error_message)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(path) DO UPDATE SET state = excluded.state, last_checked = excluded.last_checked,
-           last_online = CASE WHEN excluded.state = 'online' THEN excluded.last_checked ELSE mount_guard.last_online END,
-           error_message = excluded.error_message"
+        "INSERT INTO mount_guard (path, state, last_checked, last_online, error_message, device_id)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(path) DO UPDATE SET
+            state = excluded.state,
+            last_checked = excluded.last_checked,
+            last_online = CASE WHEN excluded.state = 'online' THEN excluded.last_checked ELSE mount_guard.last_online END,
+            error_message = excluded.error_message,
+            device_id = COALESCE(excluded.device_id, mount_guard.device_id)"
     )
-        .bind(path)
-        .bind(state)
-        .bind(&now)
-        .bind(&now)
-        .bind(error)
-        .execute(pool)
-        .await?;
+    .bind(path)
+    .bind(state)
+    .bind(&now)
+    .bind(&now)
+    .bind(error)
+    .bind(device_id.map(|d| d as i64))
+    .execute(pool)
+    .await?;
     Ok(())
+}
+
+pub async fn get_mount_device_id(pool: &SqlitePool, path: &str) -> Result<Option<u64>, DbError> {
+    let row = sqlx::query("SELECT device_id FROM mount_guard WHERE path = ?")
+        .bind(path)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row
+        .and_then(|r| r.try_get::<Option<i64>, _>("device_id").ok().flatten())
+        .map(|v| v as u64))
 }
 
 pub async fn get_mount_states(

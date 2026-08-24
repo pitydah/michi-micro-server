@@ -253,27 +253,38 @@ pub async fn scan_file(library_root: PathBuf, path: PathBuf) -> Option<Track> {
         .flatten()
 }
 
+#[cfg(unix)]
+pub fn get_path_device_id(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    path.metadata().ok().map(|m| m.dev())
+}
+
+#[cfg(not(unix))]
+pub fn get_path_device_id(_path: &Path) -> Option<u64> {
+    None
+}
+
 pub async fn reconcile_root(
     db: &sqlx::SqlitePool,
     root: &Path,
     scan_result: &ScanResult,
     cancel: &CancellationToken,
 ) -> Result<(), michi_db::DbError> {
-    if cancel.is_cancelled() {
-        return Ok(());
-    }
-
     let tracks = match scan_result {
-        ScanResult::Success(tracks) => tracks,
-        ScanResult::Unavailable(err) => {
+        ScanResult::Success(tracks) => tracks.as_slice(),
+        ScanResult::Unavailable(reason) => {
             warn!(
                 path = %root.display(),
-                error = %err,
-                "reconcile_root skipped: library mount is unavailable. Existing tracks preserved."
+                reason = %reason,
+                "reconcile_root skipped deletion: mount is unavailable."
             );
-            let _ =
-                michi_db::update_mount_state(db, &root.display().to_string(), "unavailable", err)
-                    .await;
+            let _ = michi_db::update_mount_state(
+                db,
+                &root.display().to_string(),
+                "unavailable",
+                reason,
+            )
+            .await;
             return Ok(());
         }
         ScanResult::Cancelled => {
@@ -293,19 +304,21 @@ pub async fn reconcile_root(
         }
     };
 
+    let root_str = root.display().to_string();
+    let current_dev_id = get_path_device_id(root);
+    let recorded_dev_id = michi_db::get_mount_device_id(db, &root_str)
+        .await
+        .ok()
+        .flatten();
+
     // Double-check that root directory is actually present on disk before deleting any tracks
     if !root.exists() || !root.is_dir() {
         warn!(
             path = %root.display(),
             "reconcile_root skipped deletion: root directory disappeared before reconciliation."
         );
-        let _ = michi_db::update_mount_state(
-            db,
-            &root.display().to_string(),
-            "unavailable",
-            "mount disappeared",
-        )
-        .await;
+        let _ =
+            michi_db::update_mount_state(db, &root_str, "unavailable", "mount disappeared").await;
         return Ok(());
     }
 
@@ -316,25 +329,68 @@ pub async fn reconcile_root(
         .filter(|t| Path::new(&t.file_path).starts_with(root))
         .collect();
 
-    // First Empty Scan Protection (Mount Loss Guard):
-    // If tracks existed in DB for this root, but the scan found 0 tracks, this indicates a suspicious empty scan.
-    // In Linux/NAS/Docker setups, an unmounted filesystem leaves an empty mountpoint folder.
-    // NEVER purge the database on a 0-track scan when tracks previously existed for this root.
-    if !root_existing.is_empty() && tracks.is_empty() {
-        warn!(
-            path = %root.display(),
-            existing_count = root_existing.len(),
-            "reconcile_root skipped deletion: suspicious empty scan on root that previously contained {} tracks. Mount may have dropped. Preserving DB.",
-            root_existing.len()
-        );
-        let _ = michi_db::update_mount_state(
-            db,
-            &root.display().to_string(),
-            "unavailable",
-            "suspicious empty scan: mountpoint is empty while DB contains tracks",
-        )
-        .await;
-        return Ok(());
+    // Mount Identity Protection:
+    // 1. If device ID changed (expected != current): mount lost/replaced -> PRESERVE DB.
+    // 2. If mount was previously "unavailable" and returns 0 tracks: mount recreated empty -> PRESERVE DB.
+    if !root_existing.is_empty() {
+        if let (Some(expected), Some(current)) = (recorded_dev_id, current_dev_id) {
+            if expected != current {
+                warn!(
+                    path = %root.display(),
+                    expected_dev = expected,
+                    current_dev = current,
+                    existing_count = root_existing.len(),
+                    "reconcile_root aborted: mount device identity mismatch (expected st_dev {}, got {}). Filesystem mount lost or replaced. Preserving DB.",
+                    expected, current
+                );
+                let _ = michi_db::update_mount_state_with_device(
+                    db,
+                    &root_str,
+                    "unavailable",
+                    "mount device identity mismatch: filesystem lost or replaced",
+                    Some(current),
+                )
+                .await;
+                return Ok(());
+            }
+        } else if recorded_dev_id.is_some() && current_dev_id.is_none() {
+            warn!(
+                path = %root.display(),
+                "reconcile_root aborted: unable to read current mount filesystem device identity. Preserving DB."
+            );
+            let _ = michi_db::update_mount_state_with_device(
+                db,
+                &root_str,
+                "unavailable",
+                "unable to read filesystem device identity",
+                None,
+            )
+            .await;
+            return Ok(());
+        }
+
+        // Check previous mount state: if it was unavailable and is suddenly 0 tracks, it is a newly mounted empty mountpoint
+        let mount_states = michi_db::get_mount_states(db).await.unwrap_or_default();
+        let was_unavailable = mount_states
+            .iter()
+            .any(|(p, s, ..)| p == &root_str && s == "unavailable");
+
+        if was_unavailable && tracks.is_empty() {
+            warn!(
+                path = %root.display(),
+                existing_count = root_existing.len(),
+                "reconcile_root skipped deletion: mount was previously unavailable and reappeared as empty directory. Preserving DB."
+            );
+            let _ = michi_db::update_mount_state_with_device(
+                db,
+                &root_str,
+                "unavailable",
+                "mount reappeared as empty directory while DB contains tracks",
+                current_dev_id,
+            )
+            .await;
+            return Ok(());
+        }
     }
 
     let mut existing_map: std::collections::HashMap<String, &Track> =
@@ -370,7 +426,8 @@ pub async fn reconcile_root(
         }
     }
 
-    let _ = michi_db::update_mount_state(db, &root.display().to_string(), "online", "").await;
+    let _ =
+        michi_db::update_mount_state_with_device(db, &root_str, "online", "", current_dev_id).await;
 
     if !tracks_to_upsert.is_empty() {
         michi_db::upsert_tracks(db, &tracks_to_upsert).await?;
@@ -576,6 +633,12 @@ mod tests {
         };
 
         michi_db::upsert_track(&pool, &track).await.unwrap();
+
+        // Simulate previous online state with NAS device ID (e.g. 99999)
+        let mount_str = mount_path.display().to_string();
+        michi_db::update_mount_state_with_device(&pool, &mount_str, "online", "", Some(99999))
+            .await
+            .unwrap();
 
         // Simulate mount drop: the mountpoint directory exists on disk, but is empty (0 tracks found)
         // scan_root_cancellable on the empty dir returns ScanResult::Success(vec![])
@@ -793,6 +856,90 @@ mod tests {
             in_db.content_hash.as_deref(),
             Some(expected_hash_bbb.as_str()),
             "content_hash MUST be recomputed when file fingerprint changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mount_device_identity_mismatch_preserves_db_tracks() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let song_file = root.join("song.mp3");
+        fs::write(&song_file, b"sample audio content").unwrap();
+
+        // 1. Initial track in DB
+        let track = scan_file(root.to_path_buf(), song_file.clone())
+            .await
+            .unwrap();
+        let track_id = track.id;
+        michi_db::upsert_track(&pool, &track).await.unwrap();
+
+        // 2. Record a simulated mount device ID (e.g., NAS device ID 88888)
+        let root_str = root.display().to_string();
+        michi_db::update_mount_state_with_device(&pool, &root_str, "online", "", Some(88888))
+            .await
+            .unwrap();
+
+        // 3. Reconcile root where current device ID is local filesystem (different from 88888)
+        // Even if the scan returns a different file or empty, device mismatch MUST abort deletion!
+        let scan_res = ScanResult::Success(vec![]);
+        reconcile_root(&pool, root, &scan_res, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        // 4. Verify track is STILL in DB
+        let in_db = michi_db::get_track(&pool, &track_id).await.unwrap();
+        assert!(
+            in_db.is_some(),
+            "DB tracks MUST be preserved when mount device identity mismatches"
+        );
+
+        // Verify mount guard recorded unavailable state
+        let states = michi_db::get_mount_states(&pool).await.unwrap();
+        let root_state = states.iter().find(|(p, ..)| p == &root_str).unwrap();
+        assert_eq!(root_state.1, "unavailable");
+        assert!(root_state.4.contains("identity mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_legitimate_empty_library_deletes_tracks_when_device_identity_matches() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let song_file = root.join("song.mp3");
+        fs::write(&song_file, b"sample audio content").unwrap();
+
+        // 1. Initial track scanned and reconciled with true device ID
+        let track = scan_file(root.to_path_buf(), song_file.clone())
+            .await
+            .unwrap();
+        let track_id = track.id;
+        let scan_res1 = ScanResult::Success(vec![track]);
+        reconcile_root(&pool, root, &scan_res1, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(michi_db::get_track(&pool, &track_id)
+            .await
+            .unwrap()
+            .is_some());
+
+        // 2. User deletes song.mp3 from the legitimate verified filesystem
+        fs::remove_file(&song_file).unwrap();
+
+        // 3. Reconcile root with empty scan on the SAME device
+        let scan_res2 = ScanResult::Success(vec![]);
+        reconcile_root(&pool, root, &scan_res2, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        // 4. Track should be legitimately deleted
+        assert!(
+            michi_db::get_track(&pool, &track_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "Track should be deleted when library is legitimately emptied on matching device"
         );
     }
 }

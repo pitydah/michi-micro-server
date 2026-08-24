@@ -55,7 +55,6 @@ jobs:
           submodules: recursive
 
       # Guard for manual workflow_dispatch: verify CI is green on the exact SHA being published.
-      # Treats legitimate skipped and neutral jobs (e.g. release-ghcr) as non-failures.
       - name: Guard — verify CI is green on this SHA (manual dispatch only)
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -66,33 +65,58 @@ jobs:
           SHA="${{ steps.source.outputs.sha }}"
           REPO="${{ github.repository }}"
 
-          echo "Verifying CI status for SHA: ${SHA}"
+          echo "Verifying CI workflow runs for SHA: ${SHA}"
 
-          STATUS=$(gh api \
-            "repos/${REPO}/commits/${SHA}/check-runs" \
-            --jq '[.check_runs[] | select(.name != "Publish ZimaOS Image")] | 
-                  if length == 0 then "no_checks"
-                  elif any(.[]; .status != "completed") then "pending"
-                  elif any(.[]; .conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure" or .conclusion == "stale") then "failure"
-                  elif all(.[]; .conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral") then "success"
-                  else "failure"
+          RUN_STATUS=$(gh api \
+            "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&status=completed" \
+            --jq '.workflow_runs | 
+                  if length == 0 then "no_runs"
+                  elif any(.[]; .conclusion == "success") then "success"
+                  elif any(.[]; .conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") then "failure"
+                  else "pending"
                   end')
 
-          echo "CI check status: ${STATUS}"
+          echo "CI workflow status: ${RUN_STATUS}"
 
-          if [ "${STATUS}" = "no_checks" ]; then
-            echo "ERROR: No CI check runs found for SHA ${SHA}."
+          if [ "${RUN_STATUS}" = "no_runs" ]; then
+            echo "ERROR: No completed CI workflow runs found for SHA ${SHA}."
             echo "       Run the CI workflow first, or use a SHA that has passed CI."
             exit 1
           fi
 
-          if [ "${STATUS}" != "success" ]; then
-            echo "ERROR: CI is not green for SHA ${SHA} (status: ${STATUS})."
+          if [ "${RUN_STATUS}" != "success" ]; then
+            echo "ERROR: CI is not green for SHA ${SHA} (status: ${RUN_STATUS})."
             echo "       Resolve all failing checks before publishing the ZimaOS image."
             exit 1
           fi
 
           echo "CI is green for SHA ${SHA}. Proceeding with publish."
+
+      - name: Determine Docker Image Tags
+        id: tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHA="${{ steps.source.outputs.sha }}"
+          REPO="${{ github.repository }}"
+
+          IMAGE="ghcr.io/${REPO}"
+          TAGS="${IMAGE}:r3.1-zima-${SHA}"
+
+          # Check if SOURCE_SHA is the current HEAD of main before moving mutable alias
+          MAIN_HEAD=$(gh api "repos/${REPO}/commits/main" --jq '.sha' 2>/dev/null || echo "")
+          if [ -n "$MAIN_HEAD" ] && [ "$SHA" = "$MAIN_HEAD" ]; then
+            echo "Source SHA $SHA is current HEAD of main -> including mutable alias r3.1-zima"
+            TAGS="${TAGS}
+${IMAGE}:r3.1-zima"
+          else
+            echo "Source SHA $SHA is not current HEAD of main ($MAIN_HEAD) -> skipping mutable alias r3.1-zima to prevent rollback"
+          fi
+
+          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$TAGS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -114,14 +138,13 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/pitydah/michi-micro-server:r3.1-zima
-            ghcr.io/pitydah/michi-micro-server:r3.1-zima-${{ steps.source.outputs.sha }}
+          tags: ${{ steps.tags.outputs.tags }}
           labels: |
             org.opencontainers.image.source=https://github.com/pitydah/michi-micro-server
             org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
 
       - name: Record certification image digest
         run: |

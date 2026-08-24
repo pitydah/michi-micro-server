@@ -79,9 +79,44 @@ impl LibraryWatcher {
         };
 
         let path_string = root.display().to_string();
-        let _ = michi_db::update_mount_state(&self.db, &path_string, "online", "").await;
+        let current_dev_id = crate::get_path_device_id(root);
+        let recorded_dev_id = michi_db::get_mount_device_id(&self.db, &path_string)
+            .await
+            .ok()
+            .flatten();
+
+        // 1. Device identity check: if filesystem device ID changed, mount is lost or replaced!
+        if let (Some(expected), Some(current_dev)) = (recorded_dev_id, current_dev_id) {
+            if expected != current_dev {
+                warn!(
+                    path = %root.display(),
+                    expected_dev = expected,
+                    current_dev = current_dev,
+                    "watcher detected mount device identity mismatch; mount lost or replaced; preserving DB"
+                );
+                let _ = michi_db::update_mount_state_with_device(
+                    &self.db,
+                    &path_string,
+                    "unavailable",
+                    "mount device identity mismatch: filesystem lost or replaced",
+                    Some(current_dev),
+                )
+                .await;
+                snapshots.insert(root.to_path_buf(), None);
+                return;
+            }
+        }
+
         let previous = snapshots.insert(root.to_path_buf(), Some(current.clone()));
         let Some(previous) = previous else {
+            let _ = michi_db::update_mount_state_with_device(
+                &self.db,
+                &path_string,
+                "online",
+                "",
+                current_dev_id,
+            )
+            .await;
             return;
         };
         let Some(previous) = previous else {
@@ -92,6 +127,25 @@ impl LibraryWatcher {
             }
             return;
         };
+
+        let _ = michi_db::update_mount_state_with_device(
+            &self.db,
+            &path_string,
+            "online",
+            "",
+            current_dev_id,
+        )
+        .await;
+
+        // If current is empty but previous was non-empty:
+        // Double check device identity before treating as legitimate empty library!
+        if current.is_empty() && !previous.is_empty() && current_dev_id.is_none() {
+            warn!(
+                path = %root.display(),
+                "watcher skipped deletion: unable to confirm device identity on empty snapshot"
+            );
+            return;
+        }
 
         for path in current
             .iter()
@@ -122,6 +176,10 @@ impl LibraryWatcher {
         for path in previous.keys().filter(|path| !current.contains_key(*path)) {
             if cancel.is_cancelled() {
                 return;
+            }
+            // Double check that the individual file actually disappeared on disk before deleting from DB
+            if path.exists() {
+                continue;
             }
             match michi_db::find_track_by_path(&self.db, &path.display().to_string()).await {
                 Ok(Some(track)) => {
