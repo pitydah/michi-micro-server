@@ -3898,6 +3898,95 @@ async fn test_v1_import_session_survives_memory_wipe_and_recovers_from_manifest(
 }
 
 #[tokio::test]
+async fn test_v1_import_same_name_different_checksum_collision_handled() {
+    let (app, _) = make_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/import/session")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"total_tracks":2,"total_playlists":0}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let session: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let sid = session["session_id"].as_str().unwrap().to_string();
+
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    // Upload 1: Song.flac with content A
+    let data_a = base64::engine::general_purpose::STANDARD.encode(b"content AAA distinct");
+    let mut h_a = Sha256::new();
+    h_a.update(b"content AAA distinct");
+    let hash_a = hex::encode(h_a.finalize());
+
+    let resp_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/v1/import/upload/{sid}"))
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"filename":"Track.flac","data":"{data_a}","hash":"{hash_a}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_a.status(), StatusCode::OK);
+
+    // Upload 2: Song.flac with content B (same filename, different content)
+    let data_b = base64::engine::general_purpose::STANDARD.encode(b"content BBB distinct");
+    let mut h_b = Sha256::new();
+    h_b.update(b"content BBB distinct");
+    let hash_b = hex::encode(h_b.finalize());
+
+    let resp_b = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/v1/import/upload/{sid}"))
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"filename":"Track.flac","data":"{data_b}","hash":"{hash_b}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_b.status(), StatusCode::OK);
+
+    // Commit both files
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/v1/import/commit/{sid}"))
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let commit: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let mapping = commit["mapping"].as_array().unwrap();
+    assert_eq!(
+        mapping.len(),
+        2,
+        "both files must be committed without collision corruption"
+    );
+}
+
+#[tokio::test]
 async fn test_v1_auth_real_pair_and_use_token() {
     let (app, _, state) = make_app_with_state().await;
     let client = fresh_test_client("auth-test-player");

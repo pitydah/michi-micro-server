@@ -68,14 +68,29 @@ pub struct ImportSessionState {
 }
 
 impl ImportSessionState {
-    pub async fn save_manifest(&self, session_dir: &std::path::Path) {
+    pub async fn save_manifest(&self, session_dir: &std::path::Path) -> Result<(), std::io::Error> {
         let manifest_path = session_dir.join("manifest.json");
-        if let Ok(data) = serde_json::to_string_pretty(self) {
-            let tmp_path = session_dir.join("manifest.json.tmp");
-            if tokio::fs::write(&tmp_path, data.as_bytes()).await.is_ok() {
-                let _ = tokio::fs::rename(&tmp_path, &manifest_path).await;
-            }
+        let tmp_path = session_dir.join("manifest.json.tmp");
+        let data = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        // 1. Write temp file and fsync it
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut file = tokio::fs::File::create(&tmp_path).await?;
+            file.write_all(data.as_bytes()).await?;
+            file.sync_all().await?;
         }
+
+        // 2. Atomic rename
+        tokio::fs::rename(&tmp_path, &manifest_path).await?;
+
+        // 3. Fsync parent directory to ensure metadata durability
+        if let Ok(dir_file) = std::fs::File::open(session_dir) {
+            let _ = dir_file.sync_all();
+        }
+
+        Ok(())
     }
 
     pub async fn load_manifest(session_dir: &std::path::Path) -> Option<Self> {
@@ -115,10 +130,26 @@ const MAX_IMPORT_SESSIONS: usize = 100;
 lazy_static! {
     static ref IMPORT_SESSIONS: Arc<RwLock<HashMap<Uuid, ImportSessionState>>> =
         Arc::new(RwLock::new(HashMap::new()));
+    static ref SESSION_LOCKS: Arc<RwLock<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+}
+
+pub async fn get_session_lock(session_id: &Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = SESSION_LOCKS.write().await;
+    locks
+        .entry(*session_id)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+pub async fn remove_session_lock(session_id: &Uuid) {
+    let mut locks = SESSION_LOCKS.write().await;
+    locks.remove(session_id);
 }
 
 pub async fn clear_import_sessions_for_test() {
     IMPORT_SESSIONS.write().await.clear();
+    SESSION_LOCKS.write().await.clear();
 }
 
 fn sanitize_filename(filename: &str) -> String {
@@ -256,7 +287,16 @@ pub async fn import_session_handler(
         seen_hashes: Vec::new(),
         files: Vec::new(),
     };
-    session_state.save_manifest(&session_dir).await;
+    session_state
+        .save_manifest(&session_dir)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "IO_ERROR",
+                &format!("failed to persist initial session manifest: {e}"),
+            )
+        })?;
 
     {
         let mut sessions = IMPORT_SESSIONS.write().await;
@@ -278,7 +318,11 @@ pub async fn import_upload_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     use base64::Engine;
 
-    let _session_state = get_or_recover_session(
+    // Acquire exclusive lock for this session to guarantee thread-safe upload & commit serialization
+    let session_lock = get_session_lock(&session_id).await;
+    let _session_guard = session_lock.lock().await;
+
+    let mut session_state = get_or_recover_session(
         &session_id,
         &state.config.music_paths,
         &state.config.cache_path,
@@ -347,25 +391,21 @@ pub async fn import_upload_handler(
         }
     }
 
-    {
-        let sessions = IMPORT_SESSIONS.read().await;
-        if let Some(s) = sessions.get(&session_id) {
-            if s.total_size_bytes + data.len() as u64 > MAX_SESSION_SIZE {
-                return Err(v1_error(
-                    StatusCode::BAD_REQUEST,
-                    "SESSION_SIZE_EXCEEDED",
-                    &format!("session exceeds max total size of {MAX_SESSION_SIZE} bytes"),
-                ));
-            }
-            if s.seen_hashes.contains(&data_hash) {
-                return Ok(Json(serde_json::json!({
-                    "local_track_id": local_track_id,
-                    "status": "duplicate",
-                    "remote_track_id": null,
-                    "checksum": data_hash,
-                })));
-            }
-        }
+    // Check quota and duplicate under exclusive session lock
+    if session_state.total_size_bytes + data.len() as u64 > MAX_SESSION_SIZE {
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "SESSION_SIZE_EXCEEDED",
+            &format!("session exceeds max total size of {MAX_SESSION_SIZE} bytes"),
+        ));
+    }
+    if session_state.seen_hashes.contains(&data_hash) {
+        return Ok(Json(serde_json::json!({
+            "local_track_id": local_track_id,
+            "status": "duplicate",
+            "remote_track_id": null,
+            "checksum": data_hash,
+        })));
     }
 
     let ext = std::path::Path::new(&body.filename)
@@ -390,7 +430,22 @@ pub async fn import_upload_handler(
 
     let file_path = import_dir.join(&staging_filename);
     if !file_path.exists() {
-        tokio::fs::write(&file_path, &data).await.map_err(|e| {
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::File::create(&file_path).await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "IO_ERROR",
+                &e.to_string(),
+            )
+        })?;
+        f.write_all(&data).await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "IO_ERROR",
+                &e.to_string(),
+            )
+        })?;
+        f.sync_all().await.map_err(|e| {
             v1_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "IO_ERROR",
@@ -399,22 +454,28 @@ pub async fn import_upload_handler(
         })?;
     }
 
+    // Resolve and atomically reserve safe_name within this session
     let mut safe_name = sanitize_filename(&body.filename);
-    // Check if session already has a file with the same safe_name but different checksum
+    if session_state
+        .files
+        .iter()
+        .any(|f| f.safe_name == safe_name && f.checksum != data_hash)
     {
-        let sessions = IMPORT_SESSIONS.read().await;
-        if let Some(s) = sessions.get(&session_id) {
-            if s.files
-                .iter()
-                .any(|f| f.safe_name == safe_name && f.checksum != data_hash)
-            {
-                let stem = std::path::Path::new(&safe_name)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("track");
-                let short_hash = &data_hash[..8.min(data_hash.len())];
-                safe_name = format!("{stem}_{short_hash}.{ext}");
-            }
+        let stem = std::path::Path::new(&safe_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("track")
+            .to_string();
+        let short_hash = &data_hash[..8.min(data_hash.len())];
+        safe_name = format!("{stem}_{short_hash}.{ext}");
+        let mut counter = 1;
+        while session_state
+            .files
+            .iter()
+            .any(|f| f.safe_name == safe_name && f.checksum != data_hash)
+        {
+            safe_name = format!("{stem}_{short_hash}_{counter}.{ext}");
+            counter += 1;
         }
     }
 
@@ -447,23 +508,28 @@ pub async fn import_upload_handler(
         remote_track_id: r_id,
     });
 
-    let updated_session = {
-        let mut sessions = IMPORT_SESSIONS.write().await;
-        if let Some(s) = sessions.get_mut(&session_id) {
-            s.imported_tracks += 1;
-            s.total_size_bytes += data.len() as u64;
-            s.seen_hashes.push(data_hash.clone());
-            if let Some(imp_file) = import_file_opt {
-                s.files.push(imp_file);
-            }
-            Some(s.clone())
-        } else {
-            None
-        }
-    };
+    session_state.imported_tracks += 1;
+    session_state.total_size_bytes += data.len() as u64;
+    session_state.seen_hashes.push(data_hash.clone());
+    if let Some(imp_file) = import_file_opt {
+        session_state.files.push(imp_file);
+    }
 
-    if let Some(s) = updated_session {
-        s.save_manifest(&import_dir).await;
+    // Persist manifest durably to disk
+    session_state
+        .save_manifest(&import_dir)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "IO_ERROR",
+                &format!("failed to persist session manifest: {e}"),
+            )
+        })?;
+
+    {
+        let mut sessions = IMPORT_SESSIONS.write().await;
+        sessions.insert(session_id, session_state);
     }
 
     michi_db::update_import_session_progress(&state.db, &session_id, 1, data.len() as u64)
@@ -668,6 +734,9 @@ pub async fn import_commit_handler(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let session_lock = get_session_lock(&session_id).await;
+    let _session_guard = session_lock.lock().await;
+
     let session_state = get_or_recover_session(
         &session_id,
         &state.config.music_paths,
@@ -863,18 +932,25 @@ pub async fn import_commit_handler(
         }));
     }
 
-    // Cleanup staging ONLY after all files copied and DB updated successfully
-    cleanup_session_dir(&staging_dir).await;
-
+    // Step 7: Durably mark session as Committed in SQLite BEFORE cleaning staging
     michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Committed, None)
         .await
-        .ok();
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("failed to mark import session committed in DB: {e}"),
+            )
+        })?;
     michi_db::close_import_session(&state.db, &session_id)
         .await
         .ok();
 
-    // Remove from active memory sessions now that commit succeeded
+    // Remove from active RAM sessions
     IMPORT_SESSIONS.write().await.remove(&session_id);
+
+    // Step 8: Best-effort cleanup of staging directory AFTER durable commit
+    cleanup_session_dir(&staging_dir).await;
 
     let _ = state.tx.send(r#"{"type":"library_updated"}"#.to_string());
 
@@ -890,6 +966,8 @@ pub async fn import_rollback_handler(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
 ) -> Json<serde_json::Value> {
+    let session_lock = get_session_lock(&session_id).await;
+    let _session_guard = session_lock.lock().await;
     IMPORT_SESSIONS.write().await.remove(&session_id);
     let staging_dir = get_session_dir(
         &state.config.music_paths,
