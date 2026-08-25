@@ -2989,7 +2989,7 @@ pub async fn update_import_session_progress(
 }
 
 pub async fn close_import_session(pool: &SqlitePool, session_id: &Uuid) -> Result<(), DbError> {
-    sqlx::query("UPDATE import_sessions SET status = 'completed', status_text = 'committed' WHERE session_id = ?")
+    sqlx::query("UPDATE import_sessions SET status = 'committed', status_text = 'committed' WHERE session_id = ?")
         .bind(session_id.to_string())
         .execute(pool)
         .await?;
@@ -3002,13 +3002,17 @@ pub async fn set_import_session_status(
     status: &michi_core::ImportState,
     error_message: Option<&str>,
 ) -> Result<(), DbError> {
-    sqlx::query("UPDATE import_sessions SET status = ?, status_text = ?, error_message = ? WHERE session_id = ?")
-        .bind(status.as_str())
-        .bind(status.as_str())
-        .bind(error_message)
-        .bind(session_id.to_string())
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE import_sessions
+         SET status = ?, status_text = ?, error_message = ?
+         WHERE session_id = ? AND status NOT IN ('committed', 'completed', 'rolled_back', 'expired')",
+    )
+    .bind(status.as_str())
+    .bind(status.as_str())
+    .bind(error_message)
+    .bind(session_id.to_string())
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -4507,7 +4511,11 @@ pub async fn update_mount_state_with_device(
             last_checked = excluded.last_checked,
             last_online = CASE WHEN excluded.state = 'online' THEN excluded.last_checked ELSE mount_guard.last_online END,
             error_message = excluded.error_message,
-            device_id = COALESCE(excluded.device_id, mount_guard.device_id)"
+            device_id = CASE
+               WHEN excluded.state = 'online' AND excluded.device_id IS NOT NULL THEN excluded.device_id
+               ELSE mount_guard.device_id
+            END
+"
     )
     .bind(path)
     .bind(state)

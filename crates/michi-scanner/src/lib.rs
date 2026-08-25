@@ -331,7 +331,8 @@ pub async fn reconcile_root(
 
     // Mount Identity Protection:
     // 1. If device ID changed (expected != current): mount lost/replaced -> PRESERVE DB.
-    // 2. If mount was previously "unavailable" and returns 0 tracks: mount recreated empty -> PRESERVE DB.
+    // 2. If device ID not yet recorded (v39 -> v40 bootstrap): verify track continuity before trusting current device.
+    // 3. If mount was previously "unavailable" and returns 0 tracks: mount recreated empty -> PRESERVE DB.
     if !root_existing.is_empty() {
         if let (Some(expected), Some(current)) = (recorded_dev_id, current_dev_id) {
             if expected != current {
@@ -348,11 +349,42 @@ pub async fn reconcile_root(
                     &root_str,
                     "unavailable",
                     "mount device identity mismatch: filesystem lost or replaced",
-                    Some(current),
+                    None,
                 )
                 .await;
                 return Ok(());
             }
+        } else if recorded_dev_id.is_none() {
+            // Bootstrap phase for pre-existing libraries (e.g. migration v39 -> v40):
+            // Check if there is continuity between DB tracks and files physically present on disk.
+            let has_continuity = tracks.iter().any(|t| {
+                root_existing
+                    .iter()
+                    .any(|e| e.id == t.id || e.file_path == t.file_path)
+            });
+
+            if !has_continuity {
+                warn!(
+                    path = %root.display(),
+                    existing_count = root_existing.len(),
+                    found_count = tracks.len(),
+                    "reconcile_root aborted: unverified filesystem device on pre-existing library with no matching tracks (bootstrap fail-closed). Preserving DB."
+                );
+                let _ = michi_db::update_mount_state_with_device(
+                    db,
+                    &root_str,
+                    "unavailable",
+                    "bootstrap pending: unverified device on existing non-empty library",
+                    None,
+                )
+                .await;
+                return Ok(());
+            }
+            info!(
+                path = %root.display(),
+                "bootstrapping trusted mount device identity ({:?}) for existing library",
+                current_dev_id
+            );
         } else if recorded_dev_id.is_some() && current_dev_id.is_none() {
             warn!(
                 path = %root.display(),
@@ -386,7 +418,7 @@ pub async fn reconcile_root(
                 &root_str,
                 "unavailable",
                 "mount reappeared as empty directory while DB contains tracks",
-                current_dev_id,
+                None,
             )
             .await;
             return Ok(());
@@ -941,5 +973,151 @@ mod tests {
                 .is_none(),
             "Track should be deleted when library is legitimately emptied on matching device"
         );
+    }
+
+    #[tokio::test]
+    async fn test_mount_device_identity_mismatch_multi_poll_preserves_trusted_baseline() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let root_str = root.display().to_string();
+        let song_file = root.join("song.mp3");
+        fs::write(&song_file, b"sample audio content").unwrap();
+
+        // 1. Initial track in DB with trusted device ID 88888 (e.g. NAS)
+        let track = scan_file(root.to_path_buf(), song_file.clone())
+            .await
+            .unwrap();
+        let track_id = track.id;
+        michi_db::upsert_track(&pool, &track).await.unwrap();
+        michi_db::update_mount_state_with_device(&pool, &root_str, "online", "", Some(88888))
+            .await
+            .unwrap();
+
+        // 2. Poll 1: mount lost, /music now on local filesystem (st_dev != 88888) with a random file
+        let random_file = root.join("random.mp3");
+        fs::write(&random_file, b"random noise").unwrap();
+        let random_track = scan_file(root.to_path_buf(), random_file.clone())
+            .await
+            .unwrap();
+
+        let scan_res1 = ScanResult::Success(vec![random_track.clone()]);
+        reconcile_root(&pool, root, &scan_res1, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        // Verify DB preserved
+        assert!(michi_db::get_track(&pool, &track_id)
+            .await
+            .unwrap()
+            .is_some());
+        // Verify trusted device ID was NOT overwritten (remains 88888)
+        let stored_dev = michi_db::get_mount_device_id(&pool, &root_str)
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_dev,
+            Some(88888),
+            "Trusted device ID must not be poisoned on mismatch"
+        );
+
+        // 3. Poll 2: polling continues on mismatched filesystem -> MUST STILL DETECT MISMATCH
+        let scan_res2 = ScanResult::Success(vec![random_track.clone()]);
+        reconcile_root(&pool, root, &scan_res2, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(michi_db::get_track(&pool, &track_id)
+            .await
+            .unwrap()
+            .is_some());
+        let stored_dev2 = michi_db::get_mount_device_id(&pool, &root_str)
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_dev2,
+            Some(88888),
+            "Trusted device ID must still remain 88888 on subsequent polls"
+        );
+
+        // 4. Poll 3: empty scan on mismatched filesystem -> MUST STILL DETECT MISMATCH AND PRESERVE DB
+        let scan_res3 = ScanResult::Success(vec![]);
+        reconcile_root(&pool, root, &scan_res3, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(michi_db::get_track(&pool, &track_id)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_migration_v39_to_v40_bootstrap_fail_closed_on_disconnected_mount() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let root_str = root.display().to_string();
+
+        // 1. Existing DB tracks before v40 migration (device_id is NULL)
+        let track_id = uuid::Uuid::new_v4();
+        let track = Track {
+            id: track_id,
+            title: Some("Historical Track".into()),
+            artist: None,
+            album: None,
+            album_artist: None,
+            duration_ms: None,
+            file_path: root
+                .join("historical_song.flac")
+                .to_string_lossy()
+                .to_string(),
+            format: AudioFormat::Flac,
+            sample_rate: None,
+            bit_depth: None,
+            channels: None,
+            artwork_id: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            disc_number: None,
+            content_hash: Some("hash123".into()),
+            file_size: None,
+            file_mtime_ns: None,
+            starred: false,
+            rating: 0,
+            starred_at: None,
+            replaygain_track_gain: None,
+            replaygain_track_peak: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        michi_db::upsert_track(&pool, &track).await.unwrap();
+
+        // Verify device_id is NULL initially
+        assert_eq!(
+            michi_db::get_mount_device_id(&pool, &root_str)
+                .await
+                .unwrap(),
+            None
+        );
+
+        // 2. First boot after upgrade, but NAS is disconnected -> scan returns 0 tracks or unrelated track
+        let scan_res = ScanResult::Success(vec![]);
+        reconcile_root(&pool, root, &scan_res, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        // Verify tracks are PRESERVED and mount is marked unavailable with bootstrap pending
+        let in_db = michi_db::get_track(&pool, &track_id).await.unwrap();
+        assert!(
+            in_db.is_some(),
+            "Historical tracks must be preserved during bootstrap when mount is disconnected"
+        );
+
+        let states = michi_db::get_mount_states(&pool).await.unwrap();
+        let root_state = states.iter().find(|(p, ..)| p == &root_str).unwrap();
+        assert_eq!(root_state.1, "unavailable");
+        assert!(root_state.4.contains("bootstrap pending"));
     }
 }

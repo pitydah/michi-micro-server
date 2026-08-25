@@ -99,9 +99,10 @@ impl LibraryWatcher {
                     &path_string,
                     "unavailable",
                     "mount device identity mismatch: filesystem lost or replaced",
-                    Some(current_dev),
+                    None,
                 )
                 .await;
+
                 snapshots.insert(root.to_path_buf(), None);
                 return;
             }

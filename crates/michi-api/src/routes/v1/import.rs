@@ -329,6 +329,21 @@ pub async fn import_upload_handler(
         ));
     }
 
+    // Check durable SQLite status
+    if let Ok(Some(db_session)) = michi_db::get_import_session_full(&state.db, &session_id).await {
+        if db_session.status == "committed"
+            || db_session.status == "completed"
+            || db_session.status == "rolled_back"
+            || db_session.status == "expired"
+        {
+            return Err(v1_error(
+                StatusCode::GONE,
+                "SESSION_CLOSED",
+                "import session is already closed or terminal",
+            ));
+        }
+    }
+
     let mut session_state = get_or_recover_session(
         &session_id,
         &state.config.music_paths,
@@ -751,6 +766,27 @@ pub async fn import_commit_handler(
         ));
     }
 
+    // Check durable SQLite status
+    if let Ok(Some(db_session)) = michi_db::get_import_session_full(&state.db, &session_id).await {
+        if db_session.status == "committed" || db_session.status == "completed" {
+            return Err(v1_error(
+                StatusCode::CONFLICT,
+                "SESSION_ALREADY_COMMITTED",
+                "session has already been committed",
+            ));
+        }
+        if db_session.status == "rolled_back"
+            || db_session.status == "expired"
+            || db_session.status == "failed"
+        {
+            return Err(v1_error(
+                StatusCode::GONE,
+                "SESSION_CLOSED",
+                "import session is closed or terminal",
+            ));
+        }
+    }
+
     let session_state = get_or_recover_session(
         &session_id,
         &state.config.music_paths,
@@ -983,11 +1019,26 @@ pub async fn import_commit_handler(
 pub async fn import_rollback_handler(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let session_lock = get_session_lock(&session_id).await;
     let mut session_guard = session_lock.lock().await;
+
+    // Check durable SQLite status first
+    if let Ok(Some(db_session)) = michi_db::get_import_session_full(&state.db, &session_id).await {
+        if db_session.status == "committed" || db_session.status == "completed" {
+            return Err(v1_error(
+                StatusCode::CONFLICT,
+                "CANNOT_ROLLBACK_COMMITTED",
+                "cannot rollback an import session that has already been committed",
+            ));
+        }
+        if db_session.status == "rolled_back" {
+            return Ok(Json(serde_json::json!({ "status": "rolled_back" })));
+        }
+    }
+
     if *session_guard {
-        return Json(serde_json::json!({ "status": "already_closed" }));
+        return Ok(Json(serde_json::json!({ "status": "already_closed" })));
     }
     *session_guard = true;
     IMPORT_SESSIONS.write().await.remove(&session_id);
@@ -1000,12 +1051,9 @@ pub async fn import_rollback_handler(
     michi_db::set_import_session_status(&state.db, &session_id, &ImportState::RolledBack, None)
         .await
         .ok();
-    michi_db::close_import_session(&state.db, &session_id)
-        .await
-        .ok();
     drop(session_guard);
     remove_session_lock(&session_id).await;
-    Json(serde_json::json!({ "status": "rolled_back" }))
+    Ok(Json(serde_json::json!({ "status": "rolled_back" })))
 }
 
 pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool) {

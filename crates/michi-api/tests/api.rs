@@ -2597,6 +2597,40 @@ async fn test_v1_import_flow() {
     assert_eq!(resp.status(), StatusCode::OK);
     let commit: Value = serde_json::from_str(&body_text(resp).await).unwrap();
     assert_eq!(commit["tracks_imported"], 2);
+
+    // 8. Subsequent rollback on already committed session MUST be rejected (409 Conflict)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/v1/import/rollback/{session_id}"))
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let err: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(err["error"]["code"], "CANNOT_ROLLBACK_COMMITTED");
+
+    // 9. Subsequent upload on already committed session MUST be rejected (410 Gone)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/v1/import/upload/{session_id}"))
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"filename":"song3.flac","data":"{audio_data}","hash":"{hash}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::GONE);
 }
 
 #[tokio::test]
@@ -2832,7 +2866,7 @@ async fn test_v1_import_rollback_cleans_staging() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::GONE);
 }
 
 #[tokio::test]

@@ -92,32 +92,6 @@ jobs:
 
           echo "CI is green for SHA ${SHA}. Proceeding with publish."
 
-      - name: Determine Docker Image Tags
-        id: tags
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          SHA="${{ steps.source.outputs.sha }}"
-          REPO="${{ github.repository }}"
-
-          IMAGE="ghcr.io/${REPO}"
-          TAGS="${IMAGE}:r3.1-zima-${SHA}"
-
-          # Check if SOURCE_SHA is the current HEAD of main before moving mutable alias
-          MAIN_HEAD=$(gh api "repos/${REPO}/commits/main" --jq '.sha' 2>/dev/null || echo "")
-          if [ -n "$MAIN_HEAD" ] && [ "$SHA" = "$MAIN_HEAD" ]; then
-            echo "Source SHA $SHA is current HEAD of main -> including mutable alias r3.1-zima"
-            TAGS="${TAGS}
-${IMAGE}:r3.1-zima"
-          else
-            echo "Source SHA $SHA is not current HEAD of main ($MAIN_HEAD) -> skipping mutable alias r3.1-zima to prevent rollback"
-          fi
-
-          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$TAGS" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -131,20 +105,38 @@ ${IMAGE}:r3.1-zima"
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and publish ZimaOS image
+      - name: Build and publish immutable SHA ZimaOS image
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
+          tags: ghcr.io/${{ github.repository }}:r3.1-zima-${{ steps.source.outputs.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/pitydah/michi-micro-server
             org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Update mutable r3.1-zima alias if still on main HEAD
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHA="${{ steps.source.outputs.sha }}"
+          REPO="${{ github.repository }}"
+          MAIN_HEAD=$(gh api "repos/${REPO}/commits/main" --jq '.sha' 2>/dev/null || echo "")
+
+          if [ -n "$MAIN_HEAD" ] && [ "$SHA" = "$MAIN_HEAD" ]; then
+            echo "Source SHA $SHA matches current main HEAD ($MAIN_HEAD). Updating mutable alias r3.1-zima..."
+            docker buildx imagetools create \
+              --tag "ghcr.io/${REPO}:r3.1-zima" \
+              "ghcr.io/${REPO}:r3.1-zima-${SHA}"
+            echo "Successfully updated ghcr.io/${REPO}:r3.1-zima to point to digest ${{ steps.build.outputs.digest }}"
+          else
+            echo "Source SHA $SHA is not current main HEAD ($MAIN_HEAD). Skipping mutable alias update to prevent rollback."
+          fi
 
       - name: Record certification image digest
         run: |
@@ -153,4 +145,5 @@ ${IMAGE}:r3.1-zima"
           echo "- **Image Digest**: \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Pinned URI**: \`ghcr.io/pitydah/michi-micro-server@${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Certified digest: ${{ steps.build.outputs.digest }}"
+
 

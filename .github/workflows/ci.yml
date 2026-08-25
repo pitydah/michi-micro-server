@@ -226,6 +226,8 @@ jobs:
               -o /dev/null \
               -w "%{http_code}" \
               -X POST \
+              -H 'Content-Type: application/json' \
+              --data '{}' \
               http://127.0.0.1:9090/api/v1/receivers/dummy/stream/test_pcm
           )"
 
@@ -235,6 +237,7 @@ jobs:
             echo "FAIL: expected 404 in release build, got $STATUS"
             exit 1
           fi
+
 
   ci-three-way-ecosystem:
     runs-on: ubuntu-latest
