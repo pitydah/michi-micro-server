@@ -110,14 +110,36 @@ impl LibraryWatcher {
 
         let previous = snapshots.insert(root.to_path_buf(), Some(current.clone()));
         let Some(previous) = previous else {
-            let _ = michi_db::update_mount_state_with_device(
-                &self.db,
-                &path_string,
-                "online",
-                "",
-                current_dev_id,
-            )
-            .await;
+            // First poll for this root:
+            // If device_id is not yet recorded, watcher MUST NOT establish the first trusted device
+            // when DB contains tracks! Delegate entirely to reconcile_root to verify continuity and bootstrap.
+            if recorded_dev_id.is_none() {
+                let scan_res = crate::scan_root_cancellable(root, cancel.clone()).await;
+                if let Err(error) = crate::reconcile_root(&self.db, root, &scan_res, cancel).await {
+                    warn!(path = %root.display(), %error, "reconcile_root failed during initial watcher bootstrap");
+                    snapshots.insert(root.to_path_buf(), None);
+                    return;
+                }
+                let mount_states = michi_db::get_mount_states(&self.db)
+                    .await
+                    .unwrap_or_default();
+                if mount_states
+                    .iter()
+                    .any(|(p, s, ..)| p == &path_string && s == "unavailable")
+                {
+                    snapshots.insert(root.to_path_buf(), None);
+                    return;
+                }
+            } else {
+                let _ = michi_db::update_mount_state_with_device(
+                    &self.db,
+                    &path_string,
+                    "online",
+                    "",
+                    current_dev_id,
+                )
+                .await;
+            }
             return;
         };
         let Some(previous) = previous else {
@@ -125,6 +147,18 @@ impl LibraryWatcher {
             let scan_res = crate::scan_root_cancellable(root, cancel.clone()).await;
             if let Err(error) = crate::reconcile_root(&self.db, root, &scan_res, cancel).await {
                 warn!(path = %root.display(), %error, "failed to reconcile restored mount");
+                snapshots.insert(root.to_path_buf(), None);
+                return;
+            }
+            let mount_states = michi_db::get_mount_states(&self.db)
+                .await
+                .unwrap_or_default();
+            if mount_states
+                .iter()
+                .any(|(p, s, ..)| p == &path_string && s == "unavailable")
+            {
+                snapshots.insert(root.to_path_buf(), None);
+                return;
             }
             return;
         };
@@ -297,5 +331,87 @@ mod tests {
         );
         // song.mp3 is now legitimately removed because the mount is online with song2.mp3
         assert!(michi_db::get_track(&db, &track.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_watcher_first_poll_with_historical_db_and_unverified_device_fails_closed() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("music");
+        std::fs::create_dir(&root).unwrap();
+
+        // 1. DB contains historical track from before upgrade, with device_id = NULL
+        let db_directory = tempfile::tempdir().unwrap();
+        let db = test_pool(&db_directory).await;
+        let track_id = uuid::Uuid::new_v4();
+        let historical_track = michi_core::Track {
+            id: track_id,
+            title: Some("Historical Track".into()),
+            artist: None,
+            album: None,
+            album_artist: None,
+            duration_ms: None,
+            file_path: root.join("historical.flac").to_string_lossy().to_string(),
+            format: michi_core::AudioFormat::Flac,
+            sample_rate: None,
+            bit_depth: None,
+            channels: None,
+            artwork_id: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            disc_number: None,
+            content_hash: Some("hash456".into()),
+            file_size: None,
+            file_mtime_ns: None,
+            starred: false,
+            rating: 0,
+            starred_at: None,
+            replaygain_track_gain: None,
+            replaygain_track_peak: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        michi_db::upsert_track(&db, &historical_track)
+            .await
+            .unwrap();
+
+        let path_string = root.display().to_string();
+        assert_eq!(
+            michi_db::get_mount_device_id(&db, &path_string)
+                .await
+                .unwrap(),
+            None
+        );
+
+        // 2. Filesystem on disk is disconnected/incorrect (e.g. empty or containing an unmatching file)
+        let dummy_file = root.join("unrelated.mp3");
+        std::fs::write(&dummy_file, b"unrelated track").unwrap();
+
+        // 3. First poll of watcher
+        let watcher = LibraryWatcher::new(vec![root.clone()], db.clone());
+        let cancel = CancellationToken::new();
+        let mut snapshots = HashMap::new();
+        watcher.poll_root(&root, &mut snapshots, &cancel).await;
+
+        // 4. Verify historical track was NOT destroyed
+        assert!(
+            michi_db::get_track(&db, &track_id).await.unwrap().is_some(),
+            "Historical track MUST be preserved on first watcher poll when device is unverified"
+        );
+
+        // Verify trusted device was NOT established to the incorrect device
+        let stored_dev = michi_db::get_mount_device_id(&db, &path_string)
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_dev, None,
+            "Watcher must NOT establish trusted device on unverified filesystem"
+        );
+
+        // Verify mount state is marked unavailable
+        let states = michi_db::get_mount_states(&db).await.unwrap();
+        let state = states.iter().find(|(p, ..)| p == &path_string).unwrap();
+        assert_eq!(state.1, "unavailable");
+        assert!(state.4.contains("bootstrap pending"));
     }
 }

@@ -4,7 +4,6 @@
     clippy::len_zero
 )]
 use base64::Engine;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
@@ -27,12 +26,14 @@ async fn test_db() -> SqlitePool {
 }
 
 fn test_config() -> Config {
+    let tmp = std::env::temp_dir().join(format!("michi-webui-test-{}", Uuid::new_v4()));
     Config {
         port: 9090,
-        music_paths: vec![PathBuf::from("/tmp/michi-test/music")],
-        config_path: PathBuf::from("/tmp/michi-test/config"),
-        cache_path: PathBuf::from("/tmp/michi-test/cache"),
+        music_paths: vec![tmp.join("music")],
+        config_path: tmp.join("config"),
+        cache_path: tmp.join("cache"),
         database_url: "sqlite::memory:".to_string(),
+
         version: "0.2.0",
         sync_peers: Vec::new(),
         sync_name: "michi-server-test".to_string(),

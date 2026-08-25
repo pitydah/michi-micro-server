@@ -26,12 +26,14 @@ async fn test_db() -> SqlitePool {
 }
 
 fn test_config() -> Config {
+    let tmp = std::env::temp_dir().join(format!("michi-test-{}", Uuid::new_v4()));
     Config {
         port: 9999,
-        music_paths: vec![PathBuf::from("/tmp/michi-test/music")],
-        config_path: PathBuf::from("/tmp/michi-test/config"),
-        cache_path: PathBuf::from("/tmp/michi-test/cache"),
+        music_paths: vec![tmp.join("music")],
+        config_path: tmp.join("config"),
+        cache_path: tmp.join("cache"),
         database_url: "sqlite::memory:".to_string(),
+
         version: "test",
         sync_peers: Vec::new(),
         sync_name: "test".to_string(),
@@ -399,6 +401,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         config_path: PathBuf::from("/tmp/michi-test/config"),
         cache_path: PathBuf::from("/tmp/michi-test/cache"),
         database_url: "sqlite::memory:".to_string(),
+
         version: "test",
         sync_peers: Vec::new(),
         sync_name: "test".to_string(),

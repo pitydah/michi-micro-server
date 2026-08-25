@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use michi_core::ImportState;
+use tracing::error;
 
 fn v1_error(
     status: StatusCode,
@@ -330,16 +331,27 @@ pub async fn import_upload_handler(
     }
 
     // Check durable SQLite status
-    if let Ok(Some(db_session)) = michi_db::get_import_session_full(&state.db, &session_id).await {
-        if db_session.status == "committed"
-            || db_session.status == "completed"
-            || db_session.status == "rolled_back"
-            || db_session.status == "expired"
-        {
+    match michi_db::get_import_session_full(&state.db, &session_id).await {
+        Ok(Some(db_session)) => {
+            if db_session.status == "committed"
+                || db_session.status == "completed"
+                || db_session.status == "rolled_back"
+                || db_session.status == "expired"
+            {
+                return Err(v1_error(
+                    StatusCode::GONE,
+                    "SESSION_CLOSED",
+                    "import session is already closed or terminal",
+                ));
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            error!(session_id = %session_id, error = %e, "database error checking session status");
             return Err(v1_error(
-                StatusCode::GONE,
-                "SESSION_CLOSED",
-                "import session is already closed or terminal",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("failed to verify session status from database: {e}"),
             ));
         }
     }
@@ -556,7 +568,14 @@ pub async fn import_upload_handler(
 
     michi_db::update_import_session_progress(&state.db, &session_id, 1, data.len() as u64)
         .await
-        .ok();
+        .map_err(|e| {
+            error!(session_id = %session_id, error = %e, "database error updating session progress");
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("failed to update import session progress in database: {e}"),
+            )
+        })?;
 
     Ok(Json(serde_json::json!({
         "local_track_id": local_track_id,
@@ -767,22 +786,33 @@ pub async fn import_commit_handler(
     }
 
     // Check durable SQLite status
-    if let Ok(Some(db_session)) = michi_db::get_import_session_full(&state.db, &session_id).await {
-        if db_session.status == "committed" || db_session.status == "completed" {
-            return Err(v1_error(
-                StatusCode::CONFLICT,
-                "SESSION_ALREADY_COMMITTED",
-                "session has already been committed",
-            ));
+    match michi_db::get_import_session_full(&state.db, &session_id).await {
+        Ok(Some(db_session)) => {
+            if db_session.status == "committed" || db_session.status == "completed" {
+                return Err(v1_error(
+                    StatusCode::CONFLICT,
+                    "SESSION_ALREADY_COMMITTED",
+                    "session has already been committed",
+                ));
+            }
+            if db_session.status == "rolled_back"
+                || db_session.status == "expired"
+                || db_session.status == "failed"
+            {
+                return Err(v1_error(
+                    StatusCode::GONE,
+                    "SESSION_CLOSED",
+                    "import session is closed or terminal",
+                ));
+            }
         }
-        if db_session.status == "rolled_back"
-            || db_session.status == "expired"
-            || db_session.status == "failed"
-        {
+        Ok(None) => {}
+        Err(e) => {
+            error!(session_id = %session_id, error = %e, "database error checking session status");
             return Err(v1_error(
-                StatusCode::GONE,
-                "SESSION_CLOSED",
-                "import session is closed or terminal",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("failed to verify session status from database: {e}"),
             ));
         }
     }
@@ -803,7 +833,14 @@ pub async fn import_commit_handler(
 
     michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Committing, None)
         .await
-        .ok();
+        .map_err(|e| {
+            error!(session_id = %session_id, error = %e, "failed to set session status committing");
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("failed to update session state in database: {e}"),
+            )
+        })?;
 
     let staging_dir = get_session_dir(
         &state.config.music_paths,
@@ -994,7 +1031,14 @@ pub async fn import_commit_handler(
         })?;
     michi_db::close_import_session(&state.db, &session_id)
         .await
-        .ok();
+        .map_err(|e| {
+            error!(session_id = %session_id, error = %e, "failed to close import session in DB");
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("failed to close import session in DB: {e}"),
+            )
+        })?;
 
     // Remove from active RAM sessions
     IMPORT_SESSIONS.write().await.remove(&session_id);
@@ -1024,16 +1068,27 @@ pub async fn import_rollback_handler(
     let mut session_guard = session_lock.lock().await;
 
     // Check durable SQLite status first
-    if let Ok(Some(db_session)) = michi_db::get_import_session_full(&state.db, &session_id).await {
-        if db_session.status == "committed" || db_session.status == "completed" {
-            return Err(v1_error(
-                StatusCode::CONFLICT,
-                "CANNOT_ROLLBACK_COMMITTED",
-                "cannot rollback an import session that has already been committed",
-            ));
+    match michi_db::get_import_session_full(&state.db, &session_id).await {
+        Ok(Some(db_session)) => {
+            if db_session.status == "committed" || db_session.status == "completed" {
+                return Err(v1_error(
+                    StatusCode::CONFLICT,
+                    "CANNOT_ROLLBACK_COMMITTED",
+                    "cannot rollback an import session that has already been committed",
+                ));
+            }
+            if db_session.status == "rolled_back" {
+                return Ok(Json(serde_json::json!({ "status": "rolled_back" })));
+            }
         }
-        if db_session.status == "rolled_back" {
-            return Ok(Json(serde_json::json!({ "status": "rolled_back" })));
+        Ok(None) => {}
+        Err(e) => {
+            error!(session_id = %session_id, error = %e, "database error checking session status in rollback");
+            return Err(v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("failed to verify session status from database: {e}"),
+            ));
         }
     }
 
@@ -1050,7 +1105,14 @@ pub async fn import_rollback_handler(
     cleanup_session_dir(&staging_dir).await;
     michi_db::set_import_session_status(&state.db, &session_id, &ImportState::RolledBack, None)
         .await
-        .ok();
+        .map_err(|e| {
+            error!(session_id = %session_id, error = %e, "failed to mark import session rolled back in DB");
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("failed to mark import session rolled back in DB: {e}"),
+            )
+        })?;
     drop(session_guard);
     remove_session_lock(&session_id).await;
     Ok(Json(serde_json::json!({ "status": "rolled_back" })))

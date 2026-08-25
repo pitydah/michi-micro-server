@@ -3034,7 +3034,7 @@ pub async fn list_expired_import_sessions(
     cutoff: &str,
 ) -> Result<Vec<Uuid>, DbError> {
     let rows = sqlx::query(
-        "SELECT session_id FROM import_sessions WHERE expires_at < ? AND status NOT IN ('committed', 'rolled_back')",
+        "SELECT session_id FROM import_sessions WHERE expires_at < ? AND status NOT IN ('committed', 'completed', 'rolled_back', 'expired')",
     )
     .bind(cutoff)
     .fetch_all(pool)
@@ -3046,10 +3046,12 @@ pub async fn list_expired_import_sessions(
 }
 
 pub async fn expire_import_session(pool: &SqlitePool, session_id: &Uuid) -> Result<(), DbError> {
-    sqlx::query("UPDATE import_sessions SET status = 'expired', status_text = 'expired' WHERE session_id = ?")
-        .bind(session_id.to_string())
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE import_sessions SET status = 'expired', status_text = 'expired' WHERE session_id = ? AND status NOT IN ('committed', 'completed', 'rolled_back', 'expired')",
+    )
+    .bind(session_id.to_string())
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
