@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use michi_core::ImportState;
-use tracing::error;
+use tracing::{error, warn};
 
 fn v1_error(
     status: StatusCode,
@@ -263,7 +263,14 @@ pub async fn import_session_handler(
         })?;
     michi_db::set_import_session_status(&state.db, &session_id, &ImportState::Created, None)
         .await
-        .ok();
+        .map_err(|e| {
+            error!(session_id = %session_id, error = %e, "failed to set import session status created in DB");
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("failed to initialize session status in database: {e}"),
+            )
+        })?;
 
     let session_dir = get_session_dir(
         &state.config.music_paths,
@@ -440,6 +447,23 @@ pub async fn import_upload_handler(
         ));
     }
     if session_state.seen_hashes.contains(&data_hash) {
+        // Reconcile absolute progress into SQLite on retry in case previous DB update failed
+        michi_db::update_import_session_progress(
+            &state.db,
+            &session_id,
+            session_state.imported_tracks,
+            session_state.total_size_bytes,
+        )
+        .await
+        .map_err(|e| {
+            error!(session_id = %session_id, error = %e, "database error syncing session progress on duplicate retry");
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("failed to sync import session progress in database: {e}"),
+            )
+        })?;
+
         return Ok(Json(serde_json::json!({
             "local_track_id": local_track_id,
             "status": "duplicate",
@@ -1167,13 +1191,23 @@ pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool)
                 for sid in expired {
                     let session_lock = get_session_lock(&sid).await;
                     let mut session_guard = session_lock.lock().await;
-                    *session_guard = true;
-                    michi_db::expire_import_session(&db, &sid).await.ok();
-                    let dir = get_session_dir(&music_paths, &cache_path, &sid);
-                    cleanup_session_dir(&dir).await;
-                    IMPORT_SESSIONS.write().await.remove(&sid);
-                    drop(session_guard);
-                    remove_session_lock(&sid).await;
+                    if *session_guard {
+                        continue;
+                    }
+                    match michi_db::expire_import_session(&db, &sid).await {
+                        Ok(_) => {
+                            *session_guard = true;
+                            let dir = get_session_dir(&music_paths, &cache_path, &sid);
+                            cleanup_session_dir(&dir).await;
+                            IMPORT_SESSIONS.write().await.remove(&sid);
+                            drop(session_guard);
+                            remove_session_lock(&sid).await;
+                        }
+                        Err(e) => {
+                            error!(session_id = %sid, error = %e, "database error expiring import session; preserving staging and RAM");
+                            drop(session_guard);
+                        }
+                    }
                 }
             }
             // Also clean old staging dirs with no DB record
@@ -1184,19 +1218,23 @@ pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool)
                         if entry.path().is_dir() {
                             let name = entry.file_name().to_string_lossy().to_string();
                             if let Ok(uid) = Uuid::parse_str(&name) {
-                                if michi_db::get_import_session_full(&db, &uid)
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                    .is_none()
-                                {
-                                    let session_lock = get_session_lock(&uid).await;
-                                    let mut session_guard = session_lock.lock().await;
-                                    *session_guard = true;
-                                    cleanup_session_dir(&entry.path()).await;
-                                    IMPORT_SESSIONS.write().await.remove(&uid);
-                                    drop(session_guard);
-                                    remove_session_lock(&uid).await;
+                                match michi_db::get_import_session_full(&db, &uid).await {
+                                    Ok(Some(_)) => {
+                                        // Valid session exists in DB -> preserve
+                                    }
+                                    Ok(None) => {
+                                        // Genuine orphan with no DB row -> clean up
+                                        let session_lock = get_session_lock(&uid).await;
+                                        let mut session_guard = session_lock.lock().await;
+                                        *session_guard = true;
+                                        cleanup_session_dir(&entry.path()).await;
+                                        IMPORT_SESSIONS.write().await.remove(&uid);
+                                        drop(session_guard);
+                                        remove_session_lock(&uid).await;
+                                    }
+                                    Err(e) => {
+                                        warn!(session_id = %uid, error = %e, "database error checking session for orphan cleanup; failing closed and preserving staging");
+                                    }
                                 }
                             }
                         }

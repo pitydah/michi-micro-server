@@ -21,18 +21,28 @@ use sqlx::SqlitePool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-async fn test_db() -> SqlitePool {
-    michi_db::init_pool("sqlite::memory:").await.unwrap()
+async fn test_db_with_url() -> (SqlitePool, String) {
+    let url = format!(
+        "sqlite:file:memdb_webui_{}?mode=memory&cache=shared",
+        Uuid::new_v4()
+    );
+    let pool = michi_db::init_pool(&url).await.unwrap();
+    (pool, url)
 }
 
 fn test_config() -> Config {
+    test_config_with_url("sqlite::memory:".to_string())
+}
+
+fn test_config_with_url(db_url: String) -> Config {
     let tmp = std::env::temp_dir().join(format!("michi-webui-test-{}", Uuid::new_v4()));
+
     Config {
         port: 9090,
         music_paths: vec![tmp.join("music")],
         config_path: tmp.join("config"),
         cache_path: tmp.join("cache"),
-        database_url: "sqlite::memory:".to_string(),
+        database_url: db_url,
 
         version: "0.2.0",
         sync_peers: Vec::new(),
@@ -65,8 +75,8 @@ fn test_config() -> Config {
 }
 
 async fn make_raw_app() -> (axum::Router, SqlitePool, michi_api::AppState, String) {
-    let pool = test_db().await;
-    let config = test_config();
+    let (pool, db_url) = test_db_with_url().await;
+    let config = test_config_with_url(db_url);
     let state = michi_api::AppState::new(config, pool.clone(), None);
 
     let admin_id = Uuid::new_v4();

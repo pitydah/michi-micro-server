@@ -21,18 +21,31 @@ use sqlx::SqlitePool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+async fn test_db_with_url() -> (SqlitePool, String) {
+    let url = format!(
+        "sqlite:file:memdb_{}?mode=memory&cache=shared",
+        Uuid::new_v4()
+    );
+    let pool = michi_db::init_pool(&url).await.unwrap();
+    (pool, url)
+}
+
 async fn test_db() -> SqlitePool {
-    michi_db::init_pool("sqlite::memory:").await.unwrap()
+    test_db_with_url().await.0
 }
 
 fn test_config() -> Config {
+    test_config_with_url("sqlite::memory:".to_string())
+}
+
+fn test_config_with_url(db_url: String) -> Config {
     let tmp = std::env::temp_dir().join(format!("michi-test-{}", Uuid::new_v4()));
     Config {
         port: 9999,
         music_paths: vec![tmp.join("music")],
         config_path: tmp.join("config"),
         cache_path: tmp.join("cache"),
-        database_url: "sqlite::memory:".to_string(),
+        database_url: db_url,
 
         version: "test",
         sync_peers: Vec::new(),
@@ -70,8 +83,8 @@ async fn make_app() -> (axum::Router, SqlitePool) {
 }
 
 async fn make_app_with_state() -> (axum::Router, SqlitePool, michi_api::AppState) {
-    let pool = test_db().await;
-    let config = test_config();
+    let (pool, db_url) = test_db_with_url().await;
+    let config = test_config_with_url(db_url);
     let state = michi_api::AppState::new(config, pool.clone(), None);
     (
         router_with_test_admin(state.clone(), &pool).await,
@@ -3043,7 +3056,7 @@ async fn test_v1_stream_and_download_range() {
     f.write_all(&content).await.unwrap();
     drop(f);
 
-    let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+    let pool = test_db().await;
     let id = michi_core::track_id_from_path(file_path.to_str().unwrap());
     let track = michi_core::Track {
         id,
@@ -3075,40 +3088,10 @@ async fn test_v1_stream_and_download_range() {
     };
     michi_db::upsert_track(&pool, &track).await.unwrap();
 
-    let config = michi_config::Config {
-        port: 9999,
-        music_paths: vec![music.clone()],
-        config_path: tmp.path().join("config"),
-        cache_path: tmp.path().join("cache"),
-        database_url: "sqlite::memory:".to_string(),
-        version: "test",
-        sync_peers: vec![],
-        sync_name: "test".into(),
-        listenbrainz_token: None,
-        lastfm_token: None,
-        scrobble_enabled: false,
-        auth_username: None,
-        auth_password: None,
-        auth_enabled: false,
-        allow_registration: false,
-        server_id: uuid::Uuid::new_v4(),
-        cors_origin: None,
-        dev_mode: true,
-        resource_profile: michi_core::ResourceProfile::Balanced,
-        format_policy: michi_core::AudioFormatPolicy::LosslessOnly,
-        stream_profile: michi_core::StreamProfile::Original,
-        max_remote_bitrate: 320_000,
-        remote_sync: false,
-        language: "en".into(),
-        ui: Default::default(),
-        auto_backup_enabled: false,
-        backup_max_keep: 7,
-        job_max_concurrent: 3,
-        reconnect_delay_max: 300,
-        opensubsonic_enabled: false,
-        trust_proxy: false,
-        trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
-    };
+    let mut config = test_config();
+    config.music_paths = vec![music.clone()];
+    config.config_path = tmp.path().join("config");
+    config.cache_path = tmp.path().join("cache");
     let state = michi_api::AppState::new(config, pool.clone(), None);
     let app = router_with_test_admin(state, &pool).await;
 
@@ -4053,6 +4036,100 @@ async fn test_v1_import_same_name_different_checksum_collision_handled() {
         mapping.len(),
         2,
         "both files must be committed without collision corruption"
+    );
+}
+
+#[tokio::test]
+async fn test_v1_import_duplicate_upload_reconciles_db_progress() {
+    let (app, pool) = make_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/import/session")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"total_tracks":2,"total_playlists":0}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let session: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let sid_str = session["session_id"].as_str().unwrap().to_string();
+    let sid = Uuid::parse_str(&sid_str).unwrap();
+
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    let data_a = base64::engine::general_purpose::STANDARD.encode(b"song audio content");
+    let mut h_a = Sha256::new();
+    h_a.update(b"song audio content");
+    let hash_a = hex::encode(h_a.finalize());
+
+    // 1. Initial upload -> imported_tracks becomes 1 in DB
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/v1/import/upload/{sid_str}"))
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"filename":"Track1.flac","data":"{data_a}","hash":"{hash_a}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let db_sess = michi_db::get_import_session_full(&pool, &sid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(db_sess.imported_tracks, 1);
+
+    // 2. Simulate DB ledger divergence (e.g. transient glitch previously left DB at 0)
+    sqlx::query("UPDATE import_sessions SET imported_tracks = 0 WHERE session_id = ?")
+        .bind(sid_str.clone())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let db_sess_diverged = michi_db::get_import_session_full(&pool, &sid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(db_sess_diverged.imported_tracks, 0);
+
+    // 3. Retry identical upload -> status: duplicate AND reconciles DB ledger back to 1
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/v1/import/upload/{sid_str}"))
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"filename":"Track1.flac","data":"{data_a}","hash":"{hash_a}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_dup: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(body_dup["status"], "duplicate");
+
+    // 4. Assert DB progress was reconciled to 1
+    let db_sess_healed = michi_db::get_import_session_full(&pool, &sid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        db_sess_healed.imported_tracks, 1,
+        "Duplicate retry must reconcile DB ledger"
     );
 }
 
