@@ -2978,7 +2978,7 @@ pub async fn update_import_session_progress(
     size_bytes: u64,
 ) -> Result<(), DbError> {
     sqlx::query(
-        "UPDATE import_sessions SET imported_tracks = imported_tracks + ?, total_size_bytes = total_size_bytes + ? WHERE session_id = ?",
+        "UPDATE import_sessions SET imported_tracks = ?, total_size_bytes = ? WHERE session_id = ?",
     )
     .bind(imported_tracks)
     .bind(size_bytes as i64)

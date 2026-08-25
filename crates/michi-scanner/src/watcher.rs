@@ -80,10 +80,18 @@ impl LibraryWatcher {
 
         let path_string = root.display().to_string();
         let current_dev_id = crate::get_path_device_id(root);
-        let recorded_dev_id = michi_db::get_mount_device_id(&self.db, &path_string)
-            .await
-            .ok()
-            .flatten();
+        let recorded_dev_id = match michi_db::get_mount_device_id(&self.db, &path_string).await {
+            Ok(value) => value,
+            Err(e) => {
+                warn!(
+                    path = %root.display(),
+                    error = %e,
+                    "database error querying mount device identity; failing closed to protect library"
+                );
+                snapshots.insert(root.to_path_buf(), None);
+                return;
+            }
+        };
 
         // 1. Device identity check: if filesystem device ID changed, mount is lost or replaced!
         if let (Some(expected), Some(current_dev)) = (recorded_dev_id, current_dev_id) {
@@ -120,9 +128,18 @@ impl LibraryWatcher {
                     snapshots.insert(root.to_path_buf(), None);
                     return;
                 }
-                let mount_states = michi_db::get_mount_states(&self.db)
-                    .await
-                    .unwrap_or_default();
+                let mount_states = match michi_db::get_mount_states(&self.db).await {
+                    Ok(states) => states,
+                    Err(e) => {
+                        warn!(
+                            path = %root.display(),
+                            error = %e,
+                            "database error querying mount states during bootstrap check; failing closed"
+                        );
+                        snapshots.insert(root.to_path_buf(), None);
+                        return;
+                    }
+                };
                 if mount_states
                     .iter()
                     .any(|(p, s, ..)| p == &path_string && s == "unavailable")
@@ -150,9 +167,18 @@ impl LibraryWatcher {
                 snapshots.insert(root.to_path_buf(), None);
                 return;
             }
-            let mount_states = michi_db::get_mount_states(&self.db)
-                .await
-                .unwrap_or_default();
+            let mount_states = match michi_db::get_mount_states(&self.db).await {
+                Ok(states) => states,
+                Err(e) => {
+                    warn!(
+                        path = %root.display(),
+                        error = %e,
+                        "database error querying mount states during restored mount check; failing closed"
+                    );
+                    snapshots.insert(root.to_path_buf(), None);
+                    return;
+                }
+            };
             if mount_states
                 .iter()
                 .any(|(p, s, ..)| p == &path_string && s == "unavailable")

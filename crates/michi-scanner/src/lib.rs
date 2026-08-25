@@ -306,10 +306,7 @@ pub async fn reconcile_root(
 
     let root_str = root.display().to_string();
     let current_dev_id = get_path_device_id(root);
-    let recorded_dev_id = michi_db::get_mount_device_id(db, &root_str)
-        .await
-        .ok()
-        .flatten();
+    let recorded_dev_id = michi_db::get_mount_device_id(db, &root_str).await?;
 
     // Double-check that root directory is actually present on disk before deleting any tracks
     if !root.exists() || !root.is_dir() {
@@ -402,7 +399,8 @@ pub async fn reconcile_root(
         }
 
         // Check previous mount state: if it was unavailable and is suddenly 0 tracks, it is a newly mounted empty mountpoint
-        let mount_states = michi_db::get_mount_states(db).await.unwrap_or_default();
+        let mount_states = michi_db::get_mount_states(db).await?;
+
         let was_unavailable = mount_states
             .iter()
             .any(|(p, s, ..)| p == &root_str && s == "unavailable");

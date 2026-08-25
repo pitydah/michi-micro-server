@@ -345,7 +345,13 @@ pub async fn import_upload_handler(
                 ));
             }
         }
-        Ok(None) => {}
+        Ok(None) => {
+            return Err(v1_error(
+                StatusCode::NOT_FOUND,
+                "SESSION_NOT_FOUND",
+                "import session not found in database",
+            ));
+        }
         Err(e) => {
             error!(session_id = %session_id, error = %e, "database error checking session status");
             return Err(v1_error(
@@ -561,12 +567,15 @@ pub async fn import_upload_handler(
             )
         })?;
 
+    let total_tracks = session_state.imported_tracks;
+    let total_bytes = session_state.total_size_bytes;
+
     {
         let mut sessions = IMPORT_SESSIONS.write().await;
         sessions.insert(session_id, session_state);
     }
 
-    michi_db::update_import_session_progress(&state.db, &session_id, 1, data.len() as u64)
+    michi_db::update_import_session_progress(&state.db, &session_id, total_tracks, total_bytes)
         .await
         .map_err(|e| {
             error!(session_id = %session_id, error = %e, "database error updating session progress");
@@ -806,7 +815,13 @@ pub async fn import_commit_handler(
                 ));
             }
         }
-        Ok(None) => {}
+        Ok(None) => {
+            return Err(v1_error(
+                StatusCode::NOT_FOUND,
+                "SESSION_NOT_FOUND",
+                "import session not found in database",
+            ));
+        }
         Err(e) => {
             error!(session_id = %session_id, error = %e, "database error checking session status");
             return Err(v1_error(
@@ -1080,8 +1095,21 @@ pub async fn import_rollback_handler(
             if db_session.status == "rolled_back" {
                 return Ok(Json(serde_json::json!({ "status": "rolled_back" })));
             }
+            if db_session.status == "expired" {
+                return Err(v1_error(
+                    StatusCode::GONE,
+                    "SESSION_CLOSED",
+                    "import session is expired",
+                ));
+            }
         }
-        Ok(None) => {}
+        Ok(None) => {
+            return Err(v1_error(
+                StatusCode::NOT_FOUND,
+                "SESSION_NOT_FOUND",
+                "import session not found in database",
+            ));
+        }
         Err(e) => {
             error!(session_id = %session_id, error = %e, "database error checking session status in rollback");
             return Err(v1_error(
@@ -1095,14 +1123,8 @@ pub async fn import_rollback_handler(
     if *session_guard {
         return Ok(Json(serde_json::json!({ "status": "already_closed" })));
     }
-    *session_guard = true;
-    IMPORT_SESSIONS.write().await.remove(&session_id);
-    let staging_dir = get_session_dir(
-        &state.config.music_paths,
-        &state.config.cache_path,
-        &session_id,
-    );
-    cleanup_session_dir(&staging_dir).await;
+
+    // Step 1: Durably set RolledBack status in SQLite BEFORE tearing down memory or staging
     michi_db::set_import_session_status(&state.db, &session_id, &ImportState::RolledBack, None)
         .await
         .map_err(|e| {
@@ -1113,8 +1135,23 @@ pub async fn import_rollback_handler(
                 &format!("failed to mark import session rolled back in DB: {e}"),
             )
         })?;
+
+    // Step 2: Mark runtime terminal and remove RAM session
+    *session_guard = true;
+    IMPORT_SESSIONS.write().await.remove(&session_id);
+
+    // Step 3: Best-effort cleanup of staging directory AFTER durable state update
+    let staging_dir = get_session_dir(
+        &state.config.music_paths,
+        &state.config.cache_path,
+        &session_id,
+    );
+    cleanup_session_dir(&staging_dir).await;
+
+    // Step 4: Drop mutex guard and remove runtime lock
     drop(session_guard);
     remove_session_lock(&session_id).await;
+
     Ok(Json(serde_json::json!({ "status": "rolled_back" })))
 }
 
