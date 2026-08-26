@@ -188,16 +188,7 @@ jobs:
           rm -rf "${TEST_ROOT}"
           mkdir -p "${TEST_ROOT}/config" "${TEST_ROOT}/cache" "${TEST_ROOT}/music"
 
-          python3 -c "
-import wave, struct, math
-with wave.open('${TEST_ROOT}/music/fixture.wav', 'w') as f:
-    f.setnchannels(2)
-    f.setsampwidth(2)
-    f.setframerate(48000)
-    for i in range(48000):
-        val = int(32767.0 * 0.3 * math.sin(2.0 * math.pi * 440.0 * i / 48000))
-        f.writeframes(struct.pack('<hh', val, val))
-"
+          python3 -c "import wave, struct, math; f = wave.open('${TEST_ROOT}/music/fixture.wav', 'w'); f.setnchannels(2); f.setsampwidth(2); f.setframerate(48000); [f.writeframes(struct.pack('<hh', int(32767.0 * 0.3 * math.sin(2.0 * math.pi * 440.0 * i / 48000)), int(32767.0 * 0.3 * math.sin(2.0 * math.pi * 440.0 * i / 48000)))) for i in range(48000)]; f.close()"
 
           export MICHI_CONFIG_PATH="${TEST_ROOT}/config"
           export MICHI_CACHE_PATH="${TEST_ROOT}/cache"
