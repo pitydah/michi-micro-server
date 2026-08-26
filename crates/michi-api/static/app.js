@@ -1,5 +1,5 @@
 /* ================================================================
-   Michi Control UI — main application
+   Michi Control UI — Functional Conformance WebUI Application
    ================================================================ */
 
 // ── API client ──────────────────────────────────────────────────
@@ -7,28 +7,84 @@ const MichiAPI = {
   base: '',
 
   async request(path, opts = {}) {
-    const timeout = opts.timeout || 8000;
+    const timeout = opts.timeout || 12000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
-    try {
-      const res = await fetch(this.base + path, { ...opts, signal: controller.signal });
-      clearTimeout(timer);
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        const msg = body?.error?.message || body?.message || body?.error?.code || `HTTP ${res.status}`;
-        throw new Error(msg);
+    const method = (opts.method || 'GET').toUpperCase();
+    const headers = new Headers(opts.headers || {});
+    let body = opts.body;
+
+    if (['POST', 'PUT', 'PATCH'].includes(method) && !(body instanceof FormData)) {
+      if (!headers.has('Content-Type')) {
+        headers.set('Content-Type', 'application/json');
       }
-      return res.headers.get('content-type')?.includes('json') ? res.json() : res;
+      if (body === undefined || body === null) {
+        body = '{}';
+      } else if (typeof body !== 'string') {
+        body = JSON.stringify(body);
+      }
+    }
+
+    try {
+      const res = await fetch(this.base + path, {
+        ...opts,
+        method,
+        headers,
+        body,
+        credentials: 'same-origin',
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      if (res.status === 401 && !path.startsWith('/api/auth/')) {
+        AuthSession.setUnauthenticated();
+      }
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        const msg = errBody?.error?.message || errBody?.message || errBody?.error?.code || `HTTP ${res.status}`;
+        const err = new Error(msg);
+        err.status = res.status;
+        err.details = errBody?.error?.details || errBody;
+        throw err;
+      }
+      const ct = res.headers.get('content-type') || '';
+      return ct.includes('json') ? res.json() : res;
     } catch (e) {
       clearTimeout(timer);
-      if (e.name === 'AbortError') throw new Error('Connection timeout');
+      if (e.name === 'AbortError') {
+        const timeoutErr = new Error('Connection timeout');
+        timeoutErr.name = 'TimeoutError';
+        throw timeoutErr;
+      }
       throw e;
     }
   },
 
-  status() { return this.request('/api/status'); },
+  // Auth
+  authCheck() { return this.request('/api/auth/check'); },
+  login(username, password) {
+    return this.request('/api/auth/login', {
+      method: 'POST',
+      body: { username, password }
+    });
+  },
+  register(username, password) {
+    return this.request('/api/auth/register', {
+      method: 'POST',
+      body: { username, password }
+    });
+  },
+  logout() { return this.request('/api/auth/logout', { method: 'POST' }); },
+
+  // System & Status
+  status() { return this.request('/api/v1/status'); },
   serverInfo() { return this.request('/api/v1/server/info'); },
+  capabilities() { return this.request('/api/v1/capabilities'); },
   libraryStats() { return this.request('/api/v1/library/stats'); },
+  dashboard() { return this.request('/api/v1/home/dashboard'); },
+
+  // Library & Tracks
   tracks(opts = {}) {
     let url = '/api/v1/tracks';
     const params = [];
@@ -37,12 +93,262 @@ const MichiAPI = {
     if (params.length) url += '?' + params.join('&');
     return this.request(url);
   },
+  track(id) { return this.request('/api/v1/tracks/' + id); },
+  rateTrack(id, rating) {
+    return this.request('/api/v1/tracks/' + id + '/rate', {
+      method: 'POST',
+      body: { rating }
+    });
+  },
+  starTrack(id, starred) {
+    return this.request('/api/v1/tracks/' + id + '/star', {
+      method: 'POST',
+      body: { starred }
+    });
+  },
+  starredTracks() { return this.request('/api/v1/tracks/starred'); },
+  bookmarks() { return this.request('/api/v1/bookmarks'); },
+  addBookmark(track_id, position_ms, comment) {
+    return this.request('/api/v1/bookmarks', {
+      method: 'POST',
+      body: { track_id, position_ms, comment }
+    });
+  },
+  deleteBookmark(id) { return this.request('/api/v1/bookmarks/' + id, { method: 'DELETE' }); },
+  duplicates() { return this.request('/api/v1/library/duplicates'); },
+  artistInsights(name) { return this.request('/api/v1/artists/' + encodeURIComponent(name) + '/insights'); },
+  albumHealth(name) { return this.request('/api/v1/albums/' + encodeURIComponent(name) + '/health'); },
   search(q) { return this.request('/api/v1/search?q=' + encodeURIComponent(q)); },
   searchAdvanced(q) { return this.request('/api/v1/search/advanced?q=' + encodeURIComponent(q)); },
-  scan() { return this.request('/api/library/scan', { method: 'POST' }); },
-  dashboard() { return this.request('/api/v1/home/dashboard'); },
-  playlists() { return this.request('/api/v1/playlists'); },
+  scan() { return this.request('/api/v1/library/scan', { method: 'POST' }); },
+  artworkUrl(id) { return this.base + '/api/v1/artwork/' + id; },
   streamUrl(id) { return this.base + '/api/v1/stream/' + id; },
+
+  // Playlists
+  playlists() { return this.request('/api/v1/playlists'); },
+  playlist(id) { return this.request('/api/v1/playlists/' + id); },
+  playlistTracks(id) { return this.request('/api/v1/playlists/' + id + '/tracks'); },
+  createPlaylist(name, description) {
+    return this.request('/api/v1/playlists', {
+      method: 'POST',
+      body: { name, description }
+    });
+  },
+  updatePlaylist(id, name, description) {
+    return this.request('/api/v1/playlists/' + id, {
+      method: 'PUT',
+      body: { name, description }
+    });
+  },
+  deletePlaylist(id) { return this.request('/api/v1/playlists/' + id, { method: 'DELETE' }); },
+  addPlaylistTrack(playlist_id, track_id) {
+    return this.request('/api/v1/playlists/' + playlist_id + '/tracks/' + track_id, { method: 'POST' });
+  },
+  removePlaylistTrack(playlist_id, track_id) {
+    return this.request('/api/v1/playlists/' + playlist_id + '/tracks/' + track_id, { method: 'DELETE' });
+  },
+  reorderPlaylist(id, track_ids) {
+    return this.request('/api/v1/playlists/' + id + '/reorder', {
+      method: 'PUT',
+      body: { track_ids }
+    });
+  },
+  smartPlaylist(name, rule, params) {
+    return this.request('/api/v1/playlists/smart', {
+      method: 'POST',
+      body: { name, rule, params }
+    });
+  },
+
+  // Playback & Queue
+  playbackState() { return this.request('/api/v1/playback/state'); },
+  playbackControl(body) {
+    return this.request('/api/v1/playback/control', {
+      method: 'POST',
+      body
+    });
+  },
+  queue() { return this.request('/api/v1/queue'); },
+  addQueueItems(track_ids) {
+    return this.request('/api/v1/queue/items', {
+      method: 'POST',
+      body: { track_ids }
+    });
+  },
+  removeQueueItem(id) { return this.request('/api/v1/queue/items/' + id, { method: 'DELETE' }); },
+  reorderQueue(item_ids) {
+    return this.request('/api/v1/queue/reorder', {
+      method: 'PUT',
+      body: { item_ids }
+    });
+  },
+  jumpQueue(position) {
+    return this.request('/api/v1/queue/jump', {
+      method: 'POST',
+      body: { position }
+    });
+  },
+  clearQueue() { return this.request('/api/v1/queue', { method: 'DELETE' }); },
+
+  // History
+  history(opts = {}) {
+    let url = '/api/v1/history';
+    const params = [];
+    if (opts.limit) params.push('limit=' + opts.limit);
+    if (opts.offset) params.push('offset=' + (opts.offset || 0));
+    if (params.length) url += '?' + params.join('&');
+    return this.request(url);
+  },
+  historyStats() { return this.request('/api/v1/history/stats'); },
+  exportHistory() { return this.request('/api/v1/history/export', { timeout: 20000 }); },
+  clearHistory() { return this.request('/api/v1/history', { method: 'DELETE' }); },
+
+  // Ecosystem & Link
+  linkDevices() { return this.request('/api/v1/link/devices'); },
+  revokeLinkDevice(id) { return this.request('/api/v1/link/devices/' + id, { method: 'DELETE' }); },
+  qrPair(server_url) {
+    return this.request('/api/v1/pair/qr', {
+      method: 'POST',
+      body: { server_url }
+    });
+  },
+  qrStatus(code) { return this.request('/api/v1/pair/qr/' + code + '/status'); },
+  receivers() { return this.request('/api/v1/receivers'); },
+  discoverDevices() { return this.request('/api/v1/devices/discover', { method: 'POST', timeout: 10000 }); },
+  startReceiverPair(body) { return this.request('/api/v1/receivers/pair/start', { method: 'POST', body }); },
+  confirmReceiverPair(body) { return this.request('/api/v1/receivers/pair/confirm', { method: 'POST', body }); },
+
+  // Rooms & Chains
+  roomGroups() { return this.request('/api/v1/rooms/groups'); },
+  createRoomGroup(body) { return this.request('/api/v1/rooms/groups', { method: 'POST', body }); },
+  activateRoomGroup(id) { return this.request('/api/v1/rooms/groups/' + id + '/activate', { method: 'POST' }); },
+  deactivateRoomGroup(id) { return this.request('/api/v1/rooms/groups/' + id + '/deactivate', { method: 'POST' }); },
+  deleteRoomGroup(id) { return this.request('/api/v1/rooms/groups/' + id, { method: 'DELETE' }); },
+  playRoom(id, track_id) { return this.request('/api/v1/rooms/' + id + '/play', { method: 'POST', body: { track_id } }); },
+  chains() { return this.request('/api/v1/chains'); },
+  chain(id) { return this.request('/api/v1/chains/' + id); },
+  createChain(name) { return this.request('/api/v1/chains', { method: 'POST', body: { name } }); },
+  addChainLink(chainId, body) { return this.request('/api/v1/chains/' + chainId + '/links', { method: 'POST', body }); },
+  removeChainLink(chainId, linkId) { return this.request('/api/v1/chains/' + chainId + '/links/' + linkId, { method: 'DELETE' }); },
+  reorderChainLinks(chainId, link_ids) { return this.request('/api/v1/chains/' + chainId + '/links/reorder', { method: 'POST', body: { link_ids } }); },
+  updateChainLink(chainId, linkId, body) { return this.request('/api/v1/chains/' + chainId + '/links/' + linkId, { method: 'PUT', body }); },
+  playChain(chainId) { return this.request('/api/v1/chains/' + chainId + '/play', { method: 'POST' }); },
+  stopChain(chainId) { return this.request('/api/v1/chains/' + chainId + '/stop', { method: 'POST' }); },
+  setChainVolume(chainId, volume) { return this.request('/api/v1/chains/' + chainId + '/volume', { method: 'POST', body: { volume } }); },
+
+  // Sources (Broadcast & Radio)
+  sources() { return this.request('/api/v1/sources'); },
+  addSource(url) { return this.request('/api/v1/sources', { method: 'POST', body: { url }, timeout: 15000 }); },
+  deleteSource(id) { return this.request('/api/v1/sources/' + id, { method: 'DELETE' }); },
+  sourceEpisodes(id) { return this.request('/api/v1/sources/' + id + '/episodes'); },
+
+  // Settings & Webhooks
+  settings() { return this.request('/api/v1/settings'); },
+  updateSettings(body) { return this.request('/api/v1/settings', { method: 'PUT', body }); },
+  setWebhook(url) { return this.request('/api/v1/webhook', { method: 'POST', body: { url } }); },
+  testWebhook() { return this.request('/api/v1/webhook/test', { method: 'POST', timeout: 10000 }); },
+  deleteWebhook() { return this.request('/api/v1/webhook', { method: 'DELETE' }); },
+
+  // Backup & Storage
+  backupSnapshot() { return this.request('/api/v1/backup/snapshot', { method: 'POST' }); },
+  backupVerify() { return this.request('/api/v1/backup/verify', { timeout: 30000 }); },
+  downloadBackup() { return this.request('/api/v1/backup', { timeout: 30000 }); },
+  restoreBackup(body) { return this.request('/api/v1/backup/restore', { method: 'POST', body, timeout: 60000 }); },
+
+  // Diagnostics & Health
+  diagnostics() { return this.request('/api/v1/diagnostics'); },
+  selfTest() { return this.request('/api/v1/diagnostics/self-test', { method: 'POST', timeout: 30000 }); },
+  mountHealth() { return this.request('/api/v1/diagnostics/mount-health'); },
+  storageHealth() { return this.request('/api/v1/diagnostics/storage-health'); },
+  configValidate() { return this.request('/api/v1/diagnostics/config-validate'); },
+  jobs() { return this.request('/api/v1/jobs'); },
+  cancelJob(id) { return this.request('/api/v1/jobs/' + id, { method: 'DELETE' }); },
+  modules() { return this.request('/api/v1/modules'); },
+  toggleModule(id, enabled) { return this.request('/api/v1/modules/' + id + '/toggle', { method: 'POST', body: { enabled } }); },
+  auditLog() { return this.request('/api/v1/audit/log'); },
+  changeJournal() { return this.request('/api/v1/audit/changes'); },
+
+  // Import Workflow
+  importPreflight(files) { return this.request('/api/v1/import/preflight', { method: 'POST', body: { files } }); },
+  createImportSession(body) { return this.request('/api/v1/import/sessions', { method: 'POST', body }); },
+  importSession(id) { return this.request('/api/v1/import/sessions/' + id); },
+  importUpload(sessionId, filename, dataBase64, originalPath) {
+    return this.request('/api/v1/import/sessions/' + sessionId + '/upload', {
+      method: 'POST',
+      body: {
+        filename,
+        original_path: originalPath || filename,
+        uploaded_by: 'webui',
+        data_base64: dataBase64
+      },
+      timeout: 60000
+    });
+  },
+  commitImportSession(sessionId) { return this.request('/api/v1/import/sessions/' + sessionId + '/commit', { method: 'POST' }); },
+  rollbackImportSession(sessionId) { return this.request('/api/v1/import/sessions/' + sessionId + '/rollback', { method: 'POST' }); },
+};
+
+// ── Auth Session State Machine ──────────────────────────────────
+const AuthSession = {
+  state: 'checking', // 'checking' | 'anonymous' | 'authenticated' | 'disabled'
+  user: null,
+  registrationAllowed: false,
+
+  async check() {
+    try {
+      const resp = await MichiAPI.authCheck();
+      this.registrationAllowed = !!resp.registration_allowed;
+      if (resp.authenticated) {
+        this.state = 'authenticated';
+        this.user = resp.user || { username: 'User' };
+      } else if (resp.auth_enabled === false) {
+        this.state = 'disabled';
+        this.user = { username: 'Admin' };
+      } else {
+        this.state = 'anonymous';
+        this.user = null;
+      }
+    } catch (e) {
+      this.state = 'anonymous';
+      this.user = null;
+    }
+    this.render();
+  },
+
+  setUnauthenticated() {
+    this.state = 'anonymous';
+    this.user = null;
+    this.render();
+  },
+
+  render() {
+    const btn = $('#auth-user-btn');
+    const label = $('#auth-btn-label');
+    const formContainer = $('#auth-form-container');
+    const sessionContainer = $('#auth-session-container');
+    const currentUserEl = $('#auth-current-username');
+    const regTab = $('#auth-tab-register');
+
+    if (regTab) {
+      regTab.style.display = this.registrationAllowed ? 'inline-block' : 'none';
+    }
+
+    if (this.state === 'authenticated') {
+      if (label) label.textContent = this.user?.username || 'Account';
+      if (formContainer) formContainer.style.display = 'none';
+      if (sessionContainer) sessionContainer.style.display = 'block';
+      if (currentUserEl) currentUserEl.textContent = this.user?.username || 'User';
+    } else if (this.state === 'disabled') {
+      if (label) label.textContent = 'Public';
+      if (formContainer) formContainer.style.display = 'none';
+      if (sessionContainer) sessionContainer.style.display = 'block';
+      if (currentUserEl) currentUserEl.textContent = 'Auth Disabled (Open)';
+    } else {
+      if (label) label.textContent = 'Sign In';
+      if (formContainer) formContainer.style.display = 'block';
+      if (sessionContainer) sessionContainer.style.display = 'none';
+    }
+  }
 };
 
 // ── i18n ────────────────────────────────────────────────────────
@@ -88,7 +394,6 @@ function applyI18n() {
       el.textContent = text;
     }
   });
-  // Update placeholder for search
   var searchInput = $('#search-input');
   if (searchInput) searchInput.placeholder = t('search_placeholder');
 }
@@ -113,6 +418,7 @@ const State = {
   queue: [],
   polling: null,
   audio: null,
+  eventWs: null,
 };
 window.State = State;
 
@@ -135,13 +441,21 @@ function fmtDur(ms) {
   return m + ':' + String(sec).padStart(2, '0');
 }
 
+function fmtBytes(bytes) {
+  if (bytes === null || bytes === undefined) return '--';
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
 function fmtDate(iso) {
   if (!iso) return '';
   const d = new Date(iso);
   return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
 }
 
-// ── Loading / Empty / Error states ──────────────────────────────
 function renderLoading(container, lines) {
   if (!container) return;
   container.innerHTML = Array.from({ length: lines || 3 }, () =>
@@ -169,7 +483,6 @@ function renderError(container, message, retryFn) {
     '</div>';
 }
 
-// ── Toast ───────────────────────────────────────────────────────
 function showToast(msg, isErr) {
   const el = $('#toast');
   if (!el) return;
@@ -182,7 +495,7 @@ function showToast(msg, isErr) {
   }, 3000);
 }
 
-// ── Modal ────────────────────────────────────────────────────────
+// ── Modals ───────────────────────────────────────────────────────
 var _modalCallback = null;
 var _modalPreviousFocus = null;
 
@@ -216,11 +529,116 @@ function closeModal() {
   _modalPreviousFocus = null;
 }
 
+function openAuthModal() {
+  var overlay = $('#auth-overlay');
+  if (overlay) overlay.classList.remove('hidden');
+  AuthSession.render();
+}
+
+function closeAuthModal() {
+  var overlay = $('#auth-overlay');
+  if (overlay) overlay.classList.add('hidden');
+  var errEl = $('#auth-error-msg');
+  if (errEl) errEl.style.display = 'none';
+}
+
+var _authMode = 'login';
+function switchAuthTab(mode) {
+  _authMode = mode;
+  var logTab = $('#auth-tab-login');
+  var regTab = $('#auth-tab-register');
+  var submitBtn = $('#auth-submit-btn');
+  if (logTab) logTab.classList.toggle('active', mode === 'login');
+  if (regTab) regTab.classList.toggle('active', mode === 'register');
+  if (submitBtn) submitBtn.textContent = mode === 'login' ? 'Sign In' : 'Register';
+}
+
+async function submitAuth() {
+  var username = $('#auth-username')?.value.trim();
+  var password = $('#auth-password')?.value;
+  var errEl = $('#auth-error-msg');
+  if (errEl) errEl.style.display = 'none';
+
+  if (!username || !password) {
+    if (errEl) { errEl.textContent = 'Username and password required'; errEl.style.display = 'block'; }
+    return;
+  }
+
+  try {
+    if (_authMode === 'login') {
+      await MichiAPI.login(username, password);
+      showToast('Signed in successfully');
+    } else {
+      await MichiAPI.register(username, password);
+      showToast('Registered and signed in');
+    }
+    closeAuthModal();
+    await AuthSession.check();
+    await Promise.all([loadStatus(), loadDashboard(), loadTracks()]);
+  } catch (err) {
+    if (errEl) {
+      errEl.textContent = err.message || 'Authentication failed';
+      errEl.style.display = 'block';
+    }
+  }
+}
+
+async function handleLogout() {
+  try {
+    await MichiAPI.logout();
+    showToast('Signed out');
+    closeAuthModal();
+    await AuthSession.check();
+    await Promise.all([loadStatus(), loadDashboard(), loadTracks()]);
+  } catch (e) {
+    showToast(e.message, true);
+  }
+}
+
+function openTrackDetailModal(idx) {
+  var t = State.tracks[idx];
+  if (!t) return;
+  var overlay = $('#track-detail-modal');
+  var body = $('#td-modal-body');
+  if (!overlay || !body) return;
+
+  body.innerHTML =
+    '<div style="display:flex;gap:16px;align-items:flex-start;margin-bottom:12px">' +
+    (t.artwork_id ? '<img src="/api/v1/artwork/' + t.artwork_id + '" alt="" style="width:80px;height:80px;border-radius:6px;object-fit:cover">' : '<div style="width:80px;height:80px;background:var(--bg-card);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:2rem">🎵</div>') +
+    '<div><h3 style="margin:0 0 4px 0">' + esc(t.title || 'Unknown Title') + '</h3>' +
+    '<p style="color:var(--text-2);margin:0">' + esc(t.artist || 'Unknown Artist') + '</p>' +
+    '<p style="color:var(--text-3);font-size:.78rem;margin:2px 0 0 0">' + esc(t.album || 'Unknown Album') + '</p>' +
+    '</div></div>' +
+    '<div class="panel" style="margin-top:12px">' +
+    '<div class="panel-row"><span class="panel-label">ID</span><span class="panel-mono">' + esc(t.id) + '</span></div>' +
+    '<div class="panel-row"><span class="panel-label">Format</span><span>' + esc(t.format || 'Unknown') + '</span></div>' +
+    '<div class="panel-row"><span class="panel-label">Duration</span><span>' + fmtDur(t.duration_ms) + '</span></div>' +
+    '<div class="panel-row"><span class="panel-label">Sample Rate</span><span>' + (t.sample_rate ? t.sample_rate + ' Hz' : 'N/D') + '</span></div>' +
+    '<div class="panel-row"><span class="panel-label">Bit Depth</span><span>' + (t.bit_depth ? t.bit_depth + '-bit' : 'N/D') + '</span></div>' +
+    '<div class="panel-row"><span class="panel-label">Channels</span><span>' + (t.channels ? t.channels + ' ch' : 'N/D') + '</span></div>' +
+    '<div class="panel-row"><span class="panel-label">Rating</span><span>' + (t.rating ? '★'.repeat(t.rating) : 'Unrated') + '</span></div>' +
+    '<div class="panel-row"><span class="panel-label">Starred</span><span>' + (t.starred ? '⭐ Starred' : 'No') + '</span></div>' +
+    '<div class="panel-row"><span class="panel-label">File Size</span><span>' + fmtBytes(t.file_size) + '</span></div>' +
+    '<div class="panel-row"><span class="panel-label">Content Hash</span><span class="panel-mono">' + esc(t.content_hash || 'N/D') + '</span></div>' +
+    '</div>';
+
+  overlay.classList.remove('hidden');
+}
+
+function closeTrackDetailModal() {
+  var overlay = $('#track-detail-modal');
+  if (overlay) overlay.classList.add('hidden');
+}
+
 document.addEventListener('keydown', function (e) {
-  if (e.key === 'Escape') closeModal();
+  if (e.key === 'Escape') {
+    closeModal();
+    closeAuthModal();
+    closeTrackDetailModal();
+  }
 });
 
-// ── Shell / appearance ──────────────────────────────────────────
+// ── Theme / Shell ───────────────────────────────────────────────
 function resolvedTheme(theme) {
   if (theme === 'system') {
     return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
@@ -255,10 +673,6 @@ function toggleNavigation(force) {
   if (button) button.setAttribute('aria-expanded', String(open));
 }
 
-window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', function () {
-  if (document.documentElement.dataset.themePreference === 'system') setTheme('system', false);
-});
-
 // ── Navigation ──────────────────────────────────────────────────
 function showSection(section) {
   $$('.nav-item').forEach(n => {
@@ -280,11 +694,18 @@ function showSection(section) {
   const page = $('#page-' + section);
   if (page) {
     page.classList.remove('hidden');
-    // Trigger reflow for animation
     void page.offsetHeight;
     page.classList.add('fade-in');
   }
   toggleNavigation(false);
+
+  // Lazy loaders for sections
+  if (section === 'playlists') loadPlaylists();
+  if (section === 'settings') { loadSettings(); setTimeout(loadRoomGroups, 100); }
+  if (section === 'michilink') setTimeout(loadEcosystemDevices, 200);
+  if (section === 'history') { _historyOffset = 0; loadHistory(); }
+  if (section === 'chains') { _currentChainId = null; loadChains(); }
+  if (section === 'broadcast') loadSources();
 }
 
 async function init() {
@@ -292,18 +713,22 @@ async function init() {
   await loadI18n();
   updateServerUrlDisplay();
   showSection('dashboard');
-  await Promise.all([loadStatus(), loadServerInfo(), loadDashboard(), loadTracks()]);
-  await Promise.all([loadCanonicalPlaybackState(), loadCanonicalQueue()]);
+
+  await AuthSession.check();
+  await Promise.allSettled([loadStatus(), loadServerInfo(), loadDashboard(), loadTracks()]);
+  await Promise.allSettled([loadCanonicalPlaybackState(), loadCanonicalQueue()]);
 
   State.polling = setInterval(function () {
     if (!document.hidden) { loadStatus(); loadDashboard(); }
-  }, 60000);
+  }, 30000);
 
   ServerPlayback.pollTimer = setInterval(function () {
     if (!document.hidden && ServerPlayback.outputTarget === 'server') {
       loadCanonicalPlaybackState();
     }
   }, 3000);
+
+  setupLiveEvents();
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(function () {});
@@ -312,30 +737,63 @@ async function init() {
 
 document.addEventListener('DOMContentLoaded', init);
 
-// ── Status ──────────────────────────────────────────────────────
+// ── Live Events (WebSocket / SSE) ────────────────────────────────
+function setupLiveEvents() {
+  try {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = protocol + '//' + window.location.host + '/api/v1/events';
+    State.eventWs = new WebSocket(wsUrl);
+
+    State.eventWs.onmessage = function (ev) {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data.type === 'playback_state_changed' || data.event === 'playback') {
+          loadCanonicalPlaybackState();
+        } else if (data.type === 'queue_changed' || data.event === 'queue') {
+          loadCanonicalQueue();
+        } else if (data.type === 'playlist_updated' || data.event === 'playlist') {
+          loadPlaylists();
+        } else if (data.type === 'scan_completed' || data.event === 'library') {
+          loadDashboard();
+          loadTracks();
+        }
+      } catch (e) {}
+    };
+
+    State.eventWs.onclose = function () {
+      // Reconnect with backoff
+      setTimeout(setupLiveEvents, 10000);
+    };
+  } catch (e) {
+    // Degraded fallback to polling
+  }
+}
+
+// ── Status & Connection State Machine ────────────────────────────
 async function loadStatus() {
   try {
     State.status = await MichiAPI.status();
     renderStatus();
     renderStatusPage();
-  } catch (e) { console.warn('status failed:', e.message); }
+  } catch (e) {
+    renderOfflineStatus();
+  }
 }
 
 function renderStatus() {
   const s = State.status;
-  if (!s) return;
+  if (!s) { renderOfflineStatus(); return; }
 
+  const ok = s.status === 'ok';
   const dot = $('#server-status-dot');
   const lbl = $('#server-status-label');
-  const ok = s.status === 'ok';
   if (dot) dot.className = 'server-status-dot ' + (ok ? 'online' : 'offline');
   if (lbl) lbl.textContent = ok ? 'Online' : 'Offline';
 
   const pill = $('#status-pill');
-  if (pill) {
-    pill.className = 'status-pill ' + (ok ? 'online' : 'offline');
-    pill.innerHTML = '<span class="server-status-dot ' + (ok ? 'online' : 'offline') + '"></span>' + (ok ? 'Online' : 'Offline');
-  }
+  const pillText = $('#status-pill-text');
+  if (pill) pill.className = 'status-pill ' + (ok ? 'online' : 'offline');
+  if (pillText) pillText.textContent = ok ? 'Online' : 'Offline';
 
   const sid = $('#sidebar-server-id');
   if (sid && s.server_id) sid.textContent = s.server_id.slice(0, 8) + '..';
@@ -348,7 +806,22 @@ function renderStatus() {
   }
 
   const db = $('#sidebar-db-status');
-  if (db) db.textContent = s.database === 'ok' ? 'OK' : 'ERR';
+  if (db) db.textContent = s.database === 'connected' ? 'OK' : 'ERR';
+}
+
+function renderOfflineStatus() {
+  const dot = $('#server-status-dot');
+  const lbl = $('#server-status-label');
+  if (dot) dot.className = 'server-status-dot offline';
+  if (lbl) lbl.textContent = 'Offline';
+
+  const pill = $('#status-pill');
+  const pillText = $('#status-pill-text');
+  if (pill) pill.className = 'status-pill offline';
+  if (pillText) pillText.textContent = 'Offline';
+
+  const db = $('#sidebar-db-status');
+  if (db) db.textContent = 'ERR';
 }
 
 function renderStatusPage() {
@@ -361,12 +834,12 @@ function renderStatusPage() {
   }
   container.innerHTML =
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--online)" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg></div><div class="info"><div class="label">Status</div><div class="value"><span class="badge ' + (s.status === 'ok' ? 'stable' : 'disabled') + '">' + esc(s.status) + '</span></div></div></div>' +
-    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="info"><div class="label">Service</div><div class="value">' + esc(s.name || 'No disponible') + '</div></div></div>' +
+    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="info"><div class="label">Service</div><div class="value">' + esc(s.name || 'Michi Micro Server') + '</div></div></div>' +
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div><div class="info"><div class="label">Uptime</div><div class="value">' + fmtDur((s.uptime_seconds || 0) * 1000) + '</div></div></div>' +
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></div><div class="info"><div class="label">Version</div><div class="value">' + esc(s.version || 'No disponible') + '</div></div></div>' +
-    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/></svg></div><div class="info"><div class="label">Database</div><div class="value"><span class="badge ' + (s.database === 'ok' ? 'stable' : 'disabled') + '">' + esc(s.database || 'No disponible') + '</span></div></div></div>' +
+    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/></svg></div><div class="info"><div class="label">Database</div><div class="value"><span class="badge ' + (s.database === 'connected' ? 'stable' : 'disabled') + '">' + esc(s.database || 'No disponible') + '</span></div></div></div>' +
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="info"><div class="label">Server ID</div><div class="value" style="font-family:var(--font-mono);font-size:.75rem">' + esc(s.server_id || 'No disponible') + '</div></div></div>' +
-    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div><div class="info"><div class="label">Music Paths</div><div class="value">' + esc(s.music_paths != null ? s.music_paths : 'No disponible') + '</div></div></div>';
+    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div><div class="info"><div class="label">Music Paths</div><div class="value">' + esc((s.music_paths || []).join(', ') || 'No disponible') + '</div></div></div>';
 }
 
 // ── Server Info & Michi Link ────────────────────────────────────
@@ -395,21 +868,11 @@ const FEATURE_LABELS = {
   token_refresh: { label: 'Token Refresh', stable: true },
 };
 
-const FEATURE_CLASSES = {
-  on:     { cls: 'stable', text: 'ON' },
-  off:    { cls: 'disabled', text: 'OFF' },
-  beta:   { cls: 'beta', text: 'BETA' },
-  future: { cls: 'experimental', text: 'EXP' },
-  nd:     { cls: 'disabled', text: 'N/D' },
-};
-
 function featureBadge(enabled, meta) {
-  if (meta?.future && !enabled) return FEATURE_CLASSES.future;
-  if (meta?.beta && enabled) return FEATURE_CLASSES.beta;
-  if (enabled) return FEATURE_CLASSES.on;
-  if (meta?.future) return FEATURE_CLASSES.future;
-  if (meta?.beta) return FEATURE_CLASSES.beta;
-  return FEATURE_CLASSES.off;
+  if (meta?.future && !enabled) return { cls: 'experimental', text: 'EXP' };
+  if (meta?.beta && enabled) return { cls: 'beta', text: 'BETA' };
+  if (enabled) return { cls: 'stable', text: 'ON' };
+  return { cls: 'disabled', text: 'OFF' };
 }
 
 function renderServerInfo() {
@@ -440,7 +903,7 @@ function renderServerInfo() {
   });
 }
 
-// ── Stats / Dashboard ───────────────────────────────────────────
+// ── Dashboard ───────────────────────────────────────────────────
 async function loadDashboard() {
   try {
     State.dashboard = await MichiAPI.dashboard();
@@ -454,7 +917,7 @@ function renderDashboard() {
   if (!cd) return;
 
   if (!d) {
-    cd.innerHTML = '<div class="empty-state"><div class="icon">📊</div><p><strong>' + t('error.could_not_load_dashboard') + '</strong></p><p style="font-size:.78rem;margin-top:4px">' + t('common.retry') + '.</p></div>';
+    cd.innerHTML = '<div class="empty-state"><div class="icon">📊</div><p><strong>' + t('error.could_not_load_dashboard') + '</strong></p></div>';
     return;
   }
 
@@ -469,35 +932,34 @@ function renderDashboard() {
   if (nowDetail) nowDetail.textContent = play.has_current ? (play.artist || play.album || '') : 'Choose a track from your library to begin.';
   if (nowState) nowState.textContent = play.has_current ? (play.state || 'Playing') : 'Ready to listen';
 
-  function fmtDur(ms) {
-    if (!ms) return '0h';
+  function fmtHours(ms) {
+    if (!ms && ms !== 0) return '—';
     const h = Math.floor(ms / 3600000);
     return h + 'h';
   }
 
-  function val(v, fallback) { return v !== null && v !== undefined && v !== 0 ? v : fallback; }
+  function val(v) { return v !== null && v !== undefined ? v : '—'; }
 
   cd.innerHTML =
-    '<div class="card" style="animation-delay:0ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><div class="card-value">' + val(lib.tracks, 'N/D') + '</div><div class="card-label">Tracks</div></div>' +
-    '<div class="card" style="animation-delay:40ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h18"/><rect x="3" y="8" width="18" height="12" rx="2"/></svg></div><div class="card-value">' + val(lib.albums, 'N/D') + '</div><div class="card-label">Albums</div></div>' +
-    '<div class="card" style="animation-delay:80ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + val(lib.artists, 'N/D') + '</div><div class="card-label">Artists</div></div>' +
-    '<div class="card" style="animation-delay:120ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="card-value">' + fmtDur(lib.total_duration_ms) + '</div><div class="card-label">Duration</div></div>' +
-    '<div class="card" style="animation-delay:160ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + val(health.missing_files, 0) + '</div><div class="card-label">Missing files ' + (health.is_healthy ? '<span class="badge stable">Healthy</span>' : '<span class="badge error">Needs attention</span>') + '</div></div>';
+    '<div class="card" style="animation-delay:0ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><div class="card-value">' + val(lib.tracks) + '</div><div class="card-label">Tracks</div></div>' +
+    '<div class="card" style="animation-delay:40ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h18"/><rect x="3" y="8" width="18" height="12" rx="2"/></svg></div><div class="card-value">' + val(lib.albums) + '</div><div class="card-label">Albums</div></div>' +
+    '<div class="card" style="animation-delay:80ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + val(lib.artists) + '</div><div class="card-label">Artists</div></div>' +
+    '<div class="card" style="animation-delay:120ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="card-value">' + fmtHours(lib.total_duration_ms) + '</div><div class="card-label">Duration</div></div>' +
+    '<div class="card" style="animation-delay:160ms"><div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="card-value">' + val(health.missing_files) + '</div><div class="card-label">Missing files ' + (health.missing_files !== undefined ? (health.missing_files === 0 ? '<span class="badge stable">Healthy</span>' : '<span class="badge error">Needs attention</span>') : '') + '</div></div>';
 
-  // Update meta
   var meta = $('#dashboard-meta');
   if (meta) {
     var status = State.status;
     meta.textContent = 'Server ' + (status?.status === 'ok' ? '● Online' : '● Offline') +
       ' · v' + (State.serverInfo?.version || '?') +
-      (lib.tracks ? ' · ' + lib.tracks + ' tracks' : '');
+      (lib.tracks !== undefined ? ' · ' + lib.tracks + ' tracks' : '');
   }
 }
 
-// ── Tracks / Library ────────────────────────────────────────────
+// ── Tracks & Library ────────────────────────────────────────────
 async function loadTracks() {
   try {
-    const raw = await MichiAPI.tracks();
+    const raw = await MichiAPI.tracks({ limit: 100 });
     State.tracks = raw.tracks || [];
     State.allTracks = State.tracks;
     updateTracksCount();
@@ -509,10 +971,10 @@ async function loadTracks() {
 function updateTracksCount() {
   const el1 = $('#tracks-count');
   const el2 = $('#library-meta');
-  const total = State.stats?.tracks ?? State.allTracks.length;
-  const text = 'Showing ' + Math.min(State.tracks.length, 50) + ' of ' + total + ' tracks';
+  const total = State.dashboard?.library?.tracks ?? State.allTracks.length;
+  const text = 'Showing ' + Math.min(State.tracks.length, 100) + ' of ' + total + ' tracks';
   if (el1) el1.textContent = text;
-  if (el2) el2.textContent = total + ' tracks · ' + (State.stats?.albums || '?') + ' albums · ' + (State.stats?.artists || '?') + ' artists';
+  if (el2) el2.textContent = total + ' tracks · ' + (State.dashboard?.library?.albums || '?') + ' albums · ' + (State.dashboard?.library?.artists || '?') + ' artists';
 }
 
 function renderTracks(tracks, tableId) {
@@ -520,35 +982,56 @@ function renderTracks(tracks, tableId) {
   if (!container) return;
 
   if (!tracks || tracks.length === 0) {
-    renderEmpty(container, '🎵', 'Library empty', 'Scan your music library to get started.');
+    renderEmpty(container, '🎵', 'Library empty', 'Scan or import music files to populate library.');
     return;
   }
 
   let html = '<table><thead><tr>' +
-    '<th>#</th><th>Cover</th><th>Title</th><th>Artist</th><th>Album</th><th>Format</th><th>Duration</th><th></th>' +
+    '<th>#</th><th>Cover</th><th>Title</th><th>Artist</th><th>Album</th><th>Format</th><th>Rating</th><th>Duration</th><th></th>' +
     '</tr></thead><tbody>';
 
-  const slice = tracks.slice(0, 50);
-  slice.forEach((t, i) => {
+  tracks.slice(0, 100).forEach((t, i) => {
     const realIdx = State.tracks.indexOf(t);
     const coverHtml = t.artwork_id
-      ? '<img src="/api/artwork/' + t.artwork_id + '" alt="" style="width:32px;height:32px;border-radius:4px;object-fit:cover">'
+      ? '<img src="/api/v1/artwork/' + t.artwork_id + '" alt="" style="width:32px;height:32px;border-radius:4px;object-fit:cover">'
       : '<span style="font-size:1rem">🎵</span>';
-    html += '<tr>' +
+
+    const starIcon = t.starred ? '⭐' : '☆';
+    const starsHtml = '<span class="star-rating" style="cursor:pointer" onclick="event.stopPropagation();toggleStar(' + realIdx + ')" title="Toggle Star">' + starIcon + '</span>';
+
+    html += '<tr onclick="openTrackDetailModal(' + realIdx + ')" style="cursor:pointer">' +
       '<td style="color:var(--text-dim)">' + (i + 1) + '</td>' +
       '<td>' + coverHtml + '</td>' +
       '<td class="track-title">' + esc(t.title || 'Unknown') + '</td>' +
       '<td class="track-artist">' + esc(t.artist || '—') + '</td>' +
       '<td class="track-artist">' + esc(t.album || '—') + '</td>' +
       '<td><span class="badge format" data-format="' + esc(t.format || '').toLowerCase() + '">' + esc(t.format || '?') + '</span></td>' +
+      '<td>' + starsHtml + '</td>' +
       '<td style="color:var(--text-dim)">' + fmtDur(t.duration_ms) + '</td>' +
-      '<td><button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();playTrack(' + realIdx + ')">Play</button>' +
-      '<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();addToQueue(' + realIdx + ')" style="margin-left:4px" aria-label="Add to queue">+Q</button></td>' +
+      '<td style="white-space:nowrap">' +
+      '<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();playTrack(' + realIdx + ')">Play</button>' +
+      '<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();addToQueue(' + realIdx + ')" style="margin-left:4px" aria-label="Add to queue">+Q</button>' +
+      '</td>' +
       '</tr>';
   });
 
   html += '</tbody></table>';
   container.innerHTML = html;
+}
+
+async function toggleStar(idx) {
+  const t = State.tracks[idx];
+  if (!t) return;
+  const next = !t.starred;
+  try {
+    await MichiAPI.starTrack(t.id, next);
+    t.starred = next;
+    renderTracks(State.tracks, 'tracks-table');
+    renderTracks(State.tracks, 'library-table');
+    showToast(next ? 'Starred' : 'Unstarred');
+  } catch (e) {
+    showToast(e.message, true);
+  }
 }
 
 // ── Search ──────────────────────────────────────────────────────
@@ -574,13 +1057,6 @@ async function handleSearch() {
     renderTracks(State.tracks, 'library-table');
     updateTracksCount();
     $('#tracks-count').textContent = State.tracks.length + ' results';
-    var lm = $('#library-meta');
-    if (lm) lm.textContent = State.tracks.length + ' results';
-    if (isAdvancedQuery(q)) {
-      $('#search-input').style.borderColor = 'var(--accent)';
-    } else {
-      $('#search-input').style.borderColor = '';
-    }
     showSection('library');
     showToast(t('toast.found_results', {n: State.tracks.length}));
   } catch (e) { showToast(e.message, true); }
@@ -599,7 +1075,7 @@ async function handleScan() {
   } catch (e) { showToast(e.message, true); }
 }
 
-// ── Playback & Canonical State Authority ─────────────────────────
+// ── Canonical Playback & Up Next Queue ───────────────────────────
 var ServerPlayback = {
   state: 'paused',
   track_id: null,
@@ -608,15 +1084,14 @@ var ServerPlayback = {
   duration_ms: 0,
   volume: 80,
   shuffle: false,
-  repeat: 'none',
+  repeat: 'off',
   playing: false,
-  outputTarget: 'browser', // 'browser' | 'remote'
+  outputTarget: 'browser', // 'browser' | 'server'
   pollTimer: null,
-  eventWs: null,
 };
 
 function toggleOutputTarget() {
-  ServerPlayback.outputTarget = ServerPlayback.outputTarget === 'browser' ? 'remote' : 'browser';
+  ServerPlayback.outputTarget = ServerPlayback.outputTarget === 'browser' ? 'server' : 'browser';
   var badge = $('#np-target-badge');
   if (badge) {
     badge.textContent = ServerPlayback.outputTarget === 'browser' ? 'Output: This Browser' : 'Output: Remote Link';
@@ -662,13 +1137,10 @@ async function playTrack(idx) {
 
   // Canonical server playback
   try {
-    await MichiAPI.request('/api/v1/playback/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        command: 'play',
-        value: { track_id: t.id, position_ms: 0 }
-      })
+    await MichiAPI.playbackControl({
+      command: 'play',
+      track_id: t.id,
+      position_ms: 0
     });
     await loadCanonicalPlaybackState();
   } catch (err) {
@@ -694,11 +1166,7 @@ async function playPause() {
 
   // Canonical server toggle
   try {
-    await MichiAPI.request('/api/v1/playback/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: 'toggle' })
-    });
+    await MichiAPI.playbackControl({ command: 'toggle' });
     await loadCanonicalPlaybackState();
   } catch (err) {
     showToast('Server playback control failed: ' + err.message, true);
@@ -707,11 +1175,7 @@ async function playPause() {
 
 async function toggleShuffle() {
   try {
-    var resp = await MichiAPI.request('/api/v1/playback/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: 'shuffle' })
-    });
+    var resp = await MichiAPI.playbackControl({ command: 'shuffle' });
     ServerPlayback.shuffle = !!resp.shuffle;
     updatePlaybackControlsUI();
     showToast('Shuffle ' + (ServerPlayback.shuffle ? 'ON' : 'OFF'));
@@ -722,12 +1186,8 @@ async function toggleShuffle() {
 
 async function toggleRepeat() {
   try {
-    var resp = await MichiAPI.request('/api/v1/playback/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: 'repeat' })
-    });
-    ServerPlayback.repeat = resp.repeat || 'none';
+    var resp = await MichiAPI.playbackControl({ command: 'repeat' });
+    ServerPlayback.repeat = resp.repeat || 'off';
     updatePlaybackControlsUI();
     showToast('Repeat mode: ' + ServerPlayback.repeat.toUpperCase());
   } catch (e) {
@@ -742,7 +1202,7 @@ function updatePlaybackControlsUI() {
   }
   var repeatBtn = $('#btn-repeat');
   if (repeatBtn) {
-    repeatBtn.style.color = (ServerPlayback.repeat && ServerPlayback.repeat !== 'none') ? 'var(--primary)' : 'var(--text-3)';
+    repeatBtn.style.color = (ServerPlayback.repeat && ServerPlayback.repeat !== 'off') ? 'var(--primary)' : 'var(--text-3)';
   }
 }
 
@@ -751,58 +1211,59 @@ async function addToQueue(idx) {
   if (!tracks || idx < 0 || idx >= tracks.length) return;
   const t = tracks[idx];
   try {
-    await MichiAPI.request('/api/v1/queue/items', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ track_ids: [t.id] })
-    });
-    showToast(t('toast.added_to_queue', {title: t.title || 'Unknown'}));
+    await MichiAPI.addQueueItems([t.id]);
     await loadCanonicalQueue();
+    showToast('Added to Up Next');
   } catch (e) {
-    showToast('Failed to add track to queue: ' + (e.message || 'Server error'), 'error');
+    showToast('Failed to add to queue: ' + e.message, true);
   }
 }
 
 async function loadCanonicalQueue() {
   try {
-    const q = await MichiAPI.request('/api/v1/queue');
-    if (q && q.items && Array.isArray(q.items)) {
-      if (q.items.length > 0) {
-        State.queue = q.items.map(function (it, i) {
-          const found = (State.allTracks || State.tracks || []).find(function (tr) { return tr.id === it.track_id; });
-          return found || { id: it.track_id, title: it.track?.title || 'Track ' + (i + 1), duration_ms: it.track?.duration_ms || 0 };
-        });
-      } else {
-        State.queue = [];
-      }
-    } else {
-      State.queue = [];
-    }
+    const raw = await MichiAPI.queue();
+    const items = raw.items || [];
+    State.queue = items;
+    renderQueue(items, raw.current_index || 0);
   } catch (e) {
-    State.queue = [];
+    // silent
   }
-  renderQueue();
 }
 
-function renderQueue() {
+function renderQueue(items, currentIndex) {
   const container = $('#queue-content');
   if (!container) return;
-  if (State.queue.length === 0) {
-    container.innerHTML = '<p class="queue-empty">' + t('queue_empty') + '</p>';
+  if (!items || items.length === 0) {
+    container.innerHTML = '<p class="queue-empty" data-i18n="queue_empty">Queue empty</p>';
     return;
   }
-  container.innerHTML = State.queue.map(function (t, i) {
-    return '<div class="queue-row">' +
-      '<span class="queue-index">' + String(i + 1).padStart(2, '0') + '</span>' +
-      '<span class="queue-title">' + esc(t.title || 'Unknown') + '</span>' +
-      '<span class="queue-duration">' + fmtDur(t.duration_ms) + '</span>' +
+
+  container.innerHTML = items.map((item, idx) => {
+    const isCurrent = idx === currentIndex;
+    return '<div class="queue-item ' + (isCurrent ? 'active' : '') + '" style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-subtle);font-size:.78rem">' +
+      '<div style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+      (isCurrent ? '<strong style="color:var(--primary)">▶ ' : '') +
+      esc(item.title || item.track_id) +
+      (isCurrent ? '</strong>' : '') +
+      '</div>' +
+      '<button class="btn btn-sm btn-ghost" onclick="jumpToQueueItem(' + idx + ')" style="padding:2px 6px">Jump</button>' +
       '</div>';
   }).join('');
 }
 
+async function jumpToQueueItem(pos) {
+  try {
+    await MichiAPI.jumpQueue(pos);
+    await loadCanonicalQueue();
+    await loadCanonicalPlaybackState();
+  } catch (e) {
+    showToast(e.message, true);
+  }
+}
+
 async function loadCanonicalPlaybackState() {
   try {
-    const st = await MichiAPI.request('/api/v1/playback/state');
+    const st = await MichiAPI.playbackState();
     ServerPlayback.state = st.state;
     ServerPlayback.playing = st.playing;
     ServerPlayback.track_id = st.track_id;
@@ -811,7 +1272,7 @@ async function loadCanonicalPlaybackState() {
     ServerPlayback.duration_ms = st.duration_ms || 0;
     ServerPlayback.volume = st.volume || 80;
     ServerPlayback.shuffle = !!st.shuffle;
-    ServerPlayback.repeat = st.repeat || 'none';
+    ServerPlayback.repeat = st.repeat || 'off';
 
     if (st.current_track) {
       State.currentTrack = st.current_track;
@@ -821,9 +1282,7 @@ async function loadCanonicalPlaybackState() {
     updatePlaybackControlsUI();
     updatePlayButtons();
     updatePlaybackProgress();
-  } catch (e) {
-    // silent
-  }
+  } catch (e) {}
 }
 
 function onTrackEnd() {
@@ -875,7 +1334,7 @@ function updateNowPlaying(t) {
   const cover = $('#np-cover');
   if (cover) {
     cover.innerHTML = t.artwork_id
-      ? '<img src="/api/artwork/' + t.artwork_id + '" alt="">'
+      ? '<img src="/api/v1/artwork/' + t.artwork_id + '" alt="">'
       : '🎵';
   }
   const title = $('#np-title');
@@ -901,20 +1360,6 @@ function updateNowPlaying(t) {
   }
   const dur = $('#np-duration');
   if (dur) dur.textContent = fmtDur(t.duration_ms);
-  animateNowPlaying();
-}
-
-function animateNowPlaying() {
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  [$('#np-cover'), $('.np-info')].forEach(function (element) {
-    if (!element) return;
-    element.classList.remove('material-handoff');
-    void element.offsetWidth;
-    element.classList.add('material-handoff');
-    element.addEventListener('animationend', function () {
-      element.classList.remove('material-handoff');
-    }, { once: true });
-  });
 }
 
 function updateMiniPlayer(t) {
@@ -924,7 +1369,7 @@ function updateMiniPlayer(t) {
   const cover = $('#minibar-cover');
   if (cover) {
     cover.innerHTML = t.artwork_id
-      ? '<img src="/api/artwork/' + t.artwork_id + '" alt="">'
+      ? '<img src="/api/v1/artwork/' + t.artwork_id + '" alt="">'
       : '🎵';
   }
   const title = $('#minibar-title');
@@ -933,29 +1378,24 @@ function updateMiniPlayer(t) {
   if (artist) artist.textContent = t.artist || '—';
 }
 
-// ── Michi Link panel ────────────────────────────────────────────
+// ── Michi Link & Ecosystem ──────────────────────────────────────
 async function testMichiLink() {
   const btn = $('#page-michilink button[onclick="testMichiLink()"]');
   if (btn) { btn.disabled = true; btn.textContent = 'Testing...'; }
   try {
-    const [liveRes, infoRes, capsRes] = await Promise.allSettled([
-      fetch('/health/live'),
-      MichiAPI.request('/api/v1/server/info'),
-      MichiAPI.request('/api/v1/capabilities'),
+    const [infoRes, capsRes] = await Promise.allSettled([
+      MichiAPI.serverInfo(),
+      MichiAPI.capabilities(),
     ]);
 
-    const liveOk = liveRes.status === 'fulfilled' && liveRes.value.ok;
     const infoOk = infoRes.status === 'fulfilled' && infoRes.value && !infoRes.value.error;
     const capsOk = capsRes.status === 'fulfilled' && capsRes.value && !capsRes.value.error;
 
-    if (liveOk && infoOk && capsOk) {
+    if (infoOk && capsOk) {
       showToast('Connection verified: CONNECTED / HEALTHY');
       await Promise.allSettled([loadStatus(), loadServerInfo(), loadEcosystemDevices()]);
-    } else if (liveOk || infoOk) {
-      showToast('Connection degraded: DEGRADED', true);
-      await Promise.allSettled([loadStatus(), loadServerInfo(), loadEcosystemDevices()]);
     } else {
-      showToast('Connection test failed: FAILED', true);
+      showToast('Connection degraded', true);
     }
   } catch (err) {
     showToast('Connection test failed: ' + (err.message || 'Error'), true);
@@ -964,10 +1404,9 @@ async function testMichiLink() {
   }
 }
 
-// ── Ecosystem ────────────────────────────────────────────────────
 async function loadEcosystemDevices() {
   try {
-    var raw = await MichiAPI.request('/api/v1/link/devices');
+    var raw = await MichiAPI.linkDevices();
     var devices = raw.devices || [];
     var container = $('#ecosystem-devices');
     if (!container) return;
@@ -994,18 +1433,13 @@ async function loadEcosystemDevices() {
 var _qrCode = null;
 var _qrExpiresAt = null;
 var _qrTimer = null;
-var _qrState = 'IDLE'; // IDLE, GENERATING, WAITING_FOR_SCAN, CLAIMED, EXPIRED, ERROR
+var _qrState = 'IDLE';
 
 async function generateQR() {
   _qrState = 'GENERATING';
   try {
     var originUrl = window.location.origin;
-    var resp = await MichiAPI.request('/api/v1/pair/qr', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ server_url: originUrl }),
-      timeout: 10000
-    });
+    var resp = await MichiAPI.qrPair(originUrl);
     _qrCode = resp.qr_code;
     _qrExpiresAt = new Date(resp.expires_at);
     _qrState = 'WAITING_FOR_SCAN';
@@ -1026,7 +1460,6 @@ function renderQR(resp) {
   if (empty) empty.classList.add('hidden');
   if (connected) connected.classList.add('hidden');
 
-  // Load SVG
   if (svgEl) {
     svgEl.innerHTML = '<img src="' + resp.svg_url + '" alt="QR Code" style="width:100%;height:100%">';
   }
@@ -1052,7 +1485,6 @@ function pollQRStatus() {
   _qrTimer = setInterval(async function () {
     if (!_qrCode || _qrState !== 'WAITING_FOR_SCAN') { clearInterval(_qrTimer); return; }
     updateQRCountdown();
-    // Check if expired
     if (_qrExpiresAt && new Date() > _qrExpiresAt) {
       clearInterval(_qrTimer);
       _qrState = 'EXPIRED';
@@ -1063,7 +1495,7 @@ function pollQRStatus() {
     }
 
     try {
-      var st = await MichiAPI.request('/api/v1/pair/qr/' + _qrCode + '/status');
+      var st = await MichiAPI.qrStatus(_qrCode);
       if (st.status === 'claimed' || st.claimed === true) {
         clearInterval(_qrTimer);
         _qrState = 'CLAIMED';
@@ -1076,9 +1508,7 @@ function pollQRStatus() {
         showToast('Device paired successfully');
         loadEcosystemDevices();
       }
-    } catch (e) {
-      // transient poll error
-    }
+    } catch (e) {}
   }, 1500);
 }
 
@@ -1117,7 +1547,7 @@ function copyServerUrl() {
 // ── Playlists ────────────────────────────────────────────────────
 async function loadPlaylists() {
   try {
-    const raw = await MichiAPI.request('/api/v1/playlists');
+    const raw = await MichiAPI.playlists();
     const playlists = raw.playlists || [];
     renderPlaylists(playlists);
     const el = $('#playlist-count');
@@ -1139,13 +1569,46 @@ function renderPlaylists(playlists) {
     return;
   }
   container.innerHTML = playlists.map(function (p) {
-    return '<div class="playlist-item">' +
+    return '<div class="playlist-item" onclick="openPlaylistTracks(\'' + p.id + '\',\'' + esc(p.name) + '\')">' +
       '<div class="info"><div class="name">' + esc(p.name) + '</div>' +
       (p.description ? '<div class="desc">' + esc(p.description) + '</div>' : '') +
       '</div>' +
-      '<div class="meta">' + (p.track_count || 0) + ' tracks</div>' +
+      '<div class="meta" style="display:flex;gap:6px;align-items:center">' +
+      '<span>' + (p.track_count || 0) + ' tracks</span>' +
+      '<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();exportPlaylistM3U(\'' + p.id + '\')">M3U</button>' +
+      '<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();confirmDeletePlaylist(\'' + p.id + '\',\'' + esc(p.name) + '\')">✕</button>' +
+      '</div>' +
       '</div>';
   }).join('');
+}
+
+async function openPlaylistTracks(id, name) {
+  try {
+    const raw = await MichiAPI.playlistTracks(id);
+    const tracks = raw.tracks || [];
+    State.tracks = tracks;
+    renderTracks(tracks, 'library-table');
+    showSection('library');
+    showToast('Viewing playlist: ' + name + ' (' + tracks.length + ' tracks)');
+  } catch (e) {
+    showToast('Failed to load playlist: ' + e.message, true);
+  }
+}
+
+function exportPlaylistM3U(id) {
+  window.open('/api/v1/playlists/' + id + '/export/m3u', '_blank');
+}
+
+function confirmDeletePlaylist(id, name) {
+  showModal('Delete Playlist', 'Are you sure you want to delete playlist "' + name + '"?', 'Delete', async function () {
+    try {
+      await MichiAPI.deletePlaylist(id);
+      showToast('Playlist deleted');
+      loadPlaylists();
+    } catch (e) {
+      showToast('Failed to delete playlist: ' + e.message, true);
+    }
+  });
 }
 
 function renderSmartList(playlists) {
@@ -1156,7 +1619,7 @@ function renderSmartList(playlists) {
     return;
   }
   container.innerHTML = playlists.map(function (p) {
-    return '<div class="playlist-item">' +
+    return '<div class="playlist-item" onclick="openPlaylistTracks(\'' + p.id + '\',\'' + esc(p.name) + '\')">' +
       '<div class="info"><div class="name">' + esc(p.name) + '</div>' +
       '<div class="desc">' + esc(p.description || '') + '</div></div>' +
       '<div class="meta">' + (p.track_count || 0) + ' tracks</div>' +
@@ -1175,7 +1638,6 @@ function switchPlaylistTab(tab) {
   if (tab === 'browse') loadPlaylists();
 }
 
-// Show/hide param row based on rule
 document.addEventListener('DOMContentLoaded', function () {
   var ruleSelect = $('#smart-rule');
   if (ruleSelect) {
@@ -1215,32 +1677,11 @@ async function createSmartPlaylist() {
   params.limit = limit;
 
   try {
-    var resp = await MichiAPI.request('/api/v1/playlists/smart', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, rule: rule, params: params }),
-    });
+    await MichiAPI.smartPlaylist(name, rule, params);
     showToast(t('toast.created'));
     $('#smart-name').value = '';
     loadPlaylists();
     switchPlaylistTab('browse');
-  } catch (e) { showToast(e.message, true); }
-}
-
-// ── Backup ───────────────────────────────────────────────────────
-async function downloadBackup() {
-  try {
-    var data = await MichiAPI.request('/api/v1/backup', { timeout: 30000 });
-    var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = 'michi-backup-' + new Date().toISOString().slice(0, 10) + '.json';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showToast(t('toast.backup_downloaded'));
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -1251,8 +1692,8 @@ const _historyLimit = 50;
 async function loadHistory() {
   try {
     const [list, stats] = await Promise.all([
-      MichiAPI.request('/api/v1/history?limit=' + _historyLimit + '&offset=' + _historyOffset),
-      MichiAPI.request('/api/v1/history/stats'),
+      MichiAPI.history({ limit: _historyLimit, offset: _historyOffset }),
+      MichiAPI.historyStats(),
     ]);
     renderHistory(list);
     renderHistoryStats(stats);
@@ -1299,7 +1740,7 @@ function renderHistory(list) {
     if (_historyOffset > 0) {
       ph += '<button class="btn btn-sm btn-ghost" onclick="historyPage(' + Math.max(0, _historyOffset - _historyLimit) + ')">Prev</button>';
     }
-    ph += '<span style="color:var(--text-dim);font-size:.75rem;padding:0 8px">Page ' + (Math.floor(_historyOffset / _historyLimit) + 1) + ' of ' + pages + '</span>';
+    ph += '<span style="color:var(--text-dim);font-size:.75rem;padding:0 8px">Page ' + (Math.floor(_historyOffset / _historyLimit) + 1) + ' of ' + (pages || 1) + '</span>';
     if (_historyOffset + _historyLimit < total) {
       ph += '<button class="btn btn-sm btn-ghost" onclick="historyPage(' + (_historyOffset + _historyLimit) + ')">Next</button>';
     }
@@ -1314,7 +1755,7 @@ function historyPage(offset) {
 
 async function exportHistory() {
   try {
-    const data = await MichiAPI.request('/api/v1/history/export', { timeout: 15000 });
+    const data = await MichiAPI.exportHistory();
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1329,19 +1770,20 @@ async function exportHistory() {
 }
 
 async function clearHistory() {
-  if (!confirm('Clear all play history? This cannot be undone.')) return;
-  try {
-    await MichiAPI.request('/api/v1/history', { method: 'DELETE' });
-    _historyOffset = 0;
-    loadHistory();
-    showToast(t('toast.deleted'));
-  } catch (e) { showToast(e.message, true); }
+  showModal('Clear History', 'Clear all play history? This cannot be undone.', 'Clear', async function () {
+    try {
+      await MichiAPI.clearHistory();
+      _historyOffset = 0;
+      loadHistory();
+      showToast(t('toast.deleted'));
+    } catch (e) { showToast(e.message, true); }
+  });
 }
 
 // ── Room Groups ──────────────────────────────────────────────────
 async function loadRoomGroups() {
   try {
-    var raw = await MichiAPI.request('/api/v1/rooms/groups');
+    var raw = await MichiAPI.roomGroups();
     var groups = raw.groups || [];
     var container = $('#room-groups-list');
     if (!container) return;
@@ -1376,11 +1818,7 @@ async function createRoomGroup() {
   if (!name) { showToast(t('error.please_enter_name'), true); return; }
   var ids = recvs ? recvs.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [];
   try {
-    await MichiAPI.request('/api/v1/rooms/groups', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, mode: mode, receiver_ids: ids }),
-    });
+    await MichiAPI.createRoomGroup({ name, mode, receiver_ids: ids });
     $('#rg-name').value = '';
     $('#rg-receivers').value = '';
     loadRoomGroups();
@@ -1390,7 +1828,7 @@ async function createRoomGroup() {
 
 async function activateRoomGroup(id) {
   try {
-    var resp = await MichiAPI.request('/api/v1/rooms/groups/' + id + '/activate', { method: 'POST' });
+    var resp = await MichiAPI.activateRoomGroup(id);
     loadRoomGroups();
     if (resp.status === 'already_active') {
       showToast('Room group is already active');
@@ -1409,7 +1847,7 @@ async function activateRoomGroup(id) {
 
 async function deactivateRoomGroup(id) {
   try {
-    await MichiAPI.request('/api/v1/rooms/groups/' + id + '/deactivate', { method: 'POST' });
+    await MichiAPI.deactivateRoomGroup(id);
     loadRoomGroups();
     showToast(t('toast.deactivated'));
   } catch (e) { showToast(e.message, true); }
@@ -1417,16 +1855,16 @@ async function deactivateRoomGroup(id) {
 
 async function deleteRoomGroup(id) {
   try {
-    await MichiAPI.request('/api/v1/rooms/groups/' + id, { method: 'DELETE' });
+    await MichiAPI.deleteRoomGroup(id);
     loadRoomGroups();
     showToast(t('toast.deleted'));
   } catch (e) { showToast(e.message, true); }
 }
 
-// ── Broadcast & Cast ────────────────────────────────────────────
+// ── Broadcast & Sources ──────────────────────────────────────────
 async function loadSources() {
   try {
-    var raw = await MichiAPI.request('/api/v1/sources');
+    var raw = await MichiAPI.sources();
     var sources = raw.sources || [];
     var container = $('#sources-list');
     var count = $('#sources-count');
@@ -1452,8 +1890,6 @@ async function loadSources() {
         '<button class="btn btn-sm btn-ghost" onclick="deleteSource(\'' + s.id + '\')">✕</button>' +
         '</div></div>';
     }).join('');
-    var meta = $('#broadcast-meta');
-    if (meta) meta.textContent = sources.length + ' sources · ' + sources.filter(function (s) { return s.stream_type === 'radio'; }).length + ' radio · ' + sources.filter(function (s) { return s.stream_type === 'podcast'; }).length + ' podcast';
   } catch (e) { console.warn('sources:', e.message); }
 }
 
@@ -1461,12 +1897,7 @@ async function addSource() {
   var url = $('#source-url-input')?.value.trim();
   if (!url) { showToast(t('error.please_enter_url'), true); return; }
   try {
-    var resp = await MichiAPI.request('/api/v1/sources', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: url }),
-      timeout: 15000,
-    });
+    var resp = await MichiAPI.addSource(url);
     $('#source-url-input').value = '';
     var el = $('#source-add-result');
     if (el) el.innerHTML = '<span style="color:var(--green)">✓ Added: ' + esc(resp.source?.name || resp.source?.stream_type || 'source') + '</span>';
@@ -1477,7 +1908,7 @@ async function addSource() {
 
 async function deleteSource(id) {
   try {
-    await MichiAPI.request('/api/v1/sources/' + id, { method: 'DELETE' });
+    await MichiAPI.deleteSource(id);
     loadSources();
     showToast(t('toast.deleted'));
   } catch (e) { showToast(e.message, true); }
@@ -1496,16 +1927,13 @@ function playSource(id) {
   });
 }
 
-var _currentSourceId = null;
-
 async function showEpisodes(sourceId, sourceName) {
-  _currentSourceId = sourceId;
   var view = $('#episode-view');
   var nameEl = $('#episode-source-name');
   if (view) view.classList.remove('hidden');
   if (nameEl) nameEl.textContent = 'Episodes: ' + sourceName;
   try {
-    var raw = await MichiAPI.request('/api/v1/sources/' + sourceId + '/episodes');
+    var raw = await MichiAPI.sourceEpisodes(sourceId);
     var eps = raw.episodes || [];
     var container = $('#episodes-list');
     if (!container) return;
@@ -1533,45 +1961,10 @@ function playEpisode(episodeId) {
     updateNowPlaying(State.currentTrack);
     updateMiniPlayer(State.currentTrack);
     updatePlayButtons();
-
-    // Mark as played only after playback successfully starts
-    MichiAPI.request('/api/v1/sources/episodes/' + episodeId, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ played: true }),
-    }).catch(function () {});
   }).catch(function (err) {
     showToast(t('error.could_not_play', {msg: err.message}), true);
   });
 }
-
-// Extend init to load playlists when navigating to playlists page
-var _origShowSection = showSection;
-showSection = function (section) {
-  _origShowSection(section);
-  if (section === 'playlists') {
-    loadPlaylists();
-  }
-  if (section === 'settings') {
-    loadCurrentState();
-    loadSettings();
-    setTimeout(loadRoomGroups, 100);
-  }
-  if (section === 'michilink') {
-    setTimeout(loadEcosystemDevices, 200);
-  }
-  if (section === 'history') {
-    _historyOffset = 0;
-    loadHistory();
-  }
-  if (section === 'chains') {
-    _currentChainId = null;
-    loadChains();
-  }
-  if (section === 'broadcast') {
-    loadSources();
-  }
-};
 
 // ── Settings ─────────────────────────────────────────────────────
 function switchSettingsTab(tab) {
@@ -1597,19 +1990,9 @@ function switchSettingsTab(tab) {
   }
 }
 
-document.addEventListener('keydown', function (e) {
-  if (!e.target.matches('.tab[data-stab]') || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
-  var tabs = Array.from($$('.tab[data-stab]'));
-  var current = tabs.indexOf(e.target);
-  var next = e.key === 'ArrowRight' ? (current + 1) % tabs.length : (current - 1 + tabs.length) % tabs.length;
-  e.preventDefault();
-  tabs[next].focus();
-  switchSettingsTab(tabs[next].dataset.stab);
-});
-
 async function loadSettings() {
   try {
-    var s = await MichiAPI.request('/api/v1/settings');
+    var s = await MichiAPI.settings();
     if (!$('#settings-port')) return;
     $('#settings-port').textContent = s.port;
     $('#settings-version').textContent = s.version || State.serverInfo?.version || '?';
@@ -1625,9 +2008,7 @@ async function loadSettings() {
     $('#settings-auth').innerHTML = s.auth_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
     $('#settings-dev-mode').innerHTML = s.dev_mode ? '<span class="badge stable">On</span>' : '<span class="badge disabled">Off</span>';
     $('#settings-scrobble').innerHTML = s.scrobble_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
-    var savedTheme = localStorage.getItem('michi_theme');
-    if (!savedTheme && s.theme) setTheme(s.theme, false);
-    // Effective profile details from server
+
     var scanWorkers = s.effective_scan_workers !== undefined ? s.effective_scan_workers : (s.resource_profile === 'eco' ? 1 : (s.resource_profile === 'performance' ? 4 : 2));
     var maxTc = s.effective_transcode_workers !== undefined ? s.effective_transcode_workers : (s.resource_profile === 'eco' ? 0 : (s.resource_profile === 'performance' ? 4 : 2));
     var dbPool = s.effective_db_pool !== undefined ? s.effective_db_pool : (s.resource_profile === 'eco' ? 4 : (s.resource_profile === 'performance' ? 16 : 8));
@@ -1644,8 +2025,8 @@ async function loadSettings() {
 function renderRestartBanner() {
   var banner = $('#settings-restart-banner');
   if (!banner) {
-    var sHeader = document.querySelector('.settings-section-title') || document.querySelector('#view-settings');
-    if (sHeader) {
+    var target = $('#page-settings .hero') || $('#page-settings');
+    if (target) {
       var div = document.createElement('div');
       div.id = 'settings-restart-banner';
       div.className = 'panel';
@@ -1653,31 +2034,24 @@ function renderRestartBanner() {
       div.style.borderColor = 'rgba(234, 179, 8, 0.4)';
       div.style.color = '#fef08a';
       div.style.padding = '12px 16px';
-      div.style.marginBottom = '16px';
+      div.style.margin = '12px 0';
       div.style.borderRadius = '8px';
       div.style.fontWeight = '500';
-      div.innerHTML = '⚠ <strong>Restart Required:</strong> Changes have been saved to disk, but require a server restart to take effect.';
-      sHeader.parentNode.insertBefore(div, sHeader.nextSibling);
+      div.innerHTML = '⚠ <strong>Restart Required:</strong> Settings have been saved to disk, but require a server restart to take effect.';
+      target.appendChild(div);
     }
   }
 }
-
-var _settingsRestartRequired = false;
 
 async function saveSetting(key, value) {
   var body = {};
   body[key] = value;
   try {
-    var res = await MichiAPI.request('/api/v1/settings', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    var res = await MichiAPI.updateSettings(body);
     if (res && res.restart_required) {
-      _settingsRestartRequired = true;
       localStorage.setItem('michi_restart_required', 'true');
       renderRestartBanner();
-      showToast('Settings saved. ⚠ Server restart required for changes to take effect.');
+      showToast('Settings saved. ⚠ Server restart required.');
     } else {
       showToast(t('toast.updated'));
     }
@@ -1685,134 +2059,12 @@ async function saveSetting(key, value) {
   } catch (e) { showToast(e.message, true); }
 }
 
-async function loadCurrentState() {
-  try {
-    var data = await MichiAPI.request('/api/v1/playback/state');
-    var el = $('#handoff-current-state');
-    if (el) {
-      el.textContent = JSON.stringify(data, null, 2);
-    }
-  } catch (e) {
-    var el = $('#handoff-current-state');
-    if (el) el.textContent = t('error.could_not_load_status') + ': ' + e.message;
-  }
-}
-
-// Upload
-async function uploadFile() {
-  var input = $('#settings-file-input');
-  if (!input || !input.files || !input.files[0]) {
-    showToast(t('error.please_select_file'), true);
-    return;
-  }
-  var file = input.files[0];
-  var reader = new FileReader();
-  reader.onload = async function (e) {
-    var base64 = e.target.result.split(',')[1];
-    try {
-      var resp = await MichiAPI.request('/api/v1/sync/upload/file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename: file.name,
-          original_path: file.name,
-          uploaded_by: 'webui',
-          data_base64: base64,
-        }),
-        timeout: 60000,
-      });
-      var wrap = $('#upload-progress-wrap');
-      var fill = $('#upload-progress-fill');
-      var text = $('#upload-progress-text');
-      if (wrap) wrap.classList.remove('hidden');
-      if (fill) fill.style.width = '100%';
-      if (text) text.textContent = 'Uploaded: ' + resp.hash.slice(0, 16) + '... (' + resp.size_bytes + ' bytes)';
-      showToast(t('toast.saved'));
-      input.value = '';
-    } catch (err) {
-      showToast(err.message, true);
-    }
-  };
-  reader.readAsDataURL(file);
-}
-
-// Playlist sync
-async function syncPlaylist() {
-  var name = $('#sync-playlist-name')?.value.trim();
-  var tracksText = $('#sync-playlist-tracks')?.value.trim();
-  if (!name) { showToast(t('error.please_enter_name'), true); return; }
-  var tracks = tracksText ? tracksText.split('\n').map(function (l) { return l.trim(); }).filter(Boolean) : [];
-  try {
-    var resp = await MichiAPI.request('/api/v1/sync/playlist', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, tracks: tracks }),
-    });
-    var el = $('#sync-playlist-result');
-    if (el) {
-      el.innerHTML = '<span style="color:var(--online)">✓ ' + t('toast.created') + ': ' + resp.playlist.name +
-        ' (' + resp.tracks_added + ' tracks, ' + resp.tracks_missing.length + ' missing)</span>';
-    }
-    showToast(t('toast.playlist_synced'));
-  } catch (e) { showToast(e.message, true); }
-}
-
-// Handoff
-async function transferHandoff() {
-  var trackId = $('#handoff-track-id')?.value.trim();
-  var position = parseInt($('#handoff-position')?.value || '0');
-  var playing = $('#handoff-playing')?.checked;
-  if (!trackId) { showToast(t('error.please_enter_track_id'), true); return; }
-  try {
-    var resp = await MichiAPI.request('/api/v1/player/handoff', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        track_id: trackId,
-        position_ms: position,
-        playing: playing,
-      }),
-    });
-    var el = $('#handoff-result');
-    if (el) {
-      el.innerHTML = '<span style="color:var(--online)">✓ Handoff accepted at ' + resp.position_ms + 'ms</span>';
-    }
-    loadCurrentState();
-    showToast(t('toast.handoff_transferred'));
-  } catch (e) { showToast(e.message, true); }
-}
-
-// Receivers
-async function discoverDevices() {
-  try {
-    var resp = await MichiAPI.request('/api/v1/devices/discover', { method: 'POST', timeout: 10000 });
-    var el = $('#discover-result');
-    if (el) {
-      var r = resp.receivers || [];
-      if (r.length === 0) {
-        el.innerHTML = '<span style="color:var(--text-dim)">' + t('empty.no_receivers') + '</span>';
-      } else {
-        el.innerHTML = r.map(function (rec) {
-          return '<div style="padding:6px 0;border-bottom:1px solid var(--border-subtle);font-size:.78rem">' +
-            '<span style="color:var(--text)">' + esc(rec.name || 'Unknown') + '</span> ' +
-            '<span style="color:var(--text-dim);font-family:var(--font-mono);font-size:.7rem">' + esc(rec.host || '') + '</span>' +
-            '</div>';
-        }).join('');
-      }
-    }
-  } catch (e) { showToast(e.message, true); }
-}
-
-// Webhook
+// ── Webhooks ─────────────────────────────────────────────────────
 async function setWebhook() {
   var url = $('#webhook-url')?.value.trim();
   if (!url) { showToast(t('error.please_enter_url'), true); return; }
   try {
-    await MichiAPI.request('/api/v1/webhook', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: url }),
-    });
+    await MichiAPI.setWebhook(url);
     var el = $('#webhook-status');
     if (el) el.innerHTML = '<span style="color:var(--online)">✓ Webhook set</span>';
     showToast(t('toast.webhook_configured'));
@@ -1823,7 +2075,7 @@ async function testWebhook() {
   var el = $('#webhook-status');
   if (el) el.innerHTML = '<span style="color:var(--text-dim)">Testing webhook...</span>';
   try {
-    var resp = await MichiAPI.request('/api/v1/webhook/test', { method: 'POST', timeout: 10000 });
+    var resp = await MichiAPI.testWebhook();
     if (resp && resp.status === 'success') {
       var msg = '✓ HTTP ' + resp.status_code + ' (' + resp.elapsed_ms + 'ms)';
       if (el) el.innerHTML = '<span style="color:var(--online)">' + msg + '</span>';
@@ -1840,7 +2092,7 @@ async function testWebhook() {
 
 async function deleteWebhook() {
   try {
-    await MichiAPI.request('/api/v1/webhook', { method: 'DELETE' });
+    await MichiAPI.deleteWebhook();
     var el = $('#webhook-status');
     if (el) el.innerHTML = '<span style="color:var(--text-dim)">Webhook cleared</span>';
     $('#webhook-url').value = '';
@@ -1848,12 +2100,12 @@ async function deleteWebhook() {
   } catch (e) { showToast(e.message, true); }
 }
 
-// Backup & Snapshot
+// ── Backup & Verify ──────────────────────────────────────────────
 async function createSnapshot() {
   var el = $('#snapshot-result');
   if (el) el.innerHTML = '<span style="color:var(--text-dim)">Creating library statistics snapshot...</span>';
   try {
-    var resp = await MichiAPI.request('/api/v1/backup/snapshot', { method: 'POST' });
+    var resp = await MichiAPI.backupSnapshot();
     if (el) {
       var s = resp.snapshot || {};
       var st = s.stats || {};
@@ -1870,14 +2122,14 @@ async function createSnapshot() {
 }
 
 function downloadBackup() {
-  window.open('/api/v1/backup/download', '_blank');
+  window.open('/api/v1/backup', '_blank');
 }
 
 async function verifyIntegrity() {
   var el = $('#integrity-result');
   if (el) el.innerHTML = '<span style="color:var(--text-dim)">Checking file availability...</span>';
   try {
-    var resp = await MichiAPI.request('/api/v1/backup/verify', { timeout: 30000 });
+    var resp = await MichiAPI.backupVerify();
     if (el) {
       var ok = resp.status === 'ok' || resp.missing === 0;
       el.innerHTML = '<span style="color:' + (ok ? 'var(--online)' : 'var(--error)') + '">' +
@@ -1895,7 +2147,7 @@ var _currentChainId = null;
 
 async function loadChains() {
   try {
-    var raw = await MichiAPI.request('/api/v1/chains');
+    var raw = await MichiAPI.chains();
     var chains = raw.chains || [];
     var container = $('#chains-list');
     if (!container) return;
@@ -1928,11 +2180,7 @@ async function createChain() {
   var name = $('#new-chain-name')?.value.trim();
   if (!name) { showToast(t('error.please_enter_name'), true); return; }
   try {
-    await MichiAPI.request('/api/v1/chains', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name }),
-    });
+    await MichiAPI.createChain(name);
     $('#new-chain-name').value = '';
     hideCreateChain();
     loadChains();
@@ -1943,7 +2191,7 @@ async function createChain() {
 async function openChain(id) {
   _currentChainId = id;
   try {
-    var raw = await MichiAPI.request('/api/v1/chains/' + id);
+    var raw = await MichiAPI.chain(id);
     var chain = raw.chain || {};
     var links = raw.links || [];
 
@@ -1955,7 +2203,7 @@ async function openChain(id) {
 
     renderChainLinks(links);
 
-    var recvResp = await MichiAPI.request('/api/v1/receivers');
+    var recvResp = await MichiAPI.receivers();
     var recvs = recvResp.receivers || [];
     var sel = $('#chain-add-receiver');
     if (sel) {
@@ -1983,43 +2231,17 @@ function renderChainLinks(links) {
   container.innerHTML = links.map(function (l, i) {
     var arrow = i > 0 ? '<div class="chain-arrow">↓</div>' : '';
     return arrow +
-      '<div class="chain-link-card" data-link-id="' + l.id + '" draggable="true" ' +
-      'ondragstart="dragLink(event)" ondrop="dropLink(event)" ondragover="allowDrop(event)">' +
-      '<span class="drag-handle" onmousedown="event.preventDefault()">⠿</span>' +
+      '<div class="chain-link-card" data-link-id="' + l.id + '">' +
       '<div class="link-info">' +
       '<div class="name">' + esc(l.receiver_name || l.receiver_id) + '</div>' +
       '<div class="detail">Delay: ' + l.delay_ms + 'ms</div></div>' +
       '<div class="link-volume">' +
       '<input type="range" min="0" max="100" value="' + l.volume + '" ' +
-      'oninput="updateLinkVolume(\'' + l.id + '\', this.value)" ' +
       'onchange="saveLinkVolume(\'' + l.id + '\', \'' + l.chain_id + '\', this.value)">' +
       '<span>' + l.volume + '</span></div>' +
-      '<button class="link-mute' + (l.muted ? ' muted' : '') + '" ' +
-      'onclick="toggleLinkMute(\'' + l.id + '\', \'' + l.chain_id + '\', ' + l.muted + ')">' +
-      (l.muted ? '🔇' : '🔊') + '</button>' +
       '<button class="link-remove" onclick="removeLink(\'' + l.id + '\', \'' + l.chain_id + '\')">✕</button>' +
       '</div>';
   }).join('');
-}
-
-var _dragLinkId = null;
-function dragLink(ev) {
-  _dragLinkId = ev.target.closest('.chain-link-card')?.dataset?.linkId;
-  ev.dataTransfer.effectAllowed = 'move';
-}
-function allowDrop(ev) { ev.preventDefault(); }
-function dropLink(ev) {
-  ev.preventDefault();
-  var target = ev.target.closest('.chain-link-card');
-  if (!target || !_dragLinkId) return;
-  var cards = Array.from(document.querySelectorAll('#chain-links .chain-link-card'));
-  var ids = cards.map(function (c) { return c.dataset.linkId; });
-  var fromIdx = ids.indexOf(_dragLinkId);
-  var toIdx = ids.indexOf(target.dataset.linkId);
-  if (fromIdx < 0 || toIdx < 0) return;
-  ids.splice(toIdx, 0, ids.splice(fromIdx, 1)[0]);
-  reorderLinks(ids);
-  _dragLinkId = null;
 }
 
 async function addLink() {
@@ -2028,11 +2250,7 @@ async function addLink() {
   var recvId = sel?.value;
   if (!recvId) { showToast(t('error.please_select_receiver'), true); return; }
   try {
-    await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/links', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ receiver_id: recvId }),
-    });
+    await MichiAPI.addChainLink(_currentChainId, { receiver_id: recvId });
     openChain(_currentChainId);
     showToast(t('toast.created'));
   } catch (e) { showToast(e.message, true); }
@@ -2040,51 +2258,15 @@ async function addLink() {
 
 async function removeLink(linkId, chainId) {
   try {
-    await MichiAPI.request('/api/v1/chains/' + chainId + '/links/' + linkId, { method: 'DELETE' });
+    await MichiAPI.removeChainLink(chainId, linkId);
     openChain(_currentChainId);
     showToast(t('toast.deleted'));
   } catch (e) { showToast(e.message, true); }
 }
 
-async function reorderLinks(ids) {
-  try {
-    await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/links/reorder', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ link_ids: ids }),
-    });
-    openChain(_currentChainId);
-  } catch (e) { showToast(e.message, true); }
-}
-
-async function updateLinkVolume(linkId, val) {
-  var cards = document.querySelectorAll('.chain-link-card');
-  cards.forEach(function (c) {
-    if (c.dataset.linkId === linkId) {
-      var span = c.querySelector('.link-volume span');
-      if (span) span.textContent = val;
-    }
-  });
-}
-
 async function saveLinkVolume(linkId, chainId, val) {
   try {
-    await MichiAPI.request('/api/v1/chains/' + chainId + '/links/' + linkId, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ volume: parseInt(val) }),
-    });
-  } catch (e) { showToast(e.message, true); }
-}
-
-async function toggleLinkMute(linkId, chainId, currentMuted) {
-  try {
-    await MichiAPI.request('/api/v1/chains/' + chainId + '/links/' + linkId, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ muted: !currentMuted }),
-    });
-    openChain(_currentChainId);
+    await MichiAPI.updateChainLink(chainId, linkId, { volume: parseInt(val) });
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -2094,8 +2276,7 @@ async function setChainTrack() {
   try {
     await MichiAPI.request('/api/v1/chains/' + _currentChainId, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ track_id: trackId }),
+      body: { track_id: trackId },
     });
     showToast(t('toast.updated'));
   } catch (e) { showToast(e.message, true); }
@@ -2104,9 +2285,9 @@ async function setChainTrack() {
 async function playChain() {
   if (!_currentChainId) return;
   try {
-    var resp = await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/play', { method: 'POST' });
-    if (resp && resp.links_active > 0) {
-      showToast('Chain playing on ' + resp.links_active + ' active receiver(s)');
+    var resp = await MichiAPI.playChain(_currentChainId);
+    if (resp && resp.active_links > 0) {
+      showToast('Chain playing on ' + resp.active_links + ' active receiver(s)');
     } else {
       showToast('Chain started without active receiver links', true);
     }
@@ -2120,7 +2301,7 @@ async function playChain() {
 async function stopChain() {
   if (!_currentChainId) return;
   try {
-    await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/stop', { method: 'POST' });
+    await MichiAPI.stopChain(_currentChainId);
     showToast(t('toast.deactivated'));
     loadChains();
   } catch (e) { showToast(e.message, true); }
@@ -2135,11 +2316,7 @@ function setChainVolume(val) {
   if (_chainVolTimeout) clearTimeout(_chainVolTimeout);
   _chainVolTimeout = setTimeout(async function () {
     try {
-      await MichiAPI.request('/api/v1/chains/' + _currentChainId + '/volume', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ volume: parseInt(val) }),
-      });
+      await MichiAPI.setChainVolume(_currentChainId, parseInt(val));
     } catch (e) {
       showToast('Failed to set chain volume: ' + e.message, true);
     }
