@@ -22,11 +22,57 @@ use crate::AppState;
 
 const SESSION_DURATION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
-/// Extract a Bearer token from the Authorization header
+/// Extract a Bearer token from the Authorization header or michi_web_session cookie
 #[allow(dead_code)]
 pub fn extract_bearer_token(request: &Request) -> Option<String> {
-    let auth_header = request.headers().get("Authorization")?.to_str().ok()?;
-    auth_header.strip_prefix("Bearer ").map(|s| s.to_string())
+    extract_token(request)
+}
+
+/// Helper to determine if the request is over HTTPS
+fn is_secure_request(headers: &axum::http::HeaderMap) -> bool {
+    if let Some(proto) = headers.get("X-Forwarded-Proto").and_then(|v| v.to_str().ok()) {
+        proto.eq_ignore_ascii_case("https")
+    } else {
+        false
+    }
+}
+
+/// Helper to build Set-Cookie header for michi_web_session
+fn make_session_cookie(token: &str, max_age_secs: u64, secure: bool) -> String {
+    if max_age_secs == 0 {
+        format!(
+            "michi_web_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT{}",
+            if secure { "; Secure" } else { "" }
+        )
+    } else {
+        format!(
+            "michi_web_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age_secs}{}",
+            if secure { "; Secure" } else { "" }
+        )
+    }
+}
+
+fn extract_token(request: &Request) -> Option<String> {
+    if let Some(auth_header) = request.headers().get("Authorization").and_then(|h| h.to_str().ok()) {
+        if let Some(token) = auth_header.strip_prefix("Bearer ") {
+            let t = token.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    if let Some(cookie_header) = request.headers().get(axum::http::header::COOKIE).and_then(|h| h.to_str().ok()) {
+        for cookie in cookie_header.split(';') {
+            let cookie = cookie.trim();
+            if let Some(val) = cookie.strip_prefix("michi_web_session=") {
+                let t = val.trim();
+                if !t.is_empty() {
+                    return Some(t.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Resolve the device_id from a request using either link tokens or auth sessions
@@ -113,10 +159,6 @@ impl AuthState {
     }
 }
 
-fn extract_token(request: &Request) -> Option<String> {
-    let auth_header = request.headers().get("Authorization")?.to_str().ok()?;
-    auth_header.strip_prefix("Bearer ").map(|s| s.to_string())
-}
 
 fn auth_error(status: StatusCode, message: &str) -> Response {
     (
@@ -267,6 +309,7 @@ pub(crate) struct AuthStatusResponse {
     username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     is_admin: Option<bool>,
+    registration_allowed: bool,
 }
 
 pub(crate) fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
@@ -303,7 +346,7 @@ pub(crate) async fn login_handler(
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(axum::http::HeaderMap, Json<LoginResponse>), (StatusCode, Json<serde_json::Value>)> {
     if !state.auth_enabled {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -364,12 +407,27 @@ pub(crate) async fn login_handler(
     }
 
     let token = state.auth_sessions.create_session(id).await;
-    Ok(Json(LoginResponse {
-        token,
-        id,
-        username,
-        is_admin,
-    }))
+    let secure = is_secure_request(&headers);
+    let cookie_val = make_session_cookie(&token, 86400, secure);
+
+    let mut resp_headers = axum::http::HeaderMap::new();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&cookie_val) {
+        resp_headers.insert(axum::http::header::SET_COOKIE, v);
+    }
+    resp_headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+
+    Ok((
+        resp_headers,
+        Json(LoginResponse {
+            token,
+            id,
+            username,
+            is_admin,
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -389,7 +447,7 @@ pub(crate) async fn register_handler(
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(axum::http::HeaderMap, Json<LoginResponse>), (StatusCode, Json<serde_json::Value>)> {
     if !state.auth_enabled {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -474,12 +532,27 @@ pub(crate) async fn register_handler(
         })?;
 
     let token = state.auth_sessions.create_session(user_id).await;
-    Ok(Json(LoginResponse {
-        token,
-        id: user_id,
-        username: body.username,
-        is_admin: false,
-    }))
+    let secure = is_secure_request(&headers);
+    let cookie_val = make_session_cookie(&token, 86400, secure);
+
+    let mut resp_headers = axum::http::HeaderMap::new();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&cookie_val) {
+        resp_headers.insert(axum::http::header::SET_COOKIE, v);
+    }
+    resp_headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+
+    Ok((
+        resp_headers,
+        Json(LoginResponse {
+            token,
+            id: user_id,
+            username: body.username,
+            is_admin: false,
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -492,12 +565,23 @@ pub(crate) async fn register_handler(
 )]
 pub(crate) async fn logout_handler(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     request: Request,
 ) -> impl IntoResponse {
     if let Some(token) = extract_token(&request) {
         state.auth_sessions.invalidate(&token).await;
     }
-    StatusCode::OK
+    let secure = is_secure_request(&headers);
+    let cookie_val = make_session_cookie("", 0, secure);
+    let mut resp_headers = axum::http::HeaderMap::new();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&cookie_val) {
+        resp_headers.insert(axum::http::header::SET_COOKIE, v);
+    }
+    resp_headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    (StatusCode::OK, resp_headers, Json(json!({"status": "ok"})))
 }
 
 #[utoipa::path(
@@ -519,6 +603,7 @@ pub(crate) async fn check_handler(
             id: None,
             username: None,
             is_admin: None,
+            registration_allowed: state.config.allow_registration,
         });
     }
 
@@ -545,6 +630,7 @@ pub(crate) async fn check_handler(
         id,
         username,
         is_admin,
+        registration_allowed: state.config.allow_registration,
     })
 }
 
