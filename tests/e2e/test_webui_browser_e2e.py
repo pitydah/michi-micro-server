@@ -132,10 +132,13 @@ def test_webui_full_browser_lifecycle(browser_context):
     page.wait_for_timeout(500)
     expect(page.locator("#page-library")).to_be_visible()
 
-    # 11. Test Queue navigation
-    page.click(".nav-item[data-section='queue']")
+    # 11. Test Status navigation and Queue drawer presence
+    page.click(".nav-item[data-section='status']")
     page.wait_for_timeout(500)
-    expect(page.locator("#page-queue")).to_be_visible()
+    expect(page.locator("#page-status")).to_be_visible()
+
+    queue_content = page.locator("#queue-content")
+    expect(queue_content).to_be_attached()
 
     # 12. Logout and verify protected state is torn down
     auth_btn.click()
