@@ -1518,10 +1518,8 @@ async fn test_webui_static_asset_invariants() {
     let index_path = std::path::Path::new(manifest_dir).join("static/index.html");
     let app_path = std::path::Path::new(manifest_dir).join("static/app.js");
 
-    let index_html = std::fs::read_to_string(index_path)
-        .expect("index.html must exist");
-    let app_js = std::fs::read_to_string(app_path)
-        .expect("app.js must exist");
+    let index_html = std::fs::read_to_string(index_path).expect("index.html must exist");
+    let app_js = std::fs::read_to_string(app_path).expect("app.js must exist");
 
     // 1. Initial status pill must NOT claim "Online" before checking
     assert!(
@@ -1541,7 +1539,8 @@ async fn test_webui_static_asset_invariants() {
 
     // 3. app.js must not store auth tokens in localStorage
     assert!(
-        !app_js.contains("localStorage.setItem('michi_token'") && !app_js.contains("localStorage.setItem('auth_token'"),
+        !app_js.contains("localStorage.setItem('michi_token'")
+            && !app_js.contains("localStorage.setItem('auth_token'"),
         "app.js must not store auth tokens in localStorage (use HttpOnly cookie instead)"
     );
 
@@ -1551,14 +1550,129 @@ async fn test_webui_static_asset_invariants() {
         "app.js must automatically set Content-Type: application/json for POST/PUT/PATCH"
     );
 
-    // 5. Version queries must be bumped to v=10
+    // 5. Version queries must be bumped to v=11
     assert!(
-        index_html.contains("styles.css?v=10"),
-        "index.html must reference styles.css?v=10"
+        index_html.contains("styles.css?v=11"),
+        "index.html must reference styles.css?v=11"
     );
     assert!(
-        index_html.contains("app.js?v=10"),
-        "index.html must reference app.js?v=10"
+        index_html.contains("app.js?v=11"),
+        "index.html must reference app.js?v=11"
+    );
+
+    // 6. SW_JS must reference michi-v11 cache
+    let pwa_rs = std::fs::read_to_string(std::path::Path::new(manifest_dir).join("src/pwa.rs"))
+        .expect("pwa.rs must exist");
+    assert!(
+        pwa_rs.contains("michi-v11"),
+        "pwa.rs must define CACHE = 'michi-v11'"
     );
 }
 
+#[tokio::test]
+async fn test_casaos_zimaos_metadata_icon_conformance() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let repo_root = std::path::Path::new(manifest_dir)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+
+    let casaos_path = repo_root.join("casaos/docker-compose.casaos.yml");
+    let zimaos_path = repo_root.join("casaos/docker-compose.zimaos.yml");
+    let canonical_icon_path =
+        repo_root.join("crates/michi-api/static/assets/michi-micro-server-512.png");
+
+    // 1. Canonical 512px icon must exist on disk and be non-empty
+    assert!(
+        canonical_icon_path.exists(),
+        "crates/michi-api/static/assets/michi-micro-server-512.png must exist"
+    );
+    let meta = std::fs::metadata(&canonical_icon_path).expect("icon metadata");
+    assert!(meta.len() > 1000, "canonical icon must not be empty");
+
+    // 2. Read CasaOS & ZimaOS docker-compose files
+    let casaos_content =
+        std::fs::read_to_string(&casaos_path).expect("docker-compose.casaos.yml must exist");
+    let zimaos_content =
+        std::fs::read_to_string(&zimaos_path).expect("docker-compose.zimaos.yml must exist");
+
+    let canonical_raw_url = "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server-512.png";
+
+    // 3. Must not reference the broken docs/assets/icon.png
+    assert!(
+        !casaos_content.contains("docs/assets/icon.png"),
+        "CasaOS compose must not reference missing docs/assets/icon.png"
+    );
+    assert!(
+        !zimaos_content.contains("docs/assets/icon.png"),
+        "ZimaOS compose must not reference missing docs/assets/icon.png"
+    );
+
+    // 4. Must reference the canonical 512px product icon
+    assert!(
+        casaos_content.contains(canonical_raw_url),
+        "CasaOS compose must reference canonical 512px icon"
+    );
+    assert!(
+        zimaos_content.contains(canonical_raw_url),
+        "ZimaOS compose must reference canonical 512px icon"
+    );
+
+    // 5. Launcher & Host networking invariants
+    assert!(
+        zimaos_content.contains("network_mode: host"),
+        "ZimaOS compose must preserve network_mode: host"
+    );
+    assert!(
+        zimaos_content.contains("port_map: \"9090\""),
+        "ZimaOS compose must map port 9090"
+    );
+    assert!(
+        casaos_content.contains("port_map: \"9090\""),
+        "CasaOS compose must map port 9090"
+    );
+}
+
+#[tokio::test]
+async fn test_webui_route_contract_matrix() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let app_path = std::path::Path::new(manifest_dir).join("static/app.js");
+    let app_js = std::fs::read_to_string(app_path).expect("app.js must exist");
+
+    // Assert canonical v1 endpoints used in app.js
+    let required_endpoints = [
+        "/api/auth/check",
+        "/api/auth/login",
+        "/api/auth/register",
+        "/api/auth/logout",
+        "/api/v1/status",
+        "/api/v1/server/info",
+        "/api/v1/tracks",
+        "/api/v1/star/",
+        "/api/v1/rate/",
+        "/api/v1/starred",
+        "/api/v1/bookmarks",
+        "/api/v1/playlists",
+        "/api/v1/queue",
+        "/api/v1/queue/items",
+        "/api/v1/queue/jump",
+        "/api/v1/devices/revoke",
+        "/api/v1/health/self-test",
+        "/api/v1/health/mounts",
+        "/api/v1/health/storage",
+        "/api/v1/config/validate",
+        "/api/v1/jobs",
+        "/api/v1/modules",
+        "/api/v1/changes",
+        "/api/v1/import/preflight",
+        "/api/v1/import/session",
+    ];
+
+    for ep in &required_endpoints {
+        assert!(
+            app_js.contains(ep),
+            "app.js must contain canonical endpoint reference: {ep}"
+        );
+    }
+}
