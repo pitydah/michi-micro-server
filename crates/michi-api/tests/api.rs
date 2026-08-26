@@ -414,7 +414,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
 
     let config = Config {
         port: 9999,
-        music_paths: vec![music_dir],
+        music_paths: vec![music_dir.clone()],
         config_path: config_dir,
         cache_path: cache_dir,
         database_url: db_url,
@@ -447,7 +447,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         trust_proxy: false,
         trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
     };
-    let id = track_id_from_path(canonical_file.to_str().unwrap());
+    let id = michi_core::track_id_from_library_path(&music_dir, &canonical_file);
     let track = Track {
         id,
         title: Some("Test Stream".into()),
@@ -479,6 +479,11 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
     michi_db::upsert_track(&pool, &track).await.unwrap();
 
     let state = michi_api::AppState::new(config, pool.clone(), None);
+    state
+        .disabled_modules
+        .write()
+        .await
+        .insert("scan".to_string());
     (router_with_test_admin(state, &pool).await, pool, tmp, id)
 }
 
