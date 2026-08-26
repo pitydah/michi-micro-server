@@ -70,6 +70,7 @@ pub async fn init_pool_with_size(
         .busy_timeout(std::time::Duration::from_secs(5));
 
     let pool = SqlitePoolOptions::new()
+        .min_connections(1)
         .max_connections(max_connections)
         .connect_with(opts)
         .await?;

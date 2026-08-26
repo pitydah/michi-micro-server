@@ -132,6 +132,8 @@ const MichiAPI = {
   scan() { return this.request('/api/v1/library/scan', { method: 'POST' }); },
   artworkUrl(id) { return this.base + '/api/v1/artwork/' + id; },
   streamUrl(id) { return this.base + '/api/v1/stream/' + id; },
+  downloadUrl(id) { return this.base + '/api/v1/download/' + id; },
+  downloadTrack(id) { return this.request('/api/v1/download/' + id); },
 
   // Playlists
   playlists() { return this.request('/api/v1/playlists'); },
@@ -278,7 +280,7 @@ const MichiAPI = {
   // Backup & Storage
   backupSnapshot() { return this.request('/api/v1/backup/snapshot', { method: 'POST' }); },
   backupVerify() { return this.request('/api/v1/backup/verify', { timeout: 30000 }); },
-  downloadBackup() { return this.request('/api/v1/backup', { timeout: 30000 }); },
+  downloadBackup() { return this.request('/api/v1/backup/download', { timeout: 30000 }); },
   restoreBackup(body) { return this.request('/api/v1/backup/restore', { method: 'POST', body, timeout: 60000 }); },
 
   // Diagnostics & Health
@@ -398,7 +400,7 @@ const AuthSession = {
         };
       } else if (resp.enabled === false) {
         this.state = 'disabled';
-        this.user = { username: 'Admin (Open)' };
+        this.user = null;
       } else {
         this.state = 'anonymous';
         this.user = null;
@@ -435,10 +437,10 @@ const AuthSession = {
       if (sessionContainer) sessionContainer.style.display = 'block';
       if (currentUserEl) currentUserEl.textContent = this.user?.username || 'User';
     } else if (this.state === 'disabled') {
-      if (label) label.textContent = 'Public';
+      if (label) label.textContent = 'Auth Disabled';
       if (formContainer) formContainer.style.display = 'none';
       if (sessionContainer) sessionContainer.style.display = 'block';
-      if (currentUserEl) currentUserEl.textContent = 'Auth Disabled (Open)';
+      if (currentUserEl) currentUserEl.textContent = 'Auth Disabled (Public View - Protected API Blocked)';
     } else {
       if (label) label.textContent = 'Sign In';
       if (formContainer) formContainer.style.display = 'block';
@@ -814,7 +816,7 @@ async function bootstrapPublic() {
 }
 
 async function bootstrapProtected() {
-  if (AuthSession.state === 'anonymous') {
+  if (AuthSession.state !== 'authenticated') {
     teardownProtected();
     return;
   }
@@ -827,7 +829,7 @@ async function bootstrapProtected() {
 
   if (!State.polling) {
     State.polling = setInterval(function () {
-      if (!document.hidden && AuthSession.state !== 'anonymous') {
+      if (!document.hidden && AuthSession.state === 'authenticated') {
         loadStatus();
         loadDashboard();
       }
@@ -836,7 +838,7 @@ async function bootstrapProtected() {
 
   if (!ServerPlayback.pollTimer) {
     ServerPlayback.pollTimer = setInterval(function () {
-      if (!document.hidden && AuthSession.state !== 'anonymous' && ServerPlayback.outputTarget === 'server') {
+      if (!document.hidden && AuthSession.state === 'authenticated' && ServerPlayback.outputTarget === 'server') {
         loadCanonicalPlaybackState();
       }
     }, 3000);
@@ -871,7 +873,7 @@ async function init() {
 
   await bootstrapPublic();
   const authState = await AuthSession.check();
-  if (authState === 'authenticated' || authState === 'disabled') {
+  if (authState === 'authenticated') {
     await bootstrapProtected();
   } else {
     teardownProtected();
@@ -1079,9 +1081,15 @@ function renderDashboard() {
 
   var meta = $('#dashboard-meta');
   if (meta) {
-    var status = State.status;
-    meta.textContent = 'Server ' + (status?.status === 'ok' ? '● Online' : '● Offline') +
-      ' · v' + (State.serverInfo?.version || '?') +
+    var statusText = {
+      online: '● Online',
+      degraded: '▲ Degraded',
+      auth_required: '🔒 Auth Required',
+      checking: '◌ Checking...',
+      offline: '● Offline',
+    }[ConnectionStatus.state] || '● Offline';
+    meta.textContent = 'Server ' + statusText +
+      ' · v' + (State.serverInfo?.version || State.status?.version || '?') +
       (lib.tracks !== undefined ? ' · ' + lib.tracks + ' tracks' : '');
   }
 }
@@ -1549,7 +1557,7 @@ async function testMichiLink() {
 }
 
 async function loadEcosystemDevices() {
-  if (AuthSession.state === 'anonymous') return;
+  if (AuthSession.state !== 'authenticated') return;
   try {
     var raw = await MichiAPI.linkDevices();
     var devices = raw.devices || [];
@@ -1562,6 +1570,7 @@ async function loadEcosystemDevices() {
     var typeIcons = { mobile: '📱', desktop: '💻', player: '🎵', receiver: '📡', server: '🖥️', default: '📱' };
     container.innerHTML = devices.map(function (d) {
       var icon = typeIcons[d.device_type] || typeIcons.default;
+      var devId = d.device_id || d.id || '';
       var status = d.online
         ? '<span class="badge stable" style="font-size:.6rem">ONLINE</span>'
         : '<span class="badge disabled" style="font-size:.6rem">OFFLINE</span>';
@@ -1569,13 +1578,17 @@ async function loadEcosystemDevices() {
         '<div style="font-size:1.1rem">' + icon + '</div>' +
         '<div class="info"><div class="name">' + esc(d.alias || 'Unknown') + ' ' + status + '</div>' +
         '<div class="meta">' + esc(d.device_type) + (d.device_model ? ' · ' + esc(d.device_model) : '') + '</div></div>' +
-        '<button class="btn btn-sm btn-ghost" onclick="revokeDevice(\'' + d.id + '\')">Revoke</button>' +
+        '<button class="btn btn-sm btn-ghost" onclick="revokeDevice(\'' + esc(devId) + '\')">Revoke</button>' +
         '</div>';
     }).join('');
   } catch (e) { console.warn('ecosystem:', e.message); }
 }
 
 async function revokeDevice(deviceId) {
+  if (!deviceId || deviceId === 'undefined') {
+    showToast('Invalid device ID', true);
+    return;
+  }
   showModal('Revoke Device', 'Revoke access for this device? It will need to be re-paired.', 'Revoke', async function () {
     try {
       await MichiAPI.revokeLinkDevice(deviceId);
@@ -2239,13 +2252,15 @@ async function testWebhook() {
   if (el) el.innerHTML = '<span style="color:var(--text-dim)">Testing webhook...</span>';
   try {
     var resp = await MichiAPI.testWebhook();
-    if (resp && resp.status === 'success') {
-      var msg = '✓ HTTP ' + resp.status_code + ' (' + resp.elapsed_ms + 'ms)';
+    if (resp && (resp.status === 'success' || (resp.status_code >= 200 && resp.status_code < 300))) {
+      var code = resp.status_code || 200;
+      var elapsed = resp.elapsed_ms !== undefined ? ' (' + resp.elapsed_ms + 'ms)' : '';
+      var msg = '✓ HTTP ' + code + elapsed;
       if (el) el.innerHTML = '<span style="color:var(--online)">' + msg + '</span>';
-      showToast('Webhook test passed: HTTP ' + resp.status_code);
+      showToast('Webhook test passed: HTTP ' + code);
     } else {
-      if (el) el.innerHTML = '<span style="color:var(--online)">✓ Webhook fired</span>';
-      showToast(t('toast.webhook_tested'));
+      if (el) el.innerHTML = '<span style="color:var(--error)">✗ Webhook returned non-success response</span>';
+      showToast('Webhook test returned unexpected response', true);
     }
   } catch (e) {
     if (el) el.innerHTML = '<span style="color:var(--error)">✗ ' + esc(e.message) + '</span>';
@@ -2309,12 +2324,20 @@ async function verifyIntegrity() {
 var _currentChainId = null;
 
 async function loadChains() {
-  if (AuthSession.state === 'anonymous') return;
+  if (AuthSession.state !== 'authenticated') return;
+  var container = $('#chains-list');
+  if (!container) return;
+  var feats = State.serverInfo?.features || [];
+  var hasReceivers = feats.some(function (f) {
+    return (f === 'receivers' || (f && f.name === 'receivers' && f.enabled !== false));
+  });
+  if (feats.length > 0 && !hasReceivers) {
+    container.innerHTML = '<div class="empty-state"><div class="icon">📡</div><p><strong>Receivers & Chains are disabled in Micro Server profile</strong></p><p style="font-size:.78rem;margin-top:4px">This deployment runs standalone audio output. Multi-room receiver playback is unsupported.</p></div>';
+    return;
+  }
   try {
     var raw = await MichiAPI.chains();
     var chains = raw.chains || [];
-    var container = $('#chains-list');
-    if (!container) return;
     if (chains.length === 0) {
       container.innerHTML = '<div class="empty-state"><p><strong>' + t('empty.no_chains') + '</strong></p></div>';
       return;

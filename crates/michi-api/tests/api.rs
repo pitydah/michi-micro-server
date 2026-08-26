@@ -3057,7 +3057,9 @@ async fn test_v1_stream_and_download_range() {
     drop(f);
 
     let (pool, db_url) = test_db_with_url().await;
-    let id = michi_core::track_id_from_path(file_path.to_str().unwrap());
+    let canonical_music = music.canonicalize().unwrap_or(music.clone());
+    let canonical_file = file_path.canonicalize().unwrap_or(file_path.clone());
+    let id = michi_core::track_id_from_path(canonical_file.to_str().unwrap());
     let track = michi_core::Track {
         id,
         title: Some("Range Test".into()),
@@ -3065,7 +3067,7 @@ async fn test_v1_stream_and_download_range() {
         album: None,
         album_artist: None,
         duration_ms: Some(10000),
-        file_path: file_path.to_str().unwrap().to_string(),
+        file_path: canonical_file.to_str().unwrap().to_string(),
         format: michi_core::AudioFormat::Flac,
         sample_rate: None,
         bit_depth: None,
@@ -3076,7 +3078,7 @@ async fn test_v1_stream_and_download_range() {
         track_number: None,
         disc_number: None,
         content_hash: None,
-        file_size: None,
+        file_size: Some(65536),
         file_mtime_ns: None,
         starred: false,
         rating: 0,
@@ -3089,7 +3091,7 @@ async fn test_v1_stream_and_download_range() {
     michi_db::upsert_track(&pool, &track).await.unwrap();
 
     let mut config = test_config_with_url(db_url);
-    config.music_paths = vec![music.clone()];
+    config.music_paths = vec![canonical_music];
     config.config_path = tmp.path().join("config");
     config.cache_path = tmp.path().join("cache");
     let state = michi_api::AppState::new(config, pool.clone(), None);
@@ -3133,7 +3135,7 @@ async fn test_v1_stream_and_download_range() {
         )
         .await
         .unwrap();
-    assert!(resp.status() == StatusCode::OK || resp.status() == StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     // Range not satisfiable 416
     let resp = app
@@ -3147,7 +3149,13 @@ async fn test_v1_stream_and_download_range() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    let status = resp.status();
+    let body = body_text(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::RANGE_NOT_SATISFIABLE,
+        "body was: {body}"
+    );
 }
 
 #[tokio::test]

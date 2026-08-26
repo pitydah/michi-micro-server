@@ -809,7 +809,7 @@
       "domain": "robust_import",
       "ui_present": true,
       "ui_action": "uploadImportTrack",
-      "frontend_endpoint": "/api/v1/import/upload/:session_id",
+      "frontend_endpoint": "/api/v1/import/session/:session_id/upload",
       "method": "POST",
       "backend_route": true,
       "backend_handler": "import_upload_handler",
@@ -1415,8 +1415,8 @@
     {
       "id": "sync.capabilities",
       "domain": "sync",
-      "ui_present": true,
-      "ui_action": "loadSyncCapabilities",
+      "ui_present": false,
+      "ui_action": "",
       "frontend_endpoint": "/api/v1/sync/capabilities",
       "method": "GET",
       "backend_route": true,
@@ -1424,15 +1424,15 @@
       "auth_required": true,
       "runtime_effect": false,
       "persistent_effect": false,
-      "status": "wired",
+      "status": "backend_only",
       "maturity": "stable",
       "notes": "Sync protocol capabilities and limits."
     },
     {
       "id": "sync.devices",
       "domain": "sync",
-      "ui_present": true,
-      "ui_action": "loadSyncDevices",
+      "ui_present": false,
+      "ui_action": "",
       "frontend_endpoint": "/api/v1/sync/devices",
       "method": "GET",
       "backend_route": true,
@@ -1440,7 +1440,7 @@
       "auth_required": true,
       "runtime_effect": false,
       "persistent_effect": false,
-      "status": "wired",
+      "status": "backend_only",
       "maturity": "stable",
       "notes": "Lists paired sync devices."
     },
@@ -1520,8 +1520,8 @@
       "auth_required": true,
       "runtime_effect": true,
       "persistent_effect": false,
-      "status": "internal",
-      "maturity": "internal",
+      "status": "backend_only",
+      "maturity": "stable",
       "notes": "Strictly restricted to config/cache paths; rejects music paths."
     },
     {

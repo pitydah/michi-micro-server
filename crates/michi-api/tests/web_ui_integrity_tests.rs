@@ -1676,3 +1676,220 @@ async fn test_webui_route_contract_matrix() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_webui_functional_catalog_consistency() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let catalog_path = std::path::Path::new(manifest_dir)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("docs/webui-functional-catalog.json");
+    let app_path = std::path::Path::new(manifest_dir).join("static/app.js");
+
+    let catalog_json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&catalog_path).expect("webui-functional-catalog.json must exist"),
+    )
+    .expect("catalog must be valid JSON");
+    let app_js = std::fs::read_to_string(app_path).expect("app.js must exist");
+
+    let valid_statuses = [
+        "wired",
+        "partial",
+        "backend_only",
+        "ui_only",
+        "disabled",
+        "future",
+    ];
+    let valid_maturities = ["stable", "beta", "experimental", "deprecated", "planned"];
+    let banned_legacy = [
+        "/api/server/status",
+        "/api/music/tracks",
+        "/test_pcm",
+        "/api/v1/auth/pair",
+    ];
+
+    let functions = catalog_json["functions"]
+        .as_array()
+        .expect("catalog functions must be array");
+    assert!(
+        functions.len() >= 90,
+        "catalog must contain all functional specifications (found {})",
+        functions.len()
+    );
+
+    for fn_item in functions {
+        let id = fn_item["id"].as_str().unwrap_or("");
+        let status = fn_item["status"].as_str().unwrap_or("");
+        let maturity = fn_item["maturity"].as_str().unwrap_or("");
+        let endpoint = fn_item["frontend_endpoint"].as_str().unwrap_or("");
+
+        assert!(
+            valid_statuses.contains(&status),
+            "function {id} has invalid status: {status}"
+        );
+        assert!(
+            valid_maturities.contains(&maturity),
+            "function {id} has invalid maturity: {maturity}"
+        );
+
+        for banned in &banned_legacy {
+            assert!(
+                !endpoint.contains(banned),
+                "function {id} must not declare legacy banned endpoint: {banned}"
+            );
+        }
+
+        if status == "wired" && !endpoint.is_empty() {
+            let base_endpoint = endpoint.split(':').next().unwrap().trim_end_matches('/');
+            assert!(
+                app_js.contains(base_endpoint),
+                "wired function {id} declares endpoint '{base_endpoint}' which must exist in app.js"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_webui_auth_disabled_semantics() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let app_path = std::path::Path::new(manifest_dir).join("static/app.js");
+    let app_js = std::fs::read_to_string(app_path).expect("app.js must exist");
+
+    // 1. AuthSession check must not assign open admin user on resp.enabled === false
+    assert!(
+        !app_js.contains("user = { username: 'Admin (Open)' }"),
+        "app.js must not grant admin user on auth disabled"
+    );
+    assert!(
+        !app_js.contains("currentUserEl.textContent = 'Auth Disabled (Open)'"),
+        "app.js must not claim open admin privileges"
+    );
+
+    // 2. bootstrapProtected must strictly require authenticated state
+    assert!(
+        app_js.contains("if (AuthSession.state !== 'authenticated')"),
+        "bootstrapProtected must strictly check AuthSession.state !== 'authenticated'"
+    );
+
+    // 3. init must only call bootstrapProtected when authenticated
+    assert!(
+        !app_js.contains("authState === 'authenticated' || authState === 'disabled'"),
+        "init must not bootstrap protected routes when auth is disabled"
+    );
+}
+
+#[tokio::test]
+async fn test_webui_device_revoke_contract() {
+    let (raw_app, pool, state, token) = make_raw_app().await;
+
+    // 1. Seed paired device in DB
+    let device_id = Uuid::new_v4();
+    let link_device = michi_core::LinkDevice {
+        device_id,
+        alias: "Test Mobile Client".into(),
+        device_type: "mobile".into(),
+        device_model: Some("Pixel 8".into()),
+        token_hash: "hash_abc123".into(),
+        permissions_json: "{}".into(),
+        created_at: chrono::Utc::now(),
+        last_seen: Some(chrono::Utc::now().to_rfc3339()),
+        revoked: false,
+    };
+    michi_db::create_link_device(&pool, &link_device)
+        .await
+        .unwrap();
+
+    let admin_app = raw_app.clone().layer(axum::middleware::from_fn_with_state(
+        token.clone(),
+        inject_test_authorization,
+    ));
+
+    // 2. List devices and verify device_id property
+    let resp = admin_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/link/devices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body_val: Value = serde_json::from_slice(&body_bytes).unwrap();
+    let devices = body_val["devices"].as_array().expect("devices array");
+    let found = devices
+        .iter()
+        .find(|d| d["device_id"] == device_id.to_string());
+    assert!(found.is_some(), "device_id must match seeded device UUID");
+
+    // 3. Revoke device with canonical payload {"device_id": "<uuid>"}
+    let revoke_resp = admin_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/devices/revoke")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "device_id": device_id.to_string()
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoke_resp.status(), StatusCode::OK);
+    let revoke_bytes = axum::body::to_bytes(revoke_resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let revoke_val: Value = serde_json::from_slice(&revoke_bytes).unwrap();
+    assert_eq!(revoke_val["status"], "revoked");
+
+    // 4. Revoke with missing / undefined device_id must return 400
+    let bad_revoke = admin_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/devices/revoke")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad_revoke.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_webui_webhook_truthfulness_contract() {
+    let (app, _pool, _state) = make_app().await;
+
+    // Webhook test without configured URL must return 400, never 200/success
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/webhook/test")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let val: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(val["error"]["code"], "NO_WEBHOOK_CONFIGURED");
+}

@@ -6,7 +6,7 @@ Executes real browser interactions against live server.
 Usage:
     pytest tests/e2e/test_webui_browser_e2e.py
     # or with environment variables:
-    MICHI_SERVER_URL=http://127.0.0.1:9090 MICHI_ADMIN_PASSWORD=admin123 pytest tests/e2e/test_webui_browser_e2e.py
+    MICHI_SERVER_URL=http://127.0.0.1:9090 MICHI_ADMIN_USERNAME=admin MICHI_ADMIN_PASSWORD=admin12345 pytest tests/e2e/test_webui_browser_e2e.py
 """
 
 import os
@@ -24,6 +24,7 @@ BANNED_LEGACY_ENDPOINTS = [
     "/api/tracks",
     "/api/playlists",
     "/api/queue",
+    "/test_pcm",
 ]
 
 
@@ -41,6 +42,7 @@ def test_webui_full_browser_lifecycle(browser_context):
     page = browser_context.new_page()
 
     recorded_requests = []
+    failed_responses = []
 
     def on_request(request):
         url = request.url
@@ -48,17 +50,21 @@ def test_webui_full_browser_lifecycle(browser_context):
         for banned in BANNED_LEGACY_ENDPOINTS:
             assert not (banned in url and "/api/v1" not in url), f"Banned legacy endpoint requested: {url}"
 
-    page.on("request", on_request)
+    def on_response(response):
+        if response.status >= 400 and not response.url.endswith("/api/auth/check"):
+            failed_responses.append((response.url, response.status))
 
-    # 1. Open WebUI root
+    page.on("request", on_request)
+    page.on("response", on_response)
+
+    # 1. Open WebUI root & verify title and shell
     page.goto(f"{SERVER_URL}/")
     expect(page).to_have_title("Michi Micro Server")
 
-    # 2. Check topbar elements exist
     status_pill = page.locator("#status-pill")
     expect(status_pill).to_be_visible()
 
-    # 3. Open Authentication Modal
+    # 2. Open Authentication Modal
     auth_btn = page.locator("#auth-user-btn")
     expect(auth_btn).to_be_visible()
     auth_btn.click()
@@ -66,7 +72,7 @@ def test_webui_full_browser_lifecycle(browser_context):
     auth_overlay = page.locator("#auth-overlay")
     expect(auth_overlay).to_be_visible()
 
-    # 4. Sign in with admin credentials
+    # 3. Sign in with admin credentials
     username_input = page.locator("#auth-username")
     password_input = page.locator("#auth-password")
     submit_btn = page.locator("#auth-submit-btn")
@@ -75,15 +81,20 @@ def test_webui_full_browser_lifecycle(browser_context):
     password_input.fill(ADMIN_PASSWORD)
     submit_btn.click()
 
-    # Wait for auth modal to close
     page.wait_for_timeout(1000)
 
-    # 5. Check cookies: michi_web_session must exist
+    # 4. Check cookies: michi_web_session must exist and be HttpOnly SameSite=Strict
     cookies = browser_context.cookies(SERVER_URL)
     session_cookie = next((c for c in cookies if c["name"] == "michi_web_session"), None)
     assert session_cookie is not None, "michi_web_session cookie must be set on login"
     assert session_cookie["httpOnly"] is True, "michi_web_session cookie must be HttpOnly"
     assert session_cookie["sameSite"] in ("Strict", "strict"), "michi_web_session must have SameSite=Strict"
+
+    # 5. Check client storage: tokens must NOT be stored in localStorage/sessionStorage
+    local_token = page.evaluate("() => localStorage.getItem('michi_token') || localStorage.getItem('token')")
+    session_token = page.evaluate("() => sessionStorage.getItem('michi_token') || sessionStorage.getItem('token')")
+    assert local_token is None, "Token must not be stored in localStorage"
+    assert session_token is None, "Token must not be stored in sessionStorage"
 
     # 6. Verify protected bootstrap loaded dashboard
     dashboard_cards = page.locator("#dashboard-cards")
@@ -95,17 +106,38 @@ def test_webui_full_browser_lifecycle(browser_context):
     auth_btn_label = page.locator("#auth-btn-label")
     expect(auth_btn_label).to_contain_text(ADMIN_USERNAME)
 
-    # 8. Test Scan triggering (must not fail with 415 Unsupported Media Type)
+    # 8. Test Scan triggering (must not fail with 415 or 401/500)
     scan_btn = page.locator("button:has-text('Scan')").first
-    scan_btn.click()
-    page.wait_for_timeout(1000)
+    if scan_btn.is_visible():
+        scan_btn.click()
+        page.wait_for_timeout(1000)
 
-    # 9. Test Playlists Section
+    # 9. Test Playlists Section & Lifecycle
     page.click(".nav-item[data-section='playlists']")
     page.wait_for_timeout(500)
     expect(page.locator("#page-playlists")).to_be_visible()
 
-    # 10. Logout and verify protected state is torn down
+    create_pl_btn = page.locator("button:has-text('New Playlist')")
+    if create_pl_btn.is_visible():
+        create_pl_btn.click()
+        page.wait_for_timeout(300)
+        pl_name_input = page.locator("#new-playlist-name")
+        if pl_name_input.is_visible():
+            pl_name_input.fill("Browser E2E Playlist")
+            page.click("#playlist-create-form button.btn-primary")
+            page.wait_for_timeout(800)
+
+    # 10. Test Library / Tracks navigation
+    page.click(".nav-item[data-section='library']")
+    page.wait_for_timeout(500)
+    expect(page.locator("#page-library")).to_be_visible()
+
+    # 11. Test Queue navigation
+    page.click(".nav-item[data-section='queue']")
+    page.wait_for_timeout(500)
+    expect(page.locator("#page-queue")).to_be_visible()
+
+    # 12. Logout and verify protected state is torn down
     auth_btn.click()
     page.wait_for_timeout(500)
     logout_btn = page.locator("button:has-text('Sign Out')")

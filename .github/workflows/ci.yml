@@ -188,6 +188,17 @@ jobs:
           rm -rf "${TEST_ROOT}"
           mkdir -p "${TEST_ROOT}/config" "${TEST_ROOT}/cache" "${TEST_ROOT}/music"
 
+          python3 -c "
+import wave, struct, math
+with wave.open('${TEST_ROOT}/music/fixture.wav', 'w') as f:
+    f.setnchannels(2)
+    f.setsampwidth(2)
+    f.setframerate(48000)
+    for i in range(48000):
+        val = int(32767.0 * 0.3 * math.sin(2.0 * math.pi * 440.0 * i / 48000))
+        f.writeframes(struct.pack('<hh', val, val))
+"
+
           export MICHI_CONFIG_PATH="${TEST_ROOT}/config"
           export MICHI_CACHE_PATH="${TEST_ROOT}/cache"
           export MICHI_MUSIC_PATH="${TEST_ROOT}/music"
@@ -229,6 +240,8 @@ jobs:
           pytest tests/e2e/test_webui_browser_e2e.py -v
 
           MICHI_SERVER_URL=http://127.0.0.1:9090 \
+          MICHI_ADMIN_USERNAME=admin \
+          MICHI_ADMIN_PASSWORD=admin12345 \
           pytest tests/e2e/test_webui_functional_conformance.py -v
 
   ci-no-test-api-release:
