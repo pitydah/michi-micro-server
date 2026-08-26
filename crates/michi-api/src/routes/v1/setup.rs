@@ -33,9 +33,19 @@ pub struct FixPermsBody {
 }
 
 pub async fn setup_fix_perms_handler(
+    State(state): State<AppState>,
     Json(body): Json<FixPermsBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let target = body.path.unwrap_or_else(|| "/music".to_string());
+    let target = match body.path {
+        Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+        _ => {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "VALIDATION_ERROR",
+                "path parameter is required",
+            ));
+        }
+    };
     let path = std::path::Path::new(&target);
     if !path.exists() {
         return Err(v1_error(
@@ -44,6 +54,54 @@ pub async fn setup_fix_perms_handler(
             "path does not exist",
         ));
     }
+
+    let canonical_target = match path.canonicalize() {
+        Ok(c) => c,
+        Err(_) => path.to_path_buf(),
+    };
+
+    // Strictly forbid /music and all configured music library paths
+    if target == "/music" || target.starts_with("/music/") {
+        return Err(v1_error(
+            StatusCode::FORBIDDEN,
+            "UNSAFE_TARGET",
+            "permission fix is strictly forbidden on music library paths",
+        ));
+    }
+
+    for mp in &state.config.music_paths {
+        let canonical_mp = mp.canonicalize().unwrap_or_else(|_| mp.clone());
+        if canonical_target == canonical_mp || canonical_target.starts_with(&canonical_mp) {
+            return Err(v1_error(
+                StatusCode::FORBIDDEN,
+                "UNSAFE_TARGET",
+                "permission fix is strictly forbidden on music library paths",
+            ));
+        }
+    }
+
+    // Only allow config_path or cache_path (or subdirectories thereof)
+    let is_allowed_config = state
+        .config
+        .config_path
+        .canonicalize()
+        .map(|p| canonical_target.starts_with(&p) || canonical_target == p)
+        .unwrap_or(false);
+    let is_allowed_cache = state
+        .config
+        .cache_path
+        .canonicalize()
+        .map(|p| canonical_target.starts_with(&p) || canonical_target == p)
+        .unwrap_or(false);
+
+    if !is_allowed_config && !is_allowed_cache {
+        return Err(v1_error(
+            StatusCode::FORBIDDEN,
+            "UNSAFE_TARGET",
+            "permission fix is only allowed on application config and cache directories",
+        ));
+    }
+
     // In container: chown -R 1000:1000 (safe, no symlink follow)
     let result = std::process::Command::new("chown")
         .arg("-R")

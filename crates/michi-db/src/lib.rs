@@ -1803,6 +1803,44 @@ pub async fn get_playlist(pool: &SqlitePool, id: &Uuid) -> Result<Option<Playlis
     Ok(rows.first().map(row_to_playlist))
 }
 
+pub async fn update_playlist(
+    pool: &SqlitePool,
+    id: &Uuid,
+    name: Option<&str>,
+    description: Option<Option<&str>>,
+) -> Result<Option<Playlist>, DbError> {
+    let id_str = id.to_string();
+    let current = get_playlist(pool, id).await?;
+    let Some(mut playlist) = current else {
+        return Ok(None);
+    };
+
+    let new_name = name.unwrap_or(&playlist.name);
+    let new_desc = match description {
+        Some(d) => d.map(|s| s.to_string()),
+        None => playlist.description.clone(),
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+
+    sqlx::query(
+        "UPDATE playlists SET name = ?, description = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(new_name)
+    .bind(&new_desc)
+    .bind(&now)
+    .bind(&id_str)
+    .execute(pool)
+    .await?;
+
+    let _ = record_change(pool, "playlist", &id_str, "update", None).await;
+
+    playlist.name = new_name.to_string();
+    playlist.description = new_desc;
+    playlist.updated_at = now.parse().unwrap_or_else(|_| chrono::Utc::now());
+
+    Ok(Some(playlist))
+}
+
 pub async fn delete_playlist(pool: &SqlitePool, id: &Uuid) -> Result<bool, DbError> {
     let id_str = id.to_string();
     let result = sqlx::query("DELETE FROM playlists WHERE id = ?")

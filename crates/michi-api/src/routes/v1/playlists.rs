@@ -102,9 +102,11 @@ pub struct UpdatePlaylistBody {
 pub async fn update_playlist_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Json(_body): Json<UpdatePlaylistBody>,
+    Json(body): Json<UpdatePlaylistBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    michi_db::get_playlist(&state.db, &id)
+    let name_ref = body.name.as_deref();
+    let desc_ref = body.description.as_deref().map(Some);
+    let updated = michi_db::update_playlist(&state.db, &id, name_ref, desc_ref)
         .await
         .map_err(|e| {
             v1_error(
@@ -120,7 +122,9 @@ pub async fn update_playlist_handler(
                 &format!("playlist not found: {id}"),
             )
         })?;
-    Ok(Json(serde_json::json!({ "status": "ok" })))
+
+    let _ = state.tx.send(r#"{"type":"playlist_updated"}"#.to_string());
+    Ok(Json(serde_json::json!({ "playlist": updated, "status": "ok" })))
 }
 
 pub async fn delete_playlist_handler(
@@ -145,6 +149,101 @@ pub async fn delete_playlist_handler(
     }
     let _ = state.tx.send(r#"{"type":"playlist_updated"}"#.to_string());
     Ok(Json(serde_json::json!({ "status": "deleted" })))
+}
+
+pub async fn get_playlist_tracks_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let playlist = michi_db::get_playlist(&state.db, &id)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("playlist not found: {id}"),
+            )
+        })?;
+
+    let tracks = michi_db::get_playlist_tracks(&state.db, &id)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+    let track_list: Vec<michi_core::Track> = tracks.into_iter().map(|(_, t)| t).collect();
+    Ok(Json(serde_json::json!({
+        "playlist": playlist,
+        "tracks": track_list
+    })))
+}
+
+pub async fn add_playlist_track_handler(
+    State(state): State<AppState>,
+    Path((playlist_id, track_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let pt = michi_db::add_track_to_playlist(&state.db, &playlist_id, &track_id)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+    let _ = state.tx.send(r#"{"type":"playlist_updated"}"#.to_string());
+    Ok(Json(serde_json::json!({ "playlist_track": pt, "status": "ok" })))
+}
+
+pub async fn remove_playlist_track_handler(
+    State(state): State<AppState>,
+    Path((playlist_id, track_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let deleted = michi_db::remove_track_from_playlist(&state.db, &playlist_id, &track_id)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+    let _ = state.tx.send(r#"{"type":"playlist_updated"}"#.to_string());
+    Ok(Json(serde_json::json!({ "deleted": deleted, "status": "ok" })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReorderPlaylistBody {
+    pub track_ids: Vec<Uuid>,
+}
+
+pub async fn reorder_playlist_tracks_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ReorderPlaylistBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    michi_db::reorder_playlist_tracks(&state.db, &id, &body.track_ids)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+    let _ = state.tx.send(r#"{"type":"playlist_updated"}"#.to_string());
+    Ok(Json(serde_json::json!({ "status": "ok" })))
 }
 
 // ── Smart Playlists ────────────────────────────────────────────

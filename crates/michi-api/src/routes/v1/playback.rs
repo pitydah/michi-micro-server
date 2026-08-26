@@ -110,6 +110,7 @@ pub enum PlaybackControlValue {
 #[serde(deny_unknown_fields)]
 pub struct PlaybackControlBody {
     pub command: String,
+    pub track_id: Option<Uuid>,
     pub position_ms: Option<u64>,
     pub volume: Option<u32>,
     pub value: Option<PlaybackControlValue>,
@@ -147,6 +148,26 @@ pub async fn playback_control_handler(
 
     match cmd {
         "play" => {
+            if let Some(tid) = body.track_id {
+                let track_exists = michi_db::get_track(&state.db, &tid)
+                    .await
+                    .map_err(|e| {
+                        v1_error_code(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            michi_link::MichiLinkErrorCode::InternalError,
+                            &e.to_string(),
+                        )
+                    })?
+                    .is_some();
+                if !track_exists {
+                    return Err(v1_error_code(
+                        StatusCode::NOT_FOUND,
+                        michi_link::MichiLinkErrorCode::TrackNotFound,
+                        &format!("track not found: {tid}"),
+                    ));
+                }
+                current.track_id = Some(tid);
+            }
             current.playing = true;
             if let Some(pos) = body.position_ms.or(match body.value {
                 Some(PlaybackControlValue::Integer(ms)) => Some(ms),

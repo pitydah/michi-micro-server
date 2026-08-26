@@ -103,13 +103,27 @@ pub async fn health_ready_handler(
 
 pub async fn status_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let uptime = state.started_at.elapsed().as_secs();
+    let db_ok = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tracks")
+        .fetch_one(&state.db)
+        .await
+        .is_ok();
+    let music_paths: Vec<String> = state
+        .config
+        .music_paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+
     Json(serde_json::json!({
         "status": "ok",
         "service": "michi-micro-server",
+        "name": "Michi Micro Server",
         "version": state.config.version(),
         "port": state.config.port(),
         "server_id": state.server_id(),
         "uptime_seconds": uptime,
+        "database": if db_ok { "connected" } else { "disconnected" },
+        "music_paths": music_paths,
         "resource_profile": state.config.resource_profile.to_string(),
         "stream_profile": state.config.stream_profile.to_string(),
     }))

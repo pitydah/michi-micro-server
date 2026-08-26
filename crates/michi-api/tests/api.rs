@@ -3056,7 +3056,7 @@ async fn test_v1_stream_and_download_range() {
     f.write_all(&content).await.unwrap();
     drop(f);
 
-    let pool = test_db().await;
+    let (pool, db_url) = test_db_with_url().await;
     let id = michi_core::track_id_from_path(file_path.to_str().unwrap());
     let track = michi_core::Track {
         id,
@@ -3088,7 +3088,7 @@ async fn test_v1_stream_and_download_range() {
     };
     michi_db::upsert_track(&pool, &track).await.unwrap();
 
-    let mut config = test_config();
+    let mut config = test_config_with_url(db_url);
     config.music_paths = vec![music.clone()];
     config.config_path = tmp.path().join("config");
     config.cache_path = tmp.path().join("cache");

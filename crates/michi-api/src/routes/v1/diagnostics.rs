@@ -283,24 +283,20 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
         .map(|p| p.exists())
         .collect();
 
-    let staging_path = state
-        .config
-        .music_paths
-        .first()
-        .map(|p| p.join(".import"))
-        .map(|p| p.to_string_lossy().to_string());
-    let staging_exists = staging_path
-        .as_ref()
-        .map(|p| std::path::Path::new(p).exists())
-        .unwrap_or(false);
+    let staging = crate::routes::v1::import::get_staging_dir(
+        &state.config.music_paths,
+        &state.config.cache_path,
+    );
+    let staging_path = Some(staging.to_string_lossy().to_string());
+    let staging_exists = staging.exists();
     let staging_size = if staging_exists {
-        dir_size(std::path::Path::new(staging_path.as_ref().unwrap())).unwrap_or(0)
+        dir_size(&staging).unwrap_or(0)
     } else {
         0
     };
 
     let active_import_sessions: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM import_sessions WHERE state NOT IN ('committed', 'rolled_back')",
+        "SELECT COUNT(*) FROM import_sessions WHERE status NOT IN ('committed', 'completed', 'rolled_back', 'expired')",
     )
     .fetch_one(&state.db)
     .await

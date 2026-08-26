@@ -145,12 +145,22 @@ pub async fn dashboard_handler(
 
     // Playback state
     let playback_state = state.playback_state.read().await;
+    let (track_title, track_artist, track_album) = if let Some(tid) = playback_state.track_id {
+        if let Ok(Some(t)) = michi_db::get_track(&state.db, &tid).await {
+            (t.title, t.artist, t.album)
+        } else {
+            (None, None, None)
+        }
+    } else {
+        (None, None, None)
+    };
+
     let playback = PlaybackInfo {
         has_current: playback_state.track_id.is_some(),
         track_id: playback_state.track_id,
-        title: None,
-        artist: None,
-        album: None,
+        title: track_title,
+        artist: track_artist,
+        album: track_album,
         state: if playback_state.playing {
             "playing"
         } else {
@@ -177,7 +187,12 @@ pub async fn dashboard_handler(
         .map(|u| !u.is_empty())
         .unwrap_or(false);
 
-    let uploads_in_progress = 0; // simplified
+    let uploads_in_progress: usize = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM import_sessions WHERE status IN ('created', 'receiving', 'committing')",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0) as usize;
 
     let library = LibraryStats {
         tracks,

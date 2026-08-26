@@ -48,9 +48,53 @@ pub struct CreateQueueRequest {
 }
 
 pub async fn players_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Result<Json<Vec<PlayerInfo>>, (StatusCode, Json<serde_json::Value>)> {
-    Ok(Json(vec![]))
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            Option<String>,
+            i64,
+            Option<String>,
+        ),
+    >(
+        "SELECT id, name, kind, state, volume, muted, current_track_id, position_ms, last_seen FROM players ORDER BY name ASC",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    let players = rows
+        .into_iter()
+        .map(
+            |(id, name, kind, state, volume, muted, current_track_id, position_ms, last_seen)| {
+                PlayerInfo {
+                    id,
+                    name,
+                    kind,
+                    state,
+                    volume: volume as i32,
+                    muted: muted != 0,
+                    current_track_id,
+                    position_ms,
+                    last_seen,
+                }
+            },
+        )
+        .collect();
+
+    Ok(Json(players))
 }
 
 pub async fn create_player_handler(
@@ -92,9 +136,61 @@ pub async fn create_player_handler(
 }
 
 pub async fn queues_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Result<Json<Vec<QueueInfo>>, (StatusCode, Json<serde_json::Value>)> {
-    Ok(Json(vec![]))
+    let queue_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<String>,
+            i64,
+            String,
+            i64,
+        ),
+    >(
+        "SELECT id, name, player_id, current_index, repeat_mode, shuffle FROM queues ORDER BY name ASC",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    let mut queues = Vec::new();
+    for (id, name, player_id, current_index, repeat_mode, shuffle) in queue_rows {
+        let items_rows = sqlx::query_as::<_, (String, String, i64)>(
+            "SELECT id, track_id, position FROM queue_items WHERE queue_id = ? ORDER BY position ASC",
+        )
+        .bind(&id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+
+        let items = items_rows
+            .into_iter()
+            .map(|(item_id, track_id, position)| QueueItemInfo {
+                id: item_id,
+                track_id,
+                position: position as i32,
+            })
+            .collect();
+
+        queues.push(QueueInfo {
+            id,
+            name,
+            player_id,
+            current_index: current_index as i32,
+            repeat_mode,
+            shuffle: shuffle != 0,
+            items,
+        });
+    }
+
+    Ok(Json(queues))
 }
 
 pub async fn create_queue_handler(

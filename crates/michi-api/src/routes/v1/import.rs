@@ -184,7 +184,7 @@ fn is_allowed_extension(filename: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn get_staging_dir(
+pub(crate) fn get_staging_dir(
     _music_paths: &[std::path::PathBuf],
     cache_path: &std::path::Path,
 ) -> std::path::PathBuf {

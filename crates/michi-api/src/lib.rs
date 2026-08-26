@@ -933,6 +933,19 @@ fn v1_link_routes() -> Router<AppState> {
                 .delete(routes::v1::playlists::delete_playlist_handler),
         )
         .route(
+            "/api/v1/playlists/:id/tracks",
+            get(routes::v1::playlists::get_playlist_tracks_handler),
+        )
+        .route(
+            "/api/v1/playlists/:playlist_id/tracks/:track_id",
+            post(routes::v1::playlists::add_playlist_track_handler)
+                .delete(routes::v1::playlists::remove_playlist_track_handler),
+        )
+        .route(
+            "/api/v1/playlists/:id/reorder",
+            put(routes::v1::playlists::reorder_playlist_tracks_handler),
+        )
+        .route(
             "/api/v1/playlists/:id/export/m3u",
             get(routes::v1::playlists::export_playlist_m3u_handler),
         )
