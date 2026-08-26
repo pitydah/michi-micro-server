@@ -402,20 +402,25 @@ fn create_test_file(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
 
 async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, Uuid) {
     let tmp = tempfile::tempdir().unwrap();
-    let music_dir = std::fs::canonicalize(tmp.path().join("music"))
-        .unwrap_or_else(|_| tmp.path().join("music"));
+    let music_dir = tmp.path().join("music");
     std::fs::create_dir_all(&music_dir).unwrap();
     let music_dir = std::fs::canonicalize(&music_dir).unwrap_or(music_dir);
 
     let file_path = create_test_file(&music_dir, "test.flac", &[0u8; 50000]);
+    let canonical_file = std::fs::canonicalize(&file_path).unwrap_or(file_path.clone());
 
-    let pool = test_db().await;
+    let (pool, db_url) = test_db_with_url().await;
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(&cache_dir).unwrap();
+
     let config = Config {
         port: 9999,
         music_paths: vec![music_dir],
-        config_path: PathBuf::from("/tmp/michi-test/config"),
-        cache_path: PathBuf::from("/tmp/michi-test/cache"),
-        database_url: "sqlite::memory:".to_string(),
+        config_path: config_dir,
+        cache_path: cache_dir,
+        database_url: db_url,
 
         version: "test",
         sync_peers: Vec::new(),
@@ -445,7 +450,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         trust_proxy: false,
         trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
     };
-    let id = track_id_from_path(file_path.to_str().unwrap());
+    let id = track_id_from_path(canonical_file.to_str().unwrap());
     let track = Track {
         id,
         title: Some("Test Stream".into()),
@@ -453,7 +458,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         album: Some("Test Album".into()),
         album_artist: None,
         duration_ms: Some(5000),
-        file_path: file_path.to_str().unwrap().to_string(),
+        file_path: canonical_file.to_str().unwrap().to_string(),
         format: AudioFormat::Flac,
         sample_rate: Some(44100),
         bit_depth: Some(16),
@@ -464,7 +469,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         track_number: None,
         disc_number: None,
         content_hash: None,
-        file_size: None,
+        file_size: Some(50000),
         file_mtime_ns: None,
         starred: false,
         rating: 0,

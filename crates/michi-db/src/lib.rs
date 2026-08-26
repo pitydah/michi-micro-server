@@ -62,18 +62,30 @@ pub async fn init_pool_with_size(
 
     ensure_db_parent_dir(database_url)?;
 
+    let is_memory = database_url == ":memory:"
+        || database_url == "sqlite::memory:"
+        || database_url.starts_with("sqlite:file:memdb_")
+        || database_url.contains("mode=memory");
+
     let opts = SqliteConnectOptions::from_str(database_url)
         .map_err(|e| DbError::Migration(format!("invalid database URL: {e}")))?
         .create_if_missing(true)
         .foreign_keys(true)
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .busy_timeout(std::time::Duration::from_secs(5));
+
+    let opts = if is_memory {
+        opts
+    } else {
+        opts.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+    };
+
+    let pool_size = if is_memory { 1 } else { max_connections };
 
     let pool = SqlitePoolOptions::new()
         .min_connections(1)
         .idle_timeout(None)
         .max_lifetime(None)
-        .max_connections(max_connections)
+        .max_connections(pool_size)
         .connect_with(opts)
         .await?;
 
