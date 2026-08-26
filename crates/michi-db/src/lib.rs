@@ -1822,15 +1822,13 @@ pub async fn update_playlist(
     };
     let now = chrono::Utc::now().to_rfc3339();
 
-    sqlx::query(
-        "UPDATE playlists SET name = ?, description = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(new_name)
-    .bind(&new_desc)
-    .bind(&now)
-    .bind(&id_str)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE playlists SET name = ?, description = ?, updated_at = ? WHERE id = ?")
+        .bind(new_name)
+        .bind(&new_desc)
+        .bind(&now)
+        .bind(&id_str)
+        .execute(pool)
+        .await?;
 
     let _ = record_change(pool, "playlist", &id_str, "update", None).await;
 

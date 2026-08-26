@@ -124,7 +124,9 @@ pub async fn update_playlist_handler(
         })?;
 
     let _ = state.tx.send(r#"{"type":"playlist_updated"}"#.to_string());
-    Ok(Json(serde_json::json!({ "playlist": updated, "status": "ok" })))
+    Ok(Json(
+        serde_json::json!({ "playlist": updated, "status": "ok" }),
+    ))
 }
 
 pub async fn delete_playlist_handler(
@@ -203,7 +205,9 @@ pub async fn add_playlist_track_handler(
             )
         })?;
     let _ = state.tx.send(r#"{"type":"playlist_updated"}"#.to_string());
-    Ok(Json(serde_json::json!({ "playlist_track": pt, "status": "ok" })))
+    Ok(Json(
+        serde_json::json!({ "playlist_track": pt, "status": "ok" }),
+    ))
 }
 
 pub async fn remove_playlist_track_handler(
@@ -220,7 +224,9 @@ pub async fn remove_playlist_track_handler(
             )
         })?;
     let _ = state.tx.send(r#"{"type":"playlist_updated"}"#.to_string());
-    Ok(Json(serde_json::json!({ "deleted": deleted, "status": "ok" })))
+    Ok(Json(
+        serde_json::json!({ "deleted": deleted, "status": "ok" }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

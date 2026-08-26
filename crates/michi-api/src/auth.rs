@@ -29,12 +29,24 @@ pub fn extract_bearer_token(request: &Request) -> Option<String> {
 }
 
 /// Helper to determine if the request is over HTTPS
-fn is_secure_request(headers: &axum::http::HeaderMap) -> bool {
-    if let Some(proto) = headers.get("X-Forwarded-Proto").and_then(|v| v.to_str().ok()) {
-        proto.eq_ignore_ascii_case("https")
-    } else {
-        false
+fn is_secure_request(
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: &axum::http::HeaderMap,
+    config: &michi_config::Config,
+) -> bool {
+    let peer_addr = connect_info.map(|axum::extract::ConnectInfo(addr)| addr);
+    let peer_ip = peer_addr.map(|a| a.ip());
+    if let Some(ref ip) = peer_ip {
+        if config.is_trusted_proxy(ip) {
+            if let Some(proto) = headers
+                .get("X-Forwarded-Proto")
+                .and_then(|v| v.to_str().ok())
+            {
+                return proto.eq_ignore_ascii_case("https");
+            }
+        }
     }
+    false
 }
 
 /// Helper to build Set-Cookie header for michi_web_session
@@ -53,7 +65,11 @@ fn make_session_cookie(token: &str, max_age_secs: u64, secure: bool) -> String {
 }
 
 fn extract_token(request: &Request) -> Option<String> {
-    if let Some(auth_header) = request.headers().get("Authorization").and_then(|h| h.to_str().ok()) {
+    if let Some(auth_header) = request
+        .headers()
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+    {
         if let Some(token) = auth_header.strip_prefix("Bearer ") {
             let t = token.trim();
             if !t.is_empty() {
@@ -61,7 +77,11 @@ fn extract_token(request: &Request) -> Option<String> {
             }
         }
     }
-    if let Some(cookie_header) = request.headers().get(axum::http::header::COOKIE).and_then(|h| h.to_str().ok()) {
+    if let Some(cookie_header) = request
+        .headers()
+        .get(axum::http::header::COOKIE)
+        .and_then(|h| h.to_str().ok())
+    {
         for cookie in cookie_header.split(';') {
             let cookie = cookie.trim();
             if let Some(val) = cookie.strip_prefix("michi_web_session=") {
@@ -158,7 +178,6 @@ impl AuthState {
         sessions.retain(|_, data| data.expiry > std::time::Instant::now());
     }
 }
-
 
 fn auth_error(status: StatusCode, message: &str) -> Response {
     (
@@ -407,7 +426,7 @@ pub(crate) async fn login_handler(
     }
 
     let token = state.auth_sessions.create_session(id).await;
-    let secure = is_secure_request(&headers);
+    let secure = is_secure_request(connect_info, &headers, &state.config);
     let cookie_val = make_session_cookie(&token, 86400, secure);
 
     let mut resp_headers = axum::http::HeaderMap::new();
@@ -514,7 +533,6 @@ pub(crate) async fn register_handler(
         ));
     }
 
-    let user_id = Uuid::new_v4();
     let password_hash = hash_password(&body.password).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -522,6 +540,7 @@ pub(crate) async fn register_handler(
         )
     })?;
 
+    let user_id = Uuid::new_v4();
     michi_db::create_user(&state.db, &user_id, &body.username, &password_hash, false)
         .await
         .map_err(|e| {
@@ -532,7 +551,7 @@ pub(crate) async fn register_handler(
         })?;
 
     let token = state.auth_sessions.create_session(user_id).await;
-    let secure = is_secure_request(&headers);
+    let secure = is_secure_request(connect_info, &headers, &state.config);
     let cookie_val = make_session_cookie(&token, 86400, secure);
 
     let mut resp_headers = axum::http::HeaderMap::new();
@@ -564,6 +583,7 @@ pub(crate) async fn register_handler(
     )
 )]
 pub(crate) async fn logout_handler(
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     request: Request,
@@ -571,7 +591,7 @@ pub(crate) async fn logout_handler(
     if let Some(token) = extract_token(&request) {
         state.auth_sessions.invalidate(&token).await;
     }
-    let secure = is_secure_request(&headers);
+    let secure = is_secure_request(connect_info, &headers, &state.config);
     let cookie_val = make_session_cookie("", 0, secure);
     let mut resp_headers = axum::http::HeaderMap::new();
     if let Ok(v) = axum::http::HeaderValue::from_str(&cookie_val) {

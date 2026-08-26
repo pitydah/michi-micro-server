@@ -29,16 +29,16 @@ const MANIFEST_JSON: &str = r##"{
   ]
 }"##;
 
-const SW_JS: &str = r#"const CACHE = 'michi-v10';
+const SW_JS: &str = r#"const CACHE = 'michi-v11';
 
 self.addEventListener('install', function(e) {
   e.waitUntil(
     caches.open(CACHE).then(function(c) {
       return c.addAll([
         '/',
-        '/static/styles.css?v=10',
+        '/static/styles.css?v=11',
         '/static/hero-cat.css?v=4',
-        '/static/app.js?v=10',
+        '/static/app.js?v=11',
         '/static/assets/michi-hero-cat.webp?v=1',
         '/static/assets/michi-micro-server.svg',
         '/static/assets/michi-micro-server-180.png',

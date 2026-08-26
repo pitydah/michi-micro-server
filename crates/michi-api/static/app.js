@@ -1,5 +1,5 @@
 /* ================================================================
-   Michi Control UI — Functional Conformance WebUI Application
+   Michi Control UI — Truthful Functional Conformance WebUI
    ================================================================ */
 
 // ── API client ──────────────────────────────────────────────────
@@ -38,6 +38,8 @@ const MichiAPI = {
 
       if (res.status === 401 && !path.startsWith('/api/auth/')) {
         AuthSession.setUnauthenticated();
+        teardownProtected();
+        ConnectionStatus.setAuthRequired();
       }
 
       if (!res.ok) {
@@ -95,26 +97,33 @@ const MichiAPI = {
   },
   track(id) { return this.request('/api/v1/tracks/' + id); },
   rateTrack(id, rating) {
-    return this.request('/api/v1/tracks/' + id + '/rate', {
+    return this.request('/api/v1/rate/' + id, {
       method: 'POST',
-      body: { rating }
+      body: { rating: Number(rating) }
     });
   },
   starTrack(id, starred) {
-    return this.request('/api/v1/tracks/' + id + '/star', {
+    return this.request('/api/v1/star/' + id, {
       method: 'POST',
-      body: { starred }
+      body: { starred: !!starred }
     });
   },
-  starredTracks() { return this.request('/api/v1/tracks/starred'); },
-  bookmarks() { return this.request('/api/v1/bookmarks'); },
-  addBookmark(track_id, position_ms, comment) {
+  starredTracks() { return this.request('/api/v1/starred'); },
+  bookmarks(opts = {}) {
+    let url = '/api/v1/bookmarks';
+    const params = [];
+    if (opts.limit) params.push('limit=' + opts.limit);
+    if (opts.offset) params.push('offset=' + (opts.offset || 0));
+    if (params.length) url += '?' + params.join('&');
+    return this.request(url);
+  },
+  addBookmark(track_id, position_ms, duration_ms, finished, device_id) {
     return this.request('/api/v1/bookmarks', {
       method: 'POST',
-      body: { track_id, position_ms, comment }
+      body: { track_id, position_ms, duration_ms: duration_ms || 0, finished: !!finished, device_id }
     });
   },
-  deleteBookmark(id) { return this.request('/api/v1/bookmarks/' + id, { method: 'DELETE' }); },
+  deleteBookmark(track_id) { return this.request('/api/v1/bookmarks/' + track_id, { method: 'DELETE' }); },
   duplicates() { return this.request('/api/v1/library/duplicates'); },
   artistInsights(name) { return this.request('/api/v1/artists/' + encodeURIComponent(name) + '/insights'); },
   albumHealth(name) { return this.request('/api/v1/albums/' + encodeURIComponent(name) + '/health'); },
@@ -169,26 +178,38 @@ const MichiAPI = {
     });
   },
   queue() { return this.request('/api/v1/queue'); },
-  addQueueItems(track_ids) {
+  addQueueItems(track_ids, name) {
     return this.request('/api/v1/queue/items', {
       method: 'POST',
-      body: { track_ids }
+      body: { track_ids, name }
     });
   },
-  removeQueueItem(id) { return this.request('/api/v1/queue/items/' + id, { method: 'DELETE' }); },
-  reorderQueue(item_ids) {
-    return this.request('/api/v1/queue/reorder', {
-      method: 'PUT',
-      body: { item_ids }
-    });
-  },
-  jumpQueue(position) {
+  jumpQueue(index, queue_id) {
     return this.request('/api/v1/queue/jump', {
       method: 'POST',
-      body: { position }
+      body: { index, queue_id }
     });
   },
-  clearQueue() { return this.request('/api/v1/queue', { method: 'DELETE' }); },
+  reorderQueue(item_ids, queue_id) {
+    return this.request('/api/v1/queue/reorder', {
+      method: 'PUT',
+      body: { item_ids, queue_id }
+    });
+  },
+  deleteQueue(queue_id) { return this.request('/api/v1/queue/' + queue_id, { method: 'DELETE' }); },
+  transferQueue(track_ids, current_index, position_ms, source) {
+    return this.request('/api/v1/queue/transfer', {
+      method: 'POST',
+      body: { track_ids, current_index, position_ms, source: source || 'webui' }
+    });
+  },
+  saveQueue(name, track_ids) {
+    return this.request('/api/v1/queue/save', {
+      method: 'POST',
+      body: { name, track_ids }
+    });
+  },
+  savedQueues() { return this.request('/api/v1/queue/saved'); },
 
   // History
   history(opts = {}) {
@@ -205,7 +226,12 @@ const MichiAPI = {
 
   // Ecosystem & Link
   linkDevices() { return this.request('/api/v1/link/devices'); },
-  revokeLinkDevice(id) { return this.request('/api/v1/link/devices/' + id, { method: 'DELETE' }); },
+  revokeLinkDevice(device_id) {
+    return this.request('/api/v1/devices/revoke', {
+      method: 'POST',
+      body: { device_id }
+    });
+  },
   qrPair(server_url) {
     return this.request('/api/v1/pair/qr', {
       method: 'POST',
@@ -257,35 +283,100 @@ const MichiAPI = {
 
   // Diagnostics & Health
   diagnostics() { return this.request('/api/v1/diagnostics'); },
-  selfTest() { return this.request('/api/v1/diagnostics/self-test', { method: 'POST', timeout: 30000 }); },
-  mountHealth() { return this.request('/api/v1/diagnostics/mount-health'); },
-  storageHealth() { return this.request('/api/v1/diagnostics/storage-health'); },
-  configValidate() { return this.request('/api/v1/diagnostics/config-validate'); },
+  selfTest() { return this.request('/api/v1/health/self-test', { timeout: 30000 }); },
+  mountHealth() { return this.request('/api/v1/health/mounts'); },
+  storageHealth() { return this.request('/api/v1/health/storage'); },
+  configValidate() { return this.request('/api/v1/config/validate'); },
   jobs() { return this.request('/api/v1/jobs'); },
-  cancelJob(id) { return this.request('/api/v1/jobs/' + id, { method: 'DELETE' }); },
+  job(id) { return this.request('/api/v1/jobs/' + id); },
+  cancelJob(id) { return this.request('/api/v1/jobs/' + id + '/cancel', { method: 'POST' }); },
   modules() { return this.request('/api/v1/modules'); },
-  toggleModule(id, enabled) { return this.request('/api/v1/modules/' + id + '/toggle', { method: 'POST', body: { enabled } }); },
+  toggleModule(name, enabled) { return this.request('/api/v1/modules/' + name, { method: 'POST', body: { name, enabled: !!enabled } }); },
   auditLog() { return this.request('/api/v1/audit/log'); },
-  changeJournal() { return this.request('/api/v1/audit/changes'); },
+  changeJournal() { return this.request('/api/v1/changes'); },
 
   // Import Workflow
-  importPreflight(files) { return this.request('/api/v1/import/preflight', { method: 'POST', body: { files } }); },
-  createImportSession(body) { return this.request('/api/v1/import/sessions', { method: 'POST', body }); },
-  importSession(id) { return this.request('/api/v1/import/sessions/' + id); },
-  importUpload(sessionId, filename, dataBase64, originalPath) {
-    return this.request('/api/v1/import/sessions/' + sessionId + '/upload', {
+  importPreflight(tracks) { return this.request('/api/v1/import/preflight', { method: 'POST', body: { tracks } }); },
+  createImportSession(total_tracks, total_playlists) {
+    return this.request('/api/v1/import/session', {
+      method: 'POST',
+      body: { total_tracks: total_tracks || 0, total_playlists: total_playlists || 0 }
+    });
+  },
+  importSessionStatus(sessionId) { return this.request('/api/v1/import/session/' + sessionId + '/status'); },
+  importUpload(sessionId, filename, dataBase64, hash) {
+    return this.request('/api/v1/import/session/' + sessionId + '/upload', {
       method: 'POST',
       body: {
         filename,
-        original_path: originalPath || filename,
-        uploaded_by: 'webui',
-        data_base64: dataBase64
+        data: dataBase64,
+        hash
       },
       timeout: 60000
     });
   },
-  commitImportSession(sessionId) { return this.request('/api/v1/import/sessions/' + sessionId + '/commit', { method: 'POST' }); },
-  rollbackImportSession(sessionId) { return this.request('/api/v1/import/sessions/' + sessionId + '/rollback', { method: 'POST' }); },
+  commitImportSession(sessionId) { return this.request('/api/v1/import/commit/' + sessionId, { method: 'POST' }); },
+  rollbackImportSession(sessionId) { return this.request('/api/v1/import/rollback/' + sessionId, { method: 'POST' }); },
+};
+
+// ── Connection Status State Machine ──────────────────────────────
+const ConnectionStatus = {
+  state: 'checking', // 'checking' | 'online' | 'degraded' | 'auth_required' | 'offline'
+
+  update(statusData) {
+    if (!statusData) {
+      this.state = 'offline';
+    } else if (statusData.status === 'ok') {
+      if (statusData.database === 'connected') {
+        this.state = 'online';
+      } else {
+        this.state = 'degraded';
+      }
+    } else {
+      this.state = 'degraded';
+    }
+    this.render();
+  },
+
+  setAuthRequired() {
+    this.state = 'auth_required';
+    this.render();
+  },
+
+  setOffline() {
+    this.state = 'offline';
+    this.render();
+  },
+
+  render() {
+    const dot = $('#server-status-dot');
+    const lbl = $('#server-status-label');
+    const pill = $('#status-pill');
+    const pillText = $('#status-pill-text');
+
+    const labels = {
+      checking: 'Checking...',
+      online: 'Online',
+      degraded: 'Degraded',
+      auth_required: 'Auth Required',
+      offline: 'Offline',
+    };
+
+    const cssClass = {
+      checking: 'checking',
+      online: 'online',
+      degraded: 'degraded',
+      auth_required: 'auth-required',
+      offline: 'offline',
+    }[this.state] || 'offline';
+
+    const text = labels[this.state] || 'Offline';
+
+    if (dot) dot.className = 'server-status-dot ' + cssClass;
+    if (lbl) lbl.textContent = text;
+    if (pill) pill.className = 'status-pill ' + cssClass;
+    if (pillText) pillText.textContent = text;
+  }
 };
 
 // ── Auth Session State Machine ──────────────────────────────────
@@ -298,12 +389,16 @@ const AuthSession = {
     try {
       const resp = await MichiAPI.authCheck();
       this.registrationAllowed = !!resp.registration_allowed;
-      if (resp.authenticated) {
+      if (resp.authenticated === true) {
         this.state = 'authenticated';
-        this.user = resp.user || { username: 'User' };
-      } else if (resp.auth_enabled === false) {
+        this.user = {
+          id: resp.id,
+          username: resp.username || 'User',
+          is_admin: !!resp.is_admin
+        };
+      } else if (resp.enabled === false) {
         this.state = 'disabled';
-        this.user = { username: 'Admin' };
+        this.user = { username: 'Admin (Open)' };
       } else {
         this.state = 'anonymous';
         this.user = null;
@@ -313,6 +408,7 @@ const AuthSession = {
       this.user = null;
     }
     this.render();
+    return this.state;
   },
 
   setUnauthenticated() {
@@ -574,7 +670,8 @@ async function submitAuth() {
     }
     closeAuthModal();
     await AuthSession.check();
-    await Promise.all([loadStatus(), loadDashboard(), loadTracks()]);
+    await bootstrapPublic();
+    await bootstrapProtected();
   } catch (err) {
     if (errEl) {
       errEl.textContent = err.message || 'Authentication failed';
@@ -588,8 +685,9 @@ async function handleLogout() {
     await MichiAPI.logout();
     showToast('Signed out');
     closeAuthModal();
-    await AuthSession.check();
-    await Promise.all([loadStatus(), loadDashboard(), loadTracks()]);
+    AuthSession.setUnauthenticated();
+    teardownProtected();
+    await bootstrapPublic();
   } catch (e) {
     showToast(e.message, true);
   }
@@ -699,6 +797,8 @@ function showSection(section) {
   }
   toggleNavigation(false);
 
+  if (AuthSession.state === 'anonymous') return;
+
   // Lazy loaders for sections
   if (section === 'playlists') loadPlaylists();
   if (section === 'settings') { loadSettings(); setTimeout(loadRoomGroups, 100); }
@@ -708,27 +808,74 @@ function showSection(section) {
   if (section === 'broadcast') loadSources();
 }
 
+// ── Bootstrap Authority ──────────────────────────────────────────
+async function bootstrapPublic() {
+  await Promise.allSettled([loadStatus(), loadServerInfo()]);
+}
+
+async function bootstrapProtected() {
+  if (AuthSession.state === 'anonymous') {
+    teardownProtected();
+    return;
+  }
+  await Promise.allSettled([
+    loadDashboard(),
+    loadTracks(),
+    loadCanonicalPlaybackState(),
+    loadCanonicalQueue()
+  ]);
+
+  if (!State.polling) {
+    State.polling = setInterval(function () {
+      if (!document.hidden && AuthSession.state !== 'anonymous') {
+        loadStatus();
+        loadDashboard();
+      }
+    }, 30000);
+  }
+
+  if (!ServerPlayback.pollTimer) {
+    ServerPlayback.pollTimer = setInterval(function () {
+      if (!document.hidden && AuthSession.state !== 'anonymous' && ServerPlayback.outputTarget === 'server') {
+        loadCanonicalPlaybackState();
+      }
+    }, 3000);
+  }
+
+  setupLiveEvents();
+}
+
+function teardownProtected() {
+  if (State.polling) { clearInterval(State.polling); State.polling = null; }
+  if (ServerPlayback.pollTimer) { clearInterval(ServerPlayback.pollTimer); ServerPlayback.pollTimer = null; }
+  if (State.eventWs) {
+    try { State.eventWs.close(); } catch (e) {}
+    State.eventWs = null;
+  }
+  State.dashboard = null;
+  State.tracks = [];
+  State.allTracks = [];
+  State.currentTrack = null;
+  State.queue = [];
+  renderDashboard();
+  renderTracks([], 'tracks-table');
+  renderTracks([], 'library-table');
+  renderQueue([], 0);
+}
+
 async function init() {
   setTheme(localStorage.getItem('michi_theme') || 'dark', false);
   await loadI18n();
   updateServerUrlDisplay();
   showSection('dashboard');
 
-  await AuthSession.check();
-  await Promise.allSettled([loadStatus(), loadServerInfo(), loadDashboard(), loadTracks()]);
-  await Promise.allSettled([loadCanonicalPlaybackState(), loadCanonicalQueue()]);
-
-  State.polling = setInterval(function () {
-    if (!document.hidden) { loadStatus(); loadDashboard(); }
-  }, 30000);
-
-  ServerPlayback.pollTimer = setInterval(function () {
-    if (!document.hidden && ServerPlayback.outputTarget === 'server') {
-      loadCanonicalPlaybackState();
-    }
-  }, 3000);
-
-  setupLiveEvents();
+  await bootstrapPublic();
+  const authState = await AuthSession.check();
+  if (authState === 'authenticated' || authState === 'disabled') {
+    await bootstrapProtected();
+  } else {
+    teardownProtected();
+  }
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(function () {});
@@ -739,6 +886,7 @@ document.addEventListener('DOMContentLoaded', init);
 
 // ── Live Events (WebSocket / SSE) ────────────────────────────────
 function setupLiveEvents() {
+  if (State.eventWs) return;
   try {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = protocol + '//' + window.location.host + '/api/v1/events';
@@ -761,21 +909,23 @@ function setupLiveEvents() {
     };
 
     State.eventWs.onclose = function () {
-      // Reconnect with backoff
-      setTimeout(setupLiveEvents, 10000);
+      State.eventWs = null;
+      if (AuthSession.state !== 'anonymous') {
+        setTimeout(setupLiveEvents, 10000);
+      }
     };
-  } catch (e) {
-    // Degraded fallback to polling
-  }
+  } catch (e) {}
 }
 
 // ── Status & Connection State Machine ────────────────────────────
 async function loadStatus() {
   try {
     State.status = await MichiAPI.status();
+    ConnectionStatus.update(State.status);
     renderStatus();
     renderStatusPage();
   } catch (e) {
+    ConnectionStatus.setOffline();
     renderOfflineStatus();
   }
 }
@@ -783,17 +933,6 @@ async function loadStatus() {
 function renderStatus() {
   const s = State.status;
   if (!s) { renderOfflineStatus(); return; }
-
-  const ok = s.status === 'ok';
-  const dot = $('#server-status-dot');
-  const lbl = $('#server-status-label');
-  if (dot) dot.className = 'server-status-dot ' + (ok ? 'online' : 'offline');
-  if (lbl) lbl.textContent = ok ? 'Online' : 'Offline';
-
-  const pill = $('#status-pill');
-  const pillText = $('#status-pill-text');
-  if (pill) pill.className = 'status-pill ' + (ok ? 'online' : 'offline');
-  if (pillText) pillText.textContent = ok ? 'Online' : 'Offline';
 
   const sid = $('#sidebar-server-id');
   if (sid && s.server_id) sid.textContent = s.server_id.slice(0, 8) + '..';
@@ -810,16 +949,6 @@ function renderStatus() {
 }
 
 function renderOfflineStatus() {
-  const dot = $('#server-status-dot');
-  const lbl = $('#server-status-label');
-  if (dot) dot.className = 'server-status-dot offline';
-  if (lbl) lbl.textContent = 'Offline';
-
-  const pill = $('#status-pill');
-  const pillText = $('#status-pill-text');
-  if (pill) pill.className = 'status-pill offline';
-  if (pillText) pillText.textContent = 'Offline';
-
   const db = $('#sidebar-db-status');
   if (db) db.textContent = 'ERR';
 }
@@ -905,6 +1034,7 @@ function renderServerInfo() {
 
 // ── Dashboard ───────────────────────────────────────────────────
 async function loadDashboard() {
+  if (AuthSession.state === 'anonymous') return;
   try {
     State.dashboard = await MichiAPI.dashboard();
     renderDashboard();
@@ -917,7 +1047,7 @@ function renderDashboard() {
   if (!cd) return;
 
   if (!d) {
-    cd.innerHTML = '<div class="empty-state"><div class="icon">📊</div><p><strong>' + t('error.could_not_load_dashboard') + '</strong></p></div>';
+    cd.innerHTML = '<div class="empty-state"><div class="icon">📊</div><p><strong>' + (AuthSession.state === 'anonymous' ? 'Sign in to access dashboard' : t('error.could_not_load_dashboard')) + '</strong></p></div>';
     return;
   }
 
@@ -958,6 +1088,7 @@ function renderDashboard() {
 
 // ── Tracks & Library ────────────────────────────────────────────
 async function loadTracks() {
+  if (AuthSession.state === 'anonymous') return;
   try {
     const raw = await MichiAPI.tracks({ limit: 100 });
     State.tracks = raw.tracks || [];
@@ -982,7 +1113,7 @@ function renderTracks(tracks, tableId) {
   if (!container) return;
 
   if (!tracks || tracks.length === 0) {
-    renderEmpty(container, '🎵', 'Library empty', 'Scan or import music files to populate library.');
+    renderEmpty(container, '🎵', AuthSession.state === 'anonymous' ? 'Authentication Required' : 'Library empty', AuthSession.state === 'anonymous' ? 'Please sign in to view library.' : 'Scan or import music files to populate library.');
     return;
   }
 
@@ -1087,17 +1218,29 @@ var ServerPlayback = {
   repeat: 'off',
   playing: false,
   outputTarget: 'browser', // 'browser' | 'server'
+  remoteTargetName: null,  // Room or Chain name if selected
   pollTimer: null,
 };
 
 function toggleOutputTarget() {
   ServerPlayback.outputTarget = ServerPlayback.outputTarget === 'browser' ? 'server' : 'browser';
+  updateOutputRoutingBadge();
+  showToast('Playback output routing: ' + (ServerPlayback.outputTarget === 'browser' ? 'This Browser (Local Audio)' : (ServerPlayback.remoteTargetName ? 'Remote: ' + ServerPlayback.remoteTargetName : 'Server Playback (No remote output configured)')));
+}
+
+function updateOutputRoutingBadge() {
   var badge = $('#np-target-badge');
-  if (badge) {
-    badge.textContent = ServerPlayback.outputTarget === 'browser' ? 'Output: This Browser' : 'Output: Remote Link';
-    badge.className = 'badge ' + (ServerPlayback.outputTarget === 'browser' ? 'format' : 'stable');
+  if (!badge) return;
+  if (ServerPlayback.outputTarget === 'browser') {
+    badge.textContent = 'Output: This Browser';
+    badge.className = 'badge format';
+  } else if (ServerPlayback.remoteTargetName) {
+    badge.textContent = 'Output: ' + ServerPlayback.remoteTargetName;
+    badge.className = 'badge stable';
+  } else {
+    badge.textContent = 'Server: No remote output configured';
+    badge.className = 'badge beta';
   }
-  showToast('Playback output routing: ' + (ServerPlayback.outputTarget === 'browser' ? 'This Browser (Local Audio)' : 'Remote Link (Michi Stream / Rooms)'));
 }
 
 function getAudio() {
@@ -1204,6 +1347,7 @@ function updatePlaybackControlsUI() {
   if (repeatBtn) {
     repeatBtn.style.color = (ServerPlayback.repeat && ServerPlayback.repeat !== 'off') ? 'var(--primary)' : 'var(--text-3)';
   }
+  updateOutputRoutingBadge();
 }
 
 async function addToQueue(idx) {
@@ -1220,14 +1364,13 @@ async function addToQueue(idx) {
 }
 
 async function loadCanonicalQueue() {
+  if (AuthSession.state === 'anonymous') return;
   try {
     const raw = await MichiAPI.queue();
     const items = raw.items || [];
     State.queue = items;
     renderQueue(items, raw.current_index || 0);
-  } catch (e) {
-    // silent
-  }
+  } catch (e) {}
 }
 
 function renderQueue(items, currentIndex) {
@@ -1262,6 +1405,7 @@ async function jumpToQueueItem(pos) {
 }
 
 async function loadCanonicalPlaybackState() {
+  if (AuthSession.state === 'anonymous') return;
   try {
     const st = await MichiAPI.playbackState();
     ServerPlayback.state = st.state;
@@ -1405,6 +1549,7 @@ async function testMichiLink() {
 }
 
 async function loadEcosystemDevices() {
+  if (AuthSession.state === 'anonymous') return;
   try {
     var raw = await MichiAPI.linkDevices();
     var devices = raw.devices || [];
@@ -1424,9 +1569,22 @@ async function loadEcosystemDevices() {
         '<div style="font-size:1.1rem">' + icon + '</div>' +
         '<div class="info"><div class="name">' + esc(d.alias || 'Unknown') + ' ' + status + '</div>' +
         '<div class="meta">' + esc(d.device_type) + (d.device_model ? ' · ' + esc(d.device_model) : '') + '</div></div>' +
+        '<button class="btn btn-sm btn-ghost" onclick="revokeDevice(\'' + d.id + '\')">Revoke</button>' +
         '</div>';
     }).join('');
   } catch (e) { console.warn('ecosystem:', e.message); }
+}
+
+async function revokeDevice(deviceId) {
+  showModal('Revoke Device', 'Revoke access for this device? It will need to be re-paired.', 'Revoke', async function () {
+    try {
+      await MichiAPI.revokeLinkDevice(deviceId);
+      showToast('Device revoked');
+      loadEcosystemDevices();
+    } catch (e) {
+      showToast('Failed to revoke device: ' + e.message, true);
+    }
+  });
 }
 
 // ── QR Pairing ───────────────────────────────────────────────────
@@ -1546,6 +1704,7 @@ function copyServerUrl() {
 
 // ── Playlists ────────────────────────────────────────────────────
 async function loadPlaylists() {
+  if (AuthSession.state === 'anonymous') return;
   try {
     const raw = await MichiAPI.playlists();
     const playlists = raw.playlists || [];
@@ -1690,6 +1849,7 @@ let _historyOffset = 0;
 const _historyLimit = 50;
 
 async function loadHistory() {
+  if (AuthSession.state === 'anonymous') return;
   try {
     const [list, stats] = await Promise.all([
       MichiAPI.history({ limit: _historyLimit, offset: _historyOffset }),
@@ -1782,6 +1942,7 @@ async function clearHistory() {
 
 // ── Room Groups ──────────────────────────────────────────────────
 async function loadRoomGroups() {
+  if (AuthSession.state === 'anonymous') return;
   try {
     var raw = await MichiAPI.roomGroups();
     var groups = raw.groups || [];
@@ -1863,6 +2024,7 @@ async function deleteRoomGroup(id) {
 
 // ── Broadcast & Sources ──────────────────────────────────────────
 async function loadSources() {
+  if (AuthSession.state === 'anonymous') return;
   try {
     var raw = await MichiAPI.sources();
     var sources = raw.sources || [];
@@ -1991,6 +2153,7 @@ function switchSettingsTab(tab) {
 }
 
 async function loadSettings() {
+  if (AuthSession.state === 'anonymous') return;
   try {
     var s = await MichiAPI.settings();
     if (!$('#settings-port')) return;
@@ -2146,6 +2309,7 @@ async function verifyIntegrity() {
 var _currentChainId = null;
 
 async function loadChains() {
+  if (AuthSession.state === 'anonymous') return;
   try {
     var raw = await MichiAPI.chains();
     var chains = raw.chains || [];
@@ -2287,6 +2451,8 @@ async function playChain() {
   try {
     var resp = await MichiAPI.playChain(_currentChainId);
     if (resp && resp.active_links > 0) {
+      ServerPlayback.remoteTargetName = 'Chain: ' + ($('#chain-detail-name')?.textContent || _currentChainId);
+      updateOutputRoutingBadge();
       showToast('Chain playing on ' + resp.active_links + ' active receiver(s)');
     } else {
       showToast('Chain started without active receiver links', true);
@@ -2302,6 +2468,8 @@ async function stopChain() {
   if (!_currentChainId) return;
   try {
     await MichiAPI.stopChain(_currentChainId);
+    ServerPlayback.remoteTargetName = null;
+    updateOutputRoutingBadge();
     showToast(t('toast.deactivated'));
     loadChains();
   } catch (e) { showToast(e.message, true); }
