@@ -477,7 +477,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
     michi_db::upsert_track(&pool, &track).await.unwrap();
 
     let state = michi_api::AppState::new(config, pool.clone(), None);
-    (michi_api::create_router(state), pool, tmp, id)
+    (router_with_test_admin(state, &pool).await, pool, tmp, id)
 }
 
 #[tokio::test]
@@ -3048,56 +3048,7 @@ async fn test_v1_autonomous_playback_state_independent() {
 
 #[tokio::test]
 async fn test_v1_stream_and_download_range() {
-    use tokio::io::AsyncWriteExt;
-    let tmp = tempfile::tempdir().unwrap();
-    let music = tmp.path().join("music");
-    std::fs::create_dir_all(&music).unwrap();
-    let file_path = music.join("stream_range.flac");
-    let content = vec![0u8; 65536]; // 64KB file
-    let mut f = tokio::fs::File::create(&file_path).await.unwrap();
-    f.write_all(&content).await.unwrap();
-    drop(f);
-
-    let (pool, db_url) = test_db_with_url().await;
-    let canonical_music = music.canonicalize().unwrap_or(music.clone());
-    let canonical_file = file_path.canonicalize().unwrap_or(file_path.clone());
-    let id = michi_core::track_id_from_path(canonical_file.to_str().unwrap());
-    let track = michi_core::Track {
-        id,
-        title: Some("Range Test".into()),
-        artist: None,
-        album: None,
-        album_artist: None,
-        duration_ms: Some(10000),
-        file_path: canonical_file.to_str().unwrap().to_string(),
-        format: michi_core::AudioFormat::Flac,
-        sample_rate: None,
-        bit_depth: None,
-        channels: None,
-        artwork_id: None,
-        genre: None,
-        year: None,
-        track_number: None,
-        disc_number: None,
-        content_hash: None,
-        file_size: Some(65536),
-        file_mtime_ns: None,
-        starred: false,
-        rating: 0,
-        starred_at: None,
-        replaygain_track_gain: None,
-        replaygain_track_peak: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-    };
-    michi_db::upsert_track(&pool, &track).await.unwrap();
-
-    let mut config = test_config_with_url(db_url);
-    config.music_paths = vec![canonical_music];
-    config.config_path = tmp.path().join("config");
-    config.cache_path = tmp.path().join("cache");
-    let state = michi_api::AppState::new(config, pool.clone(), None);
-    let app = router_with_test_admin(state, &pool).await;
+    let (app, _pool, _tmp, id) = make_streaming_app().await;
 
     // Full file 200
     let resp = app
