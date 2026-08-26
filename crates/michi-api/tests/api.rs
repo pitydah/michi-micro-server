@@ -397,13 +397,15 @@ async fn test_track_get_returns_400_for_bad_uuid() {
 fn create_test_file(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, content).unwrap();
-    path
+    std::fs::canonicalize(&path).unwrap_or(path)
 }
 
 async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, Uuid) {
     let tmp = tempfile::tempdir().unwrap();
-    let music_dir = tmp.path().join("music");
+    let music_dir = std::fs::canonicalize(tmp.path().join("music"))
+        .unwrap_or_else(|_| tmp.path().join("music"));
     std::fs::create_dir_all(&music_dir).unwrap();
+    let music_dir = std::fs::canonicalize(&music_dir).unwrap_or(music_dir);
 
     let file_path = create_test_file(&music_dir, "test.flac", &[0u8; 50000]);
 
