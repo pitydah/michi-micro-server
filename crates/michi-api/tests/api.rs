@@ -22,10 +22,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 async fn test_db_with_url() -> (SqlitePool, String) {
-    let url = format!(
-        "sqlite:file:memdb_{}?mode=memory&cache=shared",
-        Uuid::new_v4()
-    );
+    let url = "sqlite::memory:".to_string();
     let pool = michi_db::init_pool(&url).await.unwrap();
     (pool, url)
 }
