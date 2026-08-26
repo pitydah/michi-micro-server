@@ -3062,6 +3062,7 @@ async fn test_v1_stream_and_download_range() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(resp.into_body(), 100_000).await.unwrap();
 
     // Range request 206
     let resp = app
@@ -3076,6 +3077,7 @@ async fn test_v1_stream_and_download_range() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    let _ = axum::body::to_bytes(resp.into_body(), 100_000).await.unwrap();
 
     // Download full 200
     let resp = app
@@ -3089,6 +3091,7 @@ async fn test_v1_stream_and_download_range() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(resp.into_body(), 100_000).await.unwrap();
 
     // Range not satisfiable 416
     let resp = app

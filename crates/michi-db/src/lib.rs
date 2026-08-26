@@ -71,6 +71,8 @@ pub async fn init_pool_with_size(
 
     let pool = SqlitePoolOptions::new()
         .min_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
         .max_connections(max_connections)
         .connect_with(opts)
         .await?;
