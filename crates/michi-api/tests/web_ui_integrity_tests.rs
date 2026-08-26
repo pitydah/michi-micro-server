@@ -1511,3 +1511,54 @@ async fn test_three_way_integration_e2e_flow() {
     let ps = state.playback_state.read().await;
     assert!(ps.playing);
 }
+
+#[tokio::test]
+async fn test_webui_static_asset_invariants() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let index_path = std::path::Path::new(manifest_dir).join("static/index.html");
+    let app_path = std::path::Path::new(manifest_dir).join("static/app.js");
+
+    let index_html = std::fs::read_to_string(index_path)
+        .expect("index.html must exist");
+    let app_js = std::fs::read_to_string(app_path)
+        .expect("app.js must exist");
+
+    // 1. Initial status pill must NOT claim "Online" before checking
+    assert!(
+        !index_html.contains("<span class=\"status-pill\" id=\"status-pill\"><span class=\"server-status-dot\"></span>Online</span>"),
+        "index.html must not hardcode initial 'Online' state"
+    );
+    assert!(
+        index_html.contains("Checking..."),
+        "index.html must indicate initial checking state"
+    );
+
+    // 2. app.js must use credentials: 'same-origin'
+    assert!(
+        app_js.contains("credentials: 'same-origin'"),
+        "app.js fetch requests must include credentials: 'same-origin'"
+    );
+
+    // 3. app.js must not store auth tokens in localStorage
+    assert!(
+        !app_js.contains("localStorage.setItem('michi_token'") && !app_js.contains("localStorage.setItem('auth_token'"),
+        "app.js must not store auth tokens in localStorage (use HttpOnly cookie instead)"
+    );
+
+    // 4. app.js must set Content-Type: application/json for mutations
+    assert!(
+        app_js.contains("headers.set('Content-Type', 'application/json')"),
+        "app.js must automatically set Content-Type: application/json for POST/PUT/PATCH"
+    );
+
+    // 5. Version queries must be bumped to v=10
+    assert!(
+        index_html.contains("styles.css?v=10"),
+        "index.html must reference styles.css?v=10"
+    );
+    assert!(
+        index_html.contains("app.js?v=10"),
+        "index.html must reference app.js?v=10"
+    );
+}
+
