@@ -60,6 +60,11 @@ RUN find apps crates vendor -type f \( \
 # Runtime stage
 FROM debian:${DEBIAN_VERSION}
 
+LABEL org.opencontainers.image.title="michi-micro-server" \
+      org.opencontainers.image.description="Michi Micro Server - High performance, resource-efficient music server for edge appliances" \
+      org.opencontainers.image.source="https://github.com/pitydah/michi-micro-server" \
+      org.opencontainers.image.licenses="MIT"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libsqlite3-0 \
     wget \
