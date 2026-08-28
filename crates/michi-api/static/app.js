@@ -799,7 +799,7 @@ function showSection(section) {
   }
   toggleNavigation(false);
 
-  if (AuthSession.state === 'anonymous') return;
+  if (AuthSession.state !== 'authenticated') return;
 
   // Lazy loaders for sections
   if (section === 'playlists') loadPlaylists();
@@ -999,6 +999,21 @@ const FEATURE_LABELS = {
   token_refresh: { label: 'Token Refresh', stable: true },
 };
 
+function hasServerFeature(featureName) {
+  var info = State.serverInfo;
+  if (!info || !info.features) return true;
+  var feats = info.features;
+  if (typeof feats === 'object' && !Array.isArray(feats)) {
+    return feats[featureName] === true;
+  }
+  if (Array.isArray(feats)) {
+    return feats.some(function (f) {
+      return f === featureName || (f && f.name === featureName && f.enabled !== false);
+    });
+  }
+  return false;
+}
+
 function featureBadge(enabled, meta) {
   if (meta?.future && !enabled) return { cls: 'experimental', text: 'EXP' };
   if (meta?.beta && enabled) return { cls: 'beta', text: 'BETA' };
@@ -1036,7 +1051,7 @@ function renderServerInfo() {
 
 // ── Dashboard ───────────────────────────────────────────────────
 async function loadDashboard() {
-  if (AuthSession.state === 'anonymous') return;
+  if (AuthSession.state !== 'authenticated') return;
   try {
     State.dashboard = await MichiAPI.dashboard();
     renderDashboard();
@@ -1049,7 +1064,7 @@ function renderDashboard() {
   if (!cd) return;
 
   if (!d) {
-    cd.innerHTML = '<div class="empty-state"><div class="icon">📊</div><p><strong>' + (AuthSession.state === 'anonymous' ? 'Sign in to access dashboard' : t('error.could_not_load_dashboard')) + '</strong></p></div>';
+    cd.innerHTML = '<div class="empty-state"><div class="icon">📊</div><p><strong>' + (AuthSession.state !== 'authenticated' ? 'Sign in to access dashboard' : t('error.could_not_load_dashboard')) + '</strong></p></div>';
     return;
   }
 
@@ -1096,7 +1111,7 @@ function renderDashboard() {
 
 // ── Tracks & Library ────────────────────────────────────────────
 async function loadTracks() {
-  if (AuthSession.state === 'anonymous') return;
+  if (AuthSession.state !== 'authenticated') return;
   try {
     const raw = await MichiAPI.tracks({ limit: 100 });
     State.tracks = raw.tracks || [];
@@ -1121,7 +1136,7 @@ function renderTracks(tracks, tableId) {
   if (!container) return;
 
   if (!tracks || tracks.length === 0) {
-    renderEmpty(container, '🎵', AuthSession.state === 'anonymous' ? 'Authentication Required' : 'Library empty', AuthSession.state === 'anonymous' ? 'Please sign in to view library.' : 'Scan or import music files to populate library.');
+    renderEmpty(container, '🎵', AuthSession.state !== 'authenticated' ? 'Authentication Required' : 'Library empty', AuthSession.state !== 'authenticated' ? 'Please sign in to view library.' : 'Scan or import music files to populate library.');
     return;
   }
 
@@ -1372,7 +1387,7 @@ async function addToQueue(idx) {
 }
 
 async function loadCanonicalQueue() {
-  if (AuthSession.state === 'anonymous') return;
+  if (AuthSession.state !== 'authenticated') return;
   try {
     const raw = await MichiAPI.queue();
     const items = raw.items || [];
@@ -1413,7 +1428,7 @@ async function jumpToQueueItem(pos) {
 }
 
 async function loadCanonicalPlaybackState() {
-  if (AuthSession.state === 'anonymous') return;
+  if (AuthSession.state !== 'authenticated') return;
   try {
     const st = await MichiAPI.playbackState();
     ServerPlayback.state = st.state;
@@ -1570,7 +1585,7 @@ async function loadEcosystemDevices() {
     var typeIcons = { mobile: '📱', desktop: '💻', player: '🎵', receiver: '📡', server: '🖥️', default: '📱' };
     container.innerHTML = devices.map(function (d) {
       var icon = typeIcons[d.device_type] || typeIcons.default;
-      var devId = d.device_id || d.id || '';
+      var devId = d.device_id || '';
       var status = d.online
         ? '<span class="badge stable" style="font-size:.6rem">ONLINE</span>'
         : '<span class="badge disabled" style="font-size:.6rem">OFFLINE</span>';
@@ -1717,7 +1732,7 @@ function copyServerUrl() {
 
 // ── Playlists ────────────────────────────────────────────────────
 async function loadPlaylists() {
-  if (AuthSession.state === 'anonymous') return;
+  if (AuthSession.state !== 'authenticated') return;
   try {
     const raw = await MichiAPI.playlists();
     const playlists = raw.playlists || [];
@@ -1862,7 +1877,7 @@ let _historyOffset = 0;
 const _historyLimit = 50;
 
 async function loadHistory() {
-  if (AuthSession.state === 'anonymous') return;
+  if (AuthSession.state !== 'authenticated') return;
   try {
     const [list, stats] = await Promise.all([
       MichiAPI.history({ limit: _historyLimit, offset: _historyOffset }),
@@ -1955,7 +1970,7 @@ async function clearHistory() {
 
 // ── Room Groups ──────────────────────────────────────────────────
 async function loadRoomGroups() {
-  if (AuthSession.state === 'anonymous') return;
+  if (AuthSession.state !== 'authenticated') return;
   try {
     var raw = await MichiAPI.roomGroups();
     var groups = raw.groups || [];
@@ -2037,7 +2052,7 @@ async function deleteRoomGroup(id) {
 
 // ── Broadcast & Sources ──────────────────────────────────────────
 async function loadSources() {
-  if (AuthSession.state === 'anonymous') return;
+  if (AuthSession.state !== 'authenticated') return;
   try {
     var raw = await MichiAPI.sources();
     var sources = raw.sources || [];
@@ -2166,7 +2181,7 @@ function switchSettingsTab(tab) {
 }
 
 async function loadSettings() {
-  if (AuthSession.state === 'anonymous') return;
+  if (AuthSession.state !== 'authenticated') return;
   try {
     var s = await MichiAPI.settings();
     if (!$('#settings-port')) return;
@@ -2300,7 +2315,7 @@ async function createSnapshot() {
 }
 
 function downloadBackup() {
-  window.open('/api/v1/backup', '_blank');
+  window.open('/api/v1/backup/download', '_blank');
 }
 
 async function verifyIntegrity() {
@@ -2327,11 +2342,7 @@ async function loadChains() {
   if (AuthSession.state !== 'authenticated') return;
   var container = $('#chains-list');
   if (!container) return;
-  var feats = State.serverInfo?.features || [];
-  var hasReceivers = feats.some(function (f) {
-    return (f === 'receivers' || (f && f.name === 'receivers' && f.enabled !== false));
-  });
-  if (feats.length > 0 && !hasReceivers) {
+  if (!hasServerFeature('receivers')) {
     container.innerHTML = '<div class="empty-state"><div class="icon">📡</div><p><strong>Receivers & Chains are disabled in Micro Server profile</strong></p><p style="font-size:.78rem;margin-top:4px">This deployment runs standalone audio output. Multi-room receiver playback is unsupported.</p></div>';
     return;
   }

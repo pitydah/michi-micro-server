@@ -106,33 +106,49 @@ def test_webui_full_browser_lifecycle(browser_context):
     auth_btn_label = page.locator("#auth-btn-label")
     expect(auth_btn_label).to_contain_text(ADMIN_USERNAME)
 
-    # 8. Test Scan triggering (must not fail with 415 or 401/500)
-    scan_btn = page.locator("button:has-text('Scan')").first
-    if scan_btn.is_visible():
+    # 8. Test Scan triggering with expect_response (must return 200/202)
+    scan_btn = page.locator("button[onclick='handleScan()']").first
+    expect(scan_btn).to_be_visible()
+    with page.expect_response(lambda r: "/api/v1/library/scan" in r.url and r.request.method == "POST", timeout=5000) as scan_resp_info:
         scan_btn.click()
-        page.wait_for_timeout(1000)
+    scan_resp = scan_resp_info.value
+    assert scan_resp.status in (200, 202), f"Scan request failed with status {scan_resp.status}"
+    page.wait_for_timeout(1000)
 
     # 9. Test Playlists Section & Lifecycle
     page.click(".nav-item[data-section='playlists']")
     page.wait_for_timeout(500)
     expect(page.locator("#page-playlists")).to_be_visible()
 
-    create_pl_btn = page.locator("button:has-text('New Playlist')")
-    if create_pl_btn.is_visible():
-        create_pl_btn.click()
-        page.wait_for_timeout(300)
-        pl_name_input = page.locator("#new-playlist-name")
-        if pl_name_input.is_visible():
-            pl_name_input.fill("Browser E2E Playlist")
-            page.click("#playlist-create-form button.btn-primary")
-            page.wait_for_timeout(800)
+    # Switch to smart tab & create smart playlist
+    smart_tab_btn = page.locator("button[data-tab='smart']")
+    expect(smart_tab_btn).to_be_visible()
+    smart_tab_btn.click()
+    page.wait_for_timeout(300)
+
+    smart_name_input = page.locator("#smart-name")
+    expect(smart_name_input).to_be_visible()
+    smart_name_input.fill("Browser E2E Smart Playlist")
+
+    create_smart_btn = page.locator("button[onclick='createSmartPlaylist()']")
+    expect(create_smart_btn).to_be_visible()
+    with page.expect_response(lambda r: "/api/v1/playlists" in r.url and r.request.method == "POST", timeout=5000) as pl_resp_info:
+        create_smart_btn.click()
+    assert pl_resp_info.value.status in (200, 201), f"Playlist creation failed with status {pl_resp_info.value.status}"
+    page.wait_for_timeout(800)
 
     # 10. Test Library / Tracks navigation
     page.click(".nav-item[data-section='library']")
     page.wait_for_timeout(500)
     expect(page.locator("#page-library")).to_be_visible()
 
-    # 11. Test Status navigation and Queue drawer presence
+    # 11. Test Chains Section navigation (ensures capability gating executes cleanly without runtime exception)
+    page.click(".nav-item[data-section='chains']")
+    page.wait_for_timeout(500)
+    expect(page.locator("#page-chains")).to_be_visible()
+    expect(page.locator("#chains-list")).to_be_attached()
+
+    # 12. Test Status navigation and Queue drawer presence
     page.click(".nav-item[data-section='status']")
     page.wait_for_timeout(500)
     expect(page.locator("#page-status")).to_be_visible()
@@ -140,13 +156,16 @@ def test_webui_full_browser_lifecycle(browser_context):
     queue_content = page.locator("#queue-content")
     expect(queue_content).to_be_attached()
 
-    # 12. Logout and verify protected state is torn down
+    # 13. Verify no unexpected failed responses occurred during authenticated session
+    assert len(failed_responses) == 0, f"Unexpected failed responses during E2E: {failed_responses}"
+
+    # 14. Logout and verify protected state is torn down
     auth_btn.click()
     page.wait_for_timeout(500)
     logout_btn = page.locator("button:has-text('Sign Out')")
-    if logout_btn.is_visible():
-        logout_btn.click()
-        page.wait_for_timeout(1000)
+    expect(logout_btn).to_be_visible()
+    logout_btn.click()
+    page.wait_for_timeout(1000)
 
     expect(auth_btn_label).to_contain_text("Sign In")
     page.close()

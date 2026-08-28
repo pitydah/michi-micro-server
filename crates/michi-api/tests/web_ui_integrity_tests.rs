@@ -1741,12 +1741,21 @@ async fn test_webui_functional_catalog_consistency() {
             );
         }
 
-        if status == "wired" && !endpoint.is_empty() {
-            let base_endpoint = endpoint.split(':').next().unwrap().trim_end_matches('/');
-            assert!(
-                app_js.contains(base_endpoint),
-                "wired function {id} declares endpoint '{base_endpoint}' which must exist in app.js"
-            );
+        if status == "wired" {
+            let ui_action = fn_item["ui_action"].as_str().unwrap_or("");
+            if !ui_action.is_empty() {
+                assert!(
+                    app_js.contains(ui_action),
+                    "wired function {id} declares ui_action '{ui_action}' which must exist in app.js"
+                );
+            }
+            if !endpoint.is_empty() {
+                let base_endpoint = endpoint.split(':').next().unwrap().trim_end_matches('/');
+                assert!(
+                    app_js.contains(base_endpoint),
+                    "wired function {id} declares endpoint '{base_endpoint}' which must exist in app.js"
+                );
+            }
         }
     }
 }
