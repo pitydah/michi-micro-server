@@ -581,3 +581,75 @@ async fn test_receiver_heartbeat_replay_rejected() {
 
     let _ = client.session_stop().await;
 }
+
+#[tokio::test]
+#[ignore]
+async fn test_receiver_e2e_data_plane_pipeline() {
+    let url = sim_url();
+    let mut client = make_test_client(&url);
+
+    // 1. Pair with receiver simulator
+    let start = client
+        .pair_start("data-plane-e2e")
+        .await
+        .expect("pair_start failed");
+    let session_id = start.session_id.expect("session_id missing");
+    client
+        .pair_confirm(&session_id, "data-plane-e2e", "482391")
+        .await
+        .expect("pair_confirm failed");
+
+    // 2. Start session on receiver
+    let sess_id = format!("sess_dp_{}", uuid::Uuid::new_v4());
+    let sess_resp = client
+        .session_start(&sess_id, "pcm_s16le", 48000, 16, 2, 55400, 150, 80)
+        .await
+        .expect("session_start failed");
+
+    let stream_port = sess_resp.stream_port;
+    let ssrc = sess_resp.ssrc;
+
+    use michi_receivers::transport::{AudioTransport, RtpReceiverTransport, TransportStreamConfig};
+
+    // 3. Create RTP transport and write real PCM packets
+    let target_addr = format!("127.0.0.1:{stream_port}");
+    let mut transport = RtpReceiverTransport::new(&target_addr, ssrc);
+    transport
+        .start(TransportStreamConfig::receiver_v1_lite_default())
+        .await
+        .expect("transport start failed");
+
+    // 10ms of 48000Hz 16-bit stereo PCM = 480 frames * 4 bytes = 1920 bytes
+    let sample_chunk = vec![0x24u8; 1920];
+    for _ in 0..10 {
+        transport
+            .write_pcm(&sample_chunk)
+            .await
+            .expect("write_pcm failed");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // 4. Verify simulator received RTP packets via test metrics endpoint
+    let metrics: serde_json::Value = reqwest::get(&format!("{url}/api/v1/test/metrics"))
+        .await
+        .expect("get metrics request failed")
+        .json()
+        .await
+        .expect("parse metrics json failed");
+
+    let packets_received = metrics
+        .get("packets_received")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    assert!(
+        packets_received >= 5,
+        "simulator must have received at least 5 packets, got {packets_received}"
+    );
+
+    // 5. Test volume change propagation
+    let vol_resp = client.set_volume(60).await.expect("set_volume failed");
+    assert_eq!(vol_resp.volume, Some(60));
+
+    // 6. Stop session cleanly
+    client.session_stop().await.expect("session_stop failed");
+}

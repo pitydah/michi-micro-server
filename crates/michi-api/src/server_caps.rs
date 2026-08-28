@@ -211,7 +211,7 @@ const ALWAYS_ON_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] 
         "1.0",
         "Autonomous decoding & engine playback",
         FeatureMaturity::Beta,
-        EvidenceLevel::Implemented,
+        EvidenceLevel::EffectVerified,
     ),
 ];
 
@@ -221,7 +221,7 @@ const DISABLED_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] =
         "1.0",
         "Receiver playback data plane",
         FeatureMaturity::Beta,
-        EvidenceLevel::Implemented,
+        EvidenceLevel::IntegrationCertified,
     ),
     (
         "rooms",

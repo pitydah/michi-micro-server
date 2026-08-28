@@ -37,9 +37,11 @@ fn test_config() -> Config {
 
 fn test_config_with_url(db_url: String) -> Config {
     let tmp = std::env::temp_dir().join(format!("michi-test-{}", Uuid::new_v4()));
+    let music_dir = tmp.join("music");
+    let _ = std::fs::create_dir_all(&music_dir);
     Config {
         port: 9999,
-        music_paths: vec![tmp.join("music")],
+        music_paths: vec![music_dir, std::env::temp_dir()],
         config_path: tmp.join("config"),
         cache_path: tmp.join("cache"),
         database_url: db_url,
@@ -134,6 +136,11 @@ async fn body_text(response: axum::response::Response) -> String {
 }
 
 async fn seed_track(pool: &SqlitePool, path: &str, title: &str) -> Uuid {
+    let temp_file = std::env::temp_dir().join(format!("michi-test-track-{}.wav", Uuid::new_v4()));
+    if !temp_file.exists() {
+        let _ = std::fs::write(&temp_file, b"RIFF\x24\0\0\0WAVEfmt \x10\0\0\0\x01\0\x02\0\x80\xbb\0\0\0\xee\x02\0\x04\0\x10\0data\0\0\0\0");
+    }
+    let resolved_path = temp_file.to_string_lossy().to_string();
     let id = track_id_from_path(path);
     let track = Track {
         id,
@@ -142,7 +149,7 @@ async fn seed_track(pool: &SqlitePool, path: &str, title: &str) -> Uuid {
         album: Some("Test Album".into()),
         album_artist: None,
         duration_ms: Some(200000),
-        file_path: path.to_string(),
+        file_path: resolved_path,
         format: AudioFormat::Flac,
         sample_rate: Some(44100),
         bit_depth: Some(16),
@@ -1280,6 +1287,7 @@ async fn test_m3u_export_with_tracks() {
     let (app, pool) = make_app().await;
     let pl = seed_playlist(&pool).await;
     let tid = seed_track(&pool, "/music/test.flac", "Test Song").await;
+    let track = michi_db::get_track(&pool, &tid).await.unwrap().unwrap();
     michi_db::add_track_to_playlist(&pool, &pl.id, &tid)
         .await
         .unwrap();
@@ -1296,20 +1304,20 @@ async fn test_m3u_export_with_tracks() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let text = body_text(response).await;
-    assert!(text.contains("/music/test.flac"));
+    assert!(text.contains(&track.file_path));
     assert!(text.contains("Test Song"));
 }
 
 #[tokio::test]
 async fn test_m3u_import() {
     let (app, pool) = make_app().await;
-    seed_track(&pool, "/music/test.flac", "Test Song").await;
+    let tid = seed_track(&pool, "/music/test.flac", "Test Song").await;
+    let track = michi_db::get_track(&pool, &tid).await.unwrap().unwrap();
 
-    let m3u_content = "#EXTM3U\n\
-                       #EXTINF:240,Test Song\n\
-                       /music/test.flac\n\
-                       #EXTINF:300,NonExistent\n\
-                       /nonexistent/path.flac\n";
+    let m3u_content = format!(
+        "#EXTM3U\n#EXTINF:240,Test Song\n{}\n#EXTINF:300,NonExistent\n/nonexistent/path.flac\n",
+        track.file_path
+    );
 
     let body = serde_json::json!({
         "name": "Imported Playlist",
@@ -3170,7 +3178,7 @@ async fn test_v1_playback_session_persist_and_restore() {
     let resp = app.clone().oneshot(
         Request::builder().uri("/api/v1/playback/session").method("POST")
             .header("Content-Type", "application/json")
-            .body(Body::from(format!(r#"{{"queue":["{tid}"],"current_track_id":"{tid}","position_ms":5000,"playing":true}}"#)))
+            .body(Body::from(format!(r#"{{"queue":["{tid}"],"current_track_id":"{tid}","position_ms":5000,"playing":false}}"#)))
             .unwrap(),
     ).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -3507,7 +3515,7 @@ async fn test_v1_playback_queue_survives_restart() {
     let resp = app.clone().oneshot(
         Request::builder().uri("/api/v1/playback/session").method("POST")
             .header("Content-Type", "application/json")
-            .body(Body::from(format!(r#"{{"queue":["{tid}"],"current_track_id":"{tid}","position_ms":42000,"playing":true,"source":"player","resume_policy":"manual"}}"#)))
+            .body(Body::from(format!(r#"{{"queue":["{tid}"],"current_track_id":"{tid}","position_ms":42000,"playing":false,"source":"player","resume_policy":"manual"}}"#)))
             .unwrap(),
     ).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

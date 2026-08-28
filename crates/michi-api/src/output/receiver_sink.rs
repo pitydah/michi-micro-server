@@ -118,7 +118,7 @@ impl AudioSink for ReceiverAudioSink {
         self.bytes_received += data.len() as u64;
 
         if self.muted {
-            self.state = SinkState::AudioFlowing;
+            self.state = SinkState::Ready; // P1-07: Muted sink does not declare AudioFlowing
             return Ok(0); // 0 bytes sent to network transport when muted
         }
 
@@ -154,10 +154,15 @@ impl AudioSink for ReceiverAudioSink {
 
     async fn set_volume(&mut self, volume: u8) -> Result<(), PlaybackError> {
         self.volume = volume;
-        let _ = self
-            .session_manager
+        self.session_manager
             .set_volume(&self.receiver_id, volume as u32)
-            .await;
+            .await
+            .map_err(|e| {
+                PlaybackError::PlaybackFailed(format!(
+                    "failed to set volume on receiver {}: {}",
+                    self.receiver_id, e
+                ))
+            })?;
         Ok(())
     }
 
@@ -176,9 +181,14 @@ impl AudioSink for ReceiverAudioSink {
     }
 
     async fn stop(&mut self) -> Result<(), PlaybackError> {
-        let _ = self.session_manager.stop_session(&self.receiver_id).await;
+        let res = self.session_manager.stop_session(&self.receiver_id).await;
         self.state = SinkState::Stopped;
-        Ok(())
+        res.map(|_| ()).map_err(|e| {
+            PlaybackError::PlaybackFailed(format!(
+                "failed to stop session on receiver {}: {}",
+                self.receiver_id, e
+            ))
+        })
     }
 
     fn snapshot(&self) -> SinkSnapshot {

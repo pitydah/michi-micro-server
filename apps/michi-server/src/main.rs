@@ -146,6 +146,7 @@ async fn main() -> Result<()> {
 
     let sync_h = _sync_health.clone();
     tokio::spawn(async move {
+        sync_h.set_state(WorkerState::Running).await;
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             sync_h.tick().await;
@@ -162,6 +163,29 @@ async fn main() -> Result<()> {
     if let Err(e) = state.bootstrap_runtime().await {
         tracing::error!("runtime bootstrap failed: {}", e);
     }
+
+    let playback_h = _playback_health.clone();
+    let playback_engine = state.playback_engine.clone();
+    tokio::spawn(async move {
+        playback_h.set_state(WorkerState::Running).await;
+        loop {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            match tokio::time::timeout(Duration::from_secs(1), playback_engine.snapshot()).await {
+                Ok(Ok(_snap)) => {
+                    playback_h.tick().await;
+                }
+                Ok(Err(e)) => {
+                    warn!("playback engine watchdog query failed: {}", e);
+                    playback_h.set_state(WorkerState::Failed).await;
+                }
+                Err(_) => {
+                    warn!("playback engine watchdog timed out after 1s (engine hung)");
+                    playback_h.set_state(WorkerState::Blocked).await;
+                }
+            }
+        }
+    });
+
     let app = michi_api::create_router(state.clone());
 
     let app = if config.opensubsonic_enabled {

@@ -1558,6 +1558,26 @@ async fn test_three_way_integration_e2e_flow() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
+    // 6.5. Mobile selects output target (required under fail-closed P0-03)
+    let output_payload = serde_json::json!({
+        "kind": "receiver",
+        "id": "stream-living-room"
+    });
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/output")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {device_token}"))
+                .body(Body::from(output_payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
     // 7. Mobile issues play command (queue item was populated in step 6)
     let play_payload = serde_json::json!({
         "command": "play"

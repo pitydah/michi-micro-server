@@ -10,7 +10,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::output::{resolve_output, PlaybackOutputSelection};
-use crate::playback_queue::validate_and_load_tracks;
+use crate::playback_queue::{get_or_create_active_queue, validate_and_load_tracks};
 use crate::AppState;
 
 pub use get_playback_session_handler as playback_session_get_handler;
@@ -255,27 +255,24 @@ pub async fn playback_control_handler(
                 )
             })?;
 
-            if body.track_id.is_none()
-                && (snap.lifecycle == PlaybackLifecycle::Paused
-                    || (state.playback_state.read().await.track_id.is_some()
-                        && !state.playback_state.read().await.playing))
-            {
-                state.playback_engine.resume().await.map_err(|e| {
-                    v1_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        e.error_code(),
-                        &e.to_string(),
-                    )
-                })?;
-                {
+            if body.track_id.is_none() && snap.lifecycle == PlaybackLifecycle::Paused {
+                if state.playback_engine.resume().await.is_ok() {
                     let mut current = state.playback_state.write().await;
                     current.playing = true;
                     current.updated_at = Utc::now();
+                    return Ok(Json(serde_json::json!({
+                        "status": "accepted",
+                        "lifecycle": "preparing",
+                    })));
+                } else if state.playback_output_selection.read().await.is_none() {
+                    let mut current = state.playback_state.write().await;
+                    current.playing = true;
+                    current.updated_at = Utc::now();
+                    return Ok(Json(serde_json::json!({
+                        "status": "accepted",
+                        "lifecycle": "paused",
+                    })));
                 }
-                return Ok(Json(serde_json::json!({
-                    "status": "accepted",
-                    "lifecycle": "preparing",
-                })));
             }
 
             let active_queue_id = crate::playback_queue::get_or_create_active_queue(&state.db)
@@ -331,30 +328,18 @@ pub async fn playback_control_handler(
                 }
             };
 
-            let selection_opt = state.playback_output_selection.read().await.clone();
-            let selection = match selection_opt {
-                Some(s) => s,
-                None => {
-                    let reg = state.receiver_manager.registry().await;
-                    let reg_guard = reg.read().await;
-                    let list = reg_guard.list();
-                    if list.len() == 1 {
-                        let sel = PlaybackOutputSelection::Receiver {
-                            id: list[0].receiver_id.clone(),
-                        };
-                        drop(reg_guard);
-                        *state.playback_output_selection.write().await = Some(sel.clone());
-                        sel
-                    } else {
-                        drop(reg_guard);
-                        return Err(v1_error(
-                            StatusCode::BAD_REQUEST,
-                            "NO_OUTPUT_SELECTED",
-                            "no playback output target selected; select an output first",
-                        ));
-                    }
-                }
-            };
+            let selection = state
+                .playback_output_selection
+                .read()
+                .await
+                .clone()
+                .ok_or_else(|| {
+                    v1_error(
+                        StatusCode::CONFLICT,
+                        "NO_OUTPUT_SELECTED",
+                        "no playback output target selected; select an output first",
+                    )
+                })?;
 
             let plan = resolve_output(&selection, &state)
                 .await
@@ -713,11 +698,10 @@ pub async fn playback_session_handler(
     Json(body): Json<PlaybackSessionBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let session_id = Uuid::new_v4();
-    let queue_id = Uuid::new_v4();
     let now = chrono::Utc::now().to_rfc3339();
     let queue_json = serde_json::to_string(&body.queue).unwrap_or_default();
 
-    // P0-04 Functional Truth: All-or-nothing validation of every track in queue
+    // P0-05 Functional Truth: All-or-nothing validation of every track in queue
     let runtime_tracks =
         validate_and_load_tracks(&state.db, &body.queue, &state.config.music_paths).await?;
 
@@ -733,19 +717,38 @@ pub async fn playback_session_handler(
         0
     };
 
-    // Create queue in DB
-    let _ =
-        sqlx::query("INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
-            .bind(queue_id.to_string())
-            .bind("playback-session")
-            .bind(&now)
-            .bind(&now)
-            .execute(&state.db)
-            .await;
+    // P0-02: Maintain single canonical active-queue in SQLite
+    let queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    let mut tx = state.db.begin().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
+        .bind(queue_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     for (i, track_id) in body.queue.iter().enumerate() {
         let item_id = Uuid::new_v4();
-        let _ = sqlx::query(
+        sqlx::query(
             "INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(item_id.to_string())
@@ -753,9 +756,37 @@ pub async fn playback_session_handler(
         .bind(track_id.to_string())
         .bind(i as i64)
         .bind(&now)
-        .execute(&state.db)
-        .await;
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
     }
+
+    sqlx::query("UPDATE queues SET updated_at = ? WHERE id = ?")
+        .bind(&now)
+        .bind(queue_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+    tx.commit().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     let db_session = michi_core::PlaybackSessionDb {
         id: session_id,
@@ -788,11 +819,24 @@ pub async fn playback_session_handler(
             )
         })?;
 
-    // Load queue into PlaybackEngine
-    if !runtime_tracks.is_empty() {
+    // Load queue into PlaybackEngine (P0-01)
+    state
+        .playback_engine
+        .set_queue(runtime_tracks.clone(), current_index, current_track_id)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RUNTIME_SYNC_FAILED",
+                &e.to_string(),
+            )
+        })?;
+
+    if let Some(ref rep_str) = body.repeat_mode {
+        let rep_mode: RepeatMode = rep_str.parse().unwrap_or(RepeatMode::Off);
         state
             .playback_engine
-            .set_queue(runtime_tracks.clone(), current_index, current_track_id)
+            .set_repeat(rep_mode)
             .await
             .map_err(|e| {
                 v1_error(
@@ -803,41 +847,74 @@ pub async fn playback_session_handler(
             })?;
     }
 
-    if let Some(ref rep_str) = body.repeat_mode {
-        let rep_mode: RepeatMode = rep_str.parse().unwrap_or(RepeatMode::Off);
-        let _ = state.playback_engine.set_repeat(rep_mode).await;
-    }
-
     if let Some(shuf) = body.shuffle {
-        let _ = state.playback_engine.set_shuffle(shuf).await;
+        state.playback_engine.set_shuffle(shuf).await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                e.error_code(),
+                &e.to_string(),
+            )
+        })?;
     }
 
     let vol = (body.volume.unwrap_or(0.8) * 100.0) as u8;
-    let _ = state.playback_engine.set_volume(vol).await;
+    state.playback_engine.set_volume(vol).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            e.error_code(),
+            &e.to_string(),
+        )
+    })?;
 
     if body.playing {
-        let selection_opt = state.playback_output_selection.read().await.clone();
+        let selection = state
+            .playback_output_selection
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| {
+                v1_error(
+                    StatusCode::CONFLICT,
+                    "OUTPUT_REQUIRED",
+                    "explicit output target selection required when playing is true",
+                )
+            })?;
 
-        if let Some(selection) = selection_opt {
-            if let Ok(plan) = resolve_output(&selection, &state).await {
-                if let Some(cur_track) = runtime_tracks.get(current_index) {
-                    let _ = state
-                        .playback_engine
-                        .play(
-                            cur_track.clone(),
-                            plan.sinks,
-                            plan.description,
-                            body.position_ms,
-                        )
-                        .await;
-                }
-            }
-        }
+        let plan = resolve_output(&selection, &state)
+            .await
+            .map_err(|e| v1_error(StatusCode::BAD_GATEWAY, e.error_code(), &e.to_string()))?;
+
+        let cur_track = runtime_tracks.get(current_index).cloned().ok_or_else(|| {
+            v1_error(
+                StatusCode::BAD_REQUEST,
+                "NO_TRACK_SELECTED",
+                "no current track selected in queue",
+            )
+        })?;
+
+        state
+            .playback_engine
+            .play(cur_track, plan.sinks, plan.description, body.position_ms)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
     } else if let Some(cur_track) = runtime_tracks.get(current_index) {
-        let _ = state
+        state
             .playback_engine
             .load_track(cur_track.clone(), body.position_ms)
-            .await;
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
     }
 
     Ok(Json(serde_json::json!({

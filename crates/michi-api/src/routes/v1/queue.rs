@@ -198,34 +198,28 @@ pub async fn queue_items_handler(
         .and_then(|s| s.track_id);
     let _ = sync_active_queue_to_engine(&state, &active_queue_id, cur_track_id).await;
 
-    let total_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM queue_items WHERE queue_id = ?")
-            .bind(active_queue_id.to_string())
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
+    sync_active_queue_to_engine(&state, &active_queue_id, cur_track_id).await?;
 
     let _ = state.tx.send(
         serde_json::json!({
-            "type": "queue_changed",
+            "type": "queue_updated",
             "queue_id": active_queue_id,
-            "items_count": total_count,
+            "added_count": body.track_ids.len(),
         })
         .to_string(),
     );
 
     Ok(Json(serde_json::json!({
-        "status": "items_added",
+        "status": "ok",
         "queue_id": active_queue_id,
-        "items_count": total_count,
-        "added_count": body.track_ids.len(),
+        "added": body.track_ids.len(),
     })))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct QueueJumpBody {
-    pub index: u32,
     pub queue_id: Option<Uuid>,
+    pub index: u32,
 }
 
 pub async fn queue_jump_handler(
@@ -287,7 +281,51 @@ pub async fn queue_jump_handler(
         )
     })?;
 
-    // P1-03: Real jump interacting directly with PlaybackEngine
+    // P0-08: Guarantee the requested queue is loaded and validated before jumping
+    let track_ids: Vec<Uuid> = items
+        .iter()
+        .map(|(_, tid_str, _)| {
+            Uuid::parse_str(tid_str).map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INVALID_TRACK_ID",
+                    &e.to_string(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let validated_tracks =
+        validate_and_load_tracks(&state.db, &track_ids, &state.config.music_paths).await?;
+
+    let cur_track_id = state
+        .playback_engine
+        .snapshot()
+        .await
+        .ok()
+        .and_then(|s| s.track_id);
+    let cur_idx = if let Some(ref cur_tid) = cur_track_id {
+        validated_tracks
+            .iter()
+            .position(|t| t.id == *cur_tid)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    state
+        .playback_engine
+        .set_queue(validated_tracks, cur_idx, cur_track_id)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RUNTIME_SYNC_FAILED",
+                &e.to_string(),
+            )
+        })?;
+
+    // Now jump to the requested index in the guaranteed synchronized queue
     state
         .playback_engine
         .jump_to_index(body.index as usize)
@@ -447,10 +485,17 @@ pub async fn queue_transfer_handler(
 
     // Sync full transferred queue to PlaybackEngine
     let current_tid = body.track_ids.get(body.current_index as usize).copied();
-    let _ = state
+    state
         .playback_engine
         .set_queue(validated_tracks, body.current_index as usize, current_tid)
-        .await;
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RUNTIME_SYNC_FAILED",
+                &e.to_string(),
+            )
+        })?;
 
     if body.position_ms > 0 {
         let _ = state.playback_engine.seek(body.position_ms).await;
@@ -594,7 +639,7 @@ pub async fn queue_reorder_handler(
         .await
         .ok()
         .and_then(|s| s.track_id);
-    let _ = sync_active_queue_to_engine(&state, &queue_id, cur_track_id).await;
+    sync_active_queue_to_engine(&state, &queue_id, cur_track_id).await?;
 
     let _ = state.tx.send(
         serde_json::json!({
@@ -625,7 +670,17 @@ pub async fn clear_queue_handler(
             )
         })?;
 
-    let _ = state.playback_engine.set_queue(Vec::new(), 0, None).await;
+    state
+        .playback_engine
+        .set_queue(Vec::new(), 0, None)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RUNTIME_SYNC_FAILED",
+                &e.to_string(),
+            )
+        })?;
 
     Ok(Json(
         serde_json::json!({ "status": "cleared", "queue_id": queue_id }),

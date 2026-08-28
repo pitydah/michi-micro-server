@@ -1346,7 +1346,8 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/playback/output",
             get(routes::v1::playback::get_playback_output_handler)
-                .put(routes::v1::playback::set_playback_output_handler),
+                .put(routes::v1::playback::set_playback_output_handler)
+                .post(routes::v1::playback::set_playback_output_handler),
         )
         .route(
             "/api/v1/playback/control",

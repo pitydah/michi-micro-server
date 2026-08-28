@@ -259,9 +259,13 @@ pub async fn play_chain_handler(
         .await
         .map_err(|e| v1_error(StatusCode::BAD_GATEWAY, e.error_code(), &e.to_string()))?;
 
-    let track_id_opt = chain.track_id.or_else(|| {
-        futures_util::FutureExt::now_or_never(state.playback_state.read()).and_then(|g| g.track_id)
-    });
+    let snap_track_id = state
+        .playback_engine
+        .snapshot()
+        .await
+        .ok()
+        .and_then(|s| s.track_id);
+    let track_id_opt = chain.track_id.or(snap_track_id);
 
     let tid = track_id_opt.ok_or_else(|| {
         v1_error(
@@ -324,7 +328,10 @@ pub async fn stop_chain_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let _ = state.playback_engine.stop().await;
+    let mut engine_error = None;
+    if let Err(e) = state.playback_engine.stop().await {
+        engine_error = Some(e.to_string());
+    }
 
     let links = michi_db::get_chain_links(&state.db, &id)
         .await
@@ -338,7 +345,11 @@ pub async fn stop_chain_handler(
 
     let mut link_results = Vec::new();
     let mut stopped_count = 0usize;
-    let mut failed_count = 0usize;
+    let mut failed_count = if engine_error.is_some() {
+        1usize
+    } else {
+        0usize
+    };
 
     for link in &links {
         let reg = state.receiver_manager.registry().await;

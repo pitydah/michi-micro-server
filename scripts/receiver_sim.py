@@ -71,7 +71,15 @@ class ReceiverState:
         import socket
         import threading
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_sock.bind(("0.0.0.0", self.stream_port))
+        self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.udp_sock.bind(("0.0.0.0", self.stream_port))
+        except OSError:
+            try:
+                self.udp_sock.bind(("127.0.0.1", self.stream_port))
+            except OSError:
+                self.udp_sock.bind(("127.0.0.1", 0))
+                self.stream_port = self.udp_sock.getsockname()[1]
         self.running = True
 
         def udp_listener():

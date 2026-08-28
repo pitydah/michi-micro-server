@@ -700,12 +700,24 @@ pub async fn verify_integrity_handler(
     let quick_check: String = sqlx::query_scalar("PRAGMA quick_check")
         .fetch_one(&state.db)
         .await
-        .unwrap_or_else(|e| format!("error: {e}"));
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("PRAGMA quick_check failed: {e}"),
+            )
+        })?;
 
     let fk_rows: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
         .fetch_all(&state.db)
         .await
-        .unwrap_or_default();
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("PRAGMA foreign_key_check failed: {e}"),
+            )
+        })?;
 
     let is_ok = quick_check == "ok" && fk_rows.is_empty();
 
@@ -773,21 +785,45 @@ pub async fn backup_bundle_handler(
         )
     })?;
 
-    // 1. Write full logical backup.json
-    let tracks = michi_db::list_tracks(&state.db).await.unwrap_or_default();
+    // 1. Write full logical backup.json (P1-10 fail-closed on DB errors)
+    let tracks = michi_db::list_tracks(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
     let playlists_raw = michi_db::list_playlists(&state.db, None)
         .await
-        .unwrap_or_default();
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
     let mut playlists = Vec::with_capacity(playlists_raw.len());
     for pl in &playlists_raw {
         let track_rows = michi_db::get_playlist_tracks(&state.db, &pl.id)
             .await
-            .unwrap_or_default();
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
         let mut pl_tracks = Vec::with_capacity(track_rows.len());
         for pt in &track_rows {
             if let Some(track) = michi_db::get_track(&state.db, &pt.0.track_id)
                 .await
-                .unwrap_or(None)
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &e.to_string(),
+                    )
+                })?
             {
                 pl_tracks.push(track);
             }
@@ -798,15 +834,25 @@ pub async fn backup_bundle_handler(
             tracks: pl_tracks,
         });
     }
-    let starred_tracks = michi_db::get_starred_tracks(&state.db)
-        .await
-        .unwrap_or_default();
+    let starred_tracks = michi_db::get_starred_tracks(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
     let play_history_rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT track_id, played_at FROM play_history ORDER BY played_at DESC LIMIT 10000",
     )
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
     let play_history: Vec<BackupHistoryEntry> = play_history_rows
         .into_iter()
         .map(|(track_id, played_at)| {

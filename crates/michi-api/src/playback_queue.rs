@@ -1,4 +1,5 @@
 use axum::{http::StatusCode, Json};
+use michi_playback::TrackResolver;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -18,39 +19,34 @@ fn v1_error(
     )
 }
 
-/// All-or-nothing validation of a sequence of track IDs against database library.
+/// All-or-nothing validation of a sequence of track IDs using SqliteTrackResolver
 pub async fn validate_and_load_tracks(
     pool: &SqlitePool,
     track_ids: &[Uuid],
-    _music_paths: &[PathBuf],
+    music_paths: &[PathBuf],
 ) -> Result<Vec<michi_core::Track>, (StatusCode, Json<serde_json::Value>)> {
+    let resolver = michi_playback::SqliteTrackResolver::new(pool.clone(), music_paths.to_vec());
     let mut tracks = Vec::with_capacity(track_ids.len());
-    let mut unknown_tracks = Vec::new();
 
     for tid in track_ids {
-        match michi_db::get_track(pool, tid).await {
-            Ok(Some(track)) => {
-                tracks.push(track);
-            }
-            Ok(None) => {
-                unknown_tracks.push(*tid);
-            }
+        match resolver.get_track(*tid).await {
+            Ok(track) => tracks.push(track),
             Err(e) => {
+                let status = match e {
+                    michi_playback::PlaybackError::TrackNotFound(_)
+                    | michi_playback::PlaybackError::TrackFileMissing(_)
+                    | michi_playback::PlaybackError::TrackOutsideLibrary(_) => {
+                        StatusCode::NOT_FOUND
+                    }
+                    _ => StatusCode::BAD_REQUEST,
+                };
                 return Err(v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "DATABASE_ERROR",
-                    &e.to_string(),
+                    status,
+                    e.error_code(),
+                    &format!("track {tid} validation failed: {e}"),
                 ));
             }
         }
-    }
-
-    if !unknown_tracks.is_empty() {
-        return Err(v1_error(
-            StatusCode::NOT_FOUND,
-            "TRACK_NOT_FOUND",
-            &format!("tracks not in library: {unknown_tracks:?}"),
-        ));
     }
 
     Ok(tracks)
@@ -104,37 +100,67 @@ pub async fn sync_active_queue_to_engine(
         )
     })?;
 
-    let mut runtime_tracks = Vec::new();
-    for (tid_str, _) in &items_rows {
-        if let Ok(tid) = Uuid::parse_str(tid_str) {
-            if let Ok(Some(track)) = michi_db::get_track(&state.db, &tid).await {
-                runtime_tracks.push(track);
-            }
-        }
-    }
-
-    if !runtime_tracks.is_empty() {
-        let cur_idx = if let Some(ref cur_tid) = current_track_id {
-            runtime_tracks
-                .iter()
-                .position(|t| t.id == *cur_tid)
-                .unwrap_or(0)
-        } else {
-            0
-        };
-
+    if items_rows.is_empty() {
         state
             .playback_engine
-            .set_queue(runtime_tracks, cur_idx, current_track_id)
+            .set_queue(Vec::new(), 0, None)
             .await
             .map_err(|e| {
                 v1_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    e.error_code(),
+                    "RUNTIME_SYNC_FAILED",
                     &e.to_string(),
                 )
             })?;
+        return Ok(());
     }
+
+    let resolver = michi_playback::SqliteTrackResolver::new(
+        state.db.clone(),
+        state.config.music_paths.clone(),
+    );
+
+    let mut runtime_tracks = Vec::with_capacity(items_rows.len());
+    for (tid_str, _) in &items_rows {
+        let tid = Uuid::parse_str(tid_str).map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RUNTIME_SYNC_FAILED",
+                &format!("invalid track UUID {tid_str} in queue: {e}"),
+            )
+        })?;
+
+        let track = resolver.get_track(tid).await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RUNTIME_SYNC_FAILED",
+                &format!("failed to resolve queue track {tid}: {e}"),
+            )
+        })?;
+
+        runtime_tracks.push(track);
+    }
+
+    let cur_idx = if let Some(ref cur_tid) = current_track_id {
+        runtime_tracks
+            .iter()
+            .position(|t| t.id == *cur_tid)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    state
+        .playback_engine
+        .set_queue(runtime_tracks, cur_idx, current_track_id)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RUNTIME_SYNC_FAILED",
+                &e.to_string(),
+            )
+        })?;
 
     Ok(())
 }
