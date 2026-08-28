@@ -42,6 +42,8 @@ mod sync_ws;
 mod transcode;
 mod ws;
 
+pub mod output;
+pub use output::{PlaybackOutputSelection, ResolvedOutputPlan};
 pub mod routes;
 pub use routes::v1::audit::record_audit;
 
@@ -78,6 +80,12 @@ pub struct AppState {
     pub pairing_display: Arc<RwLock<Option<String>>>,
     /// Testability observer mapping session_id -> PIN for safe concurrent pairing.
     pub pairing_sessions_display: Arc<RwLock<HashMap<String, String>>>,
+    /// Real autonomous playback engine handle.
+    pub playback_engine: michi_playback::PlaybackEngineHandle,
+    /// Explicit output target selection (Receiver, RoomGroup, or Chain).
+    pub playback_output_selection: Arc<RwLock<Option<output::PlaybackOutputSelection>>>,
+    /// Encrypted credential store for paired receivers.
+    pub receiver_credential_store: Arc<michi_receivers::ReceiverCredentialStore>,
 }
 
 impl AppState {
@@ -92,6 +100,90 @@ impl AppState {
         for handle in handles {
             let _ = tokio::time::timeout(timeout, handle).await;
         }
+    }
+
+    pub async fn bootstrap_runtime(&self) -> Result<(), String> {
+        tracing::info!("bootstrapping runtime: loading persisted receivers and restoring credentials");
+        match michi_db::list_receivers_db(&self.db).await {
+            Ok(persisted_list) => {
+                let registry_arc = self.receiver_manager.registry().await;
+                let mut registry = registry_arc.write().await;
+                let mut restored_count = 0;
+
+                for rec in persisted_list {
+                    let mut token: Option<String> = None;
+                    if rec.paired {
+                        match michi_db::get_receiver_credential_db(&self.db, &rec.id).await {
+                            Ok(Some(cred)) => {
+                                match self.receiver_credential_store.decrypt_token(
+                                    &rec.id,
+                                    &cred.ciphertext,
+                                    &cred.nonce,
+                                ) {
+                                    Ok(decrypted) => {
+                                        token = Some(decrypted);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "failed to decrypt credential for receiver {}: {} (marking unpaired/fail-closed)",
+                                            rec.id,
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                tracing::warn!(
+                                    "no encrypted credential record found for paired receiver {}",
+                                    rec.id
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "error querying credentials for receiver {}: {}",
+                                    rec.id,
+                                    e
+                                );
+                            }
+                        }
+                    }
+
+                    let is_paired = rec.paired && token.is_some();
+                    let entry = michi_receivers::ReceiverRegistryEntry {
+                        receiver_id: rec.id.clone(),
+                        name: rec.name,
+                        device_type: rec.device_type,
+                        base_url: rec.base_url,
+                        paired: is_paired,
+                        token,
+                        last_seen: rec.last_seen.and_then(|s| {
+                            chrono::DateTime::parse_from_rfc3339(&s)
+                                .ok()
+                                .map(|d| d.with_timezone(&chrono::Utc))
+                        }),
+                        capabilities: vec!["pcm".to_string(), "rtp".to_string()],
+                        active_session_id: None,
+                        max_sample_rate: 48000,
+                        max_bit_depth: 16,
+                        supported_transports: vec!["rtp".to_string()],
+                        supported_codecs: vec!["pcm_s16le".to_string()],
+                        supported_sample_rates: vec![44100, 48000],
+                        supported_bit_depths: vec![16],
+                        supported_channels: vec![2],
+                        maximum_safe_volume: Some(100),
+                    };
+
+                    registry.add(entry);
+                    restored_count += 1;
+                }
+                tracing::info!("restored {} persisted receivers into registry", restored_count);
+            }
+            Err(e) => {
+                tracing::warn!("failed to list persisted receivers from DB: {}", e);
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -170,6 +262,28 @@ impl AppState {
         let pairing_display = Arc::new(RwLock::new(None));
         let pairing_sessions_display = Arc::new(RwLock::new(HashMap::new()));
 
+        let cred_key_path = config.config_path.join("receiver_credentials.key");
+        let receiver_credential_store = Arc::new(
+            michi_receivers::ReceiverCredentialStore::load_or_create_key(&cred_key_path)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "failed to load receiver credentials key from {:?}: {}; using ephemeral fallback",
+                        cred_key_path,
+                        e
+                    );
+                    michi_receivers::ReceiverCredentialStore::new([0u8; 32])
+                }),
+        );
+
+        let resolver = Arc::new(michi_playback::SqliteTrackResolver::new(db.clone()));
+        let (playback_engine, engine_join) = michi_playback::spawn_playback_engine(
+            resolver,
+            michi_playback::PcmFormat::default(),
+        );
+        task_handles.lock().unwrap().push(engine_join);
+
+        let playback_output_selection = Arc::new(RwLock::new(None));
+
         let state = Self {
             config,
             db,
@@ -194,6 +308,9 @@ impl AppState {
             pairing_registry,
             pairing_display,
             pairing_sessions_display,
+            playback_engine,
+            playback_output_selection,
+            receiver_credential_store,
         };
 
         state.spawn_background_tasks();
@@ -1208,6 +1325,11 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/playback/state",
             get(routes::v1::playback::playback_state_handler),
+        )
+        .route(
+            "/api/v1/playback/output",
+            get(routes::v1::playback::get_playback_output_handler)
+                .put(routes::v1::playback::set_playback_output_handler),
         )
         .route(
             "/api/v1/playback/control",

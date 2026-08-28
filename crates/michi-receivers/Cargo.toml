@@ -19,6 +19,7 @@ rand = "0.8"
 blake3 = "1"
 base64 = "0.22"
 michi-identity = { path = "../../vendor/michi-link/crates/michi-identity" }
+chacha20poly1305 = { version = "0.10", features = ["alloc"] }
 tokio-util.workspace = true
 
 

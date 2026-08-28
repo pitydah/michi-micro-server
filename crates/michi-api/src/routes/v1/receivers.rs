@@ -5,8 +5,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::AppState;
@@ -37,7 +35,7 @@ fn v1_error(
     )
 }
 
-// ── Speaker group management ─────────────────────────────────────
+// ── Speaker group management (canonical alias to persistent Room Groups) ──────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeakerGroup {
@@ -47,13 +45,31 @@ pub struct SpeakerGroup {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-lazy_static::lazy_static! {
-    static ref SPEAKER_GROUPS: Arc<RwLock<Vec<SpeakerGroup>>> = Arc::new(RwLock::new(Vec::new()));
-}
+pub async fn list_groups_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let groups = michi_db::list_room_groups_db(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
-pub async fn list_groups_handler() -> Json<serde_json::Value> {
-    let groups = SPEAKER_GROUPS.read().await;
-    Json(serde_json::json!({ "groups": groups.clone() }))
+    let speaker_groups: Vec<_> = groups
+        .into_iter()
+        .map(|(gid, name, _mode, receiver_ids, _vols, created_at)| SpeakerGroup {
+            id: gid.to_string(),
+            name,
+            receiver_ids,
+            created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                .ok()
+                .map(|d| d.with_timezone(&chrono::Utc))
+                .unwrap_or_else(chrono::Utc::now),
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({ "groups": speaker_groups })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +79,7 @@ pub struct CreateGroupBody {
 }
 
 pub async fn create_group_handler(
+    State(state): State<AppState>,
     Json(body): Json<CreateGroupBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if body.name.trim().is_empty() {
@@ -72,14 +89,36 @@ pub async fn create_group_handler(
             "group name is required",
         ));
     }
-    let mut groups = SPEAKER_GROUPS.write().await;
+
+    let gid = Uuid::new_v4();
+    let mut vols = HashMap::new();
+    for rid in &body.receiver_ids {
+        vols.insert(rid.clone(), 80);
+    }
+
+    michi_db::save_room_group_db(
+        &state.db,
+        &gid,
+        &body.name,
+        "custom",
+        &body.receiver_ids,
+        &vols,
+    )
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
     let group = SpeakerGroup {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: gid.to_string(),
         name: body.name,
         receiver_ids: body.receiver_ids,
         created_at: chrono::Utc::now(),
     };
-    groups.push(group.clone());
     Ok(Json(serde_json::json!({ "group": group })))
 }
 
@@ -91,26 +130,103 @@ pub struct SyncGroupBody {
 }
 
 pub async fn sync_group_handler(
+    State(state): State<AppState>,
     Path(group_id): Path<String>,
     Json(body): Json<SyncGroupBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let groups = SPEAKER_GROUPS.read().await;
-    let group = groups.iter().find(|g| g.id == group_id).cloned();
-    match group {
-        Some(g) => Ok(Json(serde_json::json!({
-            "status": "sync_initiated",
-            "group": g.name,
-            "receivers": g.receiver_ids,
-            "track_id": body.track_id,
-            "position_ms": body.position_ms,
-            "playing": body.playing,
-        }))),
-        None => Err(v1_error(
+    let groups = michi_db::list_room_groups_db(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    let found = groups
+        .into_iter()
+        .find(|(gid, name, _, _, _, _)| gid.to_string() == group_id || name == &group_id);
+
+    let (gid, group_name, _mode, receiver_ids, _vols, _created_at) = found.ok_or_else(|| {
+        v1_error(
             StatusCode::NOT_FOUND,
             "GROUP_NOT_FOUND",
             &format!("group {group_id} not found"),
-        )),
+        )
+    })?;
+
+    let track_uuid = Uuid::parse_str(&body.track_id).map_err(|_| {
+        v1_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_TRACK_ID",
+            "invalid track_id UUID format",
+        )
+    })?;
+
+    let track = michi_db::get_track(&state.db, &track_uuid)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "TRACK_NOT_FOUND",
+                &format!("track not found: {track_uuid}"),
+            )
+        })?;
+
+    let selection = crate::output::PlaybackOutputSelection::RoomGroup { id: gid };
+    let plan = crate::output::resolve_output(&selection, &state)
+        .await
+        .map_err(|e| v1_error(StatusCode::BAD_GATEWAY, e.error_code(), &e.to_string()))?;
+
+    if body.playing {
+        state
+            .playback_engine
+            .play(
+                track,
+                plan.sinks,
+                plan.description.clone(),
+                body.position_ms,
+            )
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
+    } else {
+        state
+            .playback_engine
+            .pause()
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
     }
+
+    *state.playback_output_selection.write().await = Some(selection);
+
+    Ok(Json(serde_json::json!({
+        "status": "accepted",
+        "lifecycle": if body.playing { "preparing" } else { "paused" },
+        "group": group_name,
+        "receivers": receiver_ids,
+        "track_id": body.track_id,
+        "position_ms": body.position_ms,
+        "playing": body.playing,
+        "output": plan.description,
+    })))
 }
 
 // ── Existing receivers CRUD ─────────────────────────────────────
@@ -216,6 +332,48 @@ pub async fn receiver_pair_start_handler(
     }
 }
 
+async fn persist_paired_receiver(state: &AppState, device_id: &str) {
+    let reg_arc = state.receiver_manager.registry().await;
+    let reg = reg_arc.read().await;
+    if let Some(entry) = reg.get(device_id) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let caps_json =
+            serde_json::to_string(&entry.capabilities).unwrap_or_else(|_| "{}".into());
+
+        if let Some(ref token) = entry.token {
+            if let Ok((ciphertext, nonce)) = state
+                .receiver_credential_store
+                .encrypt_token(device_id, token)
+            {
+                let cred = michi_db::PersistedReceiverCredential {
+                    receiver_id: device_id.to_string(),
+                    ciphertext,
+                    nonce,
+                    version: 1,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                };
+                let _ = michi_db::save_receiver_credential_db(&state.db, &cred).await;
+            }
+        }
+
+        let prec = michi_db::PersistedReceiver {
+            id: device_id.to_string(),
+            name: entry.name.clone(),
+            device_type: entry.device_type.clone(),
+            base_url: entry.base_url.clone(),
+            paired: entry.paired,
+            online: entry.last_seen.is_some(),
+            audio_capabilities: caps_json,
+            last_seen: entry.last_seen.map(|d| d.to_rfc3339()),
+            paired_at: Some(now.clone()),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        let _ = michi_db::upsert_receiver_db(&state.db, &prec).await;
+    }
+}
+
 pub async fn receiver_pair_confirm_handler(
     State(state): State<AppState>,
     Json(body): Json<ReceiverPairConfirmBody>,
@@ -233,10 +391,13 @@ pub async fn receiver_pair_confirm_handler(
         .confirm_pairing(&body.pairing_id, &body.pin)
         .await
     {
-        Ok(device_id) => Ok(Json(serde_json::json!({
-            "status": "paired",
-            "device_id": device_id,
-        }))),
+        Ok(device_id) => {
+            persist_paired_receiver(&state, &device_id).await;
+            Ok(Json(serde_json::json!({
+                "status": "paired",
+                "device_id": device_id,
+            })))
+        }
         Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "PAIR_CONFIRM_FAILED", &e)),
     }
 }
@@ -270,10 +431,13 @@ pub async fn discover_receiver_handler(
         .discover_and_pair(&body.base_url, &initiator_id, &pin)
         .await
     {
-        Ok(device_id) => Ok(Json(serde_json::json!({
-            "status": "paired",
-            "device_id": device_id,
-        }))),
+        Ok(device_id) => {
+            persist_paired_receiver(&state, &device_id).await;
+            Ok(Json(serde_json::json!({
+                "status": "paired",
+                "device_id": device_id,
+            })))
+        }
         Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "DISCOVERY_FAILED", &e)),
     }
 }
@@ -410,7 +574,7 @@ pub async fn receiver_stream_test_pcm_handler(
         bytes
     };
 
-    match state.receiver_manager.send_test_pcm(&id, &pcm_bytes).await {
+    match state.receiver_manager.write_pcm(&id, &pcm_bytes).await {
         Ok(bytes_sent) => Ok(Json(serde_json::json!({
             "status": "pcm_streamed",
             "bytes_sent": bytes_sent,
@@ -860,16 +1024,19 @@ pub async fn activate_room_group_handler(
     }
 
     let overall_status = if success_count == recv_ids.len() {
-        "active"
+        "ready"
     } else {
-        "partial"
+        "partial_ready"
     };
+
+    *state.playback_output_selection.write().await =
+        Some(crate::output::PlaybackOutputSelection::RoomGroup { id });
 
     Ok(Json(serde_json::json!({
         "status": overall_status,
         "group_id": id,
         "group_name": name,
-        "active": true,
+        "ready": true,
         "successful_receivers": success_count,
         "total_receivers": recv_ids.len(),
         "receivers": receiver_results,

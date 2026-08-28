@@ -732,8 +732,8 @@ impl ReceiverSessionManager {
         client.get_info().await
     }
 
-    /// Internal & test-only method to stream synthetic PCM audio frames through the active RTP transport
-    pub async fn send_test_pcm(&self, receiver_id: &str, pcm_data: &[u8]) -> Result<usize, String> {
+    /// Productive method to stream PCM audio frames to an active receiver transport.
+    pub async fn write_pcm(&self, receiver_id: &str, pcm_data: &[u8]) -> Result<usize, String> {
         let transport_lock = self
             .get_transport(receiver_id)
             .await
@@ -743,6 +743,12 @@ impl ReceiverSessionManager {
         tr.write_pcm(pcm_data)
             .await
             .map_err(|e| format!("write_pcm failed: {e:?}"))
+    }
+
+    /// Compatibility method to stream PCM audio frames through the active RTP transport.
+    #[deprecated(note = "use write_pcm() in production")]
+    pub async fn send_test_pcm(&self, receiver_id: &str, pcm_data: &[u8]) -> Result<usize, String> {
+        self.write_pcm(receiver_id, pcm_data).await
     }
 
     /// Query the local UDP socket port used by the active RTP transport for a receiver.

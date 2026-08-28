@@ -1867,6 +1867,7 @@ name = "michi-api"
 version = "0.2.0"
 dependencies = [
  "argon2",
+ "async-trait",
  "axum",
  "base64",
  "blake3",
@@ -1890,6 +1891,7 @@ dependencies = [
  "michi-metadata",
  "michi-onboard",
  "michi-opensubsonic",
+ "michi-playback",
  "michi-receivers",
  "michi-rooms",
  "michi-scanner",
@@ -2133,12 +2135,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "michi-playback"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "michi-core",
+ "michi-db",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "michi-receivers"
 version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64",
  "blake3",
+ "chacha20poly1305",
  "chrono",
  "ed25519-dalek",
  "michi-identity",

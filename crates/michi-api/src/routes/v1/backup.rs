@@ -653,9 +653,9 @@ pub async fn fire_sync_webhook(state: &AppState) {
     }
 }
 
-// ── Integrity / Availability verification ──────────────────────
+// ── Integrity & Availability verification ──────────────────────
 
-pub async fn verify_integrity_handler(
+pub async fn library_availability_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let tracks = michi_db::list_tracks(&state.db).await.map_err(|e| {
@@ -668,13 +668,13 @@ pub async fn verify_integrity_handler(
 
     let mut available = 0u64;
     let mut missing = 0u64;
-    let mut errors: Vec<String> = Vec::new();
+    let mut missing_tracks: Vec<String> = Vec::new();
 
     for track in &tracks {
         let path = std::path::Path::new(&track.file_path);
         if !path.exists() {
             missing += 1;
-            errors.push(format!(
+            missing_tracks.push(format!(
                 "missing: {} ({})",
                 track.title.as_deref().unwrap_or("?"),
                 track.file_path
@@ -685,11 +685,34 @@ pub async fn verify_integrity_handler(
     }
 
     Ok(Json(serde_json::json!({
-        "status": if missing == 0 { "ok" } else { "issues_found" },
+        "status": if missing == 0 { "ok" } else { "degraded" },
         "available": available,
         "missing": missing,
         "total": tracks.len(),
-        "errors": errors,
+        "missing_files": missing_tracks,
+    })))
+}
+
+pub async fn verify_integrity_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let quick_check: String = sqlx::query_scalar("PRAGMA quick_check")
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or_else(|e| format!("error: {e}"));
+
+    let fk_rows: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+
+    let is_ok = quick_check == "ok" && fk_rows.is_empty();
+
+    Ok(Json(serde_json::json!({
+        "status": if is_ok { "ok" } else { "corrupt" },
+        "quick_check": quick_check,
+        "foreign_key_violations": fk_rows.len(),
+        "integrity_verified": is_ok,
     })))
 }
 

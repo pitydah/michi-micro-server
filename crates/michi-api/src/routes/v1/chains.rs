@@ -254,101 +254,70 @@ pub async fn play_chain_handler(
         ));
     }
 
-    // Start receiver sessions for each link and record per-link outcome
-    let mut link_results = Vec::new();
-    let mut active_sessions_count = 0usize;
+    let selection = crate::output::PlaybackOutputSelection::Chain { id };
+    let plan = crate::output::resolve_output(&selection, &state)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::BAD_GATEWAY,
+                e.error_code(),
+                &e.to_string(),
+            )
+        })?;
 
-    for link in &links {
-        let reg = state.receiver_manager.registry().await;
-        let reg_read = reg.read().await;
-        if let Some(entry) = reg_read.get(&link.receiver_id) {
-            if entry.paired {
-                let session_res = if entry.active_session_id.is_none() {
-                    state
-                        .receiver_manager
-                        .start_session(
-                            &link.receiver_id,
-                            &id.to_string(),
-                            "pcm_s16le",
-                            48000,
-                            16,
-                            2,
-                            0,
-                            200,
-                            link.volume as u32,
-                        )
-                        .await
-                        .map(|_| ())
-                } else {
-                    Ok(())
-                };
+    let track_id_opt = chain.track_id.or_else(|| {
+        futures_util::FutureExt::now_or_never(state.playback_state.read()).and_then(|g| g.track_id)
+    });
 
-                match session_res {
-                    Ok(_) => {
-                        active_sessions_count += 1;
-                        if link.muted {
-                            let _ = state
-                                .receiver_manager
-                                .set_volume(&link.receiver_id, 0)
-                                .await;
-                        } else {
-                            let _ = state
-                                .receiver_manager
-                                .set_volume(&link.receiver_id, link.volume as u32)
-                                .await;
-                        }
-                        link_results.push(serde_json::json!({
-                            "receiver_id": link.receiver_id,
-                            "status": "active",
-                        }));
-                    }
-                    Err(e) => {
-                        link_results.push(serde_json::json!({
-                            "receiver_id": link.receiver_id,
-                            "status": "failed",
-                            "error": e.to_string(),
-                        }));
-                    }
-                }
-            } else {
-                link_results.push(serde_json::json!({
-                    "receiver_id": link.receiver_id,
-                    "status": "failed",
-                    "error": "receiver not paired",
-                }));
-            }
-        } else {
-            link_results.push(serde_json::json!({
-                "receiver_id": link.receiver_id,
-                "status": "failed",
-                "error": "receiver not found in registry",
-            }));
-        }
-    }
-
-    if active_sessions_count == 0 {
-        return Err(v1_error(
-            StatusCode::BAD_GATEWAY,
-            "PLAYBACK_FAILED",
-            &format!("failed to start audio output on any of {configured_links} configured links"),
-        ));
-    }
-
-    // Update canonical playback state only when at least one output is active
-    {
-        let mut ps = state.playback_state.write().await;
-        ps.track_id = chain.track_id;
-        ps.position_ms = chain.position_ms;
-        ps.playing = true;
-        ps.updated_at = chrono::Utc::now();
-        ps.device_id = Some("chain".into());
-    }
-
-    let status = if active_sessions_count == configured_links {
-        "playing"
+    let track_opt = if let Some(tid) = track_id_opt {
+        michi_db::get_track(&state.db, &tid)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?
     } else {
-        "partial"
+        None
     };
+
+    let track = match track_opt {
+        Some(t) => t,
+        None => {
+            let all = michi_db::list_tracks(&state.db)
+                .await
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &e.to_string(),
+                    )
+                })?;
+            all.into_iter().next().ok_or_else(|| {
+                v1_error(
+                    StatusCode::NOT_FOUND,
+                    "TRACK_NOT_FOUND",
+                    "no tracks available for playback",
+                )
+            })?
+        }
+    };
+
+    state
+        .playback_engine
+        .play(track, plan.sinks, plan.description.clone(), chain.position_ms)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                e.error_code(),
+                &e.to_string(),
+            )
+        })?;
+
+    *state.playback_output_selection.write().await = Some(selection);
 
     let update = michi_core::PlaybackChainUpdate {
         name: None,
@@ -361,12 +330,12 @@ pub async fn play_chain_handler(
     let _ = michi_db::update_chain(&state.db, &id, &update).await;
 
     Ok(Json(serde_json::json!({
-        "status": status,
+        "status": "accepted",
+        "lifecycle": "preparing",
         "chain_id": id,
         "configured_links": configured_links,
-        "active_links": active_sessions_count,
-        "failed_links": configured_links - active_sessions_count,
-        "links": link_results,
+        "active_links": plan.description.receiver_count,
+        "output": plan.description,
     })))
 }
 

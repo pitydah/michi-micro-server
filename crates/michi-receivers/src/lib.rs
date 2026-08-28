@@ -1,4 +1,5 @@
 pub mod client;
+pub mod credentials;
 pub mod models;
 pub mod session_manager;
 pub mod transport;
@@ -16,5 +17,6 @@ pub trait ReceiverAdapter: Send + Sync {
 }
 
 pub use client::ReceiverClient;
+pub use credentials::ReceiverCredentialStore;
 pub use models::*;
 pub use session_manager::ReceiverSessionManager;

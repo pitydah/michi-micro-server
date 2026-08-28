@@ -156,6 +156,11 @@ pub struct RtpReceiverTransport {
     ssrc: u32,
     payload_type: u8,
     pending_pcm: Vec<u8>,
+    next_packet_deadline: Option<tokio::time::Instant>,
+    packets_sent: u64,
+    bytes_sent: u64,
+    last_packet_at: Option<chrono::DateTime<chrono::Utc>>,
+    send_errors: u64,
 }
 
 impl RtpReceiverTransport {
@@ -170,6 +175,11 @@ impl RtpReceiverTransport {
             ssrc,
             payload_type: 97,
             pending_pcm: Vec::with_capacity(3840),
+            next_packet_deadline: None,
+            packets_sent: 0,
+            bytes_sent: 0,
+            last_packet_at: None,
+            send_errors: 0,
         }
     }
 
@@ -178,6 +188,22 @@ impl RtpReceiverTransport {
         self.socket
             .as_ref()
             .and_then(|s| s.local_addr().ok().map(|a| a.port()))
+    }
+
+    pub fn packets_sent(&self) -> u64 {
+        self.packets_sent
+    }
+
+    pub fn bytes_sent(&self) -> u64 {
+        self.bytes_sent
+    }
+
+    pub fn send_errors(&self) -> u64 {
+        self.send_errors
+    }
+
+    pub fn last_packet_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.last_packet_at
     }
 
     /// Build an RTP packet header for PCM audio according to RFC 3550 / Michi Link specification.
@@ -288,6 +314,11 @@ impl AudioTransport for RtpReceiverTransport {
         self.sequence_number = rand::random::<u16>();
         self.timestamp = rand::random::<u32>();
         self.pending_pcm.clear();
+        self.next_packet_deadline = Some(tokio::time::Instant::now());
+        self.packets_sent = 0;
+        self.bytes_sent = 0;
+        self.send_errors = 0;
+        self.last_packet_at = None;
 
         Ok(handle)
     }
@@ -296,6 +327,7 @@ impl AudioTransport for RtpReceiverTransport {
         if self.handle.is_none() {
             return Err(TransportError::NoSession);
         }
+        self.next_packet_deadline = Some(tokio::time::Instant::now());
         Ok(())
     }
 
@@ -303,6 +335,7 @@ impl AudioTransport for RtpReceiverTransport {
         if self.handle.is_none() {
             return Err(TransportError::NoSession);
         }
+        self.next_packet_deadline = Some(tokio::time::Instant::now());
         Ok(())
     }
 
@@ -323,6 +356,7 @@ impl AudioTransport for RtpReceiverTransport {
     async fn write_pcm(&mut self, pcm_data: &[u8]) -> TransportResult<usize> {
         let socket = self.socket.as_ref().ok_or(TransportError::NoSession)?;
         let chunk_size = 1920; // Exact 10ms of 48kHz PCM S16LE stereo: 480 frames * 2 ch * 2 bytes
+        let packet_duration = tokio::time::Duration::from_millis(10);
 
         self.pending_pcm.extend_from_slice(pcm_data);
         let mut packets_sent = 0;
@@ -337,11 +371,37 @@ impl AudioTransport for RtpReceiverTransport {
                 false,
                 &chunk,
             );
-            socket
-                .send(&packet)
-                .await
-                .map_err(|e| TransportError::Other(e.to_string()))?;
 
+            let now = tokio::time::Instant::now();
+            let deadline = match self.next_packet_deadline {
+                Some(d) => {
+                    if now > d && (now - d) > tokio::time::Duration::from_millis(100) {
+                        // Lag exceeds 100ms (e.g. after pause/seek), rebase to now to prevent burst floods
+                        now
+                    } else {
+                        d
+                    }
+                }
+                None => now,
+            };
+
+            if deadline > now {
+                tokio::time::sleep_until(deadline).await;
+            }
+
+            match socket.send(&packet).await {
+                Ok(_) => {
+                    self.packets_sent += 1;
+                    self.bytes_sent += chunk.len() as u64;
+                    self.last_packet_at = Some(chrono::Utc::now());
+                }
+                Err(e) => {
+                    self.send_errors += 1;
+                    return Err(TransportError::Other(e.to_string()));
+                }
+            }
+
+            self.next_packet_deadline = Some(deadline + packet_duration);
             self.sequence_number = self.sequence_number.wrapping_add(1);
             self.timestamp = self.timestamp.wrapping_add(480); // Exact 480 audio frames per 10ms packet
             packets_sent += 1;

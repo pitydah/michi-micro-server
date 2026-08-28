@@ -140,7 +140,7 @@ impl Default for AudioMetadata {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct Track {
     pub id: Uuid,
     pub title: Option<String>,

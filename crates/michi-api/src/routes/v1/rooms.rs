@@ -164,18 +164,17 @@ pub async fn room_play_handler(
                 "DATABASE_ERROR",
                 &e.to_string(),
             )
+        })?
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "TRACK_NOT_FOUND",
+                "track not found in library",
+            )
         })?;
 
-    if track.is_none() {
-        return Err(v1_error(
-            StatusCode::NOT_FOUND,
-            "TRACK_NOT_FOUND",
-            "track not found in library",
-        ));
-    }
-
     // Find room group
-    let rows = michi_db::list_room_groups_db(&state.db)
+    let groups = michi_db::list_room_groups_db(&state.db)
         .await
         .map_err(|e| {
             v1_error(
@@ -185,11 +184,11 @@ pub async fn room_play_handler(
             )
         })?;
 
-    let found = rows
+    let found = groups
         .into_iter()
         .find(|(gid, name, _, _, _, _)| gid.to_string() == id || name == &id);
 
-    let (room_id, _, _, receiver_ids, volumes, _) = found.ok_or_else(|| {
+    let (gid, group_name, _mode, _recv_ids, _vols, _created_at) = found.ok_or_else(|| {
         v1_error(
             StatusCode::NOT_FOUND,
             "ROOM_NOT_FOUND",
@@ -197,78 +196,37 @@ pub async fn room_play_handler(
         )
     })?;
 
-    if receiver_ids.is_empty() {
-        return Err(v1_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ROOM",
-            "room has no receivers configured",
-        ));
-    }
+    let selection = crate::output::PlaybackOutputSelection::RoomGroup { id: gid };
+    let plan = crate::output::resolve_output(&selection, &state)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::BAD_GATEWAY,
+                e.error_code(),
+                &e.to_string(),
+            )
+        })?;
 
-    let mut active_count = 0usize;
-    for recv_id in &receiver_ids {
-        let vol = volumes.get(recv_id).copied().unwrap_or(60);
-        let reg = state.receiver_manager.registry().await;
-        let reg_read = reg.read().await;
-        if let Some(entry) = reg_read.get(recv_id) {
-            if entry.paired {
-                drop(reg_read);
-                drop(reg);
-                let session_res = state
-                    .receiver_manager
-                    .start_session(
-                        recv_id,
-                        &room_id.to_string(),
-                        "pcm_s16le",
-                        48000,
-                        16,
-                        2,
-                        0,
-                        200,
-                        vol,
-                    )
-                    .await;
-                if session_res.is_ok() {
-                    active_count += 1;
-                }
-            }
-        }
-    }
+    let pos_ms = body.position_ms.unwrap_or(0);
+    state
+        .playback_engine
+        .play(track, plan.sinks, plan.description.clone(), pos_ms)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                e.error_code(),
+                &e.to_string(),
+            )
+        })?;
 
-    if active_count == 0 {
-        return Err(v1_error(
-            StatusCode::BAD_GATEWAY,
-            "PLAYBACK_FAILED",
-            "failed to start audio output on any receiver in the room",
-        ));
-    }
-
-    let mut current = state.playback_state.write().await;
-    current.track_id = Some(body.track_id);
-    current.position_ms = body.position_ms.unwrap_or(0);
-    current.playing = true;
-    current.updated_at = chrono::Utc::now();
-    let state_clone = current.clone();
-    drop(current);
-
-    let _ = state.sync_tx.send(state_clone.into());
-    let _ = state.tx.send(
-        serde_json::json!({
-            "type": "room_play", "room_id": room_id, "track_id": body.track_id,
-        })
-        .to_string(),
-    );
-
-    let status_str = if active_count < receiver_ids.len() {
-        "partial"
-    } else {
-        "playing"
-    };
+    *state.playback_output_selection.write().await = Some(selection);
 
     Ok(Json(serde_json::json!({
-        "status": status_str,
-        "room_id": room_id,
-        "active_receivers": active_count,
-        "total_receivers": receiver_ids.len(),
+        "status": "accepted",
+        "lifecycle": "preparing",
+        "room_id": gid,
+        "room_name": group_name,
+        "output": plan.description,
     })))
 }

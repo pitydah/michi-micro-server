@@ -77,7 +77,7 @@ pub async fn init_pool_with_size(
         opts
     } else {
         opts.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Full)
     };
 
     let pool_size = if is_memory { 1 } else { max_connections };
@@ -266,8 +266,11 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
     if current < 40 {
         run_migration_step!(conn, 40, "mount guard device identity", migration_040);
     }
+    if current < 41 {
+        run_migration_step!(conn, 41, "receiver credentials and metadata", migration_041);
+    }
 
-    info!("database schema at version 40");
+    info!("database schema at version 41");
     Ok(())
 }
 
@@ -994,6 +997,265 @@ async fn migration_040(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+async fn migration_041(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS receiver_credentials (
+            receiver_id TEXT PRIMARY KEY,
+            ciphertext BLOB NOT NULL,
+            nonce BLOB NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (receiver_id) REFERENCES receivers(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    let _ = sqlx::query("ALTER TABLE receivers ADD COLUMN base_url TEXT")
+        .execute(&mut **tx)
+        .await;
+    let _ = sqlx::query("ALTER TABLE receivers ADD COLUMN paired INTEGER NOT NULL DEFAULT 0")
+        .execute(&mut **tx)
+        .await;
+    let _ = sqlx::query("ALTER TABLE receivers ADD COLUMN paired_at TEXT")
+        .execute(&mut **tx)
+        .await;
+    let _ = sqlx::query("ALTER TABLE receivers ADD COLUMN updated_at TEXT")
+        .execute(&mut **tx)
+        .await;
+    let _ = sqlx::query(
+        "ALTER TABLE receivers ADD COLUMN audio_capabilities TEXT NOT NULL DEFAULT '{}'",
+    )
+    .execute(&mut **tx)
+    .await;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedReceiver {
+    pub id: String,
+    pub name: String,
+    pub device_type: String,
+    pub base_url: String,
+    pub paired: bool,
+    pub online: bool,
+    pub audio_capabilities: String,
+    pub last_seen: Option<String>,
+    pub paired_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedReceiverCredential {
+    pub receiver_id: String,
+    pub ciphertext: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub version: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub async fn upsert_receiver_db(
+    pool: &SqlitePool,
+    rec: &PersistedReceiver,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO receivers (id, name, device_type, base_url, paired, online, audio_capabilities, last_seen, paired_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            device_type = excluded.device_type,
+            base_url = excluded.base_url,
+            paired = excluded.paired,
+            online = excluded.online,
+            audio_capabilities = excluded.audio_capabilities,
+            last_seen = excluded.last_seen,
+            paired_at = excluded.paired_at,
+            updated_at = excluded.updated_at"
+    )
+    .bind(&rec.id)
+    .bind(&rec.name)
+    .bind(&rec.device_type)
+    .bind(&rec.base_url)
+    .bind(if rec.paired { 1 } else { 0 })
+    .bind(if rec.online { 1 } else { 0 })
+    .bind(&rec.audio_capabilities)
+    .bind(&rec.last_seen)
+    .bind(&rec.paired_at)
+    .bind(&rec.created_at)
+    .bind(&rec.updated_at)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn list_receivers_db(pool: &SqlitePool) -> Result<Vec<PersistedReceiver>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, name, device_type, COALESCE(base_url, '') as base_url, paired, online, COALESCE(audio_capabilities, '{}') as audio_capabilities, last_seen, paired_at, created_at, COALESCE(updated_at, created_at) as updated_at
+         FROM receivers ORDER BY name ASC"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut receivers = Vec::new();
+    for row in rows {
+        use sqlx::Row;
+        let id: String = row.get("id");
+        let name: String = row.get("name");
+        let device_type: String = row.get("device_type");
+        let base_url: String = row.get("base_url");
+        let paired: i64 = row.get("paired");
+        let online: i64 = row.get("online");
+        let audio_capabilities: String = row.get("audio_capabilities");
+        let last_seen: Option<String> = row.get("last_seen");
+        let paired_at: Option<String> = row.get("paired_at");
+        let created_at: String = row.get("created_at");
+        let updated_at: String = row.get("updated_at");
+
+        receivers.push(PersistedReceiver {
+            id,
+            name,
+            device_type,
+            base_url,
+            paired: paired != 0,
+            online: online != 0,
+            audio_capabilities,
+            last_seen,
+            paired_at,
+            created_at,
+            updated_at,
+        });
+    }
+
+    Ok(receivers)
+}
+
+pub async fn get_receiver_db(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<Option<PersistedReceiver>, DbError> {
+    let row_opt = sqlx::query(
+        "SELECT id, name, device_type, COALESCE(base_url, '') as base_url, paired, online, COALESCE(audio_capabilities, '{}') as audio_capabilities, last_seen, paired_at, created_at, COALESCE(updated_at, created_at) as updated_at
+         FROM receivers WHERE id = ?"
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(row) = row_opt {
+        use sqlx::Row;
+        let id: String = row.get("id");
+        let name: String = row.get("name");
+        let device_type: String = row.get("device_type");
+        let base_url: String = row.get("base_url");
+        let paired: i64 = row.get("paired");
+        let online: i64 = row.get("online");
+        let audio_capabilities: String = row.get("audio_capabilities");
+        let last_seen: Option<String> = row.get("last_seen");
+        let paired_at: Option<String> = row.get("paired_at");
+        let created_at: String = row.get("created_at");
+        let updated_at: String = row.get("updated_at");
+
+        Ok(Some(PersistedReceiver {
+            id,
+            name,
+            device_type,
+            base_url,
+            paired: paired != 0,
+            online: online != 0,
+            audio_capabilities,
+            last_seen,
+            paired_at,
+            created_at,
+            updated_at,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn delete_receiver_db(pool: &SqlitePool, id: &str) -> Result<bool, DbError> {
+    let res = sqlx::query("DELETE FROM receivers WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+pub async fn save_receiver_credential_db(
+    pool: &SqlitePool,
+    cred: &PersistedReceiverCredential,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO receiver_credentials (receiver_id, ciphertext, nonce, version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(receiver_id) DO UPDATE SET
+            ciphertext = excluded.ciphertext,
+            nonce = excluded.nonce,
+            version = excluded.version,
+            updated_at = excluded.updated_at"
+    )
+    .bind(&cred.receiver_id)
+    .bind(&cred.ciphertext)
+    .bind(&cred.nonce)
+    .bind(cred.version)
+    .bind(&cred.created_at)
+    .bind(&cred.updated_at)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn get_receiver_credential_db(
+    pool: &SqlitePool,
+    receiver_id: &str,
+) -> Result<Option<PersistedReceiverCredential>, DbError> {
+    let row_opt = sqlx::query(
+        "SELECT receiver_id, ciphertext, nonce, version, created_at, updated_at
+         FROM receiver_credentials WHERE receiver_id = ?"
+    )
+    .bind(receiver_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(row) = row_opt {
+        use sqlx::Row;
+        let receiver_id: String = row.get("receiver_id");
+        let ciphertext: Vec<u8> = row.get("ciphertext");
+        let nonce: Vec<u8> = row.get("nonce");
+        let version: i64 = row.get("version");
+        let created_at: String = row.get("created_at");
+        let updated_at: String = row.get("updated_at");
+
+        Ok(Some(PersistedReceiverCredential {
+            receiver_id,
+            ciphertext,
+            nonce,
+            version,
+            created_at,
+            updated_at,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn delete_receiver_credential_db(
+    pool: &SqlitePool,
+    receiver_id: &str,
+) -> Result<bool, DbError> {
+    let res = sqlx::query("DELETE FROM receiver_credentials WHERE receiver_id = ?")
+        .bind(receiver_id)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
 }
 
 pub async fn save_room_group_db(
