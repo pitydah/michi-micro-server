@@ -8,7 +8,7 @@ use michi_core::{
     PlaylistCreate, PlaylistTrack, Track, TrackUpdate,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Acquire, Row, SqlitePool};
 use thiserror::Error;
 use tracing::info;
 use uuid::Uuid;
@@ -71,7 +71,7 @@ pub async fn init_pool_with_size(
         .map_err(|e| DbError::Migration(format!("invalid database URL: {e}")))?
         .create_if_missing(true)
         .foreign_keys(true)
-        .busy_timeout(std::time::Duration::from_secs(5));
+        .busy_timeout(std::time::Duration::from_secs(30));
 
     let opts = if is_memory {
         opts
@@ -95,23 +95,25 @@ pub async fn init_pool_with_size(
 }
 
 async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
+    let mut conn = pool.acquire().await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS _migrations (
             version INTEGER PRIMARY KEY,
             applied_at TEXT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
 
     let current: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM _migrations")
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await?;
 
     macro_rules! run_migration_step {
-        ($pool:expr, $version:expr, $name:expr, $mig:ident) => {{
+        ($conn:expr, $version:expr, $name:expr, $mig:ident) => {{
             info!("applying migration {}: {}", $version, $name);
-            let mut tx = $pool.begin().await?;
+            let mut tx = $conn.begin().await?;
             $mig(&mut tx).await?;
             sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)")
                 .bind($version)
@@ -124,124 +126,124 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
     }
 
     if current < 1 {
-        run_migration_step!(pool, 1, "initial schema", migration_001);
+        run_migration_step!(conn, 1, "initial schema", migration_001);
     }
     if current < 2 {
-        run_migration_step!(pool, 2, "playlists", migration_002);
+        run_migration_step!(conn, 2, "playlists", migration_002);
     }
     if current < 3 {
-        run_migration_step!(pool, 3, "indices", migration_003);
+        run_migration_step!(conn, 3, "indices", migration_003);
     }
     if current < 4 {
-        run_migration_step!(pool, 4, "play history", migration_004);
+        run_migration_step!(conn, 4, "play history", migration_004);
     }
     if current < 5 {
-        run_migration_step!(pool, 5, "users", migration_005);
+        run_migration_step!(conn, 5, "users", migration_005);
     }
     if current < 6 {
-        run_migration_step!(pool, 6, "user_id on playlists", migration_006);
+        run_migration_step!(conn, 6, "user_id on playlists", migration_006);
     }
     if current < 7 {
-        run_migration_step!(pool, 7, "user_id on play_history", migration_007);
+        run_migration_step!(conn, 7, "user_id on play_history", migration_007);
     }
     if current < 8 {
-        run_migration_step!(pool, 8, "playlist sharing", migration_008);
+        run_migration_step!(conn, 8, "playlist sharing", migration_008);
     }
     if current < 9 {
-        run_migration_step!(pool, 9, "sync devices", migration_009);
+        run_migration_step!(conn, 9, "sync devices", migration_009);
     }
     if current < 10 {
-        run_migration_step!(pool, 10, "sync pairing tokens", migration_010);
+        run_migration_step!(conn, 10, "sync pairing tokens", migration_010);
     }
     if current < 11 {
-        run_migration_step!(pool, 11, "sync jobs", migration_011);
+        run_migration_step!(conn, 11, "sync jobs", migration_011);
     }
     if current < 12 {
-        run_migration_step!(pool, 12, "sync job items", migration_012);
+        run_migration_step!(conn, 12, "sync job items", migration_012);
     }
     if current < 13 {
-        run_migration_step!(pool, 13, "players", migration_013);
+        run_migration_step!(conn, 13, "players", migration_013);
     }
     if current < 14 {
-        run_migration_step!(pool, 14, "queues", migration_014);
+        run_migration_step!(conn, 14, "queues", migration_014);
     }
     if current < 15 {
-        run_migration_step!(pool, 15, "track metadata fields", migration_015);
+        run_migration_step!(conn, 15, "track metadata fields", migration_015);
     }
     if current < 16 {
-        run_migration_step!(pool, 16, "link devices", migration_016);
+        run_migration_step!(conn, 16, "link devices", migration_016);
     }
     if current < 17 {
-        run_migration_step!(pool, 17, "pairing sessions", migration_017);
+        run_migration_step!(conn, 17, "pairing sessions", migration_017);
     }
     if current < 18 {
-        run_migration_step!(pool, 18, "import sessions", migration_018);
+        run_migration_step!(conn, 18, "import sessions", migration_018);
     }
     if current < 19 {
-        run_migration_step!(pool, 19, "receivers", migration_019);
+        run_migration_step!(conn, 19, "receivers", migration_019);
     }
     if current < 20 {
-        run_migration_step!(pool, 20, "playback sessions", migration_020);
+        run_migration_step!(conn, 20, "playback sessions", migration_020);
     }
     if current < 21 {
-        run_migration_step!(pool, 21, "import sessions extended", migration_021);
+        run_migration_step!(conn, 21, "import sessions extended", migration_021);
     }
     if current < 22 {
-        run_migration_step!(pool, 22, "playback sessions extended", migration_022);
+        run_migration_step!(conn, 22, "playback sessions extended", migration_022);
     }
     if current < 23 {
-        run_migration_step!(pool, 23, "content_hash on tracks", migration_023);
+        run_migration_step!(conn, 23, "content_hash on tracks", migration_023);
     }
     if current < 24 {
-        run_migration_step!(pool, 24, "star/rating on tracks", migration_024);
+        run_migration_step!(conn, 24, "star/rating on tracks", migration_024);
     }
     if current < 25 {
-        run_migration_step!(pool, 25, "replaygain on tracks", migration_025);
+        run_migration_step!(conn, 25, "replaygain on tracks", migration_025);
     }
     if current < 26 {
-        run_migration_step!(pool, 26, "playback chains", migration_026);
+        run_migration_step!(conn, 26, "playback chains", migration_026);
     }
     if current < 27 {
-        run_migration_step!(pool, 27, "bookmarks", migration_027);
+        run_migration_step!(conn, 27, "bookmarks", migration_027);
     }
     if current < 28 {
-        run_migration_step!(pool, 28, "radio stations", migration_028);
+        run_migration_step!(conn, 28, "radio stations", migration_028);
     }
     if current < 29 {
-        run_migration_step!(pool, 29, "shared links", migration_029);
+        run_migration_step!(conn, 29, "shared links", migration_029);
     }
     if current < 30 {
-        run_migration_step!(pool, 30, "pairing QR codes", migration_030);
+        run_migration_step!(conn, 30, "pairing QR codes", migration_030);
     }
     if current < 31 {
-        run_migration_step!(pool, 31, "stream sources", migration_031);
+        run_migration_step!(conn, 31, "stream sources", migration_031);
     }
     if current < 32 {
-        run_migration_step!(pool, 32, "mount guard", migration_032);
+        run_migration_step!(conn, 32, "mount guard", migration_032);
     }
     if current < 33 {
-        run_migration_step!(pool, 33, "job queue", migration_033);
+        run_migration_step!(conn, 33, "job queue", migration_033);
     }
     if current < 34 {
-        run_migration_step!(pool, 34, "audit log", migration_034);
+        run_migration_step!(conn, 34, "audit log", migration_034);
     }
     if current < 35 {
-        run_migration_step!(pool, 35, "change journal", migration_035);
+        run_migration_step!(conn, 35, "change journal", migration_035);
     }
     if current < 36 {
-        run_migration_step!(pool, 36, "backup snapshots", migration_036);
+        run_migration_step!(conn, 36, "backup snapshots", migration_036);
     }
     if current < 37 {
-        run_migration_step!(pool, 37, "server config", migration_037);
+        run_migration_step!(conn, 37, "server config", migration_037);
     }
     if current < 38 {
-        run_migration_step!(pool, 38, "room groups", migration_038);
+        run_migration_step!(conn, 38, "room groups", migration_038);
     }
     if current < 39 {
-        run_migration_step!(pool, 39, "track file fingerprint", migration_039);
+        run_migration_step!(conn, 39, "track file fingerprint", migration_039);
     }
     if current < 40 {
-        run_migration_step!(pool, 40, "mount guard device identity", migration_040);
+        run_migration_step!(conn, 40, "mount guard device identity", migration_040);
     }
 
     info!("database schema at version 40");
