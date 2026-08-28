@@ -45,6 +45,21 @@ pub enum PlaybackError {
     #[error("INVALID_VOLUME: volume {0} is out of valid range 0..=100")]
     InvalidVolume(u8),
 
+    #[error("TRACK_OUTSIDE_LIBRARY: track file '{0}' is outside permitted music library paths")]
+    TrackOutsideLibrary(String),
+
+    #[error("QUEUE_EMPTY: playback queue is empty")]
+    QueueEmpty,
+
+    #[error("QUEUE_INDEX_INVALID: queue index {0} is out of bounds")]
+    QueueIndexInvalid(usize),
+
+    #[error("NO_TRACK_SELECTED: no track was selected for playback")]
+    NoTrackSelected,
+
+    #[error("ENGINE_UNAVAILABLE: playback engine is unavailable")]
+    EngineUnavailable,
+
     #[error("CHANNEL_CLOSED: playback engine command channel closed")]
     ChannelClosed,
 
@@ -63,6 +78,11 @@ impl PlaybackError {
             Self::OutputUnavailable(_) => "OUTPUT_UNAVAILABLE",
             Self::TrackNotFound(_) => "TRACK_NOT_FOUND",
             Self::TrackFileMissing(_) => "TRACK_FILE_MISSING",
+            Self::TrackOutsideLibrary(_) => "TRACK_OUTSIDE_LIBRARY",
+            Self::QueueEmpty => "QUEUE_EMPTY",
+            Self::QueueIndexInvalid(_) => "QUEUE_INDEX_INVALID",
+            Self::NoTrackSelected => "NO_TRACK_SELECTED",
+            Self::EngineUnavailable => "ENGINE_UNAVAILABLE",
             Self::DecoderUnavailable(_) => "DECODER_UNAVAILABLE",
             Self::DecoderFailed(_) => "DECODER_FAILED",
             Self::InvalidMedia(_) => "INVALID_MEDIA",

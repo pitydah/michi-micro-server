@@ -1,10 +1,12 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use michi_core::Track;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use crate::decoder::FfmpegPcmDecoder;
 use crate::error::PlaybackError;
@@ -20,6 +22,7 @@ pub struct PlaybackEngine {
     resolver: Arc<dyn TrackResolver>,
     format: PcmFormat,
     state: PlaybackLifecycle,
+    generation_id: u64,
     current_track: Option<Track>,
     queue: Vec<Track>,
     queue_index: usize,
@@ -33,8 +36,9 @@ pub struct PlaybackEngine {
     output_desc: Option<PlaybackOutputDescription>,
     sinks: Vec<Box<dyn AudioSink>>,
     decoder: Option<FfmpegPcmDecoder>,
-    bytes_decoded: u64,
-    bytes_delivered: u64,
+    track_bytes_decoded: u64,
+    track_pcm_timeline_bytes: u64,
+    network_bytes_sent_total: u64,
     output_health: String,
     last_error: Option<String>,
 }
@@ -50,6 +54,7 @@ impl PlaybackEngine {
             resolver,
             format,
             state: PlaybackLifecycle::Idle,
+            generation_id: 0,
             current_track: None,
             queue: Vec::new(),
             queue_index: 0,
@@ -63,8 +68,9 @@ impl PlaybackEngine {
             output_desc: None,
             sinks: Vec::new(),
             decoder: None,
-            bytes_decoded: 0,
-            bytes_delivered: 0,
+            track_bytes_decoded: 0,
+            track_pcm_timeline_bytes: 0,
+            network_bytes_sent_total: 0,
             output_health: "none".to_string(),
             last_error: None,
         }
@@ -108,6 +114,7 @@ impl PlaybackEngine {
 
         EngineSnapshot {
             lifecycle: self.state,
+            generation_id: self.generation_id,
             track_id: self.current_track.as_ref().map(|t| t.id),
             current_track: self.current_track.clone(),
             position_ms: pos,
@@ -117,8 +124,11 @@ impl PlaybackEngine {
             repeat: self.repeat,
             output: self.output_desc.clone(),
             sinks,
-            bytes_decoded: self.bytes_decoded,
-            bytes_delivered: self.bytes_delivered,
+            track_bytes_decoded: self.track_bytes_decoded,
+            track_pcm_timeline_bytes: self.track_pcm_timeline_bytes,
+            network_bytes_sent_total: self.network_bytes_sent_total,
+            bytes_decoded: self.track_bytes_decoded,
+            bytes_delivered: self.network_bytes_sent_total,
             output_health: self.output_health.clone(),
             last_error: self.last_error.clone(),
             updated_at: Utc::now(),
@@ -187,13 +197,16 @@ impl PlaybackEngine {
                 self.handle_eof().await;
             }
             Ok(n) => {
-                self.bytes_decoded += n as u64;
+                self.track_bytes_decoded += n as u64;
                 let chunk = &pcm_buf[..n];
 
-                // Concurrent fan-out delivery to all active sinks
+                // Concurrent fan-out delivery to all active sinks with bounded per-sink timeout
                 let mut write_futs = Vec::with_capacity(self.sinks.len());
                 for sink in self.sinks.iter_mut() {
-                    write_futs.push(sink.write_pcm(chunk));
+                    write_futs.push(tokio::time::timeout(
+                        Duration::from_millis(250),
+                        sink.write_pcm(chunk),
+                    ));
                 }
 
                 let results = futures_util::future::join_all(write_futs).await;
@@ -203,11 +216,15 @@ impl PlaybackEngine {
 
                 for (idx, res) in results.into_iter().enumerate() {
                     match res {
-                        Ok(written) => {
+                        Ok(Ok(written)) => {
                             delivered_bytes += written;
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             warn!("sink {} write error: {}", self.sinks[idx].id(), e);
+                            failed_count += 1;
+                        }
+                        Err(_timeout) => {
+                            warn!("sink {} write timed out after 250ms", self.sinks[idx].id());
                             failed_count += 1;
                         }
                     }
@@ -225,19 +242,30 @@ impl PlaybackEngine {
                     return;
                 }
 
-                self.bytes_delivered += delivered_bytes as u64;
+                if failed_count > 0 {
+                    self.output_health = "partial".to_string();
+                }
+
+                self.network_bytes_sent_total += delivered_bytes as u64;
 
                 if delivered_bytes > 0 {
+                    // P1-02 Functional Truth: Single unique timeline metric progresses once per decoded chunk
+                    self.track_pcm_timeline_bytes += n as u64;
+
                     if self.state == PlaybackLifecycle::Preparing
                         || self.state == PlaybackLifecycle::Buffering
                     {
                         self.state = PlaybackLifecycle::AudioFlowing;
+                        if self.playing_started_at.is_none() {
+                            self.playing_started_at = Some(Instant::now());
+                        }
                     }
 
-                    // Transition to Playing once >= 100ms PCM has been delivered
+                    // Transition to Playing once unique timeline >= 100ms PCM has been delivered
                     if (self.state == PlaybackLifecycle::AudioFlowing
                         || self.state == PlaybackLifecycle::Preparing)
-                        && self.bytes_delivered >= self.format.bytes_for_duration_ms(100) as u64
+                        && self.track_pcm_timeline_bytes
+                            >= self.format.bytes_for_duration_ms(100) as u64
                     {
                         self.state = PlaybackLifecycle::Playing;
                     }
@@ -348,10 +376,14 @@ impl PlaybackEngine {
         let mut decoder = FfmpegPcmDecoder::new(track.file_path.clone(), self.format);
         decoder.start(position_ms).await?;
 
+        // Reset telemetry for new track generation
+        self.generation_id += 1;
+        self.track_bytes_decoded = 0;
+        self.track_pcm_timeline_bytes = 0;
         self.decoder = Some(decoder);
         self.current_track = Some(track);
         self.base_position_ms = position_ms;
-        self.playing_started_at = Some(Instant::now());
+        self.playing_started_at = None;
         self.state = PlaybackLifecycle::Preparing;
         self.last_error = None;
 
@@ -376,11 +408,53 @@ impl PlaybackEngine {
 
                 self.sinks = sinks;
                 self.output_desc = Some(output_desc);
-                self.bytes_decoded = 0;
-                self.bytes_delivered = 0;
 
                 let res = self.start_playback_internal(*track, position_ms).await;
                 let _ = respond_to.send(res);
+                true
+            }
+            EngineCommand::LoadTrack {
+                track,
+                position_ms,
+                respond_to,
+            } => {
+                self.cleanup_playback().await;
+                self.generation_id += 1;
+                self.track_bytes_decoded = 0;
+                self.track_pcm_timeline_bytes = 0;
+                self.current_track = Some(*track);
+                self.base_position_ms = position_ms;
+                self.playing_started_at = None;
+                self.state = PlaybackLifecycle::Paused;
+                let _ = respond_to.send(Ok(()));
+                true
+            }
+            EngineCommand::JumpToIndex { index, respond_to } => {
+                if index >= self.queue.len() {
+                    let _ = respond_to.send(Err(PlaybackError::QueueIndexInvalid(index)));
+                    return true;
+                }
+
+                self.queue_index = index;
+                self.play_order_pos = self
+                    .play_order
+                    .iter()
+                    .position(|&x| x == index)
+                    .unwrap_or(0);
+                let target_track = self.queue[index].clone();
+
+                if self.state.is_playing() || self.state == PlaybackLifecycle::Preparing {
+                    let res = self.start_playback_internal(target_track, 0).await;
+                    let _ = respond_to.send(res);
+                } else {
+                    self.generation_id += 1;
+                    self.track_bytes_decoded = 0;
+                    self.track_pcm_timeline_bytes = 0;
+                    self.current_track = Some(target_track);
+                    self.base_position_ms = 0;
+                    self.playing_started_at = None;
+                    let _ = respond_to.send(Ok(()));
+                }
                 true
             }
             EngineCommand::Pause { respond_to } => {
@@ -390,8 +464,17 @@ impl PlaybackEngine {
                 if let Some(mut d) = self.decoder.take() {
                     let _ = d.stop().await;
                 }
+                let mut pause_errors = 0;
                 for sink in self.sinks.iter_mut() {
-                    let _ = sink.pause().await;
+                    if let Err(e) = sink.pause().await {
+                        warn!("sink {} pause error: {}", sink.id(), e);
+                        pause_errors += 1;
+                    }
+                }
+                if !self.sinks.is_empty() && pause_errors == self.sinks.len() {
+                    self.output_health = "failed".to_string();
+                } else if pause_errors > 0 {
+                    self.output_health = "partial".to_string();
                 }
                 self.state = PlaybackLifecycle::Paused;
                 let _ = respond_to.send(Ok(()));
@@ -400,17 +483,26 @@ impl PlaybackEngine {
             EngineCommand::Resume { respond_to } => {
                 if self.state == PlaybackLifecycle::Paused {
                     if let Some(track) = self.current_track.clone() {
-                        for sink in self.sinks.iter_mut() {
-                            let _ = sink.resume().await;
+                        if self.sinks.is_empty() {
+                            let _ = respond_to.send(Ok(()));
+                        } else {
+                            let mut resume_errors = 0;
+                            for sink in self.sinks.iter_mut() {
+                                if let Err(e) = sink.resume().await {
+                                    warn!("sink {} resume error: {}", sink.id(), e);
+                                    resume_errors += 1;
+                                }
+                            }
+                            if !self.sinks.is_empty() && resume_errors == self.sinks.len() {
+                                self.output_health = "failed".to_string();
+                            }
+                            let res = self
+                                .start_playback_internal(track, self.base_position_ms)
+                                .await;
+                            let _ = respond_to.send(res);
                         }
-                        let res = self
-                            .start_playback_internal(track, self.base_position_ms)
-                            .await;
-                        let _ = respond_to.send(res);
                     } else {
-                        let _ = respond_to.send(Err(PlaybackError::PlaybackFailed(
-                            "no track to resume".to_string(),
-                        )));
+                        let _ = respond_to.send(Ok(()));
                     }
                 } else if self.state == PlaybackLifecycle::Idle
                     || self.state == PlaybackLifecycle::Stopped
@@ -422,12 +514,10 @@ impl PlaybackEngine {
                                 .await;
                             let _ = respond_to.send(res);
                         } else {
-                            let _ = respond_to.send(Err(PlaybackError::NoOutputSelected));
+                            let _ = respond_to.send(Ok(()));
                         }
                     } else {
-                        let _ = respond_to.send(Err(PlaybackError::PlaybackFailed(
-                            "no track loaded".to_string(),
-                        )));
+                        let _ = respond_to.send(Ok(()));
                     }
                 } else {
                     let _ = respond_to.send(Ok(()));
@@ -471,8 +561,18 @@ impl PlaybackEngine {
                     self.play_order_pos += 1;
                     self.queue_index = self.play_order[self.play_order_pos];
                     let next_track = self.queue[self.queue_index].clone();
-                    let res = self.start_playback_internal(next_track, 0).await;
-                    let _ = respond_to.send(res);
+                    if self.sinks.is_empty() {
+                        self.generation_id += 1;
+                        self.track_bytes_decoded = 0;
+                        self.track_pcm_timeline_bytes = 0;
+                        self.current_track = Some(next_track);
+                        self.base_position_ms = 0;
+                        self.playing_started_at = None;
+                        let _ = respond_to.send(Ok(()));
+                    } else {
+                        let res = self.start_playback_internal(next_track, 0).await;
+                        let _ = respond_to.send(res);
+                    }
                 } else if self.repeat == RepeatMode::All && !self.queue.is_empty() {
                     if self.shuffle {
                         self.recompute_play_order(self.queue_index);
@@ -480,8 +580,18 @@ impl PlaybackEngine {
                     self.play_order_pos = 0;
                     self.queue_index = self.play_order[0];
                     let next_track = self.queue[self.queue_index].clone();
-                    let res = self.start_playback_internal(next_track, 0).await;
-                    let _ = respond_to.send(res);
+                    if self.sinks.is_empty() {
+                        self.generation_id += 1;
+                        self.track_bytes_decoded = 0;
+                        self.track_pcm_timeline_bytes = 0;
+                        self.current_track = Some(next_track);
+                        self.base_position_ms = 0;
+                        self.playing_started_at = None;
+                        let _ = respond_to.send(Ok(()));
+                    } else {
+                        let res = self.start_playback_internal(next_track, 0).await;
+                        let _ = respond_to.send(res);
+                    }
                 } else {
                     let _ = self.cleanup_playback().await;
                     self.state = PlaybackLifecycle::Ended;
@@ -497,8 +607,14 @@ impl PlaybackEngine {
                         .unwrap_or(false)
                 {
                     if let Some(track) = self.current_track.clone() {
-                        let res = self.start_playback_internal(track, 0).await;
-                        let _ = respond_to.send(res);
+                        if self.sinks.is_empty() {
+                            self.base_position_ms = 0;
+                            self.playing_started_at = None;
+                            let _ = respond_to.send(Ok(()));
+                        } else {
+                            let res = self.start_playback_internal(track, 0).await;
+                            let _ = respond_to.send(res);
+                        }
                     } else {
                         let _ = respond_to.send(Ok(()));
                     }
@@ -506,11 +622,27 @@ impl PlaybackEngine {
                     self.play_order_pos -= 1;
                     self.queue_index = self.play_order[self.play_order_pos];
                     let prev_track = self.queue[self.queue_index].clone();
-                    let res = self.start_playback_internal(prev_track, 0).await;
-                    let _ = respond_to.send(res);
+                    if self.sinks.is_empty() {
+                        self.generation_id += 1;
+                        self.track_bytes_decoded = 0;
+                        self.track_pcm_timeline_bytes = 0;
+                        self.current_track = Some(prev_track);
+                        self.base_position_ms = 0;
+                        self.playing_started_at = None;
+                        let _ = respond_to.send(Ok(()));
+                    } else {
+                        let res = self.start_playback_internal(prev_track, 0).await;
+                        let _ = respond_to.send(res);
+                    }
                 } else if let Some(track) = self.current_track.clone() {
-                    let res = self.start_playback_internal(track, 0).await;
-                    let _ = respond_to.send(res);
+                    if self.sinks.is_empty() {
+                        self.base_position_ms = 0;
+                        self.playing_started_at = None;
+                        let _ = respond_to.send(Ok(()));
+                    } else {
+                        let res = self.start_playback_internal(track, 0).await;
+                        let _ = respond_to.send(res);
+                    }
                 } else {
                     let _ = respond_to.send(Ok(()));
                 }
@@ -548,11 +680,26 @@ impl PlaybackEngine {
             EngineCommand::SetQueue {
                 tracks,
                 current_index,
+                current_track_id,
                 respond_to,
             } => {
+                let resolved_index = if let Some(target_id) = current_track_id {
+                    tracks
+                        .iter()
+                        .position(|t| t.id == target_id)
+                        .unwrap_or(current_index)
+                } else {
+                    current_index
+                };
+
                 self.queue = tracks;
-                self.queue_index = current_index;
-                self.recompute_play_order(current_index);
+                self.queue_index = resolved_index.min(self.queue.len().saturating_sub(1));
+                self.recompute_play_order(self.queue_index);
+
+                if !self.state.is_playing() && self.current_track.is_none() {
+                    self.current_track = self.queue.get(self.queue_index).cloned();
+                }
+
                 let _ = respond_to.send(Ok(()));
                 true
             }
@@ -608,6 +755,31 @@ impl PlaybackEngineHandle {
                 sinks,
                 output_desc,
                 position_ms,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| PlaybackError::ChannelClosed)?;
+        rx.await.map_err(|_| PlaybackError::ChannelClosed)?
+    }
+
+    pub async fn load_track(&self, track: Track, position_ms: u64) -> Result<(), PlaybackError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(EngineCommand::LoadTrack {
+                track: Box::new(track),
+                position_ms,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| PlaybackError::ChannelClosed)?;
+        rx.await.map_err(|_| PlaybackError::ChannelClosed)?
+    }
+
+    pub async fn jump_to_index(&self, index: usize) -> Result<(), PlaybackError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(EngineCommand::JumpToIndex {
+                index,
                 respond_to: tx,
             })
             .await
@@ -712,12 +884,14 @@ impl PlaybackEngineHandle {
         &self,
         tracks: Vec<Track>,
         current_index: usize,
+        current_track_id: Option<Uuid>,
     ) -> Result<(), PlaybackError> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(EngineCommand::SetQueue {
                 tracks,
                 current_index,
+                current_track_id,
                 respond_to: tx,
             })
             .await

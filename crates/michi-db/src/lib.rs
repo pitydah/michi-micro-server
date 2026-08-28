@@ -1227,6 +1227,63 @@ pub async fn save_receiver_credential_db(
     Ok(())
 }
 
+pub async fn persist_paired_receiver_transaction(
+    pool: &SqlitePool,
+    rec: &PersistedReceiver,
+    cred: &PersistedReceiverCredential,
+) -> Result<(), DbError> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO receivers (id, name, device_type, base_url, paired, online, audio_capabilities, last_seen, paired_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            device_type = excluded.device_type,
+            base_url = excluded.base_url,
+            paired = excluded.paired,
+            online = excluded.online,
+            audio_capabilities = excluded.audio_capabilities,
+            last_seen = excluded.last_seen,
+            paired_at = excluded.paired_at,
+            updated_at = excluded.updated_at"
+    )
+    .bind(&rec.id)
+    .bind(&rec.name)
+    .bind(&rec.device_type)
+    .bind(&rec.base_url)
+    .bind(if rec.paired { 1 } else { 0 })
+    .bind(if rec.online { 1 } else { 0 })
+    .bind(&rec.audio_capabilities)
+    .bind(&rec.last_seen)
+    .bind(&rec.paired_at)
+    .bind(&rec.created_at)
+    .bind(&rec.updated_at)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO receiver_credentials (receiver_id, ciphertext, nonce, version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(receiver_id) DO UPDATE SET
+            ciphertext = excluded.ciphertext,
+            nonce = excluded.nonce,
+            version = excluded.version,
+            updated_at = excluded.updated_at"
+    )
+    .bind(&cred.receiver_id)
+    .bind(&cred.ciphertext)
+    .bind(&cred.nonce)
+    .bind(cred.version)
+    .bind(&cred.created_at)
+    .bind(&cred.updated_at)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn get_receiver_credential_db(
     pool: &SqlitePool,
     receiver_id: &str,

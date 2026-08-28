@@ -44,6 +44,7 @@ mod ws;
 
 pub mod output;
 pub use output::{PlaybackOutputSelection, ResolvedOutputPlan};
+pub mod playback_queue;
 pub mod routes;
 pub use routes::v1::audit::record_audit;
 
@@ -84,8 +85,8 @@ pub struct AppState {
     pub playback_engine: michi_playback::PlaybackEngineHandle,
     /// Explicit output target selection (Receiver, RoomGroup, or Chain).
     pub playback_output_selection: Arc<RwLock<Option<output::PlaybackOutputSelection>>>,
-    /// Encrypted credential store for paired receivers.
-    pub receiver_credential_store: Arc<michi_receivers::ReceiverCredentialStore>,
+    /// Encrypted credential store for paired receivers (None if persistent key unavailable).
+    pub receiver_credential_store: Arc<Option<michi_receivers::ReceiverCredentialStore>>,
 }
 
 impl AppState {
@@ -116,38 +117,45 @@ impl AppState {
                 for rec in persisted_list {
                     let mut token: Option<String> = None;
                     if rec.paired {
-                        match michi_db::get_receiver_credential_db(&self.db, &rec.id).await {
-                            Ok(Some(cred)) => {
-                                match self.receiver_credential_store.decrypt_token(
-                                    &rec.id,
-                                    &cred.ciphertext,
-                                    &cred.nonce,
-                                ) {
-                                    Ok(decrypted) => {
-                                        token = Some(decrypted);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "failed to decrypt credential for receiver {}: {} (marking unpaired/fail-closed)",
-                                            rec.id,
-                                            e
-                                        );
+                        if let Some(store) = self.receiver_credential_store.as_ref() {
+                            match michi_db::get_receiver_credential_db(&self.db, &rec.id).await {
+                                Ok(Some(cred)) => {
+                                    match store.decrypt_token(
+                                        &rec.id,
+                                        &cred.ciphertext,
+                                        &cred.nonce,
+                                    ) {
+                                        Ok(decrypted) => {
+                                            token = Some(decrypted);
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "failed to decrypt credential for receiver {}: {} (marking unpaired/fail-closed)",
+                                                rec.id,
+                                                e
+                                            );
+                                        }
                                     }
                                 }
+                                Ok(None) => {
+                                    tracing::warn!(
+                                        "no encrypted credential record found for paired receiver {}",
+                                        rec.id
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "error querying credentials for receiver {}: {}",
+                                        rec.id,
+                                        e
+                                    );
+                                }
                             }
-                            Ok(None) => {
-                                tracing::warn!(
-                                    "no encrypted credential record found for paired receiver {}",
-                                    rec.id
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "error querying credentials for receiver {}: {}",
-                                    rec.id,
-                                    e
-                                );
-                            }
+                        } else {
+                            tracing::warn!(
+                                "receiver credential store unavailable, cannot restore token for receiver {}",
+                                rec.id
+                            );
                         }
                     }
 
@@ -271,17 +279,21 @@ impl AppState {
         let cred_key_path = config.config_path.join("receiver_credentials.key");
         let receiver_credential_store = Arc::new(
             michi_receivers::ReceiverCredentialStore::load_or_create_key(&cred_key_path)
-                .unwrap_or_else(|e| {
+                .map_err(|e| {
                     tracing::warn!(
-                        "failed to load receiver credentials key from {:?}: {}; using ephemeral CSPRNG fallback",
+                        "failed to load receiver credentials key from {:?}: {}",
                         cred_key_path,
                         e
                     );
-                    michi_receivers::ReceiverCredentialStore::random()
-                }),
+                    e
+                })
+                .ok(),
         );
 
-        let resolver = Arc::new(michi_playback::SqliteTrackResolver::new(db.clone()));
+        let resolver = Arc::new(michi_playback::SqliteTrackResolver::new(
+            db.clone(),
+            config.music_paths.clone(),
+        ));
         let (playback_engine, engine_join) =
             michi_playback::spawn_playback_engine(resolver, michi_playback::PcmFormat::default());
         task_handles.lock().unwrap().push(engine_join);
@@ -1262,7 +1274,8 @@ fn v1_link_routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/backup/bundle",
-            get(routes::v1::backup::backup_bundle_handler),
+            get(routes::v1::backup::backup_bundle_handler)
+                .post(routes::v1::backup::restore_backup_bundle_handler),
         )
         .route(
             "/api/v1/webhook",

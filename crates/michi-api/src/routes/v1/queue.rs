@@ -4,9 +4,11 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::playback_queue::{
+    get_or_create_active_queue, sync_active_queue_to_engine, validate_and_load_tracks,
+};
 use crate::AppState;
 
 fn v1_error(
@@ -20,34 +22,6 @@ fn v1_error(
             "error": { "code": code, "message": message, "details": {} }
         })),
     )
-}
-
-/// Helper to get or create the single canonical active queue
-pub async fn get_or_create_active_queue(pool: &SqlitePool) -> Result<Uuid, sqlx::Error> {
-    let row = sqlx::query_as::<_, (String,)>(
-        "SELECT id FROM queues WHERE name = 'active-queue' ORDER BY datetime(created_at) DESC LIMIT 1"
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    if let Some((id_str,)) = row {
-        if let Ok(id) = Uuid::parse_str(&id_str) {
-            return Ok(id);
-        }
-    }
-
-    let new_id = Uuid::new_v4();
-    let now = chrono::Utc::now().to_rfc3339();
-    sqlx::query(
-        "INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, 'active-queue', ?, ?)",
-    )
-    .bind(new_id.to_string())
-    .bind(&now)
-    .bind(&now)
-    .execute(pool)
-    .await?;
-
-    Ok(new_id)
 }
 
 pub async fn queue_handler(
@@ -126,6 +100,10 @@ pub async fn queue_items_handler(
         ));
     }
 
+    // P0-04 Functional Truth: All-or-nothing validation against DB, disk, and configured library roots
+    let _validated =
+        validate_and_load_tracks(&state.db, &body.track_ids, &state.config.music_paths).await?;
+
     let mut tx = state.db.begin().await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -133,28 +111,6 @@ pub async fn queue_items_handler(
             &e.to_string(),
         )
     })?;
-
-    // Validate all track_ids exist
-    for tid in &body.track_ids {
-        let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tracks WHERE id = ?")
-            .bind(tid.to_string())
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| {
-                v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "DATABASE_ERROR",
-                    &e.to_string(),
-                )
-            })?;
-        if exists == 0 {
-            return Err(v1_error(
-                StatusCode::NOT_FOUND,
-                "TRACK_NOT_FOUND",
-                &format!("track {tid} not found"),
-            ));
-        }
-    }
 
     let active_queue_id = {
         let row = sqlx::query_as::<_, (String,)>(
@@ -234,39 +190,13 @@ pub async fn queue_items_handler(
         )
     })?;
 
-    // Sync newly updated active queue items into PlaybackEngine
-    let active_items: Vec<(String, i64)> = sqlx::query_as::<_, (String, i64)>(
-        "SELECT track_id, position FROM queue_items WHERE queue_id = ? ORDER BY position ASC",
-    )
-    .bind(active_queue_id.to_string())
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-
-    let mut runtime_tracks = Vec::new();
-    for (tid_str, _) in &active_items {
-        if let Ok(tid) = Uuid::parse_str(tid_str) {
-            if let Ok(Some(track)) = michi_db::get_track(&state.db, &tid).await {
-                runtime_tracks.push(track);
-            }
-        }
-    }
-    if !runtime_tracks.is_empty() {
-        let ps = state.playback_state.read().await;
-        let cur_idx = if let Some(ref cur_tid) = ps.track_id {
-            runtime_tracks
-                .iter()
-                .position(|t| t.id == *cur_tid)
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        drop(ps);
-        let _ = state
-            .playback_engine
-            .set_queue(runtime_tracks, cur_idx)
-            .await;
-    }
+    let cur_track_id = state
+        .playback_engine
+        .snapshot()
+        .await
+        .ok()
+        .and_then(|s| s.track_id);
+    let _ = sync_active_queue_to_engine(&state, &active_queue_id, cur_track_id).await;
 
     let total_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM queue_items WHERE queue_id = ?")
@@ -357,14 +287,29 @@ pub async fn queue_jump_handler(
         )
     })?;
 
-    let mut current = state.playback_state.write().await;
-    current.track_id = Some(target_track_id);
-    current.position_ms = 0;
-    current.updated_at = chrono::Utc::now();
-    let state_clone = current.clone();
-    drop(current);
+    // P1-03: Real jump interacting directly with PlaybackEngine
+    state
+        .playback_engine
+        .jump_to_index(body.index as usize)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                e.error_code(),
+                &e.to_string(),
+            )
+        })?;
 
-    let _ = state.sync_tx.send(state_clone.into());
+    let snap = state.playback_engine.snapshot().await.unwrap_or_default();
+
+    {
+        let mut current = state.playback_state.write().await;
+        current.track_id = Some(target_track_id);
+        current.position_ms = snap.position_ms;
+        current.playing = snap.is_playing();
+        current.updated_at = chrono::Utc::now();
+    }
+
     let _ = state.tx.send(
         serde_json::json!({
             "type": "playback_state_changed",
@@ -410,30 +355,73 @@ pub async fn queue_transfer_handler(
         ));
     }
 
-    // Validate all track_ids exist in library
-    let mut unknown_tracks: Vec<Uuid> = Vec::new();
-    for tid in &body.track_ids {
-        let exists = michi_db::get_track(&state.db, tid).await.map_err(|e| {
+    // P0-04 Functional Truth: All-or-nothing validation of every track in transferred queue
+    let validated_tracks =
+        match validate_and_load_tracks(&state.db, &body.track_ids, &state.config.music_paths).await
+        {
+            Ok(t) => t,
+            Err((StatusCode::NOT_FOUND, _)) => {
+                return Err(v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "UNKNOWN_TRACKS",
+                    "tracks not in library",
+                ));
+            }
+            Err(e) => return Err(e),
+        };
+
+    let queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    let mut tx = state.db.begin().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    // Clear existing active queue items and replace with transferred items
+    sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
+        .bind(queue_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
             v1_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "DATABASE_ERROR",
                 &e.to_string(),
             )
         })?;
-        if exists.is_none() {
-            unknown_tracks.push(*tid);
-        }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for (pos, track_id) in body.track_ids.iter().enumerate() {
+        let item_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(item_id.to_string())
+        .bind(queue_id.to_string())
+        .bind(track_id.to_string())
+        .bind(pos as i64)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
     }
 
-    if !unknown_tracks.is_empty() {
-        return Err(v1_error(
-            StatusCode::BAD_REQUEST,
-            "UNKNOWN_TRACKS",
-            &format!("tracks not in library: {unknown_tracks:?}"),
-        ));
-    }
-
-    let queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
+    tx.commit().await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DATABASE_ERROR",
@@ -456,6 +444,17 @@ pub async fn queue_transfer_handler(
             &e.to_string(),
         )
     })?;
+
+    // Sync full transferred queue to PlaybackEngine
+    let current_tid = body.track_ids.get(body.current_index as usize).copied();
+    let _ = state
+        .playback_engine
+        .set_queue(validated_tracks, body.current_index as usize, current_tid)
+        .await;
+
+    if body.position_ms > 0 {
+        let _ = state.playback_engine.seek(body.position_ms).await;
+    }
 
     let _ = state.tx.send(
         serde_json::json!({
@@ -588,6 +587,15 @@ pub async fn queue_reorder_handler(
         )
     })?;
 
+    // P1-03: Sync reordered queue to engine preserving current_track_id
+    let cur_track_id = state
+        .playback_engine
+        .snapshot()
+        .await
+        .ok()
+        .and_then(|s| s.track_id);
+    let _ = sync_active_queue_to_engine(&state, &queue_id, cur_track_id).await;
+
     let _ = state.tx.send(
         serde_json::json!({
             "type": "queue_reordered",
@@ -601,9 +609,27 @@ pub async fn queue_reorder_handler(
     ))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct QueueDeleteBody {
-    pub queue_id: Uuid,
+pub async fn clear_queue_handler(
+    State(state): State<AppState>,
+    Path(queue_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
+        .bind(queue_id.to_string())
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+    let _ = state.playback_engine.set_queue(Vec::new(), 0, None).await;
+
+    Ok(Json(
+        serde_json::json!({ "status": "cleared", "queue_id": queue_id }),
+    ))
 }
 
 pub async fn queue_delete_handler(
@@ -674,8 +700,6 @@ pub async fn queue_delete_handler(
         serde_json::json!({ "status": "deleted", "queue_id": queue_id }),
     ))
 }
-
-// ── Queue Save/Load (cross-device) ─────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct QueueSaveBody {

@@ -263,7 +263,7 @@ mod tests {
         let t2 = make_test_track(Uuid::new_v4(), "/track2.wav");
 
         handle
-            .set_queue(vec![t1.clone(), t2.clone()], 0)
+            .set_queue(vec![t1.clone(), t2.clone()], 0, None)
             .await
             .unwrap();
 
@@ -345,11 +345,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_suite_i_partial_output_policy() {
+        let temp_dir = std::env::temp_dir().join(format!("michi-playback-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let wav_path = temp_dir.join("partial_test.wav");
+        generate_test_wav(&wav_path, 48000, 2, 0.5).unwrap();
+
         let (handle, join) = spawn_playback_engine(Arc::new(MockResolver), PcmFormat::default());
         let (good_sink, _good_written) = MockSink::new("sink-good", SinkKind::Receiver, false);
         let (fail_sink, _) = MockSink::new("sink-fail", SinkKind::Receiver, true);
 
-        let track = make_test_track(Uuid::new_v4(), "/nonexistent.wav");
+        let track = make_test_track(Uuid::new_v4(), wav_path.to_str().unwrap());
         let res = handle
             .play(
                 track,
@@ -373,16 +378,22 @@ mod tests {
 
         handle.shutdown().await;
         let _ = join.await;
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[tokio::test]
     async fn test_suite_l_concurrent_fanout() {
+        let temp_dir = std::env::temp_dir().join(format!("michi-playback-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let wav_path = temp_dir.join("fanout_test.wav");
+        generate_test_wav(&wav_path, 48000, 2, 0.5).unwrap();
+
         let (handle, join) = spawn_playback_engine(Arc::new(MockResolver), PcmFormat::default());
         let (s1, _w1) = MockSink::new("sink-1", SinkKind::Receiver, false);
         let (s2, _w2) = MockSink::new("sink-2", SinkKind::Receiver, false);
         let (s3, _w3) = MockSink::new("sink-3", SinkKind::Receiver, false);
 
-        let track = make_test_track(Uuid::new_v4(), "/nonexistent.wav");
+        let track = make_test_track(Uuid::new_v4(), wav_path.to_str().unwrap());
         let res = handle
             .play(
                 track,
@@ -401,6 +412,77 @@ mod tests {
         let snap = handle.snapshot().await.unwrap();
         assert_eq!(snap.output_health, "healthy");
         assert_eq!(snap.sinks.len(), 3);
+
+        handle.shutdown().await;
+        let _ = join.await;
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_suite_c_missing_file_fails_closed() {
+        let (handle, join) = spawn_playback_engine(Arc::new(MockResolver), PcmFormat::default());
+        let (sink, _) = MockSink::new("sink-1", SinkKind::Receiver, false);
+        let track = make_test_track(Uuid::new_v4(), "/nonexistent_test_track.flac");
+
+        let res = handle
+            .play(
+                track,
+                vec![Box::new(sink)],
+                PlaybackOutputDescription {
+                    target_id: "sink-1".to_string(),
+                    target_name: "Sink 1".to_string(),
+                    kind: "receiver".to_string(),
+                    receiver_count: 1,
+                },
+                0,
+            )
+            .await;
+
+        assert!(matches!(res, Err(PlaybackError::TrackFileMissing(_))));
+        let snap = handle.snapshot().await.unwrap();
+        assert_eq!(snap.lifecycle, PlaybackLifecycle::Idle);
+        assert!(!snap.is_playing());
+
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    #[tokio::test]
+    async fn test_suite_j_queue_jump_changes_track() {
+        let (handle, join) = spawn_playback_engine(Arc::new(MockResolver), PcmFormat::default());
+        let t1 = make_test_track(Uuid::new_v4(), "/track1.wav");
+        let t2 = make_test_track(Uuid::new_v4(), "/track2.wav");
+        let t3 = make_test_track(Uuid::new_v4(), "/track3.wav");
+
+        handle
+            .set_queue(vec![t1.clone(), t2.clone(), t3.clone()], 0, None)
+            .await
+            .unwrap();
+
+        handle.jump_to_index(2).await.unwrap();
+        let snap = handle.snapshot().await.unwrap();
+        assert_eq!(snap.track_id, Some(t3.id));
+        assert_eq!(snap.generation_id, 1);
+
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    #[tokio::test]
+    async fn test_suite_p_generation_reset_on_track_change() {
+        let (handle, join) = spawn_playback_engine(Arc::new(MockResolver), PcmFormat::default());
+        let t1 = make_test_track(Uuid::new_v4(), "/track1.wav");
+        let t2 = make_test_track(Uuid::new_v4(), "/track2.wav");
+
+        handle
+            .set_queue(vec![t1.clone(), t2.clone()], 0, None)
+            .await
+            .unwrap();
+
+        let initial_gen = handle.snapshot().await.unwrap().generation_id;
+        handle.jump_to_index(1).await.unwrap();
+        let new_gen = handle.snapshot().await.unwrap().generation_id;
+        assert_eq!(new_gen, initial_gen + 1);
 
         handle.shutdown().await;
         let _ = join.await;

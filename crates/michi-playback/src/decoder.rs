@@ -50,11 +50,6 @@ impl FfmpegPcmDecoder {
 
         let path = Path::new(&self.file_path);
         if !path.exists() {
-            if cfg!(test) || std::env::var("CARGO_MANIFEST_DIR").is_ok() {
-                self.bytes_decoded = 0;
-                self.eof = true;
-                return Ok(());
-            }
             return Err(PlaybackError::TrackFileMissing(self.file_path.clone()));
         }
 
@@ -73,6 +68,10 @@ impl FfmpegPcmDecoder {
             ));
         }
 
+        let canonical_str = canonical
+            .to_str()
+            .ok_or_else(|| PlaybackError::InvalidMedia("non-UTF-8 path".to_string()))?;
+
         let mut cmd = Command::new("ffmpeg");
         cmd.arg("-hide_banner")
             .arg("-loglevel")
@@ -85,7 +84,7 @@ impl FfmpegPcmDecoder {
         }
 
         cmd.arg("-i")
-            .arg(&self.file_path)
+            .arg(canonical_str)
             .arg("-vn")
             .arg("-sn")
             .arg("-dn")

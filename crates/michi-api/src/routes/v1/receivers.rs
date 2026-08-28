@@ -334,6 +334,15 @@ pub async fn receiver_pair_start_handler(
     }
 }
 
+async fn rollback_pairing(state: &AppState, device_id: &str) {
+    let reg_arc = state.receiver_manager.registry().await;
+    let mut reg = reg_arc.write().await;
+    if let Some(entry) = reg.get_mut(device_id) {
+        entry.paired = false;
+        entry.token = None;
+    }
+}
+
 async fn persist_paired_receiver(state: &AppState, device_id: &str) -> Result<(), String> {
     let reg_arc = state.receiver_manager.registry().await;
     let reg = reg_arc.read().await;
@@ -343,24 +352,29 @@ async fn persist_paired_receiver(state: &AppState, device_id: &str) -> Result<()
     let now = chrono::Utc::now().to_rfc3339();
     let caps_json = serde_json::to_string(&entry.capabilities).unwrap_or_else(|_| "{}".into());
 
-    if let Some(ref token) = entry.token {
-        let (ciphertext, nonce) = state
-            .receiver_credential_store
-            .encrypt_token(device_id, token)
-            .map_err(|e| format!("failed to encrypt token for {device_id}: {e}"))?;
+    let token = entry
+        .token
+        .as_ref()
+        .ok_or_else(|| "receiver token missing for paired receiver".to_string())?;
 
-        let cred = michi_db::PersistedReceiverCredential {
-            receiver_id: device_id.to_string(),
-            ciphertext,
-            nonce,
-            version: 1,
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        };
-        michi_db::save_receiver_credential_db(&state.db, &cred)
-            .await
-            .map_err(|e| format!("failed to persist credential for {device_id}: {e}"))?;
-    }
+    let store = state
+        .receiver_credential_store
+        .as_ref()
+        .as_ref()
+        .ok_or_else(|| "CREDENTIAL_STORE_UNAVAILABLE: encryption key is unavailable".to_string())?;
+
+    let (ciphertext, nonce) = store
+        .encrypt_token(device_id, token)
+        .map_err(|e| format!("failed to encrypt token for {device_id}: {e}"))?;
+
+    let cred = michi_db::PersistedReceiverCredential {
+        receiver_id: device_id.to_string(),
+        ciphertext,
+        nonce,
+        version: 1,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
 
     let prec = michi_db::PersistedReceiver {
         id: device_id.to_string(),
@@ -375,9 +389,12 @@ async fn persist_paired_receiver(state: &AppState, device_id: &str) -> Result<()
         created_at: now.clone(),
         updated_at: now,
     };
-    michi_db::upsert_receiver_db(&state.db, &prec)
+
+    michi_db::persist_paired_receiver_transaction(&state.db, &prec, &cred)
         .await
-        .map_err(|e| format!("failed to persist receiver record for {device_id}: {e}"))?;
+        .map_err(|e| {
+            format!("failed to persist receiver record and credential for {device_id}: {e}")
+        })?;
 
     Ok(())
 }
@@ -386,6 +403,14 @@ pub async fn receiver_pair_confirm_handler(
     State(state): State<AppState>,
     Json(body): Json<ReceiverPairConfirmBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.receiver_credential_store.is_none() {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "CREDENTIAL_STORE_UNAVAILABLE",
+            "Receiver credential store is unavailable",
+        ));
+    }
+
     if body.pin.trim().is_empty() {
         return Err(v1_error_code(
             StatusCode::BAD_REQUEST,
@@ -406,6 +431,7 @@ pub async fn receiver_pair_confirm_handler(
             }))),
             Err(e) => {
                 tracing::error!("pairing confirmed but persistence failed: {}", e);
+                rollback_pairing(&state, &device_id).await;
                 Err(v1_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "PERSISTENCE_FAILED",
@@ -428,6 +454,14 @@ pub async fn discover_receiver_handler(
     State(state): State<AppState>,
     Json(body): Json<DiscoverReceiverBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.receiver_credential_store.is_none() {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "CREDENTIAL_STORE_UNAVAILABLE",
+            "Receiver credential store is unavailable",
+        ));
+    }
+
     let initiator_id = body
         .initiator_id
         .unwrap_or_else(|| "michi-micro-server".into());
@@ -453,6 +487,7 @@ pub async fn discover_receiver_handler(
             }))),
             Err(e) => {
                 tracing::error!("discovery pairing confirmed but persistence failed: {}", e);
+                rollback_pairing(&state, &device_id).await;
                 Err(v1_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "PERSISTENCE_FAILED",
@@ -460,7 +495,11 @@ pub async fn discover_receiver_handler(
                 ))
             }
         },
-        Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "DISCOVERY_FAILED", &e)),
+        Err(e) => Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "DISCOVER_PAIR_FAILED",
+            &e,
+        )),
     }
 }
 

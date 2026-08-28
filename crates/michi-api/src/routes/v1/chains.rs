@@ -263,37 +263,23 @@ pub async fn play_chain_handler(
         futures_util::FutureExt::now_or_never(state.playback_state.read()).and_then(|g| g.track_id)
     });
 
-    let track_opt = if let Some(tid) = track_id_opt {
-        michi_db::get_track(&state.db, &tid).await.map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "DATABASE_ERROR",
-                &e.to_string(),
-            )
-        })?
-    } else {
-        None
-    };
+    let tid = track_id_opt.ok_or_else(|| {
+        v1_error(
+            StatusCode::CONFLICT,
+            "NO_TRACK_SELECTED",
+            "chain does not have a configured track; select a track first",
+        )
+    })?;
 
-    let track = match track_opt {
-        Some(t) => t,
-        None => {
-            let all = michi_db::list_tracks(&state.db).await.map_err(|e| {
-                v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "DATABASE_ERROR",
-                    &e.to_string(),
-                )
-            })?;
-            all.into_iter().next().ok_or_else(|| {
-                v1_error(
-                    StatusCode::NOT_FOUND,
-                    "TRACK_NOT_FOUND",
-                    "no tracks available for playback",
-                )
-            })?
-        }
-    };
+    use michi_playback::TrackResolver;
+    let resolver = michi_playback::SqliteTrackResolver::new(
+        state.db.clone(),
+        state.config.music_paths.clone(),
+    );
+    let track = resolver
+        .get_track(tid)
+        .await
+        .map_err(|e| v1_error(StatusCode::NOT_FOUND, e.error_code(), &e.to_string()))?;
 
     state
         .playback_engine
@@ -338,6 +324,8 @@ pub async fn stop_chain_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let _ = state.playback_engine.stop().await;
+
     let links = michi_db::get_chain_links(&state.db, &id)
         .await
         .map_err(|e| {

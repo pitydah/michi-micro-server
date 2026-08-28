@@ -39,7 +39,7 @@ fn test_config_with_url(db_url: String) -> Config {
 
     Config {
         port: 9090,
-        music_paths: vec![tmp.join("music")],
+        music_paths: vec![std::env::temp_dir()],
         config_path: tmp.join("config"),
         cache_path: tmp.join("cache"),
         database_url: db_url,
@@ -133,7 +133,39 @@ async fn body_json(res: Response) -> Value {
     serde_json::from_slice(&bytes).unwrap_or(Value::Null)
 }
 
+fn generate_test_wav(path: &std::path::Path, duration_secs: u32) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let sample_rate = 48000u32;
+    let num_samples = sample_rate * duration_secs * 2;
+    let data_len = num_samples * 2;
+    let mut header = Vec::new();
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&(data_len + 36).to_le_bytes());
+    header.extend_from_slice(b"WAVE");
+    header.extend_from_slice(b"fmt ");
+    header.extend_from_slice(&16u32.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&2u16.to_le_bytes());
+    header.extend_from_slice(&sample_rate.to_le_bytes());
+    header.extend_from_slice(&(sample_rate * 4).to_le_bytes());
+    header.extend_from_slice(&4u16.to_le_bytes());
+    header.extend_from_slice(&16u16.to_le_bytes());
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&data_len.to_le_bytes());
+
+    let mut file = std::fs::File::create(path).unwrap();
+    std::io::Write::write_all(&mut file, &header).unwrap();
+    let silence = vec![0u8; data_len as usize];
+    std::io::Write::write_all(&mut file, &silence).unwrap();
+}
+
 async fn seed_track(pool: &SqlitePool, path_str: &str, title: &str) -> Track {
+    let temp_file = std::env::temp_dir().join(format!("michi-test-track-{}.wav", Uuid::new_v4()));
+    generate_test_wav(&temp_file, 2);
+    let resolved_path = temp_file.to_string_lossy().to_string();
+
     let track = Track {
         id: track_id_from_path(path_str),
         title: Some(title.to_string()),
@@ -141,8 +173,8 @@ async fn seed_track(pool: &SqlitePool, path_str: &str, title: &str) -> Track {
         album: Some("Test Album".to_string()),
         album_artist: None,
         duration_ms: Some(180_000),
-        file_path: path_str.to_string(),
-        format: AudioFormat::Flac,
+        file_path: resolved_path,
+        format: AudioFormat::Wav,
         sample_rate: Some(48000),
         bit_depth: Some(16),
         channels: Some(2),
@@ -1442,11 +1474,49 @@ async fn test_three_way_integration_e2e_flow() {
     assert!(!device_token.is_empty());
 
     // 5. Register an active receiver endpoint into Micro Server
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let receiver_app = axum::Router::new().route(
+        "/api/v1/receiver-lite/session",
+        axum::routing::post(
+            |axum::Json(payload): axum::Json<serde_json::Value>| async move {
+                let ssrc = payload
+                    .get("ssrc")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(12345) as u32;
+                (
+                    axum::http::StatusCode::CREATED,
+                    axum::Json(serde_json::json!({
+                        "session_id": Uuid::new_v4().to_string(),
+                        "session_token": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ",
+                        "lease_seconds": 30,
+                        "effective": {
+                            "transport": "rtp_udp",
+                            "codec": "pcm_s16le",
+                            "sample_rate": 48000,
+                            "bit_depth": 16,
+                            "channels": 2,
+                            "packet_ms": 10,
+                            "buffer_ms": 200,
+                            "payload_type": 97,
+                            "ssrc": ssrc,
+                            "stream_port": 50004,
+                            "volume": 80,
+                        }
+                    })),
+                )
+            },
+        ),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, receiver_app).await;
+    });
+
     let reg_entry = michi_receivers::ReceiverRegistryEntry {
         receiver_id: "stream-living-room".to_string(),
         name: "Living Room Speaker".to_string(),
         device_type: "michi_stream_standard".to_string(),
-        base_url: "http://127.0.0.1:8080".to_string(),
+        base_url: format!("http://127.0.0.1:{port}"),
         paired: true,
         token: Some("dummy_token".to_string()),
         last_seen: Some(chrono::Utc::now()),

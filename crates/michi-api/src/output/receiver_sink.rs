@@ -99,12 +99,6 @@ impl AudioSink for ReceiverAudioSink {
                     debug!("started receiver session for {}", self.receiver_id);
                 }
                 Err(e) => {
-                    if cfg!(test) || std::env::var("CARGO_MANIFEST_DIR").is_ok() {
-                        debug!("receiver session start skipped in test environment: {}", e);
-                        self.state = SinkState::Ready;
-                        self.last_error = None;
-                        return Ok(());
-                    }
                     self.state = SinkState::Failed;
                     self.last_error = Some(e.clone());
                     return Err(PlaybackError::PlaybackFailed(format!(

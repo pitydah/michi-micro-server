@@ -1,5 +1,6 @@
 use axum::{body::Body, extract::State, http::StatusCode, response::Response, Json};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::AppState;
 
@@ -740,6 +741,23 @@ pub async fn mount_health_handler(
     })))
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ManifestFileEntry {
+    pub path: String,
+    pub role: String,
+    pub size: u64,
+    pub blake3: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ManifestV2 {
+    pub version: u32,
+    pub exported_at: String,
+    pub server_id: String,
+    pub config_port: u16,
+    pub files: Vec<ManifestFileEntry>,
+}
+
 pub async fn backup_bundle_handler(
     State(state): State<AppState>,
 ) -> Result<Response<Body>, (StatusCode, Json<serde_json::Value>)> {
@@ -755,69 +773,125 @@ pub async fn backup_bundle_handler(
         )
     })?;
 
-    let settings = serde_json::json!({
-        "version": 2,
-        "exported_at": chrono::Utc::now().to_rfc3339(),
-        "server_id": state.server_id(),
-        "config_port": state.config.port(),
-    });
-    std::fs::write(
-        temp_dir.join("manifest.json"),
-        serde_json::to_string_pretty(&settings).map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "SERIALIZE",
-                &e.to_string(),
-            )
-        })?,
+    // 1. Write full logical backup.json
+    let tracks = michi_db::list_tracks(&state.db).await.unwrap_or_default();
+    let playlists_raw = michi_db::list_playlists(&state.db, None)
+        .await
+        .unwrap_or_default();
+    let mut playlists = Vec::with_capacity(playlists_raw.len());
+    for pl in &playlists_raw {
+        let track_rows = michi_db::get_playlist_tracks(&state.db, &pl.id)
+            .await
+            .unwrap_or_default();
+        let mut pl_tracks = Vec::with_capacity(track_rows.len());
+        for pt in &track_rows {
+            if let Some(track) = michi_db::get_track(&state.db, &pt.0.track_id)
+                .await
+                .unwrap_or(None)
+            {
+                pl_tracks.push(track);
+            }
+        }
+        playlists.push(BackupPlaylist {
+            name: pl.name.clone(),
+            description: pl.description.clone(),
+            tracks: pl_tracks,
+        });
+    }
+    let starred_tracks = michi_db::get_starred_tracks(&state.db)
+        .await
+        .unwrap_or_default();
+    let play_history_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT track_id, played_at FROM play_history ORDER BY played_at DESC LIMIT 10000",
     )
-    .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let play_history: Vec<BackupHistoryEntry> = play_history_rows
+        .into_iter()
+        .map(|(track_id, played_at)| {
+            let timestamp = played_at.clone();
+            BackupHistoryEntry {
+                track_id,
+                played_at,
+                timestamp,
+            }
+        })
+        .collect();
 
+    let backup_payload = BackupPayload {
+        version: 2,
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        tracks,
+        playlists,
+        starred_tracks,
+        play_history,
+        server_id: state.server_id().to_string(),
+        server_name: state.config.sync_name.clone(),
+    };
+    let backup_bytes = serde_json::to_vec_pretty(&backup_payload).unwrap_or_default();
+    let backup_file = temp_dir.join("backup.json");
+    std::fs::write(&backup_file, &backup_bytes)
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
+
+    // 2. Write config.json
     let config_json = serde_json::json!({
         "port": state.config.port(),
         "database_url": state.config.database_url,
         "config_path": state.config.config_path.display().to_string(),
         "cache_path": state.config.cache_path.display().to_string(),
     });
-    std::fs::write(
-        temp_dir.join("config.json"),
-        serde_json::to_string_pretty(&config_json).map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "SERIALIZE",
-                &e.to_string(),
-            )
-        })?,
-    )
-    .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
+    let config_bytes = serde_json::to_vec_pretty(&config_json).unwrap_or_default();
+    let config_file = temp_dir.join("config.json");
+    std::fs::write(&config_file, &config_bytes)
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
 
+    // 3. Write checksums.json
     let mut checksums = serde_json::Map::new();
-    for entry in std::fs::read_dir(&temp_dir).map_err(|e| {
-        v1_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "READ_DIR",
-            &e.to_string(),
-        )
-    })? {
-        let entry = entry
-            .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "ENTRY", &e.to_string()))?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        let data = std::fs::read(entry.path())
-            .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "READ", &e.to_string()))?;
-        let hash = blake3::hash(&data);
-        checksums.insert(name, serde_json::Value::String(hash.to_hex().to_string()));
-    }
-    std::fs::write(
-        temp_dir.join("checksums.json"),
-        serde_json::to_string_pretty(&checksums).unwrap(),
-    )
-    .map_err(|e| {
-        v1_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "WRITE_CHECKSUMS",
-            &e.to_string(),
-        )
-    })?;
+    checksums.insert(
+        "backup.json".to_string(),
+        serde_json::Value::String(blake3::hash(&backup_bytes).to_hex().to_string()),
+    );
+    checksums.insert(
+        "config.json".to_string(),
+        serde_json::Value::String(blake3::hash(&config_bytes).to_hex().to_string()),
+    );
+    let checksums_bytes = serde_json::to_vec_pretty(&checksums).unwrap_or_default();
+    let checksums_file = temp_dir.join("checksums.json");
+    std::fs::write(&checksums_file, &checksums_bytes)
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
+
+    // 4. Build manifest.json (v2 with file hashes)
+    let manifest = ManifestV2 {
+        version: 2,
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        server_id: state.server_id().to_string(),
+        config_port: state.config.port(),
+        files: vec![
+            ManifestFileEntry {
+                path: "backup.json".to_string(),
+                role: "logical_backup".to_string(),
+                size: backup_bytes.len() as u64,
+                blake3: blake3::hash(&backup_bytes).to_hex().to_string(),
+            },
+            ManifestFileEntry {
+                path: "config.json".to_string(),
+                role: "config".to_string(),
+                size: config_bytes.len() as u64,
+                blake3: blake3::hash(&config_bytes).to_hex().to_string(),
+            },
+            ManifestFileEntry {
+                path: "checksums.json".to_string(),
+                role: "checksums".to_string(),
+                size: checksums_bytes.len() as u64,
+                blake3: blake3::hash(&checksums_bytes).to_hex().to_string(),
+            },
+        ],
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap_or_default();
+    let manifest_file = temp_dir.join("manifest.json");
+    std::fs::write(&manifest_file, &manifest_bytes)
+        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
 
     let file = std::fs::File::create(&bundle_path)
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "CREATE", &e.to_string()))?;
@@ -881,6 +955,278 @@ pub async fn backup_bundle_handler(
                 &e.to_string(),
             )
         })
+}
+
+pub async fn restore_backup_bundle_handler(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if body.is_empty() {
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "EMPTY_ARCHIVE",
+            "Uploaded bundle is empty",
+        ));
+    }
+
+    let temp_dir = std::env::temp_dir().join(format!("michi-restore-bundle-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "TEMP_DIR",
+            &e.to_string(),
+        )
+    })?;
+
+    // Safe extraction
+    let gz = flate2::read::GzDecoder::new(std::io::Cursor::new(body));
+    let mut archive = tar::Archive::new(gz);
+
+    let mut extracted_files = std::collections::HashMap::new();
+    let entries = archive.entries().map_err(|e| {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        v1_error(
+            StatusCode::BAD_REQUEST,
+            "CORRUPT_ARCHIVE",
+            &format!("Failed to read tar.gz entries: {e}"),
+        )
+    })?;
+
+    for entry in entries {
+        let mut entry = entry.map_err(|e| {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            v1_error(
+                StatusCode::BAD_REQUEST,
+                "CORRUPT_ENTRY",
+                &format!("Tar entry read failure: {e}"),
+            )
+        })?;
+
+        let path = entry.path().map_err(|e| {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            v1_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_PATH",
+                &format!("Invalid path in archive: {e}"),
+            )
+        })?;
+
+        let path_str = path.to_string_lossy().to_string();
+        if path_str.contains("..") || path_str.starts_with('/') {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "PATH_TRAVERSAL",
+                "Archive contains illegal path traversal components",
+            ));
+        }
+
+        let mut content = Vec::new();
+        use std::io::Read;
+        entry.read_to_end(&mut content).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            v1_error(
+                StatusCode::BAD_REQUEST,
+                "READ_FAILURE",
+                &format!("Failed to read content from {path_str}: {e}"),
+            )
+        })?;
+
+        extracted_files.insert(path_str, content);
+    }
+
+    let manifest_bytes = extracted_files.get("manifest.json").ok_or_else(|| {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        v1_error(
+            StatusCode::BAD_REQUEST,
+            "MISSING_MANIFEST",
+            "Archive does not contain manifest.json",
+        )
+    })?;
+
+    let manifest: ManifestV2 = serde_json::from_slice(manifest_bytes).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        v1_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_MANIFEST",
+            &format!("manifest.json schema error: {e}"),
+        )
+    })?;
+
+    if manifest.version != 2 {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "UNSUPPORTED_VERSION",
+            &format!(
+                "Bundle manifest version {} is not supported (expected 2)",
+                manifest.version
+            ),
+        ));
+    }
+
+    // P1-08 Functional Truth: Validate every declared file exists, matches size, and BLAKE3 hash
+    for file_entry in &manifest.files {
+        let content = extracted_files.get(&file_entry.path).ok_or_else(|| {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            v1_error(
+                StatusCode::BAD_REQUEST,
+                "MISSING_BUNDLE_FILE",
+                &format!(
+                    "File '{}' declared in manifest is missing from archive",
+                    file_entry.path
+                ),
+            )
+        })?;
+
+        if (content.len() as u64) != file_entry.size {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "SIZE_MISMATCH",
+                &format!(
+                    "File '{}' size mismatch: declared {}, actual {}",
+                    file_entry.path,
+                    file_entry.size,
+                    content.len()
+                ),
+            ));
+        }
+
+        let actual_hash = blake3::hash(content).to_hex().to_string();
+        if actual_hash != file_entry.blake3 {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "INTEGRITY_CHECKSUM_FAILED",
+                &format!(
+                    "BLAKE3 hash mismatch for '{}': declared {}, actual {}",
+                    file_entry.path, file_entry.blake3, actual_hash
+                ),
+            ));
+        }
+    }
+
+    let backup_bytes = extracted_files.get("backup.json").ok_or_else(|| {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        v1_error(
+            StatusCode::BAD_REQUEST,
+            "MISSING_BACKUP_JSON",
+            "Archive does not contain logical backup.json",
+        )
+    })?;
+
+    let restore_payload: RestoreBody = serde_json::from_slice(backup_bytes).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        v1_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_BACKUP_JSON",
+            &format!("backup.json validation failure: {e}"),
+        )
+    })?;
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    // Perform database restore inside transaction
+    let mut tx = state.db.begin().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    sqlx::query("DELETE FROM playlist_tracks")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+    sqlx::query("DELETE FROM playlists")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+    sqlx::query("DELETE FROM play_history")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+    michi_db::delete_all_tracks_tx(&mut tx).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    let mut restored_tracks = 0;
+    for track in &restore_payload.tracks {
+        michi_db::upsert_track_tx(&mut tx, track)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
+        restored_tracks += 1;
+    }
+
+    let mut restored_playlists = 0;
+    for pl in &restore_payload.playlists {
+        let playlist = michi_db::create_playlist_tx(
+            &mut tx,
+            &michi_core::PlaylistCreate {
+                name: pl.name.clone(),
+                description: pl.description.clone(),
+            },
+            None,
+        )
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+        for track in &pl.tracks {
+            let _ = michi_db::add_track_to_playlist_tx(&mut tx, &playlist.id, &track.id).await;
+        }
+        restored_playlists += 1;
+    }
+
+    tx.commit().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "restored",
+        "version": 2,
+        "tracks_restored": restored_tracks,
+        "playlists_restored": restored_playlists,
+    })))
 }
 
 /// Spawns a background integrity check every 24h

@@ -151,6 +151,7 @@ pub struct PlaybackOutputDescription {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EngineSnapshot {
     pub lifecycle: PlaybackLifecycle,
+    pub generation_id: u64,
     pub track_id: Option<Uuid>,
     pub current_track: Option<Track>,
     pub position_ms: u64,
@@ -160,6 +161,9 @@ pub struct EngineSnapshot {
     pub repeat: RepeatMode,
     pub output: Option<PlaybackOutputDescription>,
     pub sinks: Vec<SinkSnapshot>,
+    pub track_bytes_decoded: u64,
+    pub track_pcm_timeline_bytes: u64,
+    pub network_bytes_sent_total: u64,
     pub bytes_decoded: u64,
     pub bytes_delivered: u64,
     pub output_health: String,
@@ -171,6 +175,7 @@ impl Default for EngineSnapshot {
     fn default() -> Self {
         Self {
             lifecycle: PlaybackLifecycle::Idle,
+            generation_id: 0,
             track_id: None,
             current_track: None,
             position_ms: 0,
@@ -180,6 +185,9 @@ impl Default for EngineSnapshot {
             repeat: RepeatMode::Off,
             output: None,
             sinks: Vec::new(),
+            track_bytes_decoded: 0,
+            track_pcm_timeline_bytes: 0,
+            network_bytes_sent_total: 0,
             bytes_decoded: 0,
             bytes_delivered: 0,
             output_health: "none".to_string(),
@@ -201,6 +209,15 @@ pub enum EngineCommand {
         sinks: Vec<Box<dyn AudioSink>>,
         output_desc: PlaybackOutputDescription,
         position_ms: u64,
+        respond_to: oneshot::Sender<Result<(), PlaybackError>>,
+    },
+    LoadTrack {
+        track: Box<Track>,
+        position_ms: u64,
+        respond_to: oneshot::Sender<Result<(), PlaybackError>>,
+    },
+    JumpToIndex {
+        index: usize,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     Pause {
@@ -237,6 +254,7 @@ pub enum EngineCommand {
     SetQueue {
         tracks: Vec<Track>,
         current_index: usize,
+        current_track_id: Option<Uuid>,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     GetSnapshot {
