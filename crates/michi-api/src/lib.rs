@@ -95,6 +95,7 @@ impl AppState {
 
     pub async fn shutdown_and_wait(&self, timeout: Duration) {
         self.shutdown_token.cancel();
+        self.playback_engine.shutdown().await;
         let handles: Vec<tokio::task::JoinHandle<()>> =
             std::mem::take(&mut *self.task_handles.lock().unwrap());
         for handle in handles {
@@ -103,7 +104,9 @@ impl AppState {
     }
 
     pub async fn bootstrap_runtime(&self) -> Result<(), String> {
-        tracing::info!("bootstrapping runtime: loading persisted receivers and restoring credentials");
+        tracing::info!(
+            "bootstrapping runtime: loading persisted receivers and restoring credentials"
+        );
         match michi_db::list_receivers_db(&self.db).await {
             Ok(persisted_list) => {
                 let registry_arc = self.receiver_manager.registry().await;
@@ -176,7 +179,10 @@ impl AppState {
                     registry.add(entry);
                     restored_count += 1;
                 }
-                tracing::info!("restored {} persisted receivers into registry", restored_count);
+                tracing::info!(
+                    "restored {} persisted receivers into registry",
+                    restored_count
+                );
             }
             Err(e) => {
                 tracing::warn!("failed to list persisted receivers from DB: {}", e);
@@ -267,19 +273,17 @@ impl AppState {
             michi_receivers::ReceiverCredentialStore::load_or_create_key(&cred_key_path)
                 .unwrap_or_else(|e| {
                     tracing::warn!(
-                        "failed to load receiver credentials key from {:?}: {}; using ephemeral fallback",
+                        "failed to load receiver credentials key from {:?}: {}; using ephemeral CSPRNG fallback",
                         cred_key_path,
                         e
                     );
-                    michi_receivers::ReceiverCredentialStore::new([0u8; 32])
+                    michi_receivers::ReceiverCredentialStore::random()
                 }),
         );
 
         let resolver = Arc::new(michi_playback::SqliteTrackResolver::new(db.clone()));
-        let (playback_engine, engine_join) = michi_playback::spawn_playback_engine(
-            resolver,
-            michi_playback::PcmFormat::default(),
-        );
+        let (playback_engine, engine_join) =
+            michi_playback::spawn_playback_engine(resolver, michi_playback::PcmFormat::default());
         task_handles.lock().unwrap().push(engine_join);
 
         let playback_output_selection = Arc::new(RwLock::new(None));

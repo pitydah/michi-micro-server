@@ -134,7 +134,9 @@ pub struct SinkSnapshot {
     pub sink_id: String,
     pub kind: SinkKind,
     pub state: SinkState,
-    pub bytes_written: u64,
+    pub bytes_received: u64,
+    pub bytes_sent_to_transport: u64,
+    pub muted: bool,
     pub last_error: Option<String>,
 }
 
@@ -160,6 +162,7 @@ pub struct EngineSnapshot {
     pub sinks: Vec<SinkSnapshot>,
     pub bytes_decoded: u64,
     pub bytes_delivered: u64,
+    pub output_health: String,
     pub last_error: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
@@ -179,6 +182,7 @@ impl Default for EngineSnapshot {
             sinks: Vec::new(),
             bytes_decoded: 0,
             bytes_delivered: 0,
+            output_health: "none".to_string(),
             last_error: None,
             updated_at: Utc::now(),
         }

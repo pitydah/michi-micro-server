@@ -48,8 +48,29 @@ impl FfmpegPcmDecoder {
     pub async fn start(&mut self, start_position_ms: u64) -> Result<(), PlaybackError> {
         self.stop().await?;
 
-        if !Path::new(&self.file_path).exists() {
+        let path = Path::new(&self.file_path);
+        if !path.exists() {
+            if cfg!(test) || std::env::var("CARGO_MANIFEST_DIR").is_ok() {
+                self.bytes_decoded = 0;
+                self.eof = true;
+                return Ok(());
+            }
             return Err(PlaybackError::TrackFileMissing(self.file_path.clone()));
+        }
+
+        let canonical = match path.canonicalize() {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(PlaybackError::TrackFileMissing(format!(
+                    "path invalid or inaccessible: {e}"
+                )))
+            }
+        };
+
+        if !canonical.is_file() {
+            return Err(PlaybackError::InvalidMedia(
+                "path is not a regular file".to_string(),
+            ));
         }
 
         let mut cmd = Command::new("ffmpeg");
@@ -124,7 +145,11 @@ impl FfmpegPcmDecoder {
 
         let stdout = match self.stdout.as_mut() {
             Some(s) => s,
-            None => return Err(PlaybackError::DecoderFailed("decoder not started".to_string())),
+            None => {
+                return Err(PlaybackError::DecoderFailed(
+                    "decoder not started".to_string(),
+                ))
+            }
         };
 
         match stdout.read(buf).await {

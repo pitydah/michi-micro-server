@@ -23,6 +23,8 @@ pub struct PlaybackEngine {
     current_track: Option<Track>,
     queue: Vec<Track>,
     queue_index: usize,
+    play_order: Vec<usize>,
+    play_order_pos: usize,
     base_position_ms: u64,
     playing_started_at: Option<Instant>,
     volume: u8,
@@ -33,6 +35,7 @@ pub struct PlaybackEngine {
     decoder: Option<FfmpegPcmDecoder>,
     bytes_decoded: u64,
     bytes_delivered: u64,
+    output_health: String,
     last_error: Option<String>,
 }
 
@@ -50,6 +53,8 @@ impl PlaybackEngine {
             current_track: None,
             queue: Vec::new(),
             queue_index: 0,
+            play_order: Vec::new(),
+            play_order_pos: 0,
             base_position_ms: 0,
             playing_started_at: None,
             volume: 80,
@@ -60,6 +65,7 @@ impl PlaybackEngine {
             decoder: None,
             bytes_decoded: 0,
             bytes_delivered: 0,
+            output_health: "none".to_string(),
             last_error: None,
         }
     }
@@ -68,15 +74,35 @@ impl PlaybackEngine {
         &self.resolver
     }
 
+    fn recompute_play_order(&mut self, current_idx: usize) {
+        if self.queue.is_empty() {
+            self.play_order = Vec::new();
+            self.play_order_pos = 0;
+            return;
+        }
+
+        if self.shuffle {
+            use rand::seq::SliceRandom;
+            let mut order: Vec<usize> = (0..self.queue.len()).collect();
+            let mut rng = rand::thread_rng();
+            order.shuffle(&mut rng);
+            if let Some(pos) = order.iter().position(|&x| x == current_idx) {
+                order.swap(0, pos);
+            }
+            self.play_order = order;
+            self.play_order_pos = 0;
+        } else {
+            self.play_order = (0..self.queue.len()).collect();
+            self.play_order_pos = current_idx.min(self.queue.len().saturating_sub(1));
+        }
+    }
+
     pub fn snapshot(&self) -> EngineSnapshot {
         let mut pos = self.base_position_ms;
         if let Some(started) = self.playing_started_at {
             pos += started.elapsed().as_millis() as u64;
         }
-        let duration_ms = self
-            .current_track
-            .as_ref()
-            .and_then(|t| t.duration_ms);
+        let duration_ms = self.current_track.as_ref().and_then(|t| t.duration_ms);
 
         let sinks = self.sinks.iter().map(|s| s.snapshot()).collect();
 
@@ -93,6 +119,7 @@ impl PlaybackEngine {
             sinks,
             bytes_decoded: self.bytes_decoded,
             bytes_delivered: self.bytes_delivered,
+            output_health: self.output_health.clone(),
             last_error: self.last_error.clone(),
             updated_at: Utc::now(),
         }
@@ -100,7 +127,6 @@ impl PlaybackEngine {
 
     pub async fn run(mut self) {
         info!("playback engine task started");
-        // 1920 bytes = 10ms at 48000 Hz, 16-bit, stereo
         let chunk_size = self.format.bytes_for_duration_ms(10).max(1920);
         let mut pcm_buf = vec![0u8; chunk_size];
 
@@ -157,7 +183,6 @@ impl PlaybackEngine {
 
         match decoder.read_pcm(pcm_buf).await {
             Ok(0) => {
-                // EOF reached
                 info!("decoder reached EOF on current track");
                 self.handle_eof().await;
             }
@@ -165,25 +190,33 @@ impl PlaybackEngine {
                 self.bytes_decoded += n as u64;
                 let chunk = &pcm_buf[..n];
 
-                // Deliver concurrently to all sinks
-                let mut failed_indices = Vec::new();
-                let mut delivered_bytes = 0usize;
+                // Concurrent fan-out delivery to all active sinks
+                let mut write_futs = Vec::with_capacity(self.sinks.len());
+                for sink in self.sinks.iter_mut() {
+                    write_futs.push(sink.write_pcm(chunk));
+                }
 
-                for (idx, sink) in self.sinks.iter_mut().enumerate() {
-                    match sink.write_pcm(chunk).await {
+                let results = futures_util::future::join_all(write_futs).await;
+
+                let mut delivered_bytes = 0usize;
+                let mut failed_count = 0usize;
+
+                for (idx, res) in results.into_iter().enumerate() {
+                    match res {
                         Ok(written) => {
                             delivered_bytes += written;
                         }
                         Err(e) => {
-                            warn!("sink {} write error: {}", sink.id(), e);
-                            failed_indices.push(idx);
+                            warn!("sink {} write error: {}", self.sinks[idx].id(), e);
+                            failed_count += 1;
                         }
                     }
                 }
 
-                if !self.sinks.is_empty() && failed_indices.len() == self.sinks.len() {
+                if !self.sinks.is_empty() && failed_count == self.sinks.len() {
                     error!("all output sinks failed during playback");
                     self.state = PlaybackLifecycle::Failed;
+                    self.output_health = "failed".to_string();
                     self.last_error = Some("all output sinks failed".to_string());
                     if let Some(mut d) = self.decoder.take() {
                         let _ = d.stop().await;
@@ -194,17 +227,20 @@ impl PlaybackEngine {
 
                 self.bytes_delivered += delivered_bytes as u64;
 
-                if self.state == PlaybackLifecycle::Preparing
-                    || self.state == PlaybackLifecycle::Buffering
-                {
-                    self.state = PlaybackLifecycle::AudioFlowing;
-                }
+                if delivered_bytes > 0 {
+                    if self.state == PlaybackLifecycle::Preparing
+                        || self.state == PlaybackLifecycle::Buffering
+                    {
+                        self.state = PlaybackLifecycle::AudioFlowing;
+                    }
 
-                // If at least 100ms of PCM has been delivered, transition to Playing
-                if self.state == PlaybackLifecycle::AudioFlowing
-                    && self.bytes_delivered >= self.format.bytes_for_duration_ms(100) as u64
-                {
-                    self.state = PlaybackLifecycle::Playing;
+                    // Transition to Playing once >= 100ms PCM has been delivered
+                    if (self.state == PlaybackLifecycle::AudioFlowing
+                        || self.state == PlaybackLifecycle::Preparing)
+                        && self.bytes_delivered >= self.format.bytes_for_duration_ms(100) as u64
+                    {
+                        self.state = PlaybackLifecycle::Playing;
+                    }
                 }
             }
             Err(e) => {
@@ -236,7 +272,15 @@ impl PlaybackEngine {
             }
             RepeatMode::All => {
                 if !self.queue.is_empty() {
-                    self.queue_index = (self.queue_index + 1) % self.queue.len();
+                    if self.play_order_pos + 1 < self.play_order.len() {
+                        self.play_order_pos += 1;
+                    } else {
+                        if self.shuffle {
+                            self.recompute_play_order(self.queue_index);
+                        }
+                        self.play_order_pos = 0;
+                    }
+                    self.queue_index = self.play_order[self.play_order_pos];
                     let next_track = self.queue[self.queue_index].clone();
                     info!("queue advance (repeat all): track {}", next_track.id);
                     let _ = self.start_playback_internal(next_track, 0).await;
@@ -244,8 +288,9 @@ impl PlaybackEngine {
                 }
             }
             RepeatMode::Off => {
-                if !self.queue.is_empty() && self.queue_index + 1 < self.queue.len() {
-                    self.queue_index += 1;
+                if !self.queue.is_empty() && self.play_order_pos + 1 < self.play_order.len() {
+                    self.play_order_pos += 1;
+                    self.queue_index = self.play_order[self.play_order_pos];
                     let next_track = self.queue[self.queue_index].clone();
                     info!("queue advance: next track {}", next_track.id);
                     let _ = self.start_playback_internal(next_track, 0).await;
@@ -265,14 +310,40 @@ impl PlaybackEngine {
     ) -> Result<(), PlaybackError> {
         if self.sinks.is_empty() {
             self.state = PlaybackLifecycle::Failed;
+            self.output_health = "none".to_string();
             self.last_error = Some("no output sinks available".to_string());
             return Err(PlaybackError::NoOutputSelected);
         }
 
-        // Prepare sinks
-        for sink in self.sinks.iter_mut() {
-            sink.prepare(self.format).await?;
+        // Prepare sinks with partial failure tolerance
+        let mut prepared = Vec::new();
+        let total = self.sinks.len();
+
+        for mut sink in self.sinks.drain(..) {
+            match sink.prepare(self.format).await {
+                Ok(()) => prepared.push(sink),
+                Err(e) => {
+                    warn!("sink {} failed to prepare: {}", sink.id(), e);
+                }
+            }
         }
+
+        if prepared.is_empty() {
+            self.state = PlaybackLifecycle::Failed;
+            self.output_health = "failed".to_string();
+            self.last_error = Some("all output sinks failed to prepare".to_string());
+            return Err(PlaybackError::OutputUnavailable(
+                "none of the selected sinks are available".to_string(),
+            ));
+        }
+
+        self.output_health = if prepared.len() == total {
+            "healthy".to_string()
+        } else {
+            "partial".to_string()
+        };
+
+        self.sinks = prepared;
 
         let mut decoder = FfmpegPcmDecoder::new(track.file_path.clone(), self.format);
         decoder.start(position_ms).await?;
@@ -301,7 +372,6 @@ impl PlaybackEngine {
                     return true;
                 }
 
-                // Stop any previous playback
                 self.cleanup_playback().await;
 
                 self.sinks = sinks;
@@ -397,14 +467,19 @@ impl PlaybackEngine {
                 true
             }
             EngineCommand::Next { respond_to } => {
-                if !self.queue.is_empty() && self.queue_index + 1 < self.queue.len() {
-                    self.queue_index += 1;
+                if !self.queue.is_empty() && self.play_order_pos + 1 < self.play_order.len() {
+                    self.play_order_pos += 1;
+                    self.queue_index = self.play_order[self.play_order_pos];
                     let next_track = self.queue[self.queue_index].clone();
                     let res = self.start_playback_internal(next_track, 0).await;
                     let _ = respond_to.send(res);
                 } else if self.repeat == RepeatMode::All && !self.queue.is_empty() {
-                    self.queue_index = 0;
-                    let next_track = self.queue[0].clone();
+                    if self.shuffle {
+                        self.recompute_play_order(self.queue_index);
+                    }
+                    self.play_order_pos = 0;
+                    self.queue_index = self.play_order[0];
+                    let next_track = self.queue[self.queue_index].clone();
                     let res = self.start_playback_internal(next_track, 0).await;
                     let _ = respond_to.send(res);
                 } else {
@@ -421,15 +496,15 @@ impl PlaybackEngine {
                         .map(|s| s.elapsed().as_millis() > 3000)
                         .unwrap_or(false)
                 {
-                    // Restart current track from beginning
                     if let Some(track) = self.current_track.clone() {
                         let res = self.start_playback_internal(track, 0).await;
                         let _ = respond_to.send(res);
                     } else {
                         let _ = respond_to.send(Ok(()));
                     }
-                } else if self.queue_index > 0 && !self.queue.is_empty() {
-                    self.queue_index -= 1;
+                } else if self.play_order_pos > 0 && !self.queue.is_empty() {
+                    self.play_order_pos -= 1;
+                    self.queue_index = self.play_order[self.play_order_pos];
                     let prev_track = self.queue[self.queue_index].clone();
                     let res = self.start_playback_internal(prev_track, 0).await;
                     let _ = respond_to.send(res);
@@ -461,6 +536,7 @@ impl PlaybackEngine {
                 respond_to,
             } => {
                 self.shuffle = shuffle;
+                self.recompute_play_order(self.queue_index);
                 let _ = respond_to.send(Ok(()));
                 true
             }
@@ -476,6 +552,7 @@ impl PlaybackEngine {
             } => {
                 self.queue = tracks;
                 self.queue_index = current_index;
+                self.recompute_play_order(current_index);
                 let _ = respond_to.send(Ok(()));
                 true
             }

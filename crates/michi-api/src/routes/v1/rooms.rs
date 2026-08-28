@@ -199,13 +199,7 @@ pub async fn room_play_handler(
     let selection = crate::output::PlaybackOutputSelection::RoomGroup { id: gid };
     let plan = crate::output::resolve_output(&selection, &state)
         .await
-        .map_err(|e| {
-            v1_error(
-                StatusCode::BAD_GATEWAY,
-                e.error_code(),
-                &e.to_string(),
-            )
-        })?;
+        .map_err(|e| v1_error(StatusCode::BAD_GATEWAY, e.error_code(), &e.to_string()))?;
 
     let pos_ms = body.position_ms.unwrap_or(0);
     state

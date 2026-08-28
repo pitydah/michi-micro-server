@@ -48,25 +48,29 @@ pub struct SpeakerGroup {
 pub async fn list_groups_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let groups = michi_db::list_room_groups_db(&state.db).await.map_err(|e| {
-        v1_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "DATABASE_ERROR",
-            &e.to_string(),
-        )
-    })?;
+    let groups = michi_db::list_room_groups_db(&state.db)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     let speaker_groups: Vec<_> = groups
         .into_iter()
-        .map(|(gid, name, _mode, receiver_ids, _vols, created_at)| SpeakerGroup {
-            id: gid.to_string(),
-            name,
-            receiver_ids,
-            created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
-                .ok()
-                .map(|d| d.with_timezone(&chrono::Utc))
-                .unwrap_or_else(chrono::Utc::now),
-        })
+        .map(
+            |(gid, name, _mode, receiver_ids, _vols, created_at)| SpeakerGroup {
+                id: gid.to_string(),
+                name,
+                receiver_ids,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .ok()
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(chrono::Utc::now),
+            },
+        )
         .collect();
 
     Ok(Json(serde_json::json!({ "groups": speaker_groups })))
@@ -134,13 +138,15 @@ pub async fn sync_group_handler(
     Path(group_id): Path<String>,
     Json(body): Json<SyncGroupBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let groups = michi_db::list_room_groups_db(&state.db).await.map_err(|e| {
-        v1_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "DATABASE_ERROR",
-            &e.to_string(),
-        )
-    })?;
+    let groups = michi_db::list_room_groups_db(&state.db)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     let found = groups
         .into_iter()
@@ -202,17 +208,13 @@ pub async fn sync_group_handler(
                 )
             })?;
     } else {
-        state
-            .playback_engine
-            .pause()
-            .await
-            .map_err(|e| {
-                v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    e.error_code(),
-                    &e.to_string(),
-                )
-            })?;
+        state.playback_engine.pause().await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                e.error_code(),
+                &e.to_string(),
+            )
+        })?;
     }
 
     *state.playback_output_selection.write().await = Some(selection);
@@ -332,46 +334,52 @@ pub async fn receiver_pair_start_handler(
     }
 }
 
-async fn persist_paired_receiver(state: &AppState, device_id: &str) {
+async fn persist_paired_receiver(state: &AppState, device_id: &str) -> Result<(), String> {
     let reg_arc = state.receiver_manager.registry().await;
     let reg = reg_arc.read().await;
-    if let Some(entry) = reg.get(device_id) {
-        let now = chrono::Utc::now().to_rfc3339();
-        let caps_json =
-            serde_json::to_string(&entry.capabilities).unwrap_or_else(|_| "{}".into());
+    let entry = reg
+        .get(device_id)
+        .ok_or_else(|| format!("receiver {device_id} not found in registry"))?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let caps_json = serde_json::to_string(&entry.capabilities).unwrap_or_else(|_| "{}".into());
 
-        if let Some(ref token) = entry.token {
-            if let Ok((ciphertext, nonce)) = state
-                .receiver_credential_store
-                .encrypt_token(device_id, token)
-            {
-                let cred = michi_db::PersistedReceiverCredential {
-                    receiver_id: device_id.to_string(),
-                    ciphertext,
-                    nonce,
-                    version: 1,
-                    created_at: now.clone(),
-                    updated_at: now.clone(),
-                };
-                let _ = michi_db::save_receiver_credential_db(&state.db, &cred).await;
-            }
-        }
+    if let Some(ref token) = entry.token {
+        let (ciphertext, nonce) = state
+            .receiver_credential_store
+            .encrypt_token(device_id, token)
+            .map_err(|e| format!("failed to encrypt token for {device_id}: {e}"))?;
 
-        let prec = michi_db::PersistedReceiver {
-            id: device_id.to_string(),
-            name: entry.name.clone(),
-            device_type: entry.device_type.clone(),
-            base_url: entry.base_url.clone(),
-            paired: entry.paired,
-            online: entry.last_seen.is_some(),
-            audio_capabilities: caps_json,
-            last_seen: entry.last_seen.map(|d| d.to_rfc3339()),
-            paired_at: Some(now.clone()),
+        let cred = michi_db::PersistedReceiverCredential {
+            receiver_id: device_id.to_string(),
+            ciphertext,
+            nonce,
+            version: 1,
             created_at: now.clone(),
-            updated_at: now,
+            updated_at: now.clone(),
         };
-        let _ = michi_db::upsert_receiver_db(&state.db, &prec).await;
+        michi_db::save_receiver_credential_db(&state.db, &cred)
+            .await
+            .map_err(|e| format!("failed to persist credential for {device_id}: {e}"))?;
     }
+
+    let prec = michi_db::PersistedReceiver {
+        id: device_id.to_string(),
+        name: entry.name.clone(),
+        device_type: entry.device_type.clone(),
+        base_url: entry.base_url.clone(),
+        paired: entry.paired,
+        online: entry.last_seen.is_some(),
+        audio_capabilities: caps_json,
+        last_seen: entry.last_seen.map(|d| d.to_rfc3339()),
+        paired_at: Some(now.clone()),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    michi_db::upsert_receiver_db(&state.db, &prec)
+        .await
+        .map_err(|e| format!("failed to persist receiver record for {device_id}: {e}"))?;
+
+    Ok(())
 }
 
 pub async fn receiver_pair_confirm_handler(
@@ -391,13 +399,20 @@ pub async fn receiver_pair_confirm_handler(
         .confirm_pairing(&body.pairing_id, &body.pin)
         .await
     {
-        Ok(device_id) => {
-            persist_paired_receiver(&state, &device_id).await;
-            Ok(Json(serde_json::json!({
+        Ok(device_id) => match persist_paired_receiver(&state, &device_id).await {
+            Ok(()) => Ok(Json(serde_json::json!({
                 "status": "paired",
                 "device_id": device_id,
-            })))
-        }
+            }))),
+            Err(e) => {
+                tracing::error!("pairing confirmed but persistence failed: {}", e);
+                Err(v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "PERSISTENCE_FAILED",
+                    &format!("pairing confirmed but persistence failed: {e}"),
+                ))
+            }
+        },
         Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "PAIR_CONFIRM_FAILED", &e)),
     }
 }
@@ -431,13 +446,20 @@ pub async fn discover_receiver_handler(
         .discover_and_pair(&body.base_url, &initiator_id, &pin)
         .await
     {
-        Ok(device_id) => {
-            persist_paired_receiver(&state, &device_id).await;
-            Ok(Json(serde_json::json!({
+        Ok(device_id) => match persist_paired_receiver(&state, &device_id).await {
+            Ok(()) => Ok(Json(serde_json::json!({
                 "status": "paired",
                 "device_id": device_id,
-            })))
-        }
+            }))),
+            Err(e) => {
+                tracing::error!("discovery pairing confirmed but persistence failed: {}", e);
+                Err(v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "PERSISTENCE_FAILED",
+                    &format!("discovery pairing confirmed but persistence failed: {e}"),
+                ))
+            }
+        },
         Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "DISCOVERY_FAILED", &e)),
     }
 }

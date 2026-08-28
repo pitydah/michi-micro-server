@@ -60,9 +60,7 @@ pub async fn resolve_output(
                 .await
                 .map_err(PlaybackError::Database)?;
 
-            let found = groups
-                .into_iter()
-                .find(|(gid, _, _, _, _, _)| gid == id);
+            let found = groups.into_iter().find(|(gid, _, _, _, _, _)| gid == id);
 
             let (group_id, group_name, _mode, receiver_ids, volumes, _created_at) =
                 found.ok_or_else(|| PlaybackError::OutputNotFound(id.to_string()))?;

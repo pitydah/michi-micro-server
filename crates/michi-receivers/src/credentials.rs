@@ -17,6 +17,12 @@ impl ReceiverCredentialStore {
         Self { key }
     }
 
+    pub fn random() -> Self {
+        let mut key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        Self { key }
+    }
+
     pub fn load_or_create_key(key_path: &Path) -> Result<Self, String> {
         if key_path.exists() {
             let mut file = File::open(key_path)
@@ -60,7 +66,10 @@ impl ReceiverCredentialStore {
                 file.flush().map_err(|e| e.to_string())?;
             }
 
-            info!("generated persistent receiver credential encryption key at {:?}", key_path);
+            info!(
+                "generated persistent receiver credential encryption key at {:?}",
+                key_path
+            );
             Ok(Self::new(key))
         }
     }
@@ -108,12 +117,13 @@ impl ReceiverCredentialStore {
             aad: receiver_id.as_bytes(),
         };
 
-        let decrypted = cipher
-            .decrypt(nonce, payload)
-            .map_err(|_| {
-                warn!("credential decryption authentication failed for receiver '{}'", receiver_id);
-                "credential decryption failed (MAC mismatch or wrong key)".to_string()
-            })?;
+        let decrypted = cipher.decrypt(nonce, payload).map_err(|_| {
+            warn!(
+                "credential decryption authentication failed for receiver '{}'",
+                receiver_id
+            );
+            "credential decryption failed (MAC mismatch or wrong key)".to_string()
+        })?;
 
         String::from_utf8(decrypted).map_err(|e| format!("invalid UTF-8 in decrypted token: {e}"))
     }

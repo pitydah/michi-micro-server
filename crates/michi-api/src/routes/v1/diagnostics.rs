@@ -336,7 +336,12 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
         }
     };
 
-    let playback = state.playback_state.read().await;
+    let snap = state.playback_engine.snapshot().await.unwrap_or_default();
+    let engine_playing = matches!(
+        snap.lifecycle,
+        michi_playback::PlaybackLifecycle::AudioFlowing
+            | michi_playback::PlaybackLifecycle::Playing
+    );
 
     let total_queues: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM queues")
         .fetch_one(&state.db)
@@ -420,10 +425,10 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
             size_bytes: staging_size,
         },
         playback: PlaybackStatus {
-            track_id: playback.track_id.map(|i| i.to_string()),
-            playing: playback.playing,
-            position_ms: playback.position_ms,
-            volume: (playback.volume * 100.0) as u32,
+            track_id: snap.track_id.map(|i| i.to_string()),
+            playing: engine_playing,
+            position_ms: snap.position_ms,
+            volume: snap.volume as u32,
             restored: playback_restored,
             has_queue: total_queues > 0,
         },

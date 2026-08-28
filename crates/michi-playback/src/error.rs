@@ -24,6 +24,9 @@ pub enum PlaybackError {
     #[error("DECODER_FAILED: decoding failed: {0}")]
     DecoderFailed(String),
 
+    #[error("INVALID_MEDIA: invalid media file: {0}")]
+    InvalidMedia(String),
+
     #[error("PLAYBACK_FAILED: playback failed: {0}")]
     PlaybackFailed(String),
 
@@ -62,6 +65,7 @@ impl PlaybackError {
             Self::TrackFileMissing(_) => "TRACK_FILE_MISSING",
             Self::DecoderUnavailable(_) => "DECODER_UNAVAILABLE",
             Self::DecoderFailed(_) => "DECODER_FAILED",
+            Self::InvalidMedia(_) => "INVALID_MEDIA",
             Self::PlaybackFailed(_) => "PLAYBACK_FAILED",
             Self::AllOutputsFailed => "ALL_OUTPUTS_FAILED",
             Self::ReceiverNotPaired(_) => "RECEIVER_NOT_PAIRED",

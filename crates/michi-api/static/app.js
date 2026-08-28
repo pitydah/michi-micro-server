@@ -1246,9 +1246,7 @@ var ServerPlayback = {
 };
 
 function toggleOutputTarget() {
-  ServerPlayback.outputTarget = ServerPlayback.outputTarget === 'browser' ? 'server' : 'browser';
-  updateOutputRoutingBadge();
-  showToast('Playback output routing: ' + (ServerPlayback.outputTarget === 'browser' ? 'This Browser (Local Audio)' : (ServerPlayback.remoteTargetName ? 'Remote: ' + ServerPlayback.remoteTargetName : 'Server Playback (No remote output configured)')));
+  showOutputSelectorModal();
 }
 
 function updateOutputRoutingBadge() {
@@ -1261,8 +1259,95 @@ function updateOutputRoutingBadge() {
     badge.textContent = 'Output: ' + ServerPlayback.remoteTargetName;
     badge.className = 'badge stable';
   } else {
-    badge.textContent = 'Server: No remote output configured';
+    badge.textContent = 'Server: No output selected';
     badge.className = 'badge beta';
+  }
+}
+
+async function showOutputSelectorModal() {
+  closeOutputSelectorModal();
+  try {
+    var [recResp, groupResp, chainResp, curOut] = await Promise.all([
+      MichiAPI.getReceivers().catch(function() { return { receivers: [] }; }),
+      MichiAPI.getRoomGroups().catch(function() { return { groups: [] }; }),
+      MichiAPI.getChains().catch(function() { return { chains: [] }; }),
+      MichiAPI.getPlaybackOutput().catch(function() { return { output: null }; }),
+    ]);
+
+    var receivers = recResp.receivers || [];
+    var groups = groupResp.groups || [];
+    var chains = chainResp.chains || [];
+    var activeSel = curOut.output;
+
+    var modal = document.createElement('div');
+    modal.className = 'modal-backdrop';
+    modal.id = 'output-selector-modal';
+    modal.style.display = 'flex';
+    modal.innerHTML = '<div class="modal-card" style="max-width:440px">' +
+      '<div class="modal-header"><h3>Select Playback Output</h3><button class="modal-close" onclick="closeOutputSelectorModal()">&times;</button></div>' +
+      '<div class="modal-body" style="display:flex;flex-direction:column;gap:12px;max-height:60vh;overflow-y:auto">' +
+        '<div style="font-weight:600;font-size:0.85rem;color:var(--text-2);margin-top:4px">Local Output</div>' +
+        '<label style="display:flex;align-items:center;gap:8px;padding:8px;border-radius:6px;cursor:pointer;background:' + (ServerPlayback.outputTarget === 'browser' ? 'var(--bg-card-hover)' : 'transparent') + '">' +
+          '<input type="radio" name="output-target" value="browser" ' + (ServerPlayback.outputTarget === 'browser' ? 'checked' : '') + ' onchange="selectLocalBrowserOutput()">' +
+          '<div><div style="font-weight:500">This Browser (Web Audio)</div><div style="font-size:0.75rem;color:var(--text-3)">Play audio locally in this browser</div></div>' +
+        '</label>' +
+        '<div style="font-weight:600;font-size:0.85rem;color:var(--text-2);margin-top:8px">Receivers</div>' +
+        (receivers.length === 0 ? '<div style="font-size:0.8rem;color:var(--text-3);padding:4px 8px">No paired receivers found</div>' : receivers.map(function(r) {
+          var isSel = ServerPlayback.outputTarget === 'server' && activeSel && activeSel.kind === 'receiver' && activeSel.id === r.id;
+          return '<label style="display:flex;align-items:center;gap:8px;padding:8px;border-radius:6px;cursor:pointer;background:' + (isSel ? 'var(--bg-card-hover)' : 'transparent') + '">' +
+            '<input type="radio" name="output-target" value="receiver:' + r.id + '" ' + (isSel ? 'checked' : '') + ' onchange="selectServerOutputTarget(\'receiver\', \'' + r.id + '\', \'' + esc(r.name) + '\')">' +
+            '<div><div style="font-weight:500">' + esc(r.name) + '</div><div style="font-size:0.75rem;color:var(--text-3)">' + esc(r.device_type || 'Receiver') + ' &bull; ' + (r.online ? 'Online' : 'Offline') + '</div></div>' +
+          '</label>';
+        }).join('')) +
+        '<div style="font-weight:600;font-size:0.85rem;color:var(--text-2);margin-top:8px">Room Groups</div>' +
+        (groups.length === 0 ? '<div style="font-size:0.8rem;color:var(--text-3);padding:4px 8px">No room groups defined</div>' : groups.map(function(g) {
+          var isSel = ServerPlayback.outputTarget === 'server' && activeSel && activeSel.kind === 'room_group' && activeSel.id === g.id;
+          return '<label style="display:flex;align-items:center;gap:8px;padding:8px;border-radius:6px;cursor:pointer;background:' + (isSel ? 'var(--bg-card-hover)' : 'transparent') + '">' +
+            '<input type="radio" name="output-target" value="room_group:' + g.id + '" ' + (isSel ? 'checked' : '') + ' onchange="selectServerOutputTarget(\'room_group\', \'' + g.id + '\', \'' + esc(g.name) + '\')">' +
+            '<div><div style="font-weight:500">' + esc(g.name) + '</div><div style="font-size:0.75rem;color:var(--text-3)">' + (g.receivers ? g.receivers.length : 0) + ' speakers</div></div>' +
+          '</label>';
+        }).join('')) +
+        '<div style="font-weight:600;font-size:0.85rem;color:var(--text-2);margin-top:8px">Chains</div>' +
+        (chains.length === 0 ? '<div style="font-size:0.8rem;color:var(--text-3);padding:4px 8px">No audio chains defined</div>' : chains.map(function(c) {
+          var isSel = ServerPlayback.outputTarget === 'server' && activeSel && activeSel.kind === 'chain' && activeSel.id === c.id;
+          return '<label style="display:flex;align-items:center;gap:8px;padding:8px;border-radius:6px;cursor:pointer;background:' + (isSel ? 'var(--bg-card-hover)' : 'transparent') + '">' +
+            '<input type="radio" name="output-target" value="chain:' + c.id + '" ' + (isSel ? 'checked' : '') + ' onchange="selectServerOutputTarget(\'chain\', \'' + c.id + '\', \'' + esc(c.name) + '\')">' +
+            '<div><div style="font-weight:500">' + esc(c.name) + '</div><div style="font-size:0.75rem;color:var(--text-3)">' + (c.receivers ? c.receivers.length : 0) + ' nodes</div></div>' +
+          '</label>';
+        }).join('')) +
+      '</div>' +
+      '<div class="modal-footer"><button class="btn btn-secondary" onclick="closeOutputSelectorModal()">Close</button></div>' +
+    '</div>';
+
+    document.body.appendChild(modal);
+  } catch (e) {
+    showToast('Failed to load output targets: ' + e.message, true);
+  }
+}
+
+function closeOutputSelectorModal() {
+  var el = $('#output-selector-modal');
+  if (el) el.remove();
+}
+
+function selectLocalBrowserOutput() {
+  ServerPlayback.outputTarget = 'browser';
+  ServerPlayback.remoteTargetName = null;
+  updateOutputRoutingBadge();
+  closeOutputSelectorModal();
+  showToast('Output: This Browser');
+}
+
+async function selectServerOutputTarget(kind, id, name) {
+  try {
+    await MichiAPI.setPlaybackOutput({ kind: kind, id: id });
+    ServerPlayback.outputTarget = 'server';
+    ServerPlayback.remoteTargetName = name;
+    updateOutputRoutingBadge();
+    closeOutputSelectorModal();
+    showToast('Output: ' + name);
+  } catch (e) {
+    showToast('Failed to select output: ' + e.message, true);
   }
 }
 
@@ -1310,7 +1395,10 @@ async function playTrack(idx) {
     });
     await loadCanonicalPlaybackState();
   } catch (err) {
-    showToast('Failed to start server playback: ' + err.message, true);
+    showToast('Server playback failed: ' + err.message, true);
+    if (err.message && err.message.includes('NO_OUTPUT_SELECTED')) {
+      showOutputSelectorModal();
+    }
   }
 }
 
@@ -1336,12 +1424,16 @@ async function playPause() {
     await loadCanonicalPlaybackState();
   } catch (err) {
     showToast('Server playback control failed: ' + err.message, true);
+    if (err.message && err.message.includes('NO_OUTPUT_SELECTED')) {
+      showOutputSelectorModal();
+    }
   }
 }
 
 async function toggleShuffle() {
   try {
-    var resp = await MichiAPI.playbackControl({ command: 'shuffle' });
+    var nextVal = !ServerPlayback.shuffle;
+    var resp = await MichiAPI.playbackControl({ command: 'shuffle', value: nextVal });
     ServerPlayback.shuffle = !!resp.shuffle;
     updatePlaybackControlsUI();
     showToast('Shuffle ' + (ServerPlayback.shuffle ? 'ON' : 'OFF'));
@@ -1352,8 +1444,13 @@ async function toggleShuffle() {
 
 async function toggleRepeat() {
   try {
-    var resp = await MichiAPI.playbackControl({ command: 'repeat' });
-    ServerPlayback.repeat = resp.repeat || 'off';
+    var nextMode = 'off';
+    if (ServerPlayback.repeat === 'off') nextMode = 'all';
+    else if (ServerPlayback.repeat === 'all') nextMode = 'one';
+    else nextMode = 'off';
+
+    var resp = await MichiAPI.playbackControl({ command: 'repeat', value: nextMode });
+    ServerPlayback.repeat = resp.repeat || nextMode;
     updatePlaybackControlsUI();
     showToast('Repeat mode: ' + ServerPlayback.repeat.toUpperCase());
   } catch (e) {

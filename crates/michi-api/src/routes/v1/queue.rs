@@ -234,6 +234,40 @@ pub async fn queue_items_handler(
         )
     })?;
 
+    // Sync newly updated active queue items into PlaybackEngine
+    let active_items: Vec<(String, i64)> = sqlx::query_as::<_, (String, i64)>(
+        "SELECT track_id, position FROM queue_items WHERE queue_id = ? ORDER BY position ASC",
+    )
+    .bind(active_queue_id.to_string())
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let mut runtime_tracks = Vec::new();
+    for (tid_str, _) in &active_items {
+        if let Ok(tid) = Uuid::parse_str(tid_str) {
+            if let Ok(Some(track)) = michi_db::get_track(&state.db, &tid).await {
+                runtime_tracks.push(track);
+            }
+        }
+    }
+    if !runtime_tracks.is_empty() {
+        let ps = state.playback_state.read().await;
+        let cur_idx = if let Some(ref cur_tid) = ps.track_id {
+            runtime_tracks
+                .iter()
+                .position(|t| t.id == *cur_tid)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        drop(ps);
+        let _ = state
+            .playback_engine
+            .set_queue(runtime_tracks, cur_idx)
+            .await;
+    }
+
     let total_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM queue_items WHERE queue_id = ?")
             .bind(active_queue_id.to_string())

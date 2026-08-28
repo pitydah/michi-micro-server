@@ -159,6 +159,9 @@ async fn main() -> Result<()> {
         admin_user_id,
         identity.clone(),
     );
+    if let Err(e) = state.bootstrap_runtime().await {
+        tracing::error!("runtime bootstrap failed: {}", e);
+    }
     let app = michi_api::create_router(state.clone());
 
     let app = if config.opensubsonic_enabled {

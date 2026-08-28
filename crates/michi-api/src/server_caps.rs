@@ -56,36 +56,180 @@ pub struct ServerCapabilities {
 }
 
 const MODULE_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] = &[
-    ("scan", "1.0", "Library scanning with watcher", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("sync", "1.0", "Peer-to-peer library sync", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("stream", "1.0", "Direct & proxied audio streaming", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("playback", "1.0", "Playback tracking & history", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("backup", "1.0", "JSON backup & tar.gz bundle", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("webhook", "1.0", "Sync completion webhooks", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
+    (
+        "scan",
+        "1.0",
+        "Library scanning with watcher",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "sync",
+        "1.0",
+        "Peer-to-peer library sync",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "stream",
+        "1.0",
+        "Direct & proxied audio streaming",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "playback",
+        "1.0",
+        "Playback tracking & history",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "backup",
+        "1.0",
+        "JSON backup & tar.gz bundle",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "webhook",
+        "1.0",
+        "Sync completion webhooks",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
 ];
 
 const ALWAYS_ON_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] = &[
-    ("etag", "1.0", "ETag-based conditional requests", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("handoff", "1.0", "Direct stream handoff between peers", FeatureMaturity::Beta, EvidenceLevel::EffectVerified),
-    ("mounts", "1.0", "Mount health monitoring", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("audit", "1.0", "Audit log for admin actions", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("jobs", "1.0", "Persistent job queue with workers", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("modules", "1.0", "Runtime module enable/disable", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("library", "1.0", "Library browsing", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("search", "1.0", "Library search", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("download", "1.0", "Track download", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("artwork", "1.0", "Artwork serving", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("playlists", "1.0", "Playlist management", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("import", "1.0", "Library import", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("queue", "1.0", "Playback queue", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("events", "1.0", "Real-time WebSocket event dispatch", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("token_refresh", "1.0", "Device token refresh", FeatureMaturity::Stable, EvidenceLevel::EffectVerified),
-    ("autonomous_playback", "1.0", "Real autonomous decoding & engine playback", FeatureMaturity::Beta, EvidenceLevel::EffectVerified),
+    (
+        "etag",
+        "1.0",
+        "ETag-based conditional requests",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "handoff",
+        "1.0",
+        "Direct stream handoff between peers",
+        FeatureMaturity::Beta,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "mounts",
+        "1.0",
+        "Mount health monitoring",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "audit",
+        "1.0",
+        "Audit log for admin actions",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "jobs",
+        "1.0",
+        "Persistent job queue with workers",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "modules",
+        "1.0",
+        "Runtime module enable/disable",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "library",
+        "1.0",
+        "Library browsing",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "search",
+        "1.0",
+        "Library search",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "download",
+        "1.0",
+        "Track download",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "artwork",
+        "1.0",
+        "Artwork serving",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "playlists",
+        "1.0",
+        "Playlist management",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "import",
+        "1.0",
+        "Library import",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "queue",
+        "1.0",
+        "Playback queue",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "events",
+        "1.0",
+        "Real-time WebSocket event dispatch",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "token_refresh",
+        "1.0",
+        "Device token refresh",
+        FeatureMaturity::Stable,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "autonomous_playback",
+        "1.0",
+        "Autonomous decoding & engine playback",
+        FeatureMaturity::Beta,
+        EvidenceLevel::Implemented,
+    ),
 ];
 
 const DISABLED_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] = &[
-    ("receivers", "1.0", "Receiver playback groups", FeatureMaturity::Unavailable, EvidenceLevel::Declared),
-    ("rooms", "1.0", "Multi-room playback", FeatureMaturity::Unavailable, EvidenceLevel::Declared),
+    (
+        "receivers",
+        "1.0",
+        "Receiver playback data plane",
+        FeatureMaturity::Beta,
+        EvidenceLevel::Implemented,
+    ),
+    (
+        "rooms",
+        "1.0",
+        "Multi-room playback routing",
+        FeatureMaturity::Beta,
+        EvidenceLevel::Implemented,
+    ),
 ];
 
 impl ServerCapabilities {
@@ -103,49 +247,47 @@ impl ServerCapabilities {
 
         let mut features: Vec<ServerFeature> = MODULE_FEATURES
             .iter()
-            .map(|(name, version, description, maturity, evidence)| ServerFeature {
-                name,
-                version,
-                description,
-                enabled: !disabled.contains(*name),
-                maturity: *maturity,
-                evidence: *evidence,
-            })
-            .collect();
-
-        features.extend(
-            ALWAYS_ON_FEATURES
-                .iter()
-                .map(|(name, version, description, maturity, evidence)| {
-                    let enabled = if *name == "autonomous_playback" {
-                        ffmpeg && !disabled.contains("playback")
-                    } else {
-                        true
-                    };
-
-                    ServerFeature {
-                        name,
-                        version,
-                        description,
-                        enabled,
-                        maturity: *maturity,
-                        evidence: *evidence,
-                    }
-                }),
-        );
-
-        features.extend(
-            DISABLED_FEATURES
-                .iter()
-                .map(|(name, version, description, maturity, evidence)| ServerFeature {
+            .map(
+                |(name, version, description, maturity, evidence)| ServerFeature {
                     name,
                     version,
                     description,
-                    enabled: false,
+                    enabled: !disabled.contains(*name),
                     maturity: *maturity,
                     evidence: *evidence,
-                }),
-        );
+                },
+            )
+            .collect();
+
+        features.extend(ALWAYS_ON_FEATURES.iter().map(
+            |(name, version, description, maturity, evidence)| {
+                let enabled = if *name == "autonomous_playback" {
+                    ffmpeg && !disabled.contains("playback")
+                } else {
+                    true
+                };
+
+                ServerFeature {
+                    name,
+                    version,
+                    description,
+                    enabled,
+                    maturity: *maturity,
+                    evidence: *evidence,
+                }
+            },
+        ));
+
+        features.extend(DISABLED_FEATURES.iter().map(
+            |(name, version, description, maturity, evidence)| ServerFeature {
+                name,
+                version,
+                description,
+                enabled: false,
+                maturity: *maturity,
+                evidence: *evidence,
+            },
+        ));
 
         ServerCapabilities {
             version: env!("CARGO_PKG_VERSION").to_string(),

@@ -2439,7 +2439,7 @@ async fn test_v1_e2e_mobile_flow() {
                 .uri("/api/v1/playback/control")
                 .method("POST")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"command":"play"}"#))
+                .body(Body::from(r#"{"command":"pause"}"#))
                 .unwrap(),
         )
         .await
@@ -2914,7 +2914,7 @@ async fn test_v1_autonomous_playback_state_independent() {
     assert_eq!(state["state"], "paused");
     assert!(state["track_id"].is_null());
 
-    // Control: play without track_id
+    // Control: play without output target returns fail-closed BAD_REQUEST
     let resp = app
         .clone()
         .oneshot(
@@ -2927,9 +2927,9 @@ async fn test_v1_autonomous_playback_state_independent() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-    // Verify state changed
+    // Verify state remains paused
     let resp = app
         .clone()
         .oneshot(
@@ -2941,7 +2941,8 @@ async fn test_v1_autonomous_playback_state_independent() {
         .await
         .unwrap();
     let state: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    assert_eq!(state["state"], "playing");
+    assert_eq!(state["state"], "paused");
+    assert_eq!(state["playing"], false);
 
     // Control: pause
     let resp = app
@@ -4173,7 +4174,7 @@ async fn test_v1_auth_real_pair_and_use_token() {
                 .method("POST")
                 .header("Content-Type", "application/json")
                 .header("Authorization", format!("Bearer {device_token}"))
-                .body(Body::from(r#"{"command":"play"}"#))
+                .body(Body::from(r#"{"command":"pause"}"#))
                 .unwrap(),
         )
         .await

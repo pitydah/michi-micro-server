@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use chrono::Utc;
-use michi_playback::RepeatMode;
+use michi_playback::{PlaybackLifecycle, RepeatMode};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use uuid::Uuid;
@@ -41,37 +41,41 @@ fn v1_error(
 pub async fn playback_state_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let snap = state
-        .playback_engine
-        .snapshot()
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "ENGINE_ERROR", &e.to_string()))?;
+    let snap = state.playback_engine.snapshot().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ENGINE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
-    let ps = state.playback_state.read().await;
+    // Functional truth: playing is STRICTLY derived from engine lifecycle
+    let is_playing = matches!(
+        snap.lifecycle,
+        PlaybackLifecycle::AudioFlowing | PlaybackLifecycle::Playing
+    );
+    let state_str = if is_playing { "playing" } else { "paused" };
 
-    let track_id = snap.track_id.or(ps.track_id);
-    let position_ms = if snap.track_id.is_some() {
+    let ps_read = state.playback_state.read().await;
+    let track_id = snap.track_id.or(ps_read.track_id);
+    let position_ms = if is_playing || snap.position_ms > 0 {
         snap.position_ms
     } else {
-        ps.position_ms
+        ps_read.position_ms
     };
-    let is_playing = snap.is_playing() || (snap.track_id.is_none() && ps.playing);
-    let state_str = if is_playing { "playing" } else { "paused" };
-    let volume = if snap.track_id.is_some() {
-        snap.volume
-    } else {
-        (ps.volume * 100.0) as u8
-    };
-    let shuffle = if snap.track_id.is_some() {
-        snap.shuffle
-    } else {
-        ps.shuffle
-    };
-    let repeat = if snap.track_id.is_some() {
-        snap.repeat.as_str().to_string()
-    } else {
-        ps.repeat.clone()
-    };
+    drop(ps_read);
+
+    // Sync projection to keep legacy subscriptions updated
+    {
+        let mut ps = state.playback_state.write().await;
+        ps.track_id = track_id;
+        ps.position_ms = position_ms;
+        ps.playing = is_playing;
+        ps.volume = (snap.volume as f64) / 100.0;
+        ps.shuffle = snap.shuffle;
+        ps.repeat = snap.repeat.as_str().to_string();
+        ps.updated_at = snap.updated_at;
+    }
 
     let current_track = if let Some(tid) = track_id {
         michi_db::get_track(&state.db, &tid)
@@ -100,13 +104,14 @@ pub async fn playback_state_handler(
         "current_track": current_track,
         "position_ms": position_ms,
         "duration_ms": snap.duration_ms.or_else(|| current_track.as_ref().and_then(|t| t.get("duration_ms")).and_then(|v| v.as_u64())),
-        "volume": volume,
-        "shuffle": shuffle,
-        "repeat": repeat,
+        "volume": snap.volume,
+        "shuffle": snap.shuffle,
+        "repeat": snap.repeat.as_str(),
         "output": snap.output,
         "sinks": snap.sinks,
         "bytes_decoded": snap.bytes_decoded,
         "bytes_delivered": snap.bytes_delivered,
+        "output_health": snap.output_health,
         "last_error": snap.last_error,
         "restored": false,
         "updated_at": snap.updated_at,
@@ -152,11 +157,11 @@ pub enum PlaybackRepeatMode {
 }
 
 impl PlaybackRepeatMode {
-    pub fn as_str(&self) -> &'static str {
+    pub fn to_engine_repeat(&self) -> RepeatMode {
         match self {
-            Self::Off => "off",
-            Self::One => "one",
-            Self::All => "all",
+            Self::Off => RepeatMode::Off,
+            Self::One => RepeatMode::One,
+            Self::All => RepeatMode::All,
         }
     }
 }
@@ -211,62 +216,164 @@ pub async fn playback_control_handler(
     match cmd {
         "play" => {
             let snap = state.playback_engine.snapshot().await.map_err(|e| {
-                v1_error(StatusCode::INTERNAL_SERVER_ERROR, "ENGINE_ERROR", &e.to_string())
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ENGINE_ERROR",
+                    &e.to_string(),
+                )
             })?;
 
-            let track_id_opt = body.track_id.or(snap.track_id).or_else(|| {
-                // Check projection state
-                let ps = futures_util::FutureExt::now_or_never(state.playback_state.read());
-                ps.and_then(|guard| guard.track_id)
+            if body.track_id.is_none()
+                && (snap.lifecycle == PlaybackLifecycle::Paused
+                    || (state.playback_state.read().await.track_id.is_some()
+                        && !state.playback_state.read().await.playing))
+            {
+                let _ = state.playback_engine.resume().await;
+                let mut current = state.playback_state.write().await;
+                current.playing = true;
+                current.updated_at = Utc::now();
+                return Ok(Json(serde_json::json!({
+                    "status": "accepted",
+                    "lifecycle": "preparing",
+                })));
+            }
+
+            let track_id_opt = body.track_id.or(snap.track_id).or({
+                let ps = state.playback_state.read().await;
+                ps.track_id
             });
+            let pos_ms = body
+                .position_ms
+                .or(match body.value {
+                    Some(PlaybackControlValue::Integer(ms)) => Some(ms),
+                    _ => None,
+                })
+                .unwrap_or(0);
 
-            let pos_ms = body.position_ms.or(match body.value {
-                Some(PlaybackControlValue::Integer(ms)) => Some(ms),
-                _ => None,
-            }).unwrap_or(0);
-
-            if let Some(track_id) = track_id_opt {
-                let track_opt = michi_db::get_track(&state.db, &track_id)
-                    .await
-                    .map_err(|e| {
+            let track = match track_id_opt {
+                Some(tid) => {
+                    let track_opt = michi_db::get_track(&state.db, &tid).await.map_err(|e| {
                         v1_error_code(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             michi_link::MichiLinkErrorCode::InternalError,
                             &e.to_string(),
                         )
                     })?;
+                    track_opt.ok_or_else(|| {
+                        v1_error_code(
+                            StatusCode::NOT_FOUND,
+                            michi_link::MichiLinkErrorCode::NotFound,
+                            &format!("track not found: {tid}"),
+                        )
+                    })?
+                }
+                None => {
+                    let active_qid =
+                        crate::routes::v1::queue::get_or_create_active_queue(&state.db)
+                            .await
+                            .ok();
+                    let first_tid = if let Some(qid) = active_qid {
+                        let items = michi_db::get_queue_items(&state.db, &qid)
+                            .await
+                            .unwrap_or_default();
+                        items.first().map(|(id, _)| *id)
+                    } else {
+                        None
+                    };
 
-                if let Some(track) = track_opt {
-                    let selection_opt = state.playback_output_selection.read().await.clone();
-                    if let Some(selection) = selection_opt {
-                        if let Ok(plan) = resolve_output(&selection, &state).await {
-                            let _ = state
-                                .playback_engine
-                                .play(track, plan.sinks, plan.description.clone(), pos_ms)
-                                .await;
+                    if let Some(tid) = first_tid {
+                        let track_opt = michi_db::get_track(&state.db, &tid).await.ok().flatten();
+                        if let Some(t) = track_opt {
+                            t
+                        } else if let Some(ref t) = snap.current_track {
+                            t.clone()
+                        } else {
+                            return Err(v1_error_code(
+                                StatusCode::BAD_REQUEST,
+                                michi_link::MichiLinkErrorCode::InvalidRequest,
+                                "no track selected for playback",
+                            ));
                         }
+                    } else if let Some(ref t) = snap.current_track {
+                        t.clone()
+                    } else {
+                        return Err(v1_error_code(
+                            StatusCode::BAD_REQUEST,
+                            michi_link::MichiLinkErrorCode::InvalidRequest,
+                            "no track selected for playback",
+                        ));
                     }
                 }
-            }
+            };
 
-            {
-                let mut current = state.playback_state.write().await;
-                if let Some(tid) = track_id_opt {
-                    current.track_id = Some(tid);
+            // Fail-closed output resolution with automatic receiver discovery fallback
+            let selection_opt = {
+                let sel = state.playback_output_selection.read().await.clone();
+                if sel.is_none() {
+                    let reg_arc = state.receiver_manager.registry().await;
+                    let reg = reg_arc.read().await;
+                    let paired_rec = reg
+                        .list()
+                        .into_iter()
+                        .find(|r| r.paired)
+                        .map(|r| r.receiver_id.clone());
+                    paired_rec.map(|id| PlaybackOutputSelection::Receiver { id })
+                } else {
+                    sel
                 }
-                current.playing = true;
-                current.position_ms = pos_ms;
-                current.updated_at = Utc::now();
-            }
+            };
 
-            Ok(Json(serde_json::json!({
-                "status": "accepted",
-                "lifecycle": "preparing",
-                "track_id": track_id_opt,
-            })))
+            let selection = selection_opt.ok_or_else(|| {
+                v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "NO_OUTPUT_SELECTED",
+                    "no playback output target configured. Select an output target first.",
+                )
+            })?;
+
+            let plan = resolve_output(&selection, &state)
+                .await
+                .map_err(|e| v1_error(StatusCode::BAD_GATEWAY, e.error_code(), &e.to_string()))?;
+
+            let track_id = track.id;
+            let play_res = state
+                .playback_engine
+                .play(track, plan.sinks, plan.description.clone(), pos_ms)
+                .await;
+
+            match play_res {
+                Ok(()) => {
+                    {
+                        let mut current = state.playback_state.write().await;
+                        current.track_id = Some(track_id);
+                        current.playing = true;
+                        current.position_ms = pos_ms;
+                        current.updated_at = Utc::now();
+                    }
+
+                    Ok(Json(serde_json::json!({
+                        "status": "accepted",
+                        "lifecycle": "preparing",
+                        "track_id": track_id,
+                        "output": plan.description,
+                    })))
+                }
+                Err(e) => Err(v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )),
+            }
         }
         "pause" => {
-            let _ = state.playback_engine.pause().await;
+            state.playback_engine.pause().await.map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
+
             {
                 let mut current = state.playback_state.write().await;
                 current.playing = false;
@@ -279,7 +386,14 @@ pub async fn playback_control_handler(
             })))
         }
         "resume" => {
-            let _ = state.playback_engine.resume().await;
+            state.playback_engine.resume().await.map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
+
             {
                 let mut current = state.playback_state.write().await;
                 current.playing = true;
@@ -293,15 +407,31 @@ pub async fn playback_control_handler(
         }
         "toggle" => {
             let snap = state.playback_engine.snapshot().await.map_err(|e| {
-                v1_error(StatusCode::INTERNAL_SERVER_ERROR, "ENGINE_ERROR", &e.to_string())
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ENGINE_ERROR",
+                    &e.to_string(),
+                )
             })?;
 
             if snap.is_playing() {
-                let _ = state.playback_engine.pause().await;
+                state.playback_engine.pause().await.map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        e.error_code(),
+                        &e.to_string(),
+                    )
+                })?;
                 let mut current = state.playback_state.write().await;
                 current.playing = false;
             } else {
-                let _ = state.playback_engine.resume().await;
+                state.playback_engine.resume().await.map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        e.error_code(),
+                        &e.to_string(),
+                    )
+                })?;
                 let mut current = state.playback_state.write().await;
                 current.playing = true;
             }
@@ -311,7 +441,14 @@ pub async fn playback_control_handler(
             })))
         }
         "stop" => {
-            let _ = state.playback_engine.stop().await;
+            state.playback_engine.stop().await.map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
+
             {
                 let mut current = state.playback_state.write().await;
                 current.playing = false;
@@ -324,12 +461,22 @@ pub async fn playback_control_handler(
             })))
         }
         "seek" => {
-            let pos_ms = body.position_ms.or(match body.value {
-                Some(PlaybackControlValue::Integer(ms)) => Some(ms),
-                _ => None,
-            }).unwrap_or(0);
+            let pos_ms = body
+                .position_ms
+                .or(match body.value {
+                    Some(PlaybackControlValue::Integer(ms)) => Some(ms),
+                    _ => None,
+                })
+                .unwrap_or(0);
 
-            let _ = state.playback_engine.seek(pos_ms).await;
+            state.playback_engine.seek(pos_ms).await.map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
+
             {
                 let mut current = state.playback_state.write().await;
                 current.position_ms = pos_ms;
@@ -341,68 +488,76 @@ pub async fn playback_control_handler(
             })))
         }
         "next" => {
-            let _ = state.playback_engine.next().await;
+            {
+                let ps = state.playback_state.read().await;
+                let rep_mode: RepeatMode = ps.repeat.parse().unwrap_or(RepeatMode::Off);
+                let _ = state.playback_engine.set_repeat(rep_mode).await;
+                let _ = state.playback_engine.set_shuffle(ps.shuffle).await;
+            }
 
-            let active_queue_id = crate::routes::v1::queue::get_or_create_active_queue(&state.db)
-                .await
-                .ok();
-            let items = if let Some(qid) = active_queue_id {
-                sqlx::query_as::<_, (String, String, i64)>(
-                    "SELECT id, track_id, position FROM queue_items WHERE queue_id = ? ORDER BY position ASC",
-                )
-                .bind(qid.to_string())
-                .fetch_all(&state.db)
-                .await
-                .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-
-            let mut current = state.playback_state.write().await;
-            if items.is_empty() {
-                current.track_id = None;
-                current.position_ms = 0;
-                current.playing = false;
-            } else if current.repeat == "one" {
-                current.position_ms = 0;
-            } else {
-                let cur_idx = if let Some(cur_id) = current.track_id {
-                    items.iter().position(|it| it.1 == cur_id.to_string())
-                } else {
-                    None
-                };
-
-                let next_idx = match cur_idx {
-                    Some(idx) => {
-                        if current.shuffle {
-                            if items.len() > 1 {
-                                use rand::Rng;
-                                let mut rng = rand::thread_rng();
-                                let offset = rng.gen_range(1..items.len());
-                                (idx + offset) % items.len()
-                            } else {
-                                0
-                            }
-                        } else if idx + 1 < items.len() {
-                            idx + 1
-                        } else if current.repeat == "all" {
-                            0
-                        } else {
-                            items.len()
+            let snap = state.playback_engine.snapshot().await.unwrap_or_default();
+            if snap.current_track.is_none() {
+                let active_qid = crate::routes::v1::queue::get_or_create_active_queue(&state.db)
+                    .await
+                    .ok();
+                if let Some(qid) = active_qid {
+                    let items = michi_db::get_queue_items(&state.db, &qid)
+                        .await
+                        .unwrap_or_default();
+                    let mut tracks = Vec::new();
+                    for (tid, _) in &items {
+                        if let Ok(Some(t)) = michi_db::get_track(&state.db, tid).await {
+                            tracks.push(t);
                         }
                     }
-                    None => 0,
-                };
-
-                if next_idx < items.len() {
-                    if let Ok(tid) = Uuid::parse_str(&items[next_idx].1) {
-                        current.track_id = Some(tid);
-                        current.position_ms = 0;
+                    if !tracks.is_empty() {
+                        let ps = state.playback_state.read().await;
+                        let cur_idx = if let Some(ref cur_tid) = ps.track_id {
+                            tracks.iter().position(|t| t.id == *cur_tid).unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        drop(ps);
+                        let _ = state.playback_engine.set_queue(tracks, cur_idx).await;
                     }
-                } else {
-                    current.playing = false;
-                    current.position_ms = 0;
                 }
+            }
+
+            let _ = state.playback_engine.next().await;
+            let snap = state.playback_engine.snapshot().await.unwrap_or_default();
+
+            {
+                let mut current = state.playback_state.write().await;
+                if let Some(tid) = snap.track_id {
+                    current.track_id = Some(tid);
+                } else {
+                    let active_qid =
+                        crate::routes::v1::queue::get_or_create_active_queue(&state.db)
+                            .await
+                            .ok();
+                    if let Some(qid) = active_qid {
+                        if let Ok(items) = michi_db::get_queue_items(&state.db, &qid).await {
+                            if !items.is_empty() {
+                                let cur_idx = if let Some(ref cur_tid) = current.track_id {
+                                    items.iter().position(|(it, _)| it == cur_tid).unwrap_or(0)
+                                } else {
+                                    0
+                                };
+                                let next_idx = if cur_idx + 1 < items.len() {
+                                    cur_idx + 1
+                                } else if current.repeat == "all" {
+                                    0
+                                } else {
+                                    cur_idx
+                                };
+                                current.track_id = Some(items[next_idx].0);
+                            }
+                        }
+                    }
+                }
+                current.position_ms = 0;
+                current.playing = snap.is_playing();
+                current.updated_at = Utc::now();
             }
 
             Ok(Json(serde_json::json!({
@@ -410,47 +565,43 @@ pub async fn playback_control_handler(
             })))
         }
         "previous" => {
+            let pos_threshold = {
+                let ps = state.playback_state.read().await;
+                ps.position_ms > 3000
+            };
+
             let _ = state.playback_engine.previous().await;
+            let snap = state.playback_engine.snapshot().await.unwrap_or_default();
 
-            let mut current = state.playback_state.write().await;
-            if current.position_ms > 3000 {
-                current.position_ms = 0;
-            } else {
-                let active_queue_id =
-                    crate::routes::v1::queue::get_or_create_active_queue(&state.db)
-                        .await
-                        .ok();
-                let items = if let Some(qid) = active_queue_id {
-                    sqlx::query_as::<_, (String, String, i64)>(
-                        "SELECT id, track_id, position FROM queue_items WHERE queue_id = ? ORDER BY position ASC",
-                    )
-                    .bind(qid.to_string())
-                    .fetch_all(&state.db)
-                    .await
-                    .unwrap_or_default()
+            {
+                let mut current = state.playback_state.write().await;
+                if pos_threshold {
+                    current.position_ms = 0;
+                } else if let Some(tid) = snap.track_id {
+                    current.track_id = Some(tid);
+                    current.position_ms = 0;
                 } else {
-                    Vec::new()
-                };
-
-                if !items.is_empty() {
-                    let cur_idx = if let Some(cur_id) = current.track_id {
-                        items.iter().position(|it| it.1 == cur_id.to_string())
-                    } else {
-                        None
-                    };
-
-                    let prev_idx = match cur_idx {
-                        Some(idx) if idx > 0 => idx - 1,
-                        _ => 0,
-                    };
-
-                    if let Ok(tid) = Uuid::parse_str(&items[prev_idx].1) {
-                        current.track_id = Some(tid);
-                        current.position_ms = 0;
+                    let active_qid =
+                        crate::routes::v1::queue::get_or_create_active_queue(&state.db)
+                            .await
+                            .ok();
+                    if let Some(qid) = active_qid {
+                        if let Ok(items) = michi_db::get_queue_items(&state.db, &qid).await {
+                            if !items.is_empty() {
+                                let cur_idx = if let Some(ref cur_tid) = current.track_id {
+                                    items.iter().position(|(it, _)| it == cur_tid).unwrap_or(0)
+                                } else {
+                                    0
+                                };
+                                let prev_idx = if cur_idx > 0 { cur_idx - 1 } else { 0 };
+                                current.track_id = Some(items[prev_idx].0);
+                            }
+                        }
                     }
-                } else {
                     current.position_ms = 0;
                 }
+                current.playing = snap.is_playing();
+                current.updated_at = Utc::now();
             }
 
             Ok(Json(serde_json::json!({
@@ -478,7 +629,14 @@ pub async fn playback_control_handler(
             };
 
             let vol = vol_u32 as u8;
-            let _ = state.playback_engine.set_volume(vol).await;
+            state.playback_engine.set_volume(vol).await.map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
+
             {
                 let mut current = state.playback_state.write().await;
                 current.volume = (vol as f64) / 100.0;
@@ -490,7 +648,14 @@ pub async fn playback_control_handler(
             })))
         }
         "mute" => {
-            let _ = state.playback_engine.set_volume(0).await;
+            state.playback_engine.set_volume(0).await.map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
+
             {
                 let mut current = state.playback_state.write().await;
                 current.volume = 0.0;
@@ -502,7 +667,14 @@ pub async fn playback_control_handler(
             })))
         }
         "unmute" => {
-            let _ = state.playback_engine.set_volume(80).await;
+            state.playback_engine.set_volume(80).await.map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
+
             {
                 let mut current = state.playback_state.write().await;
                 current.volume = 0.8;
@@ -519,7 +691,14 @@ pub async fn playback_control_handler(
                 _ => true,
             };
 
-            let _ = state.playback_engine.set_shuffle(shuf).await;
+            state.playback_engine.set_shuffle(shuf).await.map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
+
             {
                 let mut current = state.playback_state.write().await;
                 current.shuffle = shuf;
@@ -537,7 +716,18 @@ pub async fn playback_control_handler(
                 _ => RepeatMode::Off,
             };
 
-            let _ = state.playback_engine.set_repeat(rep_mode).await;
+            state
+                .playback_engine
+                .set_repeat(rep_mode)
+                .await
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        e.error_code(),
+                        &e.to_string(),
+                    )
+                })?;
+
             {
                 let mut current = state.playback_state.write().await;
                 current.repeat = rep_mode.as_str().to_string();
@@ -578,14 +768,35 @@ pub async fn playback_session_handler(
     let now = chrono::Utc::now().to_rfc3339();
     let queue_json = serde_json::to_string(&body.queue).unwrap_or_default();
 
-    // Create queue
-    let _ = sqlx::query("INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
-        .bind(queue_id.to_string())
-        .bind("playback-session")
-        .bind(&now)
-        .bind(&now)
-        .execute(&state.db)
-        .await;
+    // Validate and load tracks
+    let mut runtime_tracks = Vec::new();
+    for track_id in &body.queue {
+        if let Ok(Some(track)) = michi_db::get_track(&state.db, track_id).await {
+            runtime_tracks.push(track);
+        }
+    }
+
+    let current_track_id = body
+        .current_track_id
+        .or_else(|| body.queue.first().copied());
+    let current_index = if let Some(ref cur_id) = current_track_id {
+        runtime_tracks
+            .iter()
+            .position(|t| t.id == *cur_id)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    // Create queue in DB
+    let _ =
+        sqlx::query("INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+            .bind(queue_id.to_string())
+            .bind("playback-session")
+            .bind(&now)
+            .bind(&now)
+            .execute(&state.db)
+            .await;
 
     for (i, track_id) in body.queue.iter().enumerate() {
         let item_id = Uuid::new_v4();
@@ -601,15 +812,17 @@ pub async fn playback_session_handler(
         .await;
     }
 
-    let track_id = body.current_track_id.or_else(|| body.queue.first().copied());
-
     let db_session = michi_core::PlaybackSessionDb {
         id: session_id,
-        device_id: body.device_id.as_deref().and_then(|d| Uuid::parse_str(d).ok()).unwrap_or_else(Uuid::nil),
+        device_id: body
+            .device_id
+            .as_deref()
+            .and_then(|d| Uuid::parse_str(d).ok())
+            .unwrap_or_else(Uuid::nil),
         queue_id: Some(queue_id),
         queue_state_json: queue_json,
-        current_index: 0,
-        current_track_id: track_id,
+        current_index: current_index as i32,
+        current_track_id,
         position_ms: body.position_ms,
         playing: body.playing,
         repeat_mode: body.repeat_mode.clone().unwrap_or_else(|| "off".into()),
@@ -630,13 +843,83 @@ pub async fn playback_session_handler(
             )
         })?;
 
+    // Load queue into PlaybackEngine
+    if !runtime_tracks.is_empty() {
+        state
+            .playback_engine
+            .set_queue(runtime_tracks.clone(), current_index)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
+    }
+
+    if let Some(ref rep_str) = body.repeat_mode {
+        let rep_mode: RepeatMode = rep_str.parse().unwrap_or(RepeatMode::Off);
+        let _ = state.playback_engine.set_repeat(rep_mode).await;
+    }
+
+    if let Some(shuf) = body.shuffle {
+        let _ = state.playback_engine.set_shuffle(shuf).await;
+    }
+
+    let vol = (body.volume.unwrap_or(0.8) * 100.0) as u8;
+    let _ = state.playback_engine.set_volume(vol).await;
+
+    if body.playing {
+        let selection_opt = {
+            let sel = state.playback_output_selection.read().await.clone();
+            if sel.is_none() {
+                let reg_arc = state.receiver_manager.registry().await;
+                let reg = reg_arc.read().await;
+                let paired_rec = reg
+                    .list()
+                    .into_iter()
+                    .find(|r| r.paired)
+                    .map(|r| r.receiver_id.clone());
+                paired_rec.map(|id| PlaybackOutputSelection::Receiver { id })
+            } else {
+                sel
+            }
+        };
+
+        if let Some(selection) = selection_opt {
+            let plan = resolve_output(&selection, &state)
+                .await
+                .map_err(|e| v1_error(StatusCode::BAD_GATEWAY, e.error_code(), &e.to_string()))?;
+
+            if let Some(cur_track) = runtime_tracks.get(current_index) {
+                state
+                    .playback_engine
+                    .play(
+                        cur_track.clone(),
+                        plan.sinks,
+                        plan.description.clone(),
+                        body.position_ms,
+                    )
+                    .await
+                    .map_err(|e| {
+                        v1_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            e.error_code(),
+                            &e.to_string(),
+                        )
+                    })?;
+            }
+        }
+    }
+
     {
         let mut current = state.playback_state.write().await;
-        current.track_id = track_id;
+        current.track_id = current_track_id;
         current.position_ms = body.position_ms;
         current.playing = body.playing;
         current.volume = body.volume.unwrap_or(0.8);
-        current.updated_at = chrono::Utc::now();
+        current.updated_at = Utc::now();
     }
 
     let _ = state.tx.send(
@@ -719,7 +1002,7 @@ pub async fn playback_session_restore_handler(
                 current.position_ms = session.position_ms;
                 current.playing = session.playing;
                 current.volume = session.volume;
-                current.updated_at = chrono::Utc::now();
+                current.updated_at = Utc::now();
             }
 
             let mut updated = session;
@@ -757,7 +1040,7 @@ pub fn auto_restore_playback_state(
                 state.position_ms = session.position_ms;
                 state.playing = false; // never auto-play on restart
                 state.volume = session.volume;
-                state.updated_at = chrono::Utc::now();
+                state.updated_at = Utc::now();
                 drop(state);
 
                 if let Some(qid) = session.queue_id {

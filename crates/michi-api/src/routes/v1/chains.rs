@@ -257,28 +257,20 @@ pub async fn play_chain_handler(
     let selection = crate::output::PlaybackOutputSelection::Chain { id };
     let plan = crate::output::resolve_output(&selection, &state)
         .await
-        .map_err(|e| {
-            v1_error(
-                StatusCode::BAD_GATEWAY,
-                e.error_code(),
-                &e.to_string(),
-            )
-        })?;
+        .map_err(|e| v1_error(StatusCode::BAD_GATEWAY, e.error_code(), &e.to_string()))?;
 
     let track_id_opt = chain.track_id.or_else(|| {
         futures_util::FutureExt::now_or_never(state.playback_state.read()).and_then(|g| g.track_id)
     });
 
     let track_opt = if let Some(tid) = track_id_opt {
-        michi_db::get_track(&state.db, &tid)
-            .await
-            .map_err(|e| {
-                v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "DATABASE_ERROR",
-                    &e.to_string(),
-                )
-            })?
+        michi_db::get_track(&state.db, &tid).await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?
     } else {
         None
     };
@@ -286,15 +278,13 @@ pub async fn play_chain_handler(
     let track = match track_opt {
         Some(t) => t,
         None => {
-            let all = michi_db::list_tracks(&state.db)
-                .await
-                .map_err(|e| {
-                    v1_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "DATABASE_ERROR",
-                        &e.to_string(),
-                    )
-                })?;
+            let all = michi_db::list_tracks(&state.db).await.map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
             all.into_iter().next().ok_or_else(|| {
                 v1_error(
                     StatusCode::NOT_FOUND,
@@ -307,7 +297,12 @@ pub async fn play_chain_handler(
 
     state
         .playback_engine
-        .play(track, plan.sinks, plan.description.clone(), chain.position_ms)
+        .play(
+            track,
+            plan.sinks,
+            plan.description.clone(),
+            chain.position_ms,
+        )
         .await
         .map_err(|e| {
             v1_error(

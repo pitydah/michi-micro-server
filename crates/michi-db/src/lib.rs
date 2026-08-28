@@ -1014,23 +1014,40 @@ async fn migration_041(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
     .execute(&mut **tx)
     .await?;
 
-    let _ = sqlx::query("ALTER TABLE receivers ADD COLUMN base_url TEXT")
+    let rows: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as("PRAGMA table_info(receivers)")
+            .fetch_all(&mut **tx)
+            .await?;
+
+    let existing_cols: std::collections::HashSet<String> = rows.into_iter().map(|r| r.1).collect();
+
+    if !existing_cols.contains("base_url") {
+        sqlx::query("ALTER TABLE receivers ADD COLUMN base_url TEXT")
+            .execute(&mut **tx)
+            .await?;
+    }
+    if !existing_cols.contains("paired") {
+        sqlx::query("ALTER TABLE receivers ADD COLUMN paired INTEGER NOT NULL DEFAULT 0")
+            .execute(&mut **tx)
+            .await?;
+    }
+    if !existing_cols.contains("paired_at") {
+        sqlx::query("ALTER TABLE receivers ADD COLUMN paired_at TEXT")
+            .execute(&mut **tx)
+            .await?;
+    }
+    if !existing_cols.contains("updated_at") {
+        sqlx::query("ALTER TABLE receivers ADD COLUMN updated_at TEXT")
+            .execute(&mut **tx)
+            .await?;
+    }
+    if !existing_cols.contains("audio_capabilities") {
+        sqlx::query(
+            "ALTER TABLE receivers ADD COLUMN audio_capabilities TEXT NOT NULL DEFAULT '{}'",
+        )
         .execute(&mut **tx)
-        .await;
-    let _ = sqlx::query("ALTER TABLE receivers ADD COLUMN paired INTEGER NOT NULL DEFAULT 0")
-        .execute(&mut **tx)
-        .await;
-    let _ = sqlx::query("ALTER TABLE receivers ADD COLUMN paired_at TEXT")
-        .execute(&mut **tx)
-        .await;
-    let _ = sqlx::query("ALTER TABLE receivers ADD COLUMN updated_at TEXT")
-        .execute(&mut **tx)
-        .await;
-    let _ = sqlx::query(
-        "ALTER TABLE receivers ADD COLUMN audio_capabilities TEXT NOT NULL DEFAULT '{}'",
-    )
-    .execute(&mut **tx)
-    .await;
+        .await?;
+    }
 
     Ok(())
 }
@@ -1060,10 +1077,7 @@ pub struct PersistedReceiverCredential {
     pub updated_at: String,
 }
 
-pub async fn upsert_receiver_db(
-    pool: &SqlitePool,
-    rec: &PersistedReceiver,
-) -> Result<(), DbError> {
+pub async fn upsert_receiver_db(pool: &SqlitePool, rec: &PersistedReceiver) -> Result<(), DbError> {
     sqlx::query(
         "INSERT INTO receivers (id, name, device_type, base_url, paired, online, audio_capabilities, last_seen, paired_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1219,7 +1233,7 @@ pub async fn get_receiver_credential_db(
 ) -> Result<Option<PersistedReceiverCredential>, DbError> {
     let row_opt = sqlx::query(
         "SELECT receiver_id, ciphertext, nonce, version, created_at, updated_at
-         FROM receiver_credentials WHERE receiver_id = ?"
+         FROM receiver_credentials WHERE receiver_id = ?",
     )
     .bind(receiver_id)
     .fetch_optional(pool)
