@@ -8,7 +8,7 @@ use michi_core::{
     PlaylistCreate, PlaylistTrack, Track, TrackUpdate,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Acquire, Row, SqlitePool};
+use sqlx::{Connection, Row, SqlitePool};
 use thiserror::Error;
 use tracing::info;
 use uuid::Uuid;
@@ -77,26 +77,47 @@ pub async fn init_pool_with_size(
         opts
     } else {
         opts.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
     };
 
     let pool_size = if is_memory { 1 } else { max_connections };
 
-    let pool = SqlitePoolOptions::new()
-        .min_connections(1)
-        .idle_timeout(None)
-        .max_lifetime(None)
-        .max_connections(pool_size)
-        .connect_with(opts)
-        .await?;
+    let pool = if is_memory {
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_with(opts)
+            .await?;
+        let mut conn = pool.acquire().await?;
+        run_migrations_on_conn(&mut conn).await?;
+        pool
+    } else {
+        // Run migrations on an isolated single connection first to guarantee zero lock contention
+        // during schema creation and WAL initialization under virtualized/QEMU environments.
+        let mut setup_conn = sqlx::SqliteConnection::connect_with(&opts).await?;
+        run_migrations_on_conn(&mut setup_conn).await?;
+        drop(setup_conn);
 
-    run_migrations(&pool).await?;
+        SqlitePoolOptions::new()
+            .min_connections(0)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .max_connections(pool_size)
+            .connect_with(opts)
+            .await?
+    };
 
     Ok(pool)
 }
 
-async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
+pub async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
     let mut conn = pool.acquire().await?;
+    run_migrations_on_conn(&mut conn).await
+}
 
+async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS _migrations (
             version INTEGER PRIMARY KEY,
@@ -113,7 +134,7 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
     macro_rules! run_migration_step {
         ($conn:expr, $version:expr, $name:expr, $mig:ident) => {{
             info!("applying migration {}: {}", $version, $name);
-            let mut tx = $conn.begin().await?;
+            let mut tx = sqlx::Connection::begin($conn).await?;
             $mig(&mut tx).await?;
             sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)")
                 .bind($version)
