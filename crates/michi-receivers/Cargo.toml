@@ -26,3 +26,5 @@ tokio-util.workspace = true
 [dev-dependencies]
 tokio.workspace = true
 uuid.workspace = true
+michi-playback = { path = "../michi-playback" }
+michi-core = { path = "../michi-core" }

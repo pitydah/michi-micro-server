@@ -735,13 +735,12 @@ async fn test_playback_controls_and_queue_traversal() {
         .unwrap();
 
     // Start with track 1
-    {
-        let mut ps = state.playback_state.write().await;
-        ps.track_id = Some(t1.id);
-        ps.playing = true;
-        ps.position_ms = 0;
-        ps.repeat = "all".into();
-    }
+    state
+        .playback_engine
+        .set_repeat(michi_playback::RepeatMode::All)
+        .await
+        .unwrap();
+    state.playback_engine.jump_to_index(0).await.unwrap();
 
     // PLAY-09: Next advances to track 2
     let next_res = app
@@ -757,15 +756,11 @@ async fn test_playback_controls_and_queue_traversal() {
         .await
         .unwrap();
     assert_eq!(next_res.status(), StatusCode::OK);
-    let ps_next = state.playback_state.read().await;
-    assert_eq!(ps_next.track_id, Some(t2.id));
-    drop(ps_next);
+    let snap_next = state.playback_engine.snapshot().await.unwrap();
+    assert_eq!(snap_next.track_id, Some(t2.id));
 
     // PLAY-10: Previous with position > 3000ms restarts current track
-    {
-        let mut ps = state.playback_state.write().await;
-        ps.position_ms = 5000;
-    }
+    state.playback_engine.seek(5000).await.unwrap();
     let prev_restart = app
         .clone()
         .oneshot(
@@ -779,10 +774,9 @@ async fn test_playback_controls_and_queue_traversal() {
         .await
         .unwrap();
     assert_eq!(prev_restart.status(), StatusCode::OK);
-    let ps_prev1 = state.playback_state.read().await;
-    assert_eq!(ps_prev1.track_id, Some(t2.id));
-    assert_eq!(ps_prev1.position_ms, 0);
-    drop(ps_prev1);
+    let snap_prev1 = state.playback_engine.snapshot().await.unwrap();
+    assert_eq!(snap_prev1.track_id, Some(t2.id));
+    assert_eq!(snap_prev1.position_ms, 0);
 
     // Previous at position 0 moves back to track 1
     let prev_back = app
@@ -798,9 +792,8 @@ async fn test_playback_controls_and_queue_traversal() {
         .await
         .unwrap();
     assert_eq!(prev_back.status(), StatusCode::OK);
-    let ps_prev2 = state.playback_state.read().await;
-    assert_eq!(ps_prev2.track_id, Some(t1.id));
-    drop(ps_prev2);
+    let snap_prev2 = state.playback_engine.snapshot().await.unwrap();
+    assert_eq!(snap_prev2.track_id, Some(t1.id));
 
     // PLAY-05: Strict Volume validation
     let vol_bad = app
@@ -830,8 +823,8 @@ async fn test_playback_controls_and_queue_traversal() {
         .await
         .unwrap();
     assert_eq!(vol_good.status(), StatusCode::OK);
-    let ps_vol = state.playback_state.read().await;
-    assert_eq!((ps_vol.volume * 100.0) as u32, 75);
+    let snap_vol = state.playback_engine.snapshot().await.unwrap();
+    assert_eq!(snap_vol.volume, 75);
 }
 
 // ── PLAY-02 / PLAY-03 / PLAY-04 / PLAY-06 / PLAY-07 / PLAY-08: Seek, Pause, Resume & Repeat ──
@@ -841,12 +834,23 @@ async fn test_playback_seek_pause_resume_and_repeat_modes() {
     let t = seed_track(&pool, "/music/seek_test.flac", "Seek Track").await;
 
     // Set initial playing state
-    {
-        let mut ps = state.playback_state.write().await;
-        ps.track_id = Some(t.id);
-        ps.playing = true;
-        ps.position_ms = 0;
-    }
+    let runtime_tracks = michi_api::playback_queue::validate_and_load_tracks(
+        &pool,
+        &[t.id],
+        &state.config.music_paths,
+    )
+    .await
+    .unwrap();
+    state
+        .playback_engine
+        .set_queue(runtime_tracks.clone(), 0, Some(t.id))
+        .await
+        .unwrap();
+    state
+        .playback_engine
+        .load_track(runtime_tracks[0].clone(), 0)
+        .await
+        .unwrap();
 
     // PLAY-04: Seek to 45000ms
     let seek_res = app
@@ -862,7 +866,10 @@ async fn test_playback_seek_pause_resume_and_repeat_modes() {
         .await
         .unwrap();
     assert_eq!(seek_res.status(), StatusCode::OK);
-    assert_eq!(state.playback_state.read().await.position_ms, 45000);
+    assert_eq!(
+        state.playback_engine.snapshot().await.unwrap().position_ms,
+        45000
+    );
 
     // PLAY-02: Pause
     let pause_res = app
@@ -878,9 +885,12 @@ async fn test_playback_seek_pause_resume_and_repeat_modes() {
         .await
         .unwrap();
     assert_eq!(pause_res.status(), StatusCode::OK);
-    assert!(!state.playback_state.read().await.playing);
+    assert_eq!(
+        state.playback_engine.snapshot().await.unwrap().lifecycle,
+        michi_playback::PlaybackLifecycle::Paused
+    );
 
-    // PLAY-03: Resume
+    // PLAY-03: Resume without outputs fails closed (OUTPUT_REQUIRED -> CONFLICT)
     let play_res = app
         .clone()
         .oneshot(
@@ -888,13 +898,12 @@ async fn test_playback_seek_pause_resume_and_repeat_modes() {
                 .method("POST")
                 .uri("/api/v1/playback/control")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"command":"play"}"#))
+                .body(Body::from(r#"{"command":"resume"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(play_res.status(), StatusCode::OK);
-    assert!(state.playback_state.read().await.playing);
+    assert_eq!(play_res.status(), StatusCode::CONFLICT);
 
     // PLAY-08: Repeat "one"
     let rep_one = app
@@ -910,7 +919,10 @@ async fn test_playback_seek_pause_resume_and_repeat_modes() {
         .await
         .unwrap();
     assert_eq!(rep_one.status(), StatusCode::OK);
-    assert_eq!(state.playback_state.read().await.repeat, "one");
+    assert_eq!(
+        state.playback_engine.snapshot().await.unwrap().repeat,
+        michi_playback::RepeatMode::One
+    );
 }
 
 // ── UI-019 / UI-027: Settings Effective Profile & Persistent Restart Flag ──
@@ -1597,9 +1609,9 @@ async fn test_three_way_integration_e2e_flow() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    // 8. Verify Micro Server playback state is playing
-    let ps = state.playback_state.read().await;
-    assert!(ps.playing);
+    // 8. Verify Micro Server playback engine selected track
+    let snap = state.playback_engine.snapshot().await.unwrap();
+    assert_eq!(snap.track_id, Some(track_id));
 }
 
 #[tokio::test]

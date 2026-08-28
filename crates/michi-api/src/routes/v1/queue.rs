@@ -142,7 +142,13 @@ pub async fn queue_items_handler(
     .bind(active_queue_id.to_string())
     .fetch_one(&mut *tx)
     .await
-    .unwrap_or(-1);
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let mut current_pos = max_pos + 1;
@@ -196,7 +202,6 @@ pub async fn queue_items_handler(
         .await
         .ok()
         .and_then(|s| s.track_id);
-    let _ = sync_active_queue_to_engine(&state, &active_queue_id, cur_track_id).await;
 
     sync_active_queue_to_engine(&state, &active_queue_id, cur_track_id).await?;
 
@@ -226,17 +231,15 @@ pub async fn queue_jump_handler(
     State(state): State<AppState>,
     Json(body): Json<QueueJumpBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let queue_id = if let Some(qid) = body.queue_id {
-        qid
-    } else {
-        get_or_create_active_queue(&state.db).await.map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "DATABASE_ERROR",
-                &e.to_string(),
-            )
-        })?
-    };
+    let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    let queue_id = body.queue_id.unwrap_or(active_queue_id);
 
     let items = sqlx::query_as::<_, (String, String, i64)>(
         "SELECT id, track_id, position FROM queue_items WHERE queue_id = ? ORDER BY position ASC",
@@ -298,24 +301,71 @@ pub async fn queue_jump_handler(
     let validated_tracks =
         validate_and_load_tracks(&state.db, &track_ids, &state.config.music_paths).await?;
 
-    let cur_track_id = state
-        .playback_engine
-        .snapshot()
-        .await
-        .ok()
-        .and_then(|s| s.track_id);
-    let cur_idx = if let Some(ref cur_tid) = cur_track_id {
-        validated_tracks
-            .iter()
-            .position(|t| t.id == *cur_tid)
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    if queue_id != active_queue_id {
+        // V-P0-04: Promote to canonical active-queue in SQLite transaction
+        let mut tx = state.db.begin().await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+        sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
+            .bind(active_queue_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
+        let now = chrono::Utc::now().to_rfc3339();
+        for (pos, tid) in track_ids.iter().enumerate() {
+            let item_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(item_id.to_string())
+            .bind(active_queue_id.to_string())
+            .bind(tid.to_string())
+            .bind(pos as i64)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
+        }
+        sqlx::query("UPDATE queues SET updated_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(active_queue_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
+        tx.commit().await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+    }
 
     state
         .playback_engine
-        .set_queue(validated_tracks, cur_idx, cur_track_id)
+        .set_queue(validated_tracks, body.index as usize, Some(target_track_id))
         .await
         .map_err(|e| {
             v1_error(
@@ -338,7 +388,13 @@ pub async fn queue_jump_handler(
             )
         })?;
 
-    let snap = state.playback_engine.snapshot().await.unwrap_or_default();
+    let snap = state.playback_engine.snapshot().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ENGINE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     {
         let mut current = state.playback_state.write().await;
@@ -498,7 +554,17 @@ pub async fn queue_transfer_handler(
         })?;
 
     if body.position_ms > 0 {
-        let _ = state.playback_engine.seek(body.position_ms).await;
+        state
+            .playback_engine
+            .seek(body.position_ms)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
     }
 
     let _ = state.tx.send(
@@ -658,6 +724,14 @@ pub async fn clear_queue_handler(
     State(state): State<AppState>,
     Path(queue_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
     sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
         .bind(queue_id.to_string())
         .execute(&state.db)
@@ -670,17 +744,20 @@ pub async fn clear_queue_handler(
             )
         })?;
 
-    state
-        .playback_engine
-        .set_queue(Vec::new(), 0, None)
-        .await
-        .map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "RUNTIME_SYNC_FAILED",
-                &e.to_string(),
-            )
-        })?;
+    // V-P0-04: Only clear engine queue if clearing the canonical active queue
+    if queue_id == active_queue_id {
+        state
+            .playback_engine
+            .set_queue(Vec::new(), 0, None)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "RUNTIME_SYNC_FAILED",
+                    &e.to_string(),
+                )
+            })?;
+    }
 
     Ok(Json(
         serde_json::json!({ "status": "cleared", "queue_id": queue_id }),
@@ -719,6 +796,14 @@ pub async fn queue_delete_handler(
         ));
     }
 
+    let queue_name: Option<String> = sqlx::query_scalar("SELECT name FROM queues WHERE id = ?")
+        .bind(queue_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .unwrap_or(None);
+
+    let is_active = queue_name.as_deref() == Some("active-queue");
+
     sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
         .bind(queue_id.to_string())
         .execute(&mut *tx)
@@ -750,6 +835,20 @@ pub async fn queue_delete_handler(
             &e.to_string(),
         )
     })?;
+
+    if is_active {
+        state
+            .playback_engine
+            .set_queue(Vec::new(), 0, None)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "RUNTIME_SYNC_FAILED",
+                    &e.to_string(),
+                )
+            })?;
+    }
 
     Ok(Json(
         serde_json::json!({ "status": "deleted", "queue_id": queue_id }),

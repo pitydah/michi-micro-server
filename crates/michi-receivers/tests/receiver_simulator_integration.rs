@@ -584,7 +584,7 @@ async fn test_receiver_heartbeat_replay_rejected() {
 
 #[tokio::test]
 #[ignore]
-async fn test_receiver_e2e_data_plane_pipeline() {
+async fn test_receiver_rtp_transport_to_simulator() {
     let url = sim_url();
     let mut client = make_test_client(&url);
 
@@ -652,4 +652,488 @@ async fn test_receiver_e2e_data_plane_pipeline() {
 
     // 6. Stop session cleanly
     client.session_stop().await.expect("session_stop failed");
+}
+
+fn create_test_wav(path: &std::path::Path, duration_ms: u64, freq_hz: f32) {
+    let sample_rate = 48000u32;
+    let num_channels = 2u16;
+    let bits_per_sample = 16u16;
+    let num_samples = (sample_rate as u64 * duration_ms / 1000) as u32;
+    let data_len = num_samples * num_channels as u32 * (bits_per_sample as u32 / 8);
+    let riff_len = 36 + data_len;
+
+    let mut buf = Vec::with_capacity(44 + data_len as usize);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&riff_len.to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&num_channels.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    let byte_rate = sample_rate * num_channels as u32 * (bits_per_sample as u32 / 8);
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    let block_align = num_channels * (bits_per_sample / 8);
+    buf.extend_from_slice(&block_align.to_le_bytes());
+    buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_len.to_le_bytes());
+
+    for i in 0..num_samples {
+        let t = i as f32 / sample_rate as f32;
+        let sample = (t * freq_hz * 2.0 * std::f32::consts::PI).sin();
+        let val = (sample * 16000.0) as i16;
+        for _ in 0..num_channels {
+            buf.extend_from_slice(&val.to_le_bytes());
+        }
+    }
+
+    std::fs::write(path, buf).expect("write wav file");
+}
+
+struct TestReceiverSink {
+    receiver_id: String,
+    session_manager: ReceiverSessionManager,
+    state: michi_playback::SinkState,
+    bytes_received: u64,
+    bytes_sent_to_transport: u64,
+    volume: u8,
+    muted: bool,
+}
+
+impl TestReceiverSink {
+    fn new(receiver_id: String, session_manager: ReceiverSessionManager) -> Self {
+        Self {
+            receiver_id,
+            session_manager,
+            state: michi_playback::SinkState::Preparing,
+            bytes_received: 0,
+            bytes_sent_to_transport: 0,
+            volume: 80,
+            muted: false,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl michi_playback::AudioSink for TestReceiverSink {
+    fn id(&self) -> &str {
+        &self.receiver_id
+    }
+
+    fn kind(&self) -> michi_playback::SinkKind {
+        michi_playback::SinkKind::Receiver
+    }
+
+    async fn prepare(
+        &mut self,
+        format: michi_playback::PcmFormat,
+    ) -> Result<(), michi_playback::PlaybackError> {
+        let active = self
+            .session_manager
+            .get_active_session(&self.receiver_id)
+            .await;
+        if active.is_none() {
+            let session_id = uuid::Uuid::new_v4().to_string();
+            self.session_manager
+                .start_session(
+                    &self.receiver_id,
+                    &session_id,
+                    "pcm_s16le",
+                    format.sample_rate,
+                    format.bit_depth as u32,
+                    format.channels as u32,
+                    0,
+                    200,
+                    self.volume as u32,
+                )
+                .await
+                .map_err(michi_playback::PlaybackError::PlaybackFailed)?;
+        }
+        self.state = michi_playback::SinkState::Ready;
+        Ok(())
+    }
+
+    async fn write_pcm(&mut self, data: &[u8]) -> Result<usize, michi_playback::PlaybackError> {
+        self.bytes_received += data.len() as u64;
+        if self.muted {
+            self.state = michi_playback::SinkState::Ready;
+            return Ok(0);
+        }
+        match self
+            .session_manager
+            .write_pcm(&self.receiver_id, data)
+            .await
+        {
+            Ok(written) => {
+                self.bytes_sent_to_transport += written as u64;
+                self.state = michi_playback::SinkState::AudioFlowing;
+                Ok(written)
+            }
+            Err(e) => {
+                self.state = michi_playback::SinkState::Failed;
+                Err(michi_playback::PlaybackError::PlaybackFailed(e))
+            }
+        }
+    }
+
+    async fn pause(&mut self) -> Result<(), michi_playback::PlaybackError> {
+        self.state = michi_playback::SinkState::Paused;
+        Ok(())
+    }
+
+    async fn resume(&mut self) -> Result<(), michi_playback::PlaybackError> {
+        self.state = michi_playback::SinkState::AudioFlowing;
+        Ok(())
+    }
+
+    async fn set_volume(&mut self, volume: u8) -> Result<(), michi_playback::PlaybackError> {
+        self.volume = volume;
+        let _ = self
+            .session_manager
+            .set_volume(&self.receiver_id, volume as u32)
+            .await;
+        Ok(())
+    }
+
+    async fn health(&self) -> Result<(), michi_playback::PlaybackError> {
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<(), michi_playback::PlaybackError> {
+        self.state = michi_playback::SinkState::Stopped;
+        let _ = self.session_manager.stop_session(&self.receiver_id).await;
+        Ok(())
+    }
+
+    fn snapshot(&self) -> michi_playback::SinkSnapshot {
+        michi_playback::SinkSnapshot {
+            sink_id: self.receiver_id.clone(),
+            kind: michi_playback::SinkKind::Receiver,
+            state: self.state,
+            bytes_received: self.bytes_received,
+            bytes_sent_to_transport: self.bytes_sent_to_transport,
+            last_error: None,
+            muted: self.muted,
+        }
+    }
+}
+
+struct TestTrackResolver {
+    tracks: std::collections::HashMap<uuid::Uuid, michi_core::Track>,
+}
+
+#[async_trait::async_trait]
+impl michi_playback::TrackResolver for TestTrackResolver {
+    async fn get_track(
+        &self,
+        track_id: uuid::Uuid,
+    ) -> Result<michi_core::Track, michi_playback::PlaybackError> {
+        self.tracks
+            .get(&track_id)
+            .cloned()
+            .ok_or(michi_playback::PlaybackError::TrackNotFound(track_id))
+    }
+}
+
+fn make_test_track(
+    id: uuid::Uuid,
+    title: &str,
+    path: &std::path::Path,
+    duration_ms: u64,
+) -> michi_core::Track {
+    michi_core::Track {
+        id,
+        title: Some(title.to_string()),
+        artist: Some("Michi".to_string()),
+        album: Some("E2E Album".to_string()),
+        album_artist: Some("Michi".to_string()),
+        duration_ms: Some(duration_ms),
+        file_path: path.display().to_string(),
+        format: michi_core::AudioFormat::Wav,
+        sample_rate: Some(48000),
+        bit_depth: Some(16),
+        channels: Some(2),
+        artwork_id: None,
+        genre: None,
+        year: Some(2026),
+        track_number: Some(1),
+        disc_number: Some(1),
+        content_hash: None,
+        file_size: std::fs::metadata(path).ok().map(|m| m.len()),
+        file_mtime_ns: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_autonomous_playback_receiver_data_plane_e2e() {
+    let url = sim_url();
+    let temp_dir = std::env::temp_dir().join(format!("michi-e2e-wav-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+    let wav_path1 = temp_dir.join("track1.wav");
+    let wav_path2 = temp_dir.join("track2.wav");
+    let wav_path_short = temp_dir.join("short.wav");
+
+    create_test_wav(&wav_path1, 2000, 440.0);
+    create_test_wav(&wav_path2, 1000, 880.0);
+    create_test_wav(&wav_path_short, 250, 660.0);
+
+    let id1 = uuid::Uuid::new_v4();
+    let id2 = uuid::Uuid::new_v4();
+    let id_short = uuid::Uuid::new_v4();
+
+    let track1 = make_test_track(id1, "Test Track 1", &wav_path1, 2000);
+    let track2 = make_test_track(id2, "Test Track 2", &wav_path2, 1000);
+    let track_short = make_test_track(id_short, "Short Track", &wav_path_short, 250);
+
+    let mut track_map = std::collections::HashMap::new();
+    track_map.insert(id1, track1.clone());
+    track_map.insert(id2, track2.clone());
+    track_map.insert(id_short, track_short.clone());
+
+    let resolver = Arc::new(TestTrackResolver { tracks: track_map });
+
+    // 1. Pair with simulator
+    let identity = make_test_identity();
+    let mut client = ReceiverClient::with_identity(&url, identity.clone());
+    let start = client.pair_start("e2e-suite").await.expect("pair_start");
+    let pair_sess_id = start.session_id.expect("session_id");
+    let confirm = client
+        .pair_confirm(&pair_sess_id, "e2e-suite", "482391")
+        .await
+        .expect("pair_confirm");
+
+    let token = confirm.token.expect("token");
+    let rec_id = "rec-sim-e2e".to_string();
+
+    // 2. Set up ReceiverSessionManager
+    let session_mgr = ReceiverSessionManager::new();
+    let reg_arc = session_mgr.registry().await;
+    {
+        let mut reg = reg_arc.write().await;
+        reg.add(michi_receivers::ReceiverRegistryEntry {
+            receiver_id: rec_id.clone(),
+            name: "Standard Simulator".to_string(),
+            device_type: "michi_stream_standard".to_string(),
+            base_url: url.clone(),
+            paired: true,
+            token: Some(token),
+            last_seen: Some(chrono::Utc::now()),
+            capabilities: vec!["pcm_s16le".to_string()],
+            active_session_id: None,
+            max_sample_rate: 48000,
+            max_bit_depth: 16,
+            supported_transports: vec!["rtp_udp".to_string()],
+            supported_codecs: vec!["pcm_s16le".to_string()],
+            supported_sample_rates: vec![48000],
+            supported_bit_depths: vec![16],
+            supported_channels: vec![2],
+            maximum_safe_volume: Some(100),
+        });
+    }
+
+    // 3. Reset simulator metrics
+    let http_client = reqwest::Client::new();
+    let _ = http_client
+        .post(format!("{url}/api/v1/test/metrics/reset"))
+        .send()
+        .await;
+
+    // 4. Instantiate PlaybackEngine
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let engine_handle = michi_playback::PlaybackEngineHandle::new(tx);
+    let engine =
+        michi_playback::PlaybackEngine::new(rx, resolver, michi_playback::PcmFormat::default());
+    tokio::spawn(async move {
+        engine.run().await;
+    });
+
+    let sink = Box::new(TestReceiverSink::new(rec_id.clone(), session_mgr.clone()));
+
+    // 5. Start real playback through engine -> decoder -> sink -> transport -> simulator
+    engine_handle
+        .play(
+            track1.clone(),
+            vec![sink],
+            michi_playback::PlaybackOutputDescription {
+                target_id: "rec-sim-e2e".to_string(),
+                target_name: "Standard Simulator".to_string(),
+                kind: "receiver".to_string(),
+                receiver_count: 1,
+            },
+            0,
+        )
+        .await
+        .expect("play failed");
+
+    // Poll until packets arrive in simulator
+    let mut packets_seen = 0u64;
+    let mut payload_bytes = 0u64;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Ok(resp) = http_client
+            .get(format!("{url}/api/v1/test/metrics"))
+            .send()
+            .await
+        {
+            if let Ok(metrics) = resp.json::<serde_json::Value>().await {
+                packets_seen = metrics
+                    .get("packets_received")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                payload_bytes = metrics
+                    .get("payload_bytes_received")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let pt = metrics.get("last_payload_type").and_then(|v| v.as_u64());
+                let malformed = metrics.get("malformed_packets").and_then(|v| v.as_u64());
+                if packets_seen >= 10 {
+                    assert_eq!(pt, Some(97), "RTP payload type must be 97");
+                    assert_eq!(malformed, Some(0), "must have 0 malformed packets");
+                    break;
+                }
+            }
+        }
+    }
+
+    assert!(
+        packets_seen >= 10,
+        "engine must stream real RTP packets to receiver simulator, got {packets_seen}"
+    );
+    assert!(
+        payload_bytes >= 9600,
+        "payload bytes must be > 0, got {payload_bytes}"
+    );
+
+    // 6. Verify Engine Snapshot telemetry
+    let snap = engine_handle.snapshot().await.expect("snapshot failed");
+    assert!(
+        snap.track_bytes_decoded > 0,
+        "track_bytes_decoded must be > 0"
+    );
+    assert!(
+        snap.track_pcm_timeline_bytes > 0,
+        "track_pcm_timeline_bytes must be > 0"
+    );
+    assert!(
+        snap.network_bytes_sent_total > 0,
+        "network_bytes_sent_total must be > 0"
+    );
+    assert_eq!(snap.output_health, "healthy");
+    assert!(snap.is_playing());
+
+    // 7. Verify Pause effect
+    engine_handle.pause().await.expect("pause failed");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let m1: serde_json::Value = http_client
+        .get(format!("{url}/api/v1/test/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let p_paused1 = m1["packets_received"].as_u64().unwrap_or(0);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let m2: serde_json::Value = http_client
+        .get(format!("{url}/api/v1/test/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let p_paused2 = m2["packets_received"].as_u64().unwrap_or(0);
+    assert_eq!(
+        p_paused1, p_paused2,
+        "packets must not increment while paused"
+    );
+
+    // 8. Verify Resume effect
+    engine_handle.resume().await.expect("resume failed");
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let m3: serde_json::Value = http_client
+        .get(format!("{url}/api/v1/test/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let p_resumed = m3["packets_received"].as_u64().unwrap_or(0);
+    assert!(
+        p_resumed > p_paused2,
+        "packets must resume flowing after resume"
+    );
+
+    // 9. Verify Seek effect & generation increment
+    let gen_before = engine_handle.snapshot().await.unwrap().generation_id;
+    engine_handle.seek(500).await.expect("seek failed");
+    let gen_after = engine_handle.snapshot().await.unwrap().generation_id;
+    assert!(
+        gen_after > gen_before,
+        "seek must increment engine generation"
+    );
+
+    // 10. Verify EOF queue advance
+    engine_handle
+        .set_queue(
+            vec![track_short.clone(), track2.clone()],
+            0,
+            Some(track_short.id),
+        )
+        .await
+        .expect("set_queue");
+
+    let sink2 = Box::new(TestReceiverSink::new(rec_id.clone(), session_mgr.clone()));
+    engine_handle
+        .play(
+            track_short.clone(),
+            vec![sink2],
+            michi_playback::PlaybackOutputDescription {
+                target_id: "rec-sim-e2e".to_string(),
+                target_name: "Standard Simulator".to_string(),
+                kind: "receiver".to_string(),
+                receiver_count: 1,
+            },
+            0,
+        )
+        .await
+        .expect("play short");
+
+    // Wait for short track to finish and advance to track2
+    let mut advanced = false;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Ok(snap) = engine_handle.snapshot().await {
+            if snap.track_id == Some(track2.id) {
+                advanced = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        advanced,
+        "playback engine must automatically advance to next track on EOF"
+    );
+
+    // 11. Verify Stop cleanly stops receiver session
+    engine_handle.stop().await.expect("stop failed");
+    let final_snap = engine_handle.snapshot().await.unwrap();
+    assert_eq!(
+        final_snap.lifecycle,
+        michi_playback::PlaybackLifecycle::Stopped
+    );
+
+    // Clean up temp dir
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }

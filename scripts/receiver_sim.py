@@ -56,15 +56,18 @@ class ReceiverState:
         self.metrics = {
             "packets_received": 0,
             "bytes_received": 0,
+            "payload_bytes_received": 0,
             "last_payload_size": 0,
             "last_payload_type": 0,
             "last_sequence": 0,
             "last_timestamp": 0,
             "last_ssrc": 0,
+            "malformed_packets": 0,
             "source_ip": "",
             "source_port": 0,
             "heartbeats_received": 0,
             "session_id": "",
+            "packet_history": [],
         }
 
         # Start background UDP thread on stream_port
@@ -104,6 +107,7 @@ class ReceiverState:
                         })
                         self.metrics["packets_received"] += 1
                         self.metrics["bytes_received"] += len(data)
+                        self.metrics["payload_bytes_received"] = self.metrics.get("payload_bytes_received", 0) + payload_size
                         self.metrics["last_payload_size"] = payload_size
                         self.metrics["last_payload_type"] = pt
                         self.metrics["last_sequence"] = seq
@@ -111,6 +115,8 @@ class ReceiverState:
                         self.metrics["last_ssrc"] = ssrc
                         self.metrics["source_ip"] = addr[0]
                         self.metrics["source_port"] = addr[1]
+                    else:
+                        self.metrics["malformed_packets"] = self.metrics.get("malformed_packets", 0) + 1
                 except Exception:
                     break
 
@@ -298,6 +304,26 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             self.send_json(200, {"status": "faults_cleared"})
             return
 
+        if path == "/api/v1/test/metrics/reset":
+            st.metrics = {
+                "packets_received": 0,
+                "bytes_received": 0,
+                "payload_bytes_received": 0,
+                "last_payload_size": 0,
+                "last_payload_type": 0,
+                "last_sequence": 0,
+                "last_timestamp": 0,
+                "last_ssrc": 0,
+                "malformed_packets": 0,
+                "source_ip": "",
+                "source_port": 0,
+                "heartbeats_received": 0,
+                "session_id": st.active_session_id or "",
+                "packet_history": [],
+            }
+            self.send_json(200, {"status": "metrics_reset"})
+            return
+
         if self.check_faults(path):
             return
 
@@ -443,6 +469,23 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             st.ssrc = ssrc
             st.volume = vol
             st.playing = True
+
+            st.metrics = {
+                "packets_received": 0,
+                "bytes_received": 0,
+                "payload_bytes_received": 0,
+                "last_payload_size": 0,
+                "last_payload_type": 0,
+                "last_sequence": 0,
+                "last_timestamp": 0,
+                "last_ssrc": 0,
+                "malformed_packets": 0,
+                "source_ip": "",
+                "source_port": 0,
+                "heartbeats_received": 0,
+                "session_id": st.active_session_id,
+                "packet_history": [],
+            }
 
             effective = {
                 "transport": "rtp_udp",

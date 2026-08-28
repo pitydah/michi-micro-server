@@ -98,6 +98,20 @@ const MODULE_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] = &
         FeatureMaturity::Stable,
         EvidenceLevel::EffectVerified,
     ),
+    (
+        "receivers",
+        "1.0",
+        "Receiver playback data plane",
+        FeatureMaturity::Beta,
+        EvidenceLevel::IntegrationCertified,
+    ),
+    (
+        "rooms",
+        "1.0",
+        "Multi-room playback routing",
+        FeatureMaturity::Beta,
+        EvidenceLevel::Implemented,
+    ),
 ];
 
 const ALWAYS_ON_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] = &[
@@ -215,22 +229,7 @@ const ALWAYS_ON_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] 
     ),
 ];
 
-const DISABLED_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] = &[
-    (
-        "receivers",
-        "1.0",
-        "Receiver playback data plane",
-        FeatureMaturity::Beta,
-        EvidenceLevel::IntegrationCertified,
-    ),
-    (
-        "rooms",
-        "1.0",
-        "Multi-room playback routing",
-        FeatureMaturity::Beta,
-        EvidenceLevel::Implemented,
-    ),
-];
+const DISABLED_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] = &[];
 
 impl ServerCapabilities {
     pub async fn from_state(state: &AppState) -> Self {

@@ -339,9 +339,12 @@ impl AppState {
         let shutdown = self.shutdown_token.clone();
 
         // Import cleanup (siempre corre)
-        routes::v1::import::spawn_import_cleanup(&self.config, db.clone());
-        // Restore playback state (siempre corre)
-        routes::v1::playback::auto_restore_playback_state(db.clone(), self.playback_state.clone());
+        routes::v1::playback::auto_restore_playback_state(
+            db.clone(),
+            self.playback_state.clone(),
+            self.playback_engine.clone(),
+            self.config.music_paths.clone(),
+        );
 
         // DB maintenance scheduler (siempre corre)
         let maintenance_db = db.clone();

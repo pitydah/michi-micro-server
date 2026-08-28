@@ -205,7 +205,13 @@ pub async fn download_backup_handler(
         server_name: state.config.sync_name.clone(),
     };
 
-    let json_bytes = serde_json::to_vec_pretty(&payload).unwrap_or_default();
+    let json_bytes = serde_json::to_vec_pretty(&payload).map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "BACKUP_CREATION_FAILED",
+            &e.to_string(),
+        )
+    })?;
     let filename = format!(
         "michi-backup-{}.json",
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
@@ -875,7 +881,13 @@ pub async fn backup_bundle_handler(
         server_id: state.server_id().to_string(),
         server_name: state.config.sync_name.clone(),
     };
-    let backup_bytes = serde_json::to_vec_pretty(&backup_payload).unwrap_or_default();
+    let backup_bytes = serde_json::to_vec_pretty(&backup_payload).map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "BACKUP_CREATION_FAILED",
+            &e.to_string(),
+        )
+    })?;
     let backup_file = temp_dir.join("backup.json");
     std::fs::write(&backup_file, &backup_bytes)
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
@@ -887,7 +899,13 @@ pub async fn backup_bundle_handler(
         "config_path": state.config.config_path.display().to_string(),
         "cache_path": state.config.cache_path.display().to_string(),
     });
-    let config_bytes = serde_json::to_vec_pretty(&config_json).unwrap_or_default();
+    let config_bytes = serde_json::to_vec_pretty(&config_json).map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "BACKUP_CREATION_FAILED",
+            &e.to_string(),
+        )
+    })?;
     let config_file = temp_dir.join("config.json");
     std::fs::write(&config_file, &config_bytes)
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
@@ -902,7 +920,13 @@ pub async fn backup_bundle_handler(
         "config.json".to_string(),
         serde_json::Value::String(blake3::hash(&config_bytes).to_hex().to_string()),
     );
-    let checksums_bytes = serde_json::to_vec_pretty(&checksums).unwrap_or_default();
+    let checksums_bytes = serde_json::to_vec_pretty(&checksums).map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "BACKUP_CREATION_FAILED",
+            &e.to_string(),
+        )
+    })?;
     let checksums_file = temp_dir.join("checksums.json");
     std::fs::write(&checksums_file, &checksums_bytes)
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;
@@ -934,7 +958,13 @@ pub async fn backup_bundle_handler(
             },
         ],
     };
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap_or_default();
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "BACKUP_CREATION_FAILED",
+            &e.to_string(),
+        )
+    })?;
     let manifest_file = temp_dir.join("manifest.json");
     std::fs::write(&manifest_file, &manifest_bytes)
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "WRITE", &e.to_string()))?;

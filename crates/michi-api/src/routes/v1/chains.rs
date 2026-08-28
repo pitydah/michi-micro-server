@@ -385,25 +385,37 @@ pub async fn stop_chain_handler(
         }
     }
 
+    if failed_count > 0 && stopped_count == 0 {
+        return Err(v1_error(
+            StatusCode::BAD_GATEWAY,
+            "CHAIN_STOP_FAILED",
+            "failed to stop all links in chain",
+        ));
+    }
+
     let status = if failed_count == 0 {
         "stopped"
-    } else if stopped_count > 0 {
-        "partial"
     } else {
-        "failed"
+        "partial"
     };
 
-    if failed_count == 0 || stopped_count > 0 {
-        let update = michi_core::PlaybackChainUpdate {
-            name: None,
-            track_id: None,
-            position_ms: None,
-            playing: Some(false),
-            shuffle: None,
-            repeat_mode: None,
-        };
-        let _ = michi_db::update_chain(&state.db, &id, &update).await;
-    }
+    let update = michi_core::PlaybackChainUpdate {
+        name: None,
+        track_id: None,
+        position_ms: None,
+        playing: Some(false),
+        shuffle: None,
+        repeat_mode: None,
+    };
+    michi_db::update_chain(&state.db, &id, &update)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     Ok(Json(serde_json::json!({
         "status": status,

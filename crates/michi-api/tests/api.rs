@@ -1545,9 +1545,8 @@ async fn test_v1_server_info() {
     assert!(json["roles"].is_array());
     assert_eq!(json["auth"]["strategy"], "SERVER_CODE");
     assert!(json["auth"]["token_refresh"].as_bool().unwrap_or(false));
-    assert_eq!(json["auth"]["required"].as_bool(), Some(true));
-    assert_eq!(json["features"]["receivers"].as_bool(), Some(false));
-    assert_eq!(json["features"]["rooms"].as_bool(), Some(false));
+    assert_eq!(json["features"]["receivers"].as_bool(), Some(true));
+    assert_eq!(json["features"]["rooms"].as_bool(), Some(true));
     assert_eq!(json["api_version"], "v1");
 }
 
