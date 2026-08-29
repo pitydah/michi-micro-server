@@ -874,7 +874,7 @@ fn make_test_track(
 
 #[tokio::test]
 #[ignore]
-async fn test_autonomous_playback_receiver_data_plane_e2e() {
+async fn test_playback_engine_to_receiver_session_manager_e2e() {
     let url = sim_url();
     let temp_dir = std::env::temp_dir().join(format!("michi-e2e-wav-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).expect("create temp dir");

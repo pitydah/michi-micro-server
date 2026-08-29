@@ -97,6 +97,10 @@ class ReceiverState:
                         payload_size = len(data) - 12
                         if "packet_history" not in self.metrics:
                             self.metrics["packet_history"] = []
+                        if "first_sequence" not in self.metrics or self.metrics["first_sequence"] is None:
+                            self.metrics["first_sequence"] = seq
+                        if "first_timestamp" not in self.metrics or self.metrics["first_timestamp"] is None:
+                            self.metrics["first_timestamp"] = ts
                         self.metrics["packet_history"].append({
                             "seq": seq,
                             "ts": ts,

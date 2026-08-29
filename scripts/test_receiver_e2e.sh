@@ -73,4 +73,8 @@ echo "Running all receiver simulator integration tests..."
 cargo test -p michi-receivers --test receiver_simulator_integration -- --ignored --test-threads=1
 
 echo ""
+echo "Running production ReceiverAudioSink data plane certification test..."
+cargo test -p michi-api test_autonomous_playback_to_production_receiver_sink_e2e -- --ignored --test-threads=1
+
+echo ""
 echo "=== RECEIVER E2E TESTS: ALL PASSED ==="

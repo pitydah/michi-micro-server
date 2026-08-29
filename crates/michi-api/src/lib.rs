@@ -339,6 +339,9 @@ impl AppState {
         let shutdown = self.shutdown_token.clone();
 
         // Import cleanup (siempre corre)
+        routes::v1::import::spawn_import_cleanup(&self.config, db.clone());
+
+        // Restore playback state (siempre corre)
         routes::v1::playback::auto_restore_playback_state(
             db.clone(),
             self.playback_state.clone(),

@@ -17,6 +17,10 @@ use crate::model::{
 use crate::resolver::TrackResolver;
 use crate::sink::AudioSink;
 
+/// Playing means sustained PCM delivery, not a single successful packet burst.
+pub const PLAYING_EVIDENCE_THRESHOLD_MS: u64 = 100;
+pub const MAX_FAILED_SINK_SNAPSHOTS: usize = 32;
+
 pub struct PlaybackEngine {
     receiver: mpsc::Receiver<EngineCommand>,
     resolver: Arc<dyn TrackResolver>,
@@ -217,8 +221,9 @@ impl PlaybackEngine {
                 let mut delivered_bytes = 0usize;
                 let mut surviving_sinks = Vec::new();
                 let total_sinks = self.sinks.len();
+                let old_sinks = std::mem::take(&mut self.sinks);
 
-                for (mut sink, res) in self.sinks.drain(..).zip(results.into_iter()) {
+                for (mut sink, res) in old_sinks.into_iter().zip(results.into_iter()) {
                     match res {
                         Ok(Ok(written)) => {
                             delivered_bytes += written;
@@ -233,7 +238,7 @@ impl PlaybackEngine {
                             let mut snap = sink.snapshot();
                             snap.state = SinkState::Failed;
                             snap.last_error = Some(e.to_string());
-                            self.failed_sinks.push(snap);
+                            self.record_failed_sink(snap);
                             tokio::spawn(async move {
                                 let _ =
                                     tokio::time::timeout(Duration::from_millis(500), sink.stop())
@@ -248,7 +253,7 @@ impl PlaybackEngine {
                             let mut snap = sink.snapshot();
                             snap.state = SinkState::Failed;
                             snap.last_error = Some("write timed out after 250ms".to_string());
-                            self.failed_sinks.push(snap);
+                            self.record_failed_sink(snap);
                             tokio::spawn(async move {
                                 let _ =
                                     tokio::time::timeout(Duration::from_millis(500), sink.stop())
@@ -293,7 +298,10 @@ impl PlaybackEngine {
 
                     if self.state == PlaybackLifecycle::AudioFlowing
                         && self.track_pcm_timeline_bytes
-                            >= self.format.bytes_for_duration_ms(20) as u64
+                            >= self
+                                .format
+                                .bytes_for_duration_ms(PLAYING_EVIDENCE_THRESHOLD_MS)
+                                as u64
                     {
                         self.state = PlaybackLifecycle::Playing;
                     }
@@ -310,6 +318,13 @@ impl PlaybackEngine {
                 self.playing_started_at = None;
             }
         }
+    }
+
+    fn record_failed_sink(&mut self, snap: SinkSnapshot) {
+        if self.failed_sinks.len() >= MAX_FAILED_SINK_SNAPSHOTS {
+            self.failed_sinks.remove(0);
+        }
+        self.failed_sinks.push(snap);
     }
 
     async fn fail_playback(&mut self, e: PlaybackError) {
@@ -334,7 +349,7 @@ impl PlaybackEngine {
         match self.repeat {
             RepeatMode::One => {
                 if let Some(track) = self.current_track.clone() {
-                    info!("repeat one: repeating track {}", track.id);
+                    info!("repeat one: replaying track {}", track.id);
                     if let Err(e) = self.start_playback_internal(track, 0).await {
                         self.fail_playback(e).await;
                     }
@@ -343,13 +358,13 @@ impl PlaybackEngine {
             }
             RepeatMode::All => {
                 if !self.queue.is_empty() {
-                    if self.play_order_pos + 1 < self.play_order.len() {
-                        self.play_order_pos += 1;
-                    } else {
+                    if self.play_order_pos + 1 >= self.play_order.len() {
                         if self.shuffle {
                             self.recompute_play_order(self.queue_index);
                         }
                         self.play_order_pos = 0;
+                    } else {
+                        self.play_order_pos += 1;
                     }
                     self.queue_index = self.play_order[self.play_order_pos];
                     let next_track = self.queue[self.queue_index].clone();
@@ -383,6 +398,7 @@ impl PlaybackEngine {
         track: Track,
         position_ms: u64,
     ) -> Result<(), PlaybackError> {
+        self.failed_sinks.clear();
         if self.sinks.is_empty() {
             self.state = PlaybackLifecycle::Failed;
             self.output_health = "none".to_string();
@@ -616,6 +632,7 @@ impl PlaybackEngine {
                         self.generation_id += 1;
                         self.track_bytes_decoded = 0;
                         self.track_pcm_timeline_bytes = 0;
+                        self.failed_sinks.clear();
                         self.playing_started_at = None;
                         self.state = PlaybackLifecycle::Preparing;
 

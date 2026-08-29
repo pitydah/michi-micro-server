@@ -151,9 +151,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
+        # Rust toolchain setup
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config ffmpeg
       - name: Run Web UI Functional Integrity Suite
         run: cargo test -p michi-api --test web_ui_integrity_tests
 
@@ -169,7 +170,7 @@ jobs:
           toolchain: 1.88.0
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config ffmpeg
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

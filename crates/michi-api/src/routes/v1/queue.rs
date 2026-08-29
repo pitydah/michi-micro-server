@@ -27,7 +27,28 @@ fn v1_error(
 pub async fn queue_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let current = state.playback_state.read().await;
+    let snap = state.playback_engine.snapshot().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ENGINE_UNAVAILABLE",
+            &e.to_string(),
+        )
+    })?;
+
+    let is_playing = matches!(
+        snap.lifecycle,
+        michi_playback::PlaybackLifecycle::AudioFlowing
+            | michi_playback::PlaybackLifecycle::Playing
+    );
+
+    let position_ms = if snap.lifecycle == michi_playback::PlaybackLifecycle::Stopped
+        || snap.lifecycle == michi_playback::PlaybackLifecycle::Ended
+    {
+        0
+    } else {
+        snap.position_ms
+    };
+
     let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -61,24 +82,36 @@ pub async fn queue_handler(
         })
         .collect::<Vec<_>>();
 
-    let current_index = if let Some(ref cur_tid) = current.track_id {
+    let current_index = if let Some(ref cur_tid) = snap.track_id {
         items
             .iter()
             .position(|it| it["track_id"] == cur_tid.to_string())
-            .unwrap_or(0) as u32
+            .map(|pos| pos as u32)
     } else {
-        0
+        None
     };
+
+    // Update legacy playback state projection
+    {
+        let mut ps = state.playback_state.write().await;
+        ps.track_id = snap.track_id;
+        ps.position_ms = position_ms;
+        ps.playing = is_playing;
+        ps.volume = (snap.volume as f64) / 100.0;
+        ps.shuffle = snap.shuffle;
+        ps.repeat = snap.repeat.as_str().to_string();
+        ps.updated_at = snap.updated_at;
+    }
 
     Ok(Json(serde_json::json!({
         "queue_id": active_queue_id,
         "items_count": items.len(),
         "items": items,
-        "current_track_id": current.track_id,
+        "current_track_id": snap.track_id,
         "current_index": current_index,
-        "position_ms": current.position_ms,
-        "playing": current.playing,
-        "volume": (current.volume * 100.0) as u32,
+        "position_ms": position_ms,
+        "playing": is_playing,
+        "volume": snap.volume,
     })))
 }
 
@@ -200,8 +233,14 @@ pub async fn queue_items_handler(
         .playback_engine
         .snapshot()
         .await
-        .ok()
-        .and_then(|s| s.track_id);
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ENGINE_UNAVAILABLE",
+                &e.to_string(),
+            )
+        })?
+        .track_id;
 
     sync_active_queue_to_engine(&state, &active_queue_id, cur_track_id).await?;
 
@@ -703,8 +742,14 @@ pub async fn queue_reorder_handler(
         .playback_engine
         .snapshot()
         .await
-        .ok()
-        .and_then(|s| s.track_id);
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ENGINE_UNAVAILABLE",
+                &e.to_string(),
+            )
+        })?
+        .track_id;
     sync_active_queue_to_engine(&state, &queue_id, cur_track_id).await?;
 
     let _ = state.tx.send(

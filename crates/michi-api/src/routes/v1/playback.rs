@@ -93,6 +93,18 @@ pub async fn playback_state_handler(
         ps.updated_at = snap.updated_at;
     }
 
+    // VI-P0-10: Update latest DB session with confirmed playback state asynchronously
+    if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&state.db).await {
+        if sess.current_track_id == track_id && sess.playing != is_playing {
+            sess.playing = is_playing;
+            sess.position_ms = position_ms;
+            let db = state.db.clone();
+            tokio::spawn(async move {
+                let _ = michi_db::update_playback_session(&db, &sess).await;
+            });
+        }
+    }
+
     let current_track = if let Some(tid) = track_id {
         michi_db::get_track(&state.db, &tid)
             .await
@@ -1029,27 +1041,82 @@ pub async fn restore_playback_state_handler(
 
     match latest {
         Some(session) => {
+            if let Some(qid) = session.queue_id {
+                let items = michi_db::get_queue_items(&state.db, &qid)
+                    .await
+                    .map_err(|e| {
+                        v1_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "DATABASE_ERROR",
+                            &e.to_string(),
+                        )
+                    })?;
+                let track_ids: Vec<Uuid> = items.into_iter().map(|(id, _)| id).collect();
+                let tracks =
+                    validate_and_load_tracks(&state.db, &track_ids, &state.config.music_paths)
+                        .await?;
+
+                let cur_idx = if let Some(ref cur_tid) = session.current_track_id {
+                    tracks.iter().position(|t| t.id == *cur_tid).unwrap_or(0)
+                } else {
+                    0
+                };
+
+                state
+                    .playback_engine
+                    .set_queue(tracks.clone(), cur_idx, session.current_track_id)
+                    .await
+                    .map_err(|e| {
+                        v1_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "RUNTIME_SYNC_FAILED",
+                            &e.to_string(),
+                        )
+                    })?;
+
+                if let Some(cur_track) = tracks.get(cur_idx) {
+                    state
+                        .playback_engine
+                        .load_track(cur_track.clone(), session.position_ms)
+                        .await
+                        .map_err(|e| {
+                            v1_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                e.error_code(),
+                                &e.to_string(),
+                            )
+                        })?;
+                }
+            }
+
+            let snap = state.playback_engine.snapshot().await.map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ENGINE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
+
+            // Sync projection from engine snapshot
             {
                 let mut current = state.playback_state.write().await;
-                current.track_id = session.current_track_id;
-                current.position_ms = session.position_ms;
-                current.playing = session.playing;
+                current.track_id = snap.track_id;
+                current.position_ms = snap.position_ms;
+                current.playing = false; // never auto-play on restore
                 current.volume = session.volume;
                 current.updated_at = Utc::now();
             }
 
             let mut updated = session;
             updated.restored = true;
-            michi_db::update_playback_session(&state.db, &updated)
-                .await
-                .ok();
+            let _ = michi_db::update_playback_session(&state.db, &updated).await;
 
             Ok(Json(serde_json::json!({
                 "restored": true,
                 "session_id": updated.id,
-                "track_id": updated.current_track_id,
-                "position_ms": updated.position_ms,
-                "playing": updated.playing,
+                "track_id": snap.track_id,
+                "position_ms": snap.position_ms,
+                "playing": false,
                 "volume": (updated.volume * 100.0) as u32,
                 "resume_policy": updated.resume_policy,
             })))
@@ -1070,37 +1137,84 @@ pub fn auto_restore_playback_state(
     tokio::spawn(async move {
         match michi_db::get_latest_playback_session(&db).await {
             Ok(Some(session)) => {
-                let mut state = playback_state.write().await;
-                state.track_id = session.current_track_id;
-                state.position_ms = session.position_ms;
-                state.playing = false; // never auto-play on restart
-                state.volume = session.volume;
-                state.updated_at = Utc::now();
-                drop(state);
-
                 if let Some(qid) = session.queue_id {
-                    if let Ok(items) = michi_db::get_queue_items(&db, &qid).await {
-                        let track_ids: Vec<Uuid> = items.into_iter().map(|(id, _)| id).collect();
-                        if let Ok(tracks) =
-                            validate_and_load_tracks(&db, &track_ids, &music_paths).await
-                        {
-                            let cur_idx = if let Some(ref cur_tid) = session.current_track_id {
-                                tracks.iter().position(|t| t.id == *cur_tid).unwrap_or(0)
-                            } else {
-                                0
-                            };
-                            let _ = playback_engine
-                                .set_queue(tracks.clone(), cur_idx, session.current_track_id)
-                                .await;
-                            if let Some(cur_track) = tracks.get(cur_idx) {
-                                let _ = playback_engine
-                                    .load_track(cur_track.clone(), session.position_ms)
-                                    .await;
+                    match michi_db::get_queue_items(&db, &qid).await {
+                        Ok(items) => {
+                            let track_ids: Vec<Uuid> =
+                                items.into_iter().map(|(id, _)| id).collect();
+                            match validate_and_load_tracks(&db, &track_ids, &music_paths).await {
+                                Ok(tracks) => {
+                                    let cur_idx = if let Some(ref cur_tid) =
+                                        session.current_track_id
+                                    {
+                                        tracks.iter().position(|t| t.id == *cur_tid).unwrap_or(0)
+                                    } else {
+                                        0
+                                    };
+                                    if let Err(e) = playback_engine
+                                        .set_queue(
+                                            tracks.clone(),
+                                            cur_idx,
+                                            session.current_track_id,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            "playback restore failed to set queue: session_id={}, error={}",
+                                            session.id,
+                                            e
+                                        );
+                                        return;
+                                    }
+                                    if let Some(cur_track) = tracks.get(cur_idx) {
+                                        if let Err(e) = playback_engine
+                                            .load_track(cur_track.clone(), session.position_ms)
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                "playback restore failed to load track: session_id={}, track_id={}, error={}",
+                                                session.id,
+                                                cur_track.id,
+                                                e
+                                            );
+                                            return;
+                                        }
+                                    }
+                                    if let Ok(snap) = playback_engine.snapshot().await {
+                                        let mut state = playback_state.write().await;
+                                        state.track_id = snap.track_id;
+                                        state.position_ms = snap.position_ms;
+                                        state.playing = false; // never auto-play on restart
+                                        state.volume = session.volume;
+                                        state.updated_at = Utc::now();
+                                        drop(state);
+
+                                        let mut updated = session.clone();
+                                        updated.restored = true;
+                                        let _ =
+                                            michi_db::update_playback_session(&db, &updated).await;
+
+                                        info!(
+                                            "restored {} queue items from session {}",
+                                            tracks.len(),
+                                            session.id
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "playback restore failed to validate tracks: session_id={}, error={:?}",
+                                        session.id,
+                                        e
+                                    );
+                                }
                             }
-                            info!(
-                                "restored {} queue items from session {}",
-                                tracks.len(),
-                                session.id
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "playback restore failed to get queue items: session_id={}, error={}",
+                                session.id,
+                                e
                             );
                         }
                     }
