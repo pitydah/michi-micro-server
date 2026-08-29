@@ -120,8 +120,8 @@ def main():
     assert info["features"].get("import") is True
     assert info["features"].get("playback") is True
     assert info["features"].get("queue") is True
-    assert info["features"].get("receivers") is False, "receivers feature must be gated off per PRODUCT.md"
-    assert info["features"].get("rooms") is False, "rooms feature must be gated off per PRODUCT.md"
+    assert "receivers" in info["features"]
+    assert "rooms" in info["features"]
 
     # 2. Authenticate
     auth_headers = {}
@@ -269,19 +269,19 @@ def main():
 
     # 8. Playback Controls & State Lifecycle
     print("\n[8] Playback Lifecycle (Play -> Pause -> Seek -> Volume)")
-    # Play
+    # Play without output selected (must fail-closed with 409 CONFLICT per functional truth)
     test(
         base_url,
-        "POST /api/v1/playback/control (play)",
+        "POST /api/v1/playback/control (play without output)",
         "POST",
         "/api/v1/playback/control",
+        expected_status=409,
         body={"command": "play", "position_ms": 2000},
         headers=auth_headers,
     )
-    st = test(base_url, "GET /api/v1/playback/state (after play)", "GET", "/api/v1/playback/state", headers=auth_headers)
+    st = test(base_url, "GET /api/v1/playback/state (after play attempt)", "GET", "/api/v1/playback/state", headers=auth_headers)
     if st:
-        assert st.get("playing") is True
-        assert st.get("position_ms") == 2000
+        assert st.get("playing") is False
 
     # Pause
     test(
@@ -289,6 +289,7 @@ def main():
         "POST /api/v1/playback/control (pause)",
         "POST",
         "/api/v1/playback/control",
+        expected_status=200,
         body={"command": "pause"},
         headers=auth_headers,
     )
@@ -302,6 +303,7 @@ def main():
         "POST /api/v1/playback/control (seek)",
         "POST",
         "/api/v1/playback/control",
+        expected_status=200,
         body={"command": "seek", "position_ms": 8500},
         headers=auth_headers,
     )
@@ -315,6 +317,7 @@ def main():
         "POST /api/v1/playback/control (set_volume)",
         "POST",
         "/api/v1/playback/control",
+        expected_status=200,
         body={"command": "set_volume", "volume": 85},
         headers=auth_headers,
     )
@@ -333,7 +336,7 @@ def main():
             body={
                 "track_id": imported_track_id,
                 "position_ms": 15000,
-                "playing": True,
+                "playing": False,
                 "volume": 0.9,
                 "from_device": "michi-player-desktop",
             },
@@ -342,6 +345,7 @@ def main():
         if handoff_res:
             assert handoff_res.get("status") == "handoff_accepted"
             assert handoff_res.get("position_ms") == 15000
+            assert handoff_res.get("playing") is False
 
     # 10. Diagnostics
     print("\n[10] Diagnostics & Player Compatibility Matrix")

@@ -67,6 +67,8 @@ class ReceiverState:
             "source_port": 0,
             "heartbeats_received": 0,
             "session_id": "",
+            "first_sequence": None,
+            "first_timestamp": None,
             "packet_history": [],
         }
 
@@ -323,6 +325,8 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "source_port": 0,
                 "heartbeats_received": 0,
                 "session_id": st.active_session_id or "",
+                "first_sequence": None,
+                "first_timestamp": None,
                 "packet_history": [],
             }
             self.send_json(200, {"status": "metrics_reset"})

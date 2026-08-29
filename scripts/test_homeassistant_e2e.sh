@@ -57,7 +57,9 @@ rm -f /tmp/michi_ha_test/michi.db
 # Run Michi Server with MQTT enabled
 echo "Starting Michi Micro Server with MQTT enabled..."
 MICHI_PORT="$SERVER_PORT" \
-MICHI_AUTH_ENABLED="false" \
+MICHI_AUTH_ENABLED="true" \
+MICHI_AUTH_USERNAME="admin" \
+MICHI_AUTH_PASSWORD="TestAdminPassword123!" \
 MICHI_DATABASE_URL="sqlite:///tmp/michi_ha_test/michi.db" \
 MICHI_MUSIC_PATHS="/tmp/michi_ha_test/music" \
 MICHI_CACHE_PATH="/tmp/michi_ha_test/cache" \

@@ -145,7 +145,7 @@ pub async fn rate_limit_middleware(
     Ok(next.run(req).await)
 }
 
-/// Rate limiting middleware específico para pairing (por IP, 5 intentos/minuto)
+/// Rate limiting middleware específico para pairing (por IP, configurable intentos/minuto)
 pub async fn pairing_rate_limit_middleware(
     State(state): State<SecurityState>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
@@ -160,11 +160,16 @@ pub async fn pairing_rate_limit_middleware(
     let (count, last_reset) = entry.value();
     let elapsed = now.duration_since(*last_reset);
 
+    let max_attempts = state.config.pairing_rate_limit_per_minute.max(1);
+
     if elapsed.as_secs() > 60 {
         // Reset cada minuto
         *entry = (1, now);
-    } else if *count >= 5 {
-        warn!("Pairing rate limit exceeded for IP: {}", ip);
+    } else if *count >= max_attempts {
+        warn!(
+            "Pairing rate limit exceeded for IP: {} (limit={}/min)",
+            ip, max_attempts
+        );
         return Err((StatusCode::TOO_MANY_REQUESTS, "60".to_string()));
     } else {
         entry.value_mut().0 += 1;
@@ -253,6 +258,15 @@ mod tests {
         let config = SecurityConfig::default();
         assert_eq!(config.rate_limit_rps, 10);
         assert_eq!(config.pairing_rate_limit_per_minute, 5);
+    }
+
+    #[test]
+    fn test_custom_pairing_rate_limit_config() {
+        let config = SecurityConfig {
+            pairing_rate_limit_per_minute: 2,
+            ..Default::default()
+        };
+        assert_eq!(config.pairing_rate_limit_per_minute, 2);
     }
 
     #[test]

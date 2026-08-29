@@ -10,19 +10,21 @@ use crate::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct RoomsStatus {
-    available: bool,
-    version: Option<String>,
-    rooms: Vec<michi_rooms::Room>,
+    pub available: bool,
+    pub version: Option<String>,
+    pub degraded: bool,
+    pub error: Option<String>,
+    pub rooms: Vec<michi_rooms::Room>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct VolumeRequest {
-    volume: u32,
+    pub volume: u32,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct MuteRequest {
-    muted: bool,
+    pub muted: bool,
 }
 
 pub async fn rooms_status_handler(
@@ -33,15 +35,27 @@ pub async fn rooms_status_handler(
         return Ok(Json(RoomsStatus {
             available: false,
             version: None,
+            degraded: snapcast.degraded,
+            error: snapcast.error,
             rooms: vec![],
         }));
     }
-    let rooms = michi_rooms::get_groups().await.unwrap_or_default();
-    Ok(Json(RoomsStatus {
-        available: true,
-        version: snapcast.version,
-        rooms,
-    }))
+    match michi_rooms::get_groups().await {
+        Ok(rooms) => Ok(Json(RoomsStatus {
+            available: true,
+            version: snapcast.version,
+            degraded: false,
+            error: None,
+            rooms,
+        })),
+        Err(e) => Ok(Json(RoomsStatus {
+            available: false,
+            version: snapcast.version,
+            degraded: true,
+            error: Some(e.to_string()),
+            rooms: vec![],
+        })),
+    }
 }
 
 pub async fn rooms_volume_handler(
@@ -52,9 +66,23 @@ pub async fn rooms_volume_handler(
     michi_rooms::set_group_volume(&id, body.volume)
         .await
         .map_err(|e| {
+            let status = match e {
+                michi_rooms::SnapcastError::Transport(_) | michi_rooms::SnapcastError::Timeout => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+                michi_rooms::SnapcastError::HttpStatus(code) => {
+                    StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY)
+                }
+                _ => StatusCode::BAD_GATEWAY,
+            };
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
+                status,
+                Json(serde_json::json!({
+                    "error": {
+                        "code": "SNAPCAST_RPC_FAILED",
+                        "message": e.to_string()
+                    }
+                })),
             )
         })?;
     Ok(Json(serde_json::json!({"status": "ok"})))
@@ -68,9 +96,23 @@ pub async fn rooms_mute_handler(
     michi_rooms::set_group_mute(&id, body.muted)
         .await
         .map_err(|e| {
+            let status = match e {
+                michi_rooms::SnapcastError::Transport(_) | michi_rooms::SnapcastError::Timeout => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+                michi_rooms::SnapcastError::HttpStatus(code) => {
+                    StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY)
+                }
+                _ => StatusCode::BAD_GATEWAY,
+            };
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
+                status,
+                Json(serde_json::json!({
+                    "error": {
+                        "code": "SNAPCAST_RPC_FAILED",
+                        "message": e.to_string()
+                    }
+                })),
             )
         })?;
     Ok(Json(serde_json::json!({"status": "ok"})))

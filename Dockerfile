@@ -28,6 +28,7 @@ COPY crates/michi-tui/Cargo.toml ./crates/michi-tui/Cargo.toml
 COPY crates/michi-client/Cargo.toml ./crates/michi-client/Cargo.toml
 COPY crates/michi-opensubsonic/Cargo.toml ./crates/michi-opensubsonic/Cargo.toml
 COPY crates/michi-rooms/Cargo.toml ./crates/michi-rooms/Cargo.toml
+COPY crates/michi-playback/Cargo.toml ./crates/michi-playback/Cargo.toml
 COPY crates/michi-link/Cargo.toml ./crates/michi-link/Cargo.toml
 COPY crates/michi-receivers/Cargo.toml ./crates/michi-receivers/Cargo.toml
 COPY crates/michi-security/Cargo.toml ./crates/michi-security/Cargo.toml
@@ -37,7 +38,7 @@ COPY crates/michi-onboard/Cargo.toml ./crates/michi-onboard/Cargo.toml
 COPY vendor/michi-link/crates/michi-identity/Cargo.toml ./vendor/michi-link/crates/michi-identity/Cargo.toml
 
 # Dummy sources for dependency caching
-RUN for dir in michi-core michi-api michi-config michi-db michi-metadata michi-scanner michi-streaming michi-m3u michi-sync michi-homeassistant michi-tui michi-client michi-opensubsonic michi-rooms michi-link michi-receivers michi-security michi-ingest michi-connect michi-onboard; do \
+RUN for dir in michi-core michi-api michi-config michi-db michi-metadata michi-scanner michi-streaming michi-m3u michi-sync michi-homeassistant michi-tui michi-client michi-opensubsonic michi-rooms michi-playback michi-link michi-receivers michi-security michi-ingest michi-connect michi-onboard; do \
       mkdir -p crates/$dir/src && echo "pub fn placeholder() {}" > crates/$dir/src/lib.rs; \
     done && \
     mkdir -p vendor/michi-link/crates/michi-identity/src && \

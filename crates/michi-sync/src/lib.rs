@@ -2,12 +2,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, SqlitePool};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 use utoipa::ToSchema;
@@ -222,13 +222,17 @@ impl SyncMessage {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct UploadMeta {
+    id: Uuid,
     filename: String,
     original_path: String,
     file_size: i64,
     expected_hash: String,
     uploaded_by: String,
     total_chunks: u32,
+    chunk_size: usize,
+    received_chunks: HashSet<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -269,13 +273,34 @@ impl SyncManager {
         let file_id = Uuid::new_v4();
         let filename = init.filename.clone();
         let meta = UploadMeta {
-            filename: init.filename,
-            original_path: init.original_path,
+            id: file_id,
+            filename: init.filename.clone(),
+            original_path: init.original_path.clone(),
             file_size: init.file_size,
-            expected_hash: init.expected_hash,
-            uploaded_by: init.uploaded_by,
+            expected_hash: init.expected_hash.clone(),
+            uploaded_by: init.uploaded_by.clone(),
             total_chunks: 0,
+            chunk_size: self.chunk_size,
+            received_chunks: HashSet::new(),
         };
+
+        let now = Utc::now().to_rfc3339();
+        let _ = sqlx::query(
+            "INSERT INTO sync_uploads (id, filename, original_path, file_size, expected_hash, uploaded_by, total_chunks, chunk_size, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'uploading', ?, ?)"
+        )
+        .bind(file_id.to_string())
+        .bind(&init.filename)
+        .bind(&init.original_path)
+        .bind(init.file_size)
+        .bind(&init.expected_hash)
+        .bind(&init.uploaded_by)
+        .bind(self.chunk_size as i64)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.db_pool)
+        .await;
+
         self.uploads.write().await.insert(file_id, meta);
         info!("Upload initialized: {} -> {}", file_id, filename);
         Ok(file_id)
@@ -283,16 +308,6 @@ impl SyncManager {
 
     pub async fn upload_chunk(&self, chunk: UploadChunk) -> Result<UploadProgress, SyncError> {
         let file_path = self.upload_dir.join(chunk.file_id.to_string());
-
-        // Track total_chunks from the first chunk
-        {
-            let mut uploads = self.uploads.write().await;
-            if let Some(meta) = uploads.get_mut(&chunk.file_id) {
-                if chunk.chunk_index == 0 {
-                    meta.total_chunks = chunk.total_chunks;
-                }
-            }
-        }
 
         // Verify individual chunk hash (checksum of chunk data)
         let mut hasher = Sha256::new();
@@ -305,21 +320,135 @@ impl SyncManager {
             });
         }
 
-        let mut file = File::options()
-            .create(true)
-            .append(true)
-            .open(&file_path)
-            .await?;
+        // Ensure session is loaded (from memory or fallback to DB on restart)
+        {
+            let mut uploads = self.uploads.write().await;
+            if let std::collections::hash_map::Entry::Vacant(e) = uploads.entry(chunk.file_id) {
+                if let Ok(Some(row)) = sqlx::query_as::<
+                    _,
+                    (
+                        String,
+                        String,
+                        String,
+                        i64,
+                        String,
+                        String,
+                        i64,
+                        i64,
+                        String,
+                    ),
+                >(
+                    "SELECT id, filename, original_path, file_size, expected_hash, uploaded_by, total_chunks, chunk_size, status
+                     FROM sync_uploads WHERE id = ?"
+                )
+                .bind(chunk.file_id.to_string())
+                .fetch_optional(&self.db_pool)
+                .await {
+                    let mut received = HashSet::new();
+                    if let Ok(chunk_rows) = sqlx::query_as::<_, (i64,)>(
+                        "SELECT chunk_index FROM sync_upload_chunks WHERE file_id = ?"
+                    )
+                    .bind(chunk.file_id.to_string())
+                    .fetch_all(&self.db_pool)
+                    .await {
+                        for (idx,) in chunk_rows {
+                            received.insert(idx as u32);
+                        }
+                    }
 
-        file.write_all(&chunk.data).await?;
-        file.sync_all().await?;
+                    e.insert(UploadMeta {
+                        id: chunk.file_id,
+                        filename: row.1,
+                        original_path: row.2,
+                        file_size: row.3,
+                        expected_hash: row.4,
+                        uploaded_by: row.5,
+                        total_chunks: row.6 as u32,
+                        chunk_size: row.7 as usize,
+                        received_chunks: received,
+                    });
+                }
+            }
 
-        let completed = chunk.chunk_index + 1 >= chunk.total_chunks;
+            if let Some(meta) = uploads.get_mut(&chunk.file_id) {
+                if meta.total_chunks == 0 || meta.total_chunks != chunk.total_chunks {
+                    meta.total_chunks = chunk.total_chunks;
+                    let _ = sqlx::query("UPDATE sync_uploads SET total_chunks = ? WHERE id = ?")
+                        .bind(chunk.total_chunks as i64)
+                        .bind(chunk.file_id.to_string())
+                        .execute(&self.db_pool)
+                        .await;
+                }
+            } else {
+                return Err(SyncError::UploadFailed("upload session not found".into()));
+            }
+        }
+
+        let (chunk_size, is_already_received) = {
+            let mut uploads = self.uploads.write().await;
+            let meta = uploads.get_mut(&chunk.file_id).unwrap();
+            let effective_chunk_size = if meta.total_chunks > 1 && meta.file_size > 0 {
+                (meta.file_size as usize).div_ceil(meta.total_chunks as usize).max(1)
+            } else {
+                meta.chunk_size
+            };
+            meta.chunk_size = effective_chunk_size;
+            (
+                effective_chunk_size,
+                meta.received_chunks.contains(&chunk.chunk_index),
+            )
+        };
+
+        if !is_already_received {
+            // Write at offset: offset = chunk_index * chunk_size
+            let offset = (chunk.chunk_index as u64) * (chunk_size as u64);
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&file_path)
+                .await?;
+
+            file.seek(std::io::SeekFrom::Start(offset)).await?;
+            file.write_all(&chunk.data).await?;
+            file.sync_all().await?;
+
+            // Persist chunk receipt in DB
+            let now = Utc::now().to_rfc3339();
+            let _ = sqlx::query(
+                "INSERT OR REPLACE INTO sync_upload_chunks (file_id, chunk_index, chunk_hash, size, created_at)
+                 VALUES (?, ?, ?, ?, ?)"
+            )
+            .bind(chunk.file_id.to_string())
+            .bind(chunk.chunk_index as i64)
+            .bind(&chunk.chunk_hash)
+            .bind(chunk.data.len() as i64)
+            .bind(&now)
+            .execute(&self.db_pool)
+            .await;
+
+            let mut uploads = self.uploads.write().await;
+            if let Some(meta) = uploads.get_mut(&chunk.file_id) {
+                meta.received_chunks.insert(chunk.chunk_index);
+            }
+        }
+
+        let (uploaded_chunks, total_chunks, completed) = {
+            let uploads = self.uploads.read().await;
+            let meta = uploads.get(&chunk.file_id).unwrap();
+            let received_count = meta.received_chunks.len() as u32;
+            let total = meta.total_chunks.max(1);
+            let is_complete = meta.total_chunks > 0
+                && received_count >= meta.total_chunks
+                && (0..meta.total_chunks).all(|i| meta.received_chunks.contains(&i));
+            (received_count, total, is_complete)
+        };
+
         let progress = UploadProgress {
             file_id: chunk.file_id,
-            uploaded_chunks: chunk.chunk_index + 1,
-            total_chunks: chunk.total_chunks,
-            percentage: ((chunk.chunk_index + 1) as f64 / chunk.total_chunks as f64) * 100.0,
+            uploaded_chunks,
+            total_chunks,
+            percentage: (uploaded_chunks as f64 / total_chunks as f64) * 100.0,
             completed,
         };
 
@@ -348,6 +477,20 @@ impl SyncManager {
             });
         }
 
+        let actual_size = std::fs::metadata(&file_path)
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
+        if meta.file_size > 0 && actual_size != meta.file_size {
+            warn!(
+                "File size mismatch for {}: expected {}, got {}",
+                file_id, meta.file_size, actual_size
+            );
+            return Err(SyncError::UploadFailed(format!(
+                "file size mismatch: expected {}, got {}",
+                meta.file_size, actual_size
+            )));
+        }
+
         // Register in DB
         let server_path = file_path.to_string_lossy().to_string();
         self.register_uploaded_file(
@@ -359,6 +502,16 @@ impl SyncManager {
             meta.uploaded_by.clone(),
         )
         .await?;
+
+        // Update upload session status in DB
+        let now = Utc::now().to_rfc3339();
+        let _ = sqlx::query(
+            "UPDATE sync_uploads SET status = 'completed', updated_at = ? WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(file_id.to_string())
+        .execute(&self.db_pool)
+        .await;
 
         // Cleanup metadata
         self.uploads.write().await.remove(&file_id);
@@ -374,30 +527,54 @@ impl SyncManager {
         &self,
         file_id: &Uuid,
     ) -> Result<Option<UploadProgress>, SyncError> {
-        let meta = self.uploads.read().await.get(file_id).cloned();
-        Ok(meta.map(|m| {
-            let file_path = self.upload_dir.join(file_id.to_string());
-            let uploaded_chunks = if file_path.exists() {
-                // Estimate from file size
-                (std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0) as f64
-                    / self.chunk_size as f64)
-                    .ceil() as u32
-            } else {
-                0
-            };
-            let total = if m.total_chunks > 0 {
-                m.total_chunks
-            } else {
-                1
-            };
-            UploadProgress {
+        let meta = {
+            let uploads = self.uploads.read().await;
+            uploads.get(file_id).cloned()
+        };
+
+        if let Some(m) = meta {
+            let uploaded = m.received_chunks.len() as u32;
+            let total = m.total_chunks.max(1);
+            let completed = m.total_chunks > 0
+                && uploaded >= m.total_chunks
+                && (0..m.total_chunks).all(|i| m.received_chunks.contains(&i));
+            return Ok(Some(UploadProgress {
                 file_id: *file_id,
-                uploaded_chunks,
+                uploaded_chunks: uploaded,
                 total_chunks: total,
-                percentage: (uploaded_chunks as f64 / total as f64) * 100.0,
-                completed: uploaded_chunks >= total,
-            }
-        }))
+                percentage: (uploaded as f64 / total as f64) * 100.0,
+                completed,
+            }));
+        }
+
+        // Fallback to DB check
+        if let Ok(Some(row)) = sqlx::query_as::<_, (i64, String)>(
+            "SELECT total_chunks, status FROM sync_uploads WHERE id = ?",
+        )
+        .bind(file_id.to_string())
+        .fetch_optional(&self.db_pool)
+        .await
+        {
+            let (total, status) = row;
+            let chunk_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM sync_upload_chunks WHERE file_id = ?")
+                    .bind(file_id.to_string())
+                    .fetch_one(&self.db_pool)
+                    .await
+                    .unwrap_or(0);
+
+            let total_u32 = (total as u32).max(1);
+            let uploaded_u32 = chunk_count as u32;
+            return Ok(Some(UploadProgress {
+                file_id: *file_id,
+                uploaded_chunks: uploaded_u32,
+                total_chunks: total_u32,
+                percentage: (uploaded_u32 as f64 / total_u32 as f64) * 100.0,
+                completed: status == "completed",
+            }));
+        }
+
+        Ok(None)
     }
 
     pub async fn check_file_exists(
@@ -424,10 +601,11 @@ impl SyncManager {
         uploaded_by: String,
     ) -> Result<Uuid, SyncError> {
         let id = Uuid::new_v4();
+        let now = Utc::now();
 
         sqlx::query(
-            "INSERT INTO synced_files (id, filename, original_path, server_path, file_hash, file_size, uploaded_by, checksum_verified)
-             VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)"
+            "INSERT INTO synced_files (id, filename, original_path, server_path, file_hash, file_size, uploaded_at, uploaded_by, checksum_verified)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE)"
         )
         .bind(id)
         .bind(&filename)
@@ -435,6 +613,7 @@ impl SyncManager {
         .bind(&server_path)
         .bind(&file_hash)
         .bind(file_size)
+        .bind(now)
         .bind(&uploaded_by)
         .execute(&self.db_pool)
         .await?;
@@ -575,5 +754,155 @@ mod tests {
         };
         assert_eq!(chunk.chunk_index, 0);
         assert_eq!(chunk.total_chunks, 5);
+    }
+
+    #[tokio::test]
+    async fn test_resumable_upload_out_of_order_and_idempotent() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        // Run migrations/tables
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS synced_files (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                original_path TEXT NOT NULL,
+                server_path TEXT NOT NULL,
+                file_hash TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                uploaded_at TEXT NOT NULL,
+                uploaded_by TEXT NOT NULL,
+                checksum_verified INTEGER NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS sync_uploads (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                original_path TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                expected_hash TEXT NOT NULL,
+                uploaded_by TEXT NOT NULL,
+                total_chunks INTEGER NOT NULL,
+                chunk_size INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'uploading',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS sync_upload_chunks (
+                file_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                chunk_hash TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (file_id, chunk_index)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sync_mgr = SyncManager {
+            db_pool: pool.clone(),
+            upload_dir: temp_dir.path().to_path_buf(),
+            chunk_size: 4,
+            uploads: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        // File: "ABCDEFGH" (8 bytes, chunk_size=4 => 2 chunks)
+        // chunk 0: "ABCD"
+        // chunk 1: "EFGH"
+        let data_chunk0 = b"ABCD".to_vec();
+        let data_chunk1 = b"EFGH".to_vec();
+
+        let mut h0 = Sha256::new();
+        h0.update(&data_chunk0);
+        let hash0 = format!("{:x}", h0.finalize());
+
+        let mut h1 = Sha256::new();
+        h1.update(&data_chunk1);
+        let hash1 = format!("{:x}", h1.finalize());
+
+        let mut h_total = Sha256::new();
+        h_total.update(b"ABCDEFGH");
+        let expected_total_hash = format!("{:x}", h_total.finalize());
+
+        let file_id = sync_mgr
+            .init_upload(UploadInit {
+                filename: "test.bin".into(),
+                original_path: "/tmp/test.bin".into(),
+                file_size: 8,
+                expected_hash: expected_total_hash.clone(),
+                uploaded_by: "tester".into(),
+            })
+            .await
+            .unwrap();
+
+        // Send Chunk 1 FIRST (out of order)
+        let prog1 = sync_mgr
+            .upload_chunk(UploadChunk {
+                file_id,
+                chunk_index: 1,
+                total_chunks: 2,
+                data: data_chunk1.clone(),
+                chunk_hash: hash1.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(prog1.uploaded_chunks, 1);
+        assert!(!prog1.completed);
+
+        // Resend Chunk 1 (idempotency)
+        let prog1_dup = sync_mgr
+            .upload_chunk(UploadChunk {
+                file_id,
+                chunk_index: 1,
+                total_chunks: 2,
+                data: data_chunk1.clone(),
+                chunk_hash: hash1.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(prog1_dup.uploaded_chunks, 1);
+        assert!(!prog1_dup.completed);
+
+        // Send Chunk 0 (completes upload)
+        let prog0 = sync_mgr
+            .upload_chunk(UploadChunk {
+                file_id,
+                chunk_index: 0,
+                total_chunks: 2,
+                data: data_chunk0.clone(),
+                chunk_hash: hash0.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(prog0.uploaded_chunks, 2);
+        assert!(prog0.completed);
+
+        // Verify final file content on disk
+        let written = std::fs::read(temp_dir.path().join(file_id.to_string())).unwrap();
+        assert_eq!(written, b"ABCDEFGH");
+
+        // Verify registered in DB
+        let exists = sync_mgr
+            .check_file_exists(&expected_total_hash)
+            .await
+            .unwrap();
+        assert!(exists.is_some());
     }
 }

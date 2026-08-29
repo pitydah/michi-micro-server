@@ -4769,3 +4769,449 @@ async fn test_auth_pairing_grants_proper_permissions() {
     assert!(confirm["server_id"].as_str().unwrap().len() > 10);
     assert!(confirm["permissions"].is_null());
 }
+
+#[tokio::test]
+async fn test_v1_playback_restore_settings_consistency() {
+    let (app, pool) = make_app().await;
+    let track_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let wav_path = std::env::temp_dir().join(format!("restore_test_{track_id}.wav"));
+    std::fs::write(&wav_path, b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00").unwrap();
+
+    let track = michi_core::Track {
+        id: track_id,
+        title: Some("Restore Test".to_string()),
+        artist: Some("Michi".to_string()),
+        album: Some("Restore Album".to_string()),
+        album_artist: Some("Michi".to_string()),
+        duration_ms: Some(5000),
+        file_path: wav_path.display().to_string(),
+        format: michi_core::AudioFormat::Wav,
+        sample_rate: Some(48000),
+        bit_depth: Some(16),
+        channels: Some(2),
+        artwork_id: None,
+        genre: None,
+        year: Some(2026),
+        track_number: Some(1),
+        disc_number: Some(1),
+        content_hash: None,
+        file_size: Some(100),
+        file_mtime_ns: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
+        created_at: now,
+        updated_at: now,
+    };
+    michi_db::upsert_track(&pool, &track).await.unwrap();
+
+    // Create active queue with track
+    let qid = Uuid::new_v4();
+    let now_str = now.to_rfc3339();
+    sqlx::query(
+        "INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, 'active-queue', ?, ?)",
+    )
+    .bind(qid.to_string())
+    .bind(&now_str)
+    .bind(&now_str)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query("INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, 0, ?)")
+        .bind(Uuid::new_v4().to_string())
+        .bind(qid.to_string())
+        .bind(track_id.to_string())
+        .bind(&now_str)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Create playback session with specific volume, repeat, shuffle, position
+    let sess = michi_core::PlaybackSessionDb {
+        id: Uuid::new_v4(),
+        device_id: Uuid::new_v4(),
+        queue_id: Some(qid),
+        queue_state_json: "[]".to_string(),
+        current_index: 0,
+        current_track_id: Some(track_id),
+        position_ms: 2500,
+        playing: true, // was playing before crash/restart
+        volume: 0.65,
+        shuffle: true,
+        repeat_mode: "all".to_string(),
+        source: "michi-player".to_string(),
+        resume_policy: "track".to_string(),
+        restored: false,
+    };
+    michi_db::create_playback_session(&pool, &sess)
+        .await
+        .unwrap();
+
+    // Call POST /api/v1/playback/restore
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/restore")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(body["restored"], true);
+    assert_eq!(body["playing"], false, "never autoplay on restore");
+    assert_eq!(body["volume"], 65);
+    assert_eq!(body["shuffle"], true);
+    assert_eq!(body["repeat"], "all");
+    assert_eq!(body["position_ms"], 2500);
+
+    let _ = std::fs::remove_file(&wav_path);
+}
+
+#[tokio::test]
+async fn test_v1_playback_restore_position_clamped_to_duration() {
+    let (app, pool) = make_app().await;
+
+    let track_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let wav_path = std::env::temp_dir().join(format!("clamp_test_{track_id}.wav"));
+    std::fs::write(&wav_path, b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00").unwrap();
+
+    let track = michi_core::Track {
+        id: track_id,
+        title: Some("Clamp Test".to_string()),
+        artist: Some("Michi".to_string()),
+        album: Some("Clamp Album".to_string()),
+        album_artist: Some("Michi".to_string()),
+        duration_ms: Some(3000),
+        file_path: wav_path.display().to_string(),
+        format: michi_core::AudioFormat::Wav,
+        sample_rate: Some(48000),
+        bit_depth: Some(16),
+        channels: Some(2),
+        artwork_id: None,
+        genre: None,
+        year: Some(2026),
+        track_number: Some(1),
+        disc_number: Some(1),
+        content_hash: None,
+        file_size: Some(100),
+        file_mtime_ns: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
+        created_at: now,
+        updated_at: now,
+    };
+    michi_db::upsert_track(&pool, &track).await.unwrap();
+
+    let qid = Uuid::new_v4();
+    let now_str = now.to_rfc3339();
+    sqlx::query(
+        "INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, 'active-queue', ?, ?)",
+    )
+    .bind(qid.to_string())
+    .bind(&now_str)
+    .bind(&now_str)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query("INSERT INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, 0, ?)")
+        .bind(Uuid::new_v4().to_string())
+        .bind(qid.to_string())
+        .bind(track_id.to_string())
+        .bind(&now_str)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Session with position 99999ms (far beyond 3000ms duration)
+    let sess = michi_core::PlaybackSessionDb {
+        id: Uuid::new_v4(),
+        device_id: Uuid::new_v4(),
+        queue_id: Some(qid),
+        queue_state_json: "[]".to_string(),
+        current_index: 0,
+        current_track_id: Some(track_id),
+        position_ms: 99999,
+        playing: false,
+        volume: 0.8,
+        shuffle: false,
+        repeat_mode: "off".to_string(),
+        source: "michi-player".to_string(),
+        resume_policy: "track".to_string(),
+        restored: false,
+    };
+    michi_db::create_playback_session(&pool, &sess)
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/restore")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(body["restored"], true);
+    assert_eq!(
+        body["position_ms"], 3000,
+        "position beyond duration must be clamped deterministically"
+    );
+
+    let _ = std::fs::remove_file(&wav_path);
+}
+
+#[tokio::test]
+async fn test_v1_playback_session_persists_without_get_playback_state() {
+    let (app, pool) = make_app().await;
+
+    let sess = michi_core::PlaybackSessionDb {
+        id: Uuid::new_v4(),
+        device_id: Uuid::new_v4(),
+        queue_id: None,
+        queue_state_json: "[]".to_string(),
+        current_index: 0,
+        current_track_id: None,
+        position_ms: 0,
+        playing: false,
+        volume: 0.5,
+        shuffle: false,
+        repeat_mode: "off".to_string(),
+        source: "michi-player".to_string(),
+        resume_policy: "track".to_string(),
+        restored: false,
+    };
+    michi_db::create_playback_session(&pool, &sess)
+        .await
+        .unwrap();
+
+    // Send control command set_volume 90
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/control")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"command":"set_volume","volume":90}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Send control command shuffle true
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/control")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"command":"shuffle","value":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Send control command repeat all
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/control")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"command":"repeat","value":"all"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Do NOT call GET /api/v1/playback/state !
+    // Directly query database to verify persistence projection was executed faithfully
+    let loaded = michi_db::get_latest_playback_session(&pool)
+        .await
+        .unwrap()
+        .expect("playback session must exist");
+    assert_eq!((loaded.volume * 100.0).round() as u32, 90);
+    assert!(loaded.shuffle);
+    assert_eq!(loaded.repeat_mode, "all");
+}
+
+#[tokio::test]
+async fn test_v1_rooms_status_and_fail_closed_controls() {
+    let (app, _pool) = make_app().await;
+
+    // 1. Check rooms status when snapcast is not running
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/rooms/status")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let val: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(val["available"], false);
+    assert_eq!(val["rooms"], serde_json::json!([]));
+
+    // 2. Volume control without snapcast must fail-closed with 503 SNAPCAST_RPC_FAILED
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/rooms/group-1/volume")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"volume":75}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let val: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(val["error"]["code"], "SNAPCAST_RPC_FAILED");
+
+    // 3. Mute control without snapcast must fail-closed with 503 SNAPCAST_RPC_FAILED
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/rooms/group-1/mute")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"muted":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let val: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(val["error"]["code"], "SNAPCAST_RPC_FAILED");
+}
+
+#[tokio::test]
+async fn test_v1_sync_resumable_chunk_upload_flow() {
+    use sha2::Digest;
+    let (app, _pool) = make_app().await;
+
+    // File: 8 bytes, chunk size 4 => 2 chunks
+    let chunk0_data = b"WXYZ".to_vec();
+    let chunk1_data = b"1234".to_vec();
+
+    let mut h0 = sha2::Sha256::new();
+    h0.update(&chunk0_data);
+    let hash0 = hex::encode(h0.finalize());
+
+    let mut h1 = sha2::Sha256::new();
+    h1.update(&chunk1_data);
+    let hash1 = hex::encode(h1.finalize());
+
+    let mut h_tot = sha2::Sha256::new();
+    h_tot.update(b"WXYZ1234");
+    let total_hash = hex::encode(h_tot.finalize());
+
+    // 1. Init upload
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sync/upload/init")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"filename":"chunked.flac","original_path":"/chunked.flac","file_size":8,"expected_hash":"{total_hash}","uploaded_by":"tester"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let init_val: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    let file_id = init_val["file_id"].as_str().unwrap();
+
+    // 2. Upload chunk 1 first (out-of-order)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/v1/sync/upload/{file_id}/chunk"))
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"file_id":"{file_id}","chunk_index":1,"total_chunks":2,"data":{chunk1_data:?},"chunk_hash":"{hash1}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let prog1: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(prog1["progress"]["uploaded_chunks"], 1);
+    assert_eq!(prog1["progress"]["completed"], false);
+    assert_eq!(prog1["status"], "in_progress");
+
+    // 3. Status check
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/v1/sync/upload/{file_id}/status"))
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let st: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(st["progress"]["uploaded_chunks"], 1);
+    assert_eq!(st["progress"]["completed"], false);
+
+    // 4. Upload chunk 0 (completes the upload)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/v1/sync/upload/{file_id}/chunk"))
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"file_id":"{file_id}","chunk_index":0,"total_chunks":2,"data":{chunk0_data:?},"chunk_hash":"{hash0}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let prog0: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(prog0["progress"]["uploaded_chunks"], 2);
+    assert_eq!(prog0["progress"]["completed"], true);
+    assert_eq!(prog0["status"], "completed");
+}

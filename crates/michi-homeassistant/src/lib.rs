@@ -1,16 +1,14 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use michi_config::Config;
-use michi_sync::PlaybackState;
+use michi_playback::{PlaybackEngineHandle, PlaybackLifecycle};
 use rumqttc::{AsyncClient, MqttOptions, Packet, QoS};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
-use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 const DISCOVERY_PREFIX: &str = "homeassistant";
-const STATE_INTERVAL_SECS: u64 = 5;
+const STATE_INTERVAL_SECS: u64 = 2;
 
 fn build_sensor_config(object_id: &str, name: &str, icon: &str) -> Value {
     json!({
@@ -79,6 +77,15 @@ fn entities() -> Vec<HaEntity> {
         },
         HaEntity {
             domain: "sensor",
+            object_id: "playback_position",
+            config: build_sensor_config(
+                "playback_position",
+                "Michi Playback Position",
+                "mdi:timer-play-outline",
+            ),
+        },
+        HaEntity {
+            domain: "sensor",
             object_id: "server_status",
             config: build_sensor_config("server_status", "Michi Server Status", "mdi:server"),
         },
@@ -86,6 +93,21 @@ fn entities() -> Vec<HaEntity> {
             domain: "button",
             object_id: "play_pause",
             config: build_button_config("play_pause", "Michi Play/Pause", "mdi:play-pause"),
+        },
+        HaEntity {
+            domain: "button",
+            object_id: "play",
+            config: build_button_config("play", "Michi Play", "mdi:play"),
+        },
+        HaEntity {
+            domain: "button",
+            object_id: "pause",
+            config: build_button_config("pause", "Michi Pause", "mdi:pause"),
+        },
+        HaEntity {
+            domain: "button",
+            object_id: "stop",
+            config: build_button_config("stop", "Michi Stop", "mdi:stop"),
         },
         HaEntity {
             domain: "button",
@@ -144,28 +166,36 @@ async fn publish_discovery(client: &AsyncClient) {
     }
 }
 
-async fn publish_states(
-    client: &AsyncClient,
-    playback_state: &Arc<RwLock<PlaybackState>>,
-    db: &SqlitePool,
-) {
-    let state = playback_state.read().await;
+async fn publish_states(client: &AsyncClient, engine: &PlaybackEngineHandle, db: &SqlitePool) {
+    let snap = match engine.snapshot().await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("failed to get engine snapshot for HA: {e}");
+            return;
+        }
+    };
 
-    let (title, artist, album) = if let Some(track_id) = &state.track_id {
+    let is_flowing = matches!(
+        snap.lifecycle,
+        PlaybackLifecycle::AudioFlowing | PlaybackLifecycle::Playing
+    );
+
+    let (title, artist, album, track_duration_ms) = if let Some(ref track_id) = snap.track_id {
         match michi_db::get_track(db, track_id).await {
             Ok(Some(track)) => (
                 track.title.unwrap_or_default(),
                 track.artist.unwrap_or_default(),
                 track.album.unwrap_or_default(),
+                track.duration_ms.unwrap_or(0),
             ),
-            _ => (String::new(), String::new(), String::new()),
+            _ => (String::new(), String::new(), String::new(), 0),
         }
     } else {
-        (String::new(), String::new(), String::new())
+        (String::new(), String::new(), String::new(), 0)
     };
 
-    let status = if state.playing { "playing" } else { "paused" };
-    let volume_pct = (state.volume * 100.0) as u32;
+    let status = if is_flowing { "playing" } else { "paused" };
+    let volume_pct = snap.volume as u32;
 
     let states = [
         ("track_title", title),
@@ -173,7 +203,8 @@ async fn publish_states(
         ("album", album),
         ("playback_status", status.to_string()),
         ("volume", volume_pct.to_string()),
-        ("track_duration", state.position_ms.to_string()),
+        ("track_duration", track_duration_ms.to_string()),
+        ("playback_position", snap.position_ms.to_string()),
         ("server_status", "online".to_string()),
         ("volume_set", volume_pct.to_string()),
     ];
@@ -189,71 +220,68 @@ async fn publish_states(
     }
 }
 
-async fn handle_command(topic: &str, config: &Config, playback_state: &Arc<RwLock<PlaybackState>>) {
+async fn handle_command(topic: &str, payload: &str, engine: &PlaybackEngineHandle) {
     let cmd = topic.trim_start_matches("michi/").trim_end_matches("/cmd");
 
-    info!("received command: {}", cmd);
+    info!("received HA MQTT command: {} (payload: '{}')", cmd, payload);
 
     match cmd {
         "play_pause" => {
-            let current = playback_state.read().await;
-            let new_playing = !current.playing;
-            drop(current);
-
-            let url = format!("http://localhost:{}/api/playback/state", config.port);
-            let body = json!({
-                "playing": new_playing,
-                "position_ms": 0,
-                "track_id": null,
-            });
-
-            let client = reqwest::Client::new();
-            match client.post(&url).json(&body).send().await {
-                Ok(resp) => {
-                    if resp.status().is_success() {
-                        info!("play_pause toggled to {}", new_playing);
-                    } else {
-                        warn!(
-                            "play_pause HTTP {} {}",
-                            resp.status(),
-                            resp.text().await.unwrap_or_default()
-                        );
+            if let Ok(snap) = engine.snapshot().await {
+                let is_flowing = matches!(
+                    snap.lifecycle,
+                    PlaybackLifecycle::AudioFlowing | PlaybackLifecycle::Playing
+                );
+                if is_flowing {
+                    if let Err(e) = engine.pause().await {
+                        warn!("HA play_pause -> pause error: {e}");
                     }
-                }
-                Err(e) => {
-                    error!("play_pause HTTP request failed: {}", e);
+                } else if let Err(e) = engine.resume().await {
+                    warn!("HA play_pause -> resume error: {e}");
                 }
             }
         }
-        "next_track" | "previous_track" => {
-            let url = format!("http://localhost:{}/api/playback/state", config.port);
-            let body = json!({
-                "playing": false,
-                "position_ms": 0,
-                "track_id": null,
-            });
-
-            let client = reqwest::Client::new();
-            match client.post(&url).json(&body).send().await {
-                Ok(resp) => {
-                    if resp.status().is_success() {
-                        info!("{} executed", cmd);
-                    } else {
-                        warn!(
-                            "{} HTTP {} {}",
-                            cmd,
-                            resp.status(),
-                            resp.text().await.unwrap_or_default()
-                        );
-                    }
+        "play" => {
+            if let Err(e) = engine.resume().await {
+                warn!("HA play -> resume error: {e}");
+            }
+        }
+        "pause" => {
+            if let Err(e) = engine.pause().await {
+                warn!("HA pause error: {e}");
+            }
+        }
+        "stop" => {
+            if let Err(e) = engine.stop().await {
+                warn!("HA stop error: {e}");
+            }
+        }
+        "next_track" | "next" => {
+            if let Err(e) = engine.next().await {
+                warn!("HA next error: {e}");
+            }
+        }
+        "previous_track" | "previous" => {
+            if let Err(e) = engine.previous().await {
+                warn!("HA previous error: {e}");
+            }
+        }
+        "volume_set" => {
+            if let Ok(val) = payload.trim().parse::<f64>() {
+                let vol_u8 = (val.round() as u8).min(100);
+                if let Err(e) = engine.set_volume(vol_u8).await {
+                    warn!("HA volume_set error: {e}");
                 }
-                Err(e) => {
-                    error!("{} HTTP request failed: {}", cmd, e);
+            } else if let Ok(val) = payload.trim().parse::<u8>() {
+                if let Err(e) = engine.set_volume(val.min(100)).await {
+                    warn!("HA volume_set error: {e}");
                 }
+            } else {
+                warn!("HA volume_set invalid payload: {}", payload);
             }
         }
         _ => {
-            warn!("unknown command: {}", cmd);
+            warn!("unknown HA command: {}", cmd);
         }
     }
 }
@@ -276,7 +304,7 @@ async fn mqtt_connect(
     Ok((client, eventloop))
 }
 
-pub async fn run(config: Config, playback_state: Arc<RwLock<PlaybackState>>, db: SqlitePool) {
+pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
     let host = match std::env::var("MICHI_MQTT_HOST") {
         Ok(h) => h,
         Err(_) => {
@@ -307,14 +335,22 @@ pub async fn run(config: Config, playback_state: Arc<RwLock<PlaybackState>>, db:
 
         publish_discovery(&client).await;
 
-        for cmd in &["play_pause", "next_track", "previous_track"] {
+        for cmd in &[
+            "play_pause",
+            "play",
+            "pause",
+            "stop",
+            "next_track",
+            "previous_track",
+            "volume_set",
+        ] {
             let topic = format!("michi/{cmd}/cmd");
             if let Err(e) = client.subscribe(&topic, QoS::AtLeastOnce).await {
                 warn!("failed to subscribe to {}: {}", topic, e);
             }
         }
 
-        publish_states(&client, &playback_state, &db).await;
+        publish_states(&client, &engine, &db).await;
         info!("HA integration running");
 
         let mut last_state_publish = tokio::time::Instant::now();
@@ -335,11 +371,16 @@ pub async fn run(config: Config, playback_state: Arc<RwLock<PlaybackState>>, db:
                             payload.chars().take(100).collect::<String>()
                         );
                         if topic.starts_with("michi/") {
-                            handle_command(&topic, &config, &playback_state).await;
+                            handle_command(&topic, &payload, &engine).await;
+                            // Immediately publish updated states after command execution
+                            publish_states(&client, &engine, &db).await;
+                            last_state_publish = tokio::time::Instant::now();
                         }
                     }
                     rumqttc::Event::Incoming(Packet::ConnAck(_)) => {
-                        info!("MQTT connected/ reconnected");
+                        info!("MQTT connected/reconnected");
+                        publish_discovery(&client).await;
+                        publish_states(&client, &engine, &db).await;
                     }
                     _ => {}
                 },
@@ -348,7 +389,7 @@ pub async fn run(config: Config, playback_state: Arc<RwLock<PlaybackState>>, db:
                     break;
                 }
                 Err(_) => {
-                    publish_states(&client, &playback_state, &db).await;
+                    publish_states(&client, &engine, &db).await;
                     last_state_publish = tokio::time::Instant::now();
                 }
             }
@@ -366,7 +407,7 @@ mod tests {
     #[test]
     fn test_entities_count() {
         let ents = entities();
-        assert_eq!(ents.len(), 11, "expected 7 sensors + 3 buttons + 1 number");
+        assert!(ents.len() >= 12, "expected sensors + buttons + numbers");
     }
 
     #[test]

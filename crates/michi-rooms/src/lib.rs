@@ -1,8 +1,36 @@
 // Michi Rooms — Snapcast integration wrapper
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
-const SNAPCAST_JSON_RPC_URL: &str = "http://127.0.0.1:1780/json-rpc";
+pub const SNAPCAST_JSON_RPC_URL: &str = "http://127.0.0.1:1780/json-rpc";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SnapcastError {
+    Transport(String),
+    Timeout,
+    HttpStatus(u16),
+    JsonParse(String),
+    RpcError { code: i64, message: String },
+    InvalidResponse(String),
+}
+
+impl fmt::Display for SnapcastError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SnapcastError::Transport(e) => write!(f, "snapcast transport error: {e}"),
+            SnapcastError::Timeout => write!(f, "snapcast request timed out"),
+            SnapcastError::HttpStatus(code) => write!(f, "snapcast HTTP error status {code}"),
+            SnapcastError::JsonParse(e) => write!(f, "snapcast JSON parse error: {e}"),
+            SnapcastError::RpcError { code, message } => {
+                write!(f, "snapcast RPC error {code}: {message}")
+            }
+            SnapcastError::InvalidResponse(e) => write!(f, "snapcast invalid response: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SnapcastError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapcastServerStatus {
@@ -10,6 +38,8 @@ pub struct SnapcastServerStatus {
     pub version: Option<String>,
     pub host: String,
     pub port: u16,
+    pub degraded: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,40 +62,102 @@ pub struct SnapClient {
     pub group_id: Option<String>,
 }
 
-pub async fn check_snapcast() -> SnapcastServerStatus {
+/// Centralized JSON-RPC 2.0 client for Snapcast communication.
+/// Rigorously validates transport, timeout, HTTP status, JSON validity,
+/// and JSON-RPC error objects.
+pub async fn rpc_call(
+    url: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, SnapcastError> {
     let client = reqwest::Client::new();
-    let req = serde_json::json!({
+    let req_body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "Server.GetStatus",
-        "params": {}
+        "method": method,
+        "params": params,
     });
-    match client
-        .post(SNAPCAST_JSON_RPC_URL)
-        .json(&req)
+
+    let resp = client
+        .post(url)
+        .json(&req_body)
         .timeout(std::time::Duration::from_secs(3))
         .send()
         .await
-    {
-        Ok(resp) => {
-            if let Ok(body) = resp.json::<serde_json::Value>().await {
-                let version = body
-                    .get("result")
-                    .and_then(|r| r.get("server"))
-                    .and_then(|s| s.get("version"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                SnapcastServerStatus {
-                    available: true,
-                    version,
-                    host: "127.0.0.1".into(),
-                    port: 1780,
-                }
+        .map_err(|e| {
+            if e.is_timeout() {
+                SnapcastError::Timeout
             } else {
-                unavailable()
+                SnapcastError::Transport(e.to_string())
+            }
+        })?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(SnapcastError::HttpStatus(status.as_u16()));
+    }
+
+    let val: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| SnapcastError::JsonParse(e.to_string()))?;
+
+    // Check for JSON-RPC error field
+    if let Some(err_obj) = val.get("error") {
+        if !err_obj.is_null() {
+            let code = err_obj
+                .get("code")
+                .and_then(|c| c.as_i64())
+                .unwrap_or(-32000);
+            let msg = err_obj
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown RPC error")
+                .to_string();
+            return Err(SnapcastError::RpcError { code, message: msg });
+        }
+    }
+
+    // Extract result field
+    val.get("result")
+        .cloned()
+        .ok_or_else(|| SnapcastError::InvalidResponse("missing 'result' in RPC response".into()))
+}
+
+pub async fn check_snapcast() -> SnapcastServerStatus {
+    match rpc_call(
+        SNAPCAST_JSON_RPC_URL,
+        "Server.GetStatus",
+        serde_json::json!({}),
+    )
+    .await
+    {
+        Ok(result) => {
+            let version = result
+                .get("server")
+                .and_then(|s| s.get("version"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            SnapcastServerStatus {
+                available: true,
+                version,
+                host: "127.0.0.1".into(),
+                port: 1780,
+                degraded: false,
+                error: None,
             }
         }
-        Err(_) => unavailable(),
+        Err(e) => match e {
+            SnapcastError::Transport(_) | SnapcastError::Timeout => unavailable(),
+            other => SnapcastServerStatus {
+                available: false,
+                version: None,
+                host: "127.0.0.1".into(),
+                port: 1780,
+                degraded: true,
+                error: Some(other.to_string()),
+            },
+        },
     }
 }
 
@@ -75,34 +167,25 @@ fn unavailable() -> SnapcastServerStatus {
         version: None,
         host: "127.0.0.1".into(),
         port: 1780,
+        degraded: false,
+        error: None,
     }
 }
 
-pub async fn get_groups() -> Result<Vec<Room>, String> {
-    let client = reqwest::Client::new();
-    let req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "Server.GetStatus",
-        "params": {}
-    });
-    let resp = client
-        .post(SNAPCAST_JSON_RPC_URL)
-        .json(&req)
-        .timeout(std::time::Duration::from_secs(3))
-        .send()
-        .await
-        .map_err(|e| format!("snapcast connection failed: {e}"))?;
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("snapcast parse failed: {e}"))?;
-    let groups = body
-        .get("result")
-        .and_then(|r| r.get("server"))
+pub async fn get_groups() -> Result<Vec<Room>, SnapcastError> {
+    let result = rpc_call(
+        SNAPCAST_JSON_RPC_URL,
+        "Server.GetStatus",
+        serde_json::json!({}),
+    )
+    .await?;
+    let groups = result
+        .get("server")
         .and_then(|s| s.get("groups"))
         .and_then(|g| g.as_array())
-        .ok_or_else(|| "unexpected snapcast response".to_string())?;
+        .ok_or_else(|| {
+            SnapcastError::InvalidResponse("missing 'server.groups' array in response".to_string())
+        })?;
 
     Ok(groups
         .iter()
@@ -136,42 +219,29 @@ pub async fn get_groups() -> Result<Vec<Room>, String> {
         .collect())
 }
 
-pub async fn set_group_volume(group_id: &str, volume: u32) -> Result<(), String> {
-    let client = reqwest::Client::new();
-    let req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "Group.SetVolume",
-        "params": {
+pub async fn set_group_volume(group_id: &str, volume: u32) -> Result<(), SnapcastError> {
+    rpc_call(
+        SNAPCAST_JSON_RPC_URL,
+        "Group.SetVolume",
+        serde_json::json!({
             "id": group_id,
             "volume": {"percent": volume, "muted": false}
-        }
-    });
-    client
-        .post(SNAPCAST_JSON_RPC_URL)
-        .json(&req)
-        .timeout(std::time::Duration::from_secs(3))
-        .send()
-        .await
-        .map_err(|e| format!("snapcast volume failed: {e}"))?;
+        }),
+    )
+    .await?;
     Ok(())
 }
 
-pub async fn set_group_mute(group_id: &str, muted: bool) -> Result<(), String> {
-    let client = reqwest::Client::new();
-    let req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "Group.SetMute",
-        "params": {"id": group_id, "mute": muted}
-    });
-    client
-        .post(SNAPCAST_JSON_RPC_URL)
-        .json(&req)
-        .timeout(std::time::Duration::from_secs(3))
-        .send()
-        .await
-        .map_err(|e| format!("snapcast mute failed: {e}"))?;
+pub async fn set_group_mute(group_id: &str, muted: bool) -> Result<(), SnapcastError> {
+    rpc_call(
+        SNAPCAST_JSON_RPC_URL,
+        "Group.SetMute",
+        serde_json::json!({
+            "id": group_id,
+            "mute": muted
+        }),
+    )
+    .await?;
     Ok(())
 }
 
@@ -183,6 +253,7 @@ mod tests {
     fn test_unavailable() {
         let s = unavailable();
         assert!(!s.available);
+        assert!(!s.degraded);
         assert_eq!(s.host, "127.0.0.1");
         assert_eq!(s.port, 1780);
     }
@@ -215,5 +286,20 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         assert!(json.contains("Kitchen Speaker"));
         assert!(json.contains("75"));
+    }
+
+    #[test]
+    fn test_error_display() {
+        let err = SnapcastError::RpcError {
+            code: -32601,
+            message: "Method not found".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "snapcast RPC error -32601: Method not found"
+        );
+
+        let err2 = SnapcastError::HttpStatus(502);
+        assert_eq!(err2.to_string(), "snapcast HTTP error status 502");
     }
 }

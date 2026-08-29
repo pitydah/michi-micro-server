@@ -93,18 +93,6 @@ pub async fn playback_state_handler(
         ps.updated_at = snap.updated_at;
     }
 
-    // VI-P0-10: Update latest DB session with confirmed playback state asynchronously
-    if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&state.db).await {
-        if sess.current_track_id == track_id && sess.playing != is_playing {
-            sess.playing = is_playing;
-            sess.position_ms = position_ms;
-            let db = state.db.clone();
-            tokio::spawn(async move {
-                let _ = michi_db::update_playback_session(&db, &sess).await;
-            });
-        }
-    }
-
     let current_track = if let Some(tid) = track_id {
         michi_db::get_track(&state.db, &tid)
             .await
@@ -246,7 +234,7 @@ pub async fn playback_control_handler(
         ));
     }
 
-    match cmd {
+    let res = match cmd {
         "resume" => {
             state
                 .playback_engine
@@ -669,7 +657,48 @@ pub async fn playback_control_handler(
             })))
         }
         _ => unreachable!(),
+    };
+
+    if res.is_ok() {
+        if let Ok(snap) = state.playback_engine.snapshot().await {
+            let _ = persist_engine_session_projection(&state.db, &snap).await;
+        }
     }
+
+    res
+}
+
+/// Persists current EngineSnapshot state to the latest PlaybackSession in SQLite.
+///
+/// Functional Truth: Never sets playing=true based on intent or commands,
+/// only when verified snapshot lifecycle is AudioFlowing or Playing.
+pub async fn persist_engine_session_projection(
+    db: &sqlx::SqlitePool,
+    snap: &michi_playback::EngineSnapshot,
+) -> Result<(), michi_db::DbError> {
+    let is_playing = matches!(
+        snap.lifecycle,
+        michi_playback::PlaybackLifecycle::AudioFlowing
+            | michi_playback::PlaybackLifecycle::Playing
+    );
+    let position_ms = if snap.lifecycle == michi_playback::PlaybackLifecycle::Stopped
+        || snap.lifecycle == michi_playback::PlaybackLifecycle::Ended
+    {
+        0
+    } else {
+        snap.position_ms
+    };
+
+    if let Some(mut sess) = michi_db::get_latest_playback_session(db).await? {
+        sess.current_track_id = snap.track_id;
+        sess.position_ms = position_ms;
+        sess.playing = is_playing;
+        sess.volume = (snap.volume as f64) / 100.0;
+        sess.shuffle = snap.shuffle;
+        sess.repeat_mode = snap.repeat.as_str().to_string();
+        michi_db::update_playback_session(db, &sess).await?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1074,10 +1103,25 @@ pub async fn restore_playback_state_handler(
                         )
                     })?;
 
+                // Restore volume, shuffle, repeat to engine
+                let vol_u8 = (session.volume * 100.0).round().clamp(0.0, 100.0) as u8;
+                let _ = state.playback_engine.set_volume(vol_u8).await;
+                let _ = state.playback_engine.set_shuffle(session.shuffle).await;
+                let rep_mode = match session.repeat_mode.as_str() {
+                    "one" => RepeatMode::One,
+                    "all" => RepeatMode::All,
+                    _ => RepeatMode::Off,
+                };
+                let _ = state.playback_engine.set_repeat(rep_mode).await;
+
                 if let Some(cur_track) = tracks.get(cur_idx) {
+                    let pos_ms = cur_track
+                        .duration_ms
+                        .map(|d| session.position_ms.min(d))
+                        .unwrap_or(session.position_ms);
                     state
                         .playback_engine
-                        .load_track(cur_track.clone(), session.position_ms)
+                        .load_track(cur_track.clone(), pos_ms)
                         .await
                         .map_err(|e| {
                             v1_error(
@@ -1103,7 +1147,9 @@ pub async fn restore_playback_state_handler(
                 current.track_id = snap.track_id;
                 current.position_ms = snap.position_ms;
                 current.playing = false; // never auto-play on restore
-                current.volume = session.volume;
+                current.volume = (snap.volume as f64) / 100.0;
+                current.shuffle = snap.shuffle;
+                current.repeat = snap.repeat.as_str().to_string();
                 current.updated_at = Utc::now();
             }
 
@@ -1117,7 +1163,9 @@ pub async fn restore_playback_state_handler(
                 "track_id": snap.track_id,
                 "position_ms": snap.position_ms,
                 "playing": false,
-                "volume": (updated.volume * 100.0) as u32,
+                "volume": snap.volume,
+                "shuffle": snap.shuffle,
+                "repeat": snap.repeat.as_str(),
                 "resume_policy": updated.resume_policy,
             })))
         }
@@ -1166,9 +1214,26 @@ pub fn auto_restore_playback_state(
                                         );
                                         return;
                                     }
+
+                                    // Restore volume, shuffle, repeat to engine
+                                    let vol_u8 =
+                                        (session.volume * 100.0).round().clamp(0.0, 100.0) as u8;
+                                    let _ = playback_engine.set_volume(vol_u8).await;
+                                    let _ = playback_engine.set_shuffle(session.shuffle).await;
+                                    let rep_mode = match session.repeat_mode.as_str() {
+                                        "one" => RepeatMode::One,
+                                        "all" => RepeatMode::All,
+                                        _ => RepeatMode::Off,
+                                    };
+                                    let _ = playback_engine.set_repeat(rep_mode).await;
+
                                     if let Some(cur_track) = tracks.get(cur_idx) {
+                                        let pos_ms = cur_track
+                                            .duration_ms
+                                            .map(|d| session.position_ms.min(d))
+                                            .unwrap_or(session.position_ms);
                                         if let Err(e) = playback_engine
-                                            .load_track(cur_track.clone(), session.position_ms)
+                                            .load_track(cur_track.clone(), pos_ms)
                                             .await
                                         {
                                             tracing::warn!(
@@ -1185,7 +1250,9 @@ pub fn auto_restore_playback_state(
                                         state.track_id = snap.track_id;
                                         state.position_ms = snap.position_ms;
                                         state.playing = false; // never auto-play on restart
-                                        state.volume = session.volume;
+                                        state.volume = (snap.volume as f64) / 100.0;
+                                        state.shuffle = snap.shuffle;
+                                        state.repeat = snap.repeat.as_str().to_string();
                                         state.updated_at = Utc::now();
                                         drop(state);
 

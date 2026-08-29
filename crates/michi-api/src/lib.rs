@@ -1372,6 +1372,10 @@ fn v1_link_routes() -> Router<AppState> {
             post(routes::v1::playback::playback_session_restore_handler),
         )
         .route(
+            "/api/v1/playback/restore",
+            post(routes::v1::playback::playback_session_restore_handler),
+        )
+        .route(
             "/api/v1/player/handoff",
             post(routes::v1::playback::handoff_handler),
         )

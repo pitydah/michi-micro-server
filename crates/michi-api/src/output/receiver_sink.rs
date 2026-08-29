@@ -425,6 +425,11 @@ mod integration_tests {
         // 6. Poll metrics from canonical simulator
         let mut packets_seen = 0u64;
         let mut payload_bytes = 0u64;
+        let mut first_seq = 0u64;
+        let mut last_seq = 0u64;
+        let mut first_ts = 0u64;
+        let mut last_ts = 0u64;
+        let mut ssrc_seen = 0u64;
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             if let Ok(resp) = http_client
@@ -443,6 +448,27 @@ mod integration_tests {
                         .unwrap_or(0);
                     let pt = metrics.get("last_payload_type").and_then(|v| v.as_u64());
                     let malformed = metrics.get("malformed_packets").and_then(|v| v.as_u64());
+                    first_seq = metrics
+                        .get("first_sequence")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    last_seq = metrics
+                        .get("last_sequence")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    first_ts = metrics
+                        .get("first_timestamp")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    last_ts = metrics
+                        .get("last_timestamp")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    ssrc_seen = metrics
+                        .get("last_ssrc")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+
                     if packets_seen >= 10 {
                         assert_eq!(pt, Some(97), "RTP payload type must be 97");
                         assert_eq!(malformed, Some(0), "must have 0 malformed packets");
@@ -460,6 +486,15 @@ mod integration_tests {
             payload_bytes >= 9600,
             "payload bytes must be > 0, got {payload_bytes}"
         );
+        assert!(
+            last_seq > first_seq,
+            "sequence must grow monotonically: last={last_seq}, first={first_seq}"
+        );
+        assert!(
+            last_ts > first_ts,
+            "timestamp must grow monotonically: last={last_ts}, first={first_ts}"
+        );
+        assert!(ssrc_seen > 0, "SSRC must be non-zero");
 
         // 7. Verify Engine Snapshot telemetry with production sink
         let snap = engine_handle.snapshot().await.expect("snapshot failed");
@@ -525,13 +560,29 @@ mod integration_tests {
             "packets must resume flowing after resume"
         );
 
-        // 10. Verify Seek effect & generation increment
+        // 10. Verify Seek effect & exact generation increment
         let gen_before = engine_handle.snapshot().await.unwrap().generation_id;
         engine_handle.seek(500).await.expect("seek failed");
         let gen_after = engine_handle.snapshot().await.unwrap().generation_id;
+        assert_eq!(
+            gen_after,
+            gen_before + 1,
+            "seek must increment engine generation by exactly 1"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let m_seek: serde_json::Value = http_client
+            .get(format!("{url}/api/v1/test/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let p_seek = m_seek["packets_received"].as_u64().unwrap_or(0);
         assert!(
-            gen_after > gen_before,
-            "seek must increment engine generation"
+            p_seek > p_resumed,
+            "packets must continue streaming after seek"
         );
 
         // 11. Verify EOF queue advance with production sink

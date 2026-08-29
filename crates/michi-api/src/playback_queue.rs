@@ -61,9 +61,13 @@ pub async fn get_or_create_active_queue(pool: &SqlitePool) -> Result<Uuid, sqlx:
     .await?;
 
     if let Some((id_str,)) = row {
-        if let Ok(id) = Uuid::parse_str(&id_str) {
-            return Ok(id);
-        }
+        let id = Uuid::parse_str(&id_str).map_err(|e| {
+            sqlx::Error::Decode(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("corrupt queue UUID '{id_str}': {e}"),
+            )))
+        })?;
+        return Ok(id);
     }
 
     let new_id = Uuid::new_v4();

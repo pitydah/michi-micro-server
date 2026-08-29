@@ -19,14 +19,22 @@ import urllib.error
 PASS = 0
 FAIL = 0
 
+AUTH_TOKEN = None
+
 def http_get(url):
-    req = urllib.request.Request(url)
+    headers = {}
+    if AUTH_TOKEN:
+        headers["Authorization"] = f"Bearer {AUTH_TOKEN}"
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=5) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 def http_post(url, payload=None):
+    headers = {"Content-Type": "application/json"}
+    if AUTH_TOKEN:
+        headers["Authorization"] = f"Bearer {AUTH_TOKEN}"
     data = json.dumps(payload or {}).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(url, data=data, headers=headers)
     with urllib.request.urlopen(req, timeout=5) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -41,9 +49,12 @@ def test(name, func):
         FAIL += 1
 
 def main():
+    global AUTH_TOKEN
     parser = argparse.ArgumentParser(description="Home Assistant & MQTT E2E Test")
     parser.add_argument("--admin-url", default="http://127.0.0.1:18884")
     parser.add_argument("--server-url", default="http://127.0.0.1:9099")
+    parser.add_argument("--username", default="admin")
+    parser.add_argument("--password", default="TestAdminPassword123!")
     args = parser.parse_args()
 
     admin_url = args.admin_url.rstrip("/")
@@ -53,6 +64,16 @@ def main():
     print("Home Assistant & MQTT Real E2E Integration Test")
     print(f"Admin API: {admin_url} | Micro Server: {server_url}")
     print("=" * 60)
+
+    # Attempt login to obtain token if server requires auth
+    try:
+        login_resp = http_post(f"{server_url}/api/auth/login", {
+            "username": args.username,
+            "password": args.password,
+        })
+        AUTH_TOKEN = login_resp.get("token")
+    except Exception:
+        pass
 
     # 1. Verify Auto-Discovery Messages Received
     def test_discovery():
@@ -98,20 +119,31 @@ def main():
         assert "michi/volume/state" in msgs, "missing michi/volume/state"
     test("Periodic State Publication (server_status, playback_status, volume)", test_state_publication)
 
-    # 3. Test Command Processing (play_pause)
+    # 3. Test Command Processing (play_pause without output fails-closed to paused)
     def test_command_play_pause():
-        # Inject command into broker
         http_post(f"{admin_url}/api/mqtt/publish", {
             "topic": "michi/play_pause/cmd",
             "payload": ""
         })
-        time.sleep(1.0)
-        # Verify server state endpoint
-        state = http_get(f"{server_url}/api/playback/state")
+        time.sleep(0.5)
+        # Verify server state endpoint (must remain paused without output selected)
+        state = http_get(f"{server_url}/api/v1/playback/state")
         assert "playing" in state, f"expected playing in state: {state}"
-    test("Incoming MQTT Command Handling (michi/play_pause/cmd)", test_command_play_pause)
+        assert state["playing"] is False, f"expected playing to be false without output, got {state['playing']}"
+    test("Incoming MQTT Command Handling (michi/play_pause/cmd fail-closed)", test_command_play_pause)
 
-    # 4. Broker Disconnect & Auto-Reconnect Resilience
+    # 4. Test Volume Set via MQTT
+    def test_command_volume_set():
+        http_post(f"{admin_url}/api/mqtt/publish", {
+            "topic": "michi/volume_set/cmd",
+            "payload": "75"
+        })
+        time.sleep(0.5)
+        state = http_get(f"{server_url}/api/v1/playback/state")
+        assert state.get("volume") == 75, f"expected volume 75, got {state.get('volume')}"
+    test("Incoming MQTT Volume Set (michi/volume_set/cmd)", test_command_volume_set)
+
+    # 5. Broker Disconnect & Auto-Reconnect Resilience
     def test_broker_disconnect_reconnect():
         # Drop all connections
         http_post(f"{admin_url}/api/mqtt/drop")

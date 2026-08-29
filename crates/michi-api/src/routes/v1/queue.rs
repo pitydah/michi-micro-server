@@ -154,7 +154,13 @@ pub async fn queue_items_handler(
         .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
 
         if let Some((id_str,)) = row {
-            Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4())
+            Uuid::parse_str(&id_str).map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_INVARIANT_VIOLATION",
+                    &format!("corrupt queue UUID '{id_str}': {e}"),
+                )
+            })?
         } else {
             let new_id = Uuid::new_v4();
             let now = chrono::Utc::now().to_rfc3339();

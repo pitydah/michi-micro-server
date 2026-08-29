@@ -213,7 +213,7 @@ async fn main() -> Result<()> {
         let ha_dm = state.disabled_modules.clone();
         if !ha_dm.read().await.contains("homeassistant") {
             let ha_config = config.clone();
-            let ha_playback = state.playback_state.clone();
+            let ha_engine = state.playback_engine.clone();
             let ha_db = state.db.clone();
             let _ha_shutdown = state.shutdown_token.clone();
             let ha_cancel = state
@@ -232,7 +232,7 @@ async fn main() -> Result<()> {
                             info!("homeassistant module disabled at startup");
                             futures_util::future::pending::<()>().await;
                         }
-                        michi_homeassistant::run(ha_config, ha_playback, ha_db).await;
+                        michi_homeassistant::run(ha_config, ha_engine, ha_db).await;
                     } => {}
                 }
                 info!("homeassistant stopped");

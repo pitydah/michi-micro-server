@@ -269,8 +269,11 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
     if current < 41 {
         run_migration_step!(conn, 41, "receiver credentials and metadata", migration_041);
     }
+    if current < 42 {
+        run_migration_step!(conn, 42, "sync uploads and resumable chunks", migration_042);
+    }
 
-    info!("database schema at version 41");
+    info!("database schema at version 42");
     Ok(())
 }
 
@@ -1048,6 +1051,58 @@ async fn migration_041(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
         .execute(&mut **tx)
         .await?;
     }
+
+    Ok(())
+}
+
+async fn migration_042(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS synced_files (
+            id TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            original_path TEXT NOT NULL,
+            server_path TEXT NOT NULL,
+            file_hash TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            uploaded_at TEXT NOT NULL,
+            uploaded_by TEXT NOT NULL,
+            checksum_verified INTEGER NOT NULL DEFAULT 1
+        )",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sync_uploads (
+            id TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            original_path TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            expected_hash TEXT NOT NULL,
+            uploaded_by TEXT NOT NULL,
+            total_chunks INTEGER NOT NULL,
+            chunk_size INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'uploading',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sync_upload_chunks (
+            file_id TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            chunk_hash TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (file_id, chunk_index),
+            FOREIGN KEY (file_id) REFERENCES sync_uploads(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&mut **tx)
+    .await?;
 
     Ok(())
 }

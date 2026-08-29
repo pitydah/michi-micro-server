@@ -109,6 +109,33 @@ impl PlaybackEngine {
         }
     }
 
+    fn recompute_play_order_new_cycle(&mut self, just_finished_idx: usize) {
+        if self.queue.is_empty() {
+            self.play_order = Vec::new();
+            self.play_order_pos = 0;
+            return;
+        }
+
+        if self.shuffle {
+            use rand::seq::SliceRandom;
+            use rand::Rng;
+            let mut order: Vec<usize> = (0..self.queue.len()).collect();
+            let mut rng = rand::thread_rng();
+            order.shuffle(&mut rng);
+
+            // Mandatory Invariant: when queue.len() > 1, first track of new cycle != just_finished_idx
+            if self.queue.len() > 1 && order[0] == just_finished_idx {
+                let swap_idx = rng.gen_range(1..self.queue.len());
+                order.swap(0, swap_idx);
+            }
+            self.play_order = order;
+            self.play_order_pos = 0;
+        } else {
+            self.play_order = (0..self.queue.len()).collect();
+            self.play_order_pos = 0;
+        }
+    }
+
     pub fn snapshot(&self) -> EngineSnapshot {
         let mut pos = self.base_position_ms;
         if let Some(started) = self.playing_started_at {
@@ -360,9 +387,10 @@ impl PlaybackEngine {
                 if !self.queue.is_empty() {
                     if self.play_order_pos + 1 >= self.play_order.len() {
                         if self.shuffle {
-                            self.recompute_play_order(self.queue_index);
+                            self.recompute_play_order_new_cycle(self.queue_index);
+                        } else {
+                            self.play_order_pos = 0;
                         }
-                        self.play_order_pos = 0;
                     } else {
                         self.play_order_pos += 1;
                     }
@@ -678,9 +706,10 @@ impl PlaybackEngine {
                     }
                 } else if self.repeat == RepeatMode::All && !self.queue.is_empty() {
                     if self.shuffle {
-                        self.recompute_play_order(self.queue_index);
+                        self.recompute_play_order_new_cycle(self.queue_index);
+                    } else {
+                        self.play_order_pos = 0;
                     }
-                    self.play_order_pos = 0;
                     self.queue_index = self.play_order[0];
                     let next_track = self.queue[self.queue_index].clone();
                     if self.sinks.is_empty() {
@@ -1071,4 +1100,108 @@ pub fn spawn_playback_engine(
     let handle = PlaybackEngineHandle::new(tx);
     let join_handle = tokio::spawn(engine.run());
     (handle, join_handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummyResolver;
+    #[async_trait::async_trait]
+    impl TrackResolver for DummyResolver {
+        async fn get_track(&self, track_id: Uuid) -> Result<Track, PlaybackError> {
+            Err(PlaybackError::TrackNotFound(track_id))
+        }
+    }
+
+    fn make_dummy_track(title: &str) -> Track {
+        Track {
+            id: Uuid::new_v4(),
+            title: Some(title.to_string()),
+            artist: Some("Michi".to_string()),
+            album: Some("Album".to_string()),
+            album_artist: Some("Michi".to_string()),
+            duration_ms: Some(1000),
+            file_path: format!("/tmp/{title}.wav"),
+            format: michi_core::AudioFormat::Wav,
+            sample_rate: Some(48000),
+            bit_depth: Some(16),
+            channels: Some(2),
+            artwork_id: None,
+            genre: None,
+            year: Some(2026),
+            track_number: Some(1),
+            disc_number: Some(1),
+            content_hash: None,
+            file_size: Some(100),
+            file_mtime_ns: None,
+            starred: false,
+            rating: 0,
+            starred_at: None,
+            replaygain_track_gain: None,
+            replaygain_track_peak: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_shuffle_repeat_all_does_not_immediately_repeat_finished_track() {
+        let (_tx, rx) = mpsc::channel(16);
+        let mut engine = PlaybackEngine::new(rx, Arc::new(DummyResolver), PcmFormat::default());
+        engine.queue = vec![
+            make_dummy_track("A"),
+            make_dummy_track("B"),
+            make_dummy_track("C"),
+            make_dummy_track("D"),
+        ];
+        engine.shuffle = true;
+        engine.repeat = RepeatMode::All;
+
+        for finished_idx in 0..4 {
+            for _ in 0..50 {
+                engine.recompute_play_order_new_cycle(finished_idx);
+                assert_ne!(
+                    engine.play_order[0], finished_idx,
+                    "first track of new cycle ({}) must not immediately repeat finished track ({})",
+                    engine.play_order[0], finished_idx
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_shuffle_repeat_all_each_cycle_contains_all_tracks_once() {
+        let (_tx, rx) = mpsc::channel(16);
+        let mut engine = PlaybackEngine::new(rx, Arc::new(DummyResolver), PcmFormat::default());
+        let n = 6;
+        engine.queue = (0..n).map(|i| make_dummy_track(&format!("T{i}"))).collect();
+        engine.shuffle = true;
+        engine.repeat = RepeatMode::All;
+
+        for _ in 0..100 {
+            engine.recompute_play_order_new_cycle(2);
+            assert_eq!(engine.play_order.len(), n);
+            let mut sorted = engine.play_order.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                sorted,
+                (0..n).collect::<Vec<_>>(),
+                "must contain each index exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shuffle_single_track_repeat_all_may_repeat_same_track() {
+        let (_tx, rx) = mpsc::channel(16);
+        let mut engine = PlaybackEngine::new(rx, Arc::new(DummyResolver), PcmFormat::default());
+        engine.queue = vec![make_dummy_track("OnlyTrack")];
+        engine.shuffle = true;
+        engine.repeat = RepeatMode::All;
+
+        engine.recompute_play_order_new_cycle(0);
+        assert_eq!(engine.play_order, vec![0]);
+        assert_eq!(engine.play_order_pos, 0);
+    }
 }

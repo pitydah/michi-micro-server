@@ -9,6 +9,7 @@ michi-core = { path = "../michi-core" }
 michi-sync = { path = "../michi-sync" }
 michi-config = { path = "../michi-config" }
 michi-db = { path = "../michi-db" }
+michi-playback = { path = "../michi-playback" }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
