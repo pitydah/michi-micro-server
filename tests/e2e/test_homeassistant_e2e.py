@@ -114,7 +114,9 @@ def main():
         assert msgs["michi/server_status/state"] == "online"
 
         assert "michi/playback_status/state" in msgs, "missing michi/playback_status/state"
-        assert msgs["michi/playback_status/state"] in ("playing", "paused")
+        assert msgs["michi/playback_status/state"] in (
+            "idle", "preparing", "buffering", "audio_flowing", "playing", "paused", "stopped", "ended", "failed"
+        )
 
         assert "michi/volume/state" in msgs, "missing michi/volume/state"
     test("Periodic State Publication (server_status, playback_status, volume)", test_state_publication)

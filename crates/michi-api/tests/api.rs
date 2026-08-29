@@ -5121,9 +5121,11 @@ async fn test_v1_sync_resumable_chunk_upload_flow() {
     use sha2::Digest;
     let (app, _pool) = make_app().await;
 
-    // File: 8 bytes, chunk size 4 => 2 chunks
-    let chunk0_data = b"WXYZ".to_vec();
-    let chunk1_data = b"1234".to_vec();
+    // Server default chunk size is 1 MiB (1048576 bytes)
+    // Create 2 chunks: chunk 0 = 1048576 bytes, chunk 1 = 512 bytes => total 1049088 bytes (2 chunks)
+    let chunk0_data = vec![b'A'; 1024 * 1024];
+    let chunk1_data = vec![b'B'; 512];
+    let total_len = chunk0_data.len() + chunk1_data.len();
 
     let mut h0 = sha2::Sha256::new();
     h0.update(&chunk0_data);
@@ -5134,7 +5136,8 @@ async fn test_v1_sync_resumable_chunk_upload_flow() {
     let hash1 = hex::encode(h1.finalize());
 
     let mut h_tot = sha2::Sha256::new();
-    h_tot.update(b"WXYZ1234");
+    h_tot.update(&chunk0_data);
+    h_tot.update(&chunk1_data);
     let total_hash = hex::encode(h_tot.finalize());
 
     // 1. Init upload
@@ -5146,7 +5149,7 @@ async fn test_v1_sync_resumable_chunk_upload_flow() {
                 .method("POST")
                 .header("Content-Type", "application/json")
                 .body(Body::from(format!(
-                    r#"{{"filename":"chunked.flac","original_path":"/chunked.flac","file_size":8,"expected_hash":"{total_hash}","uploaded_by":"tester"}}"#
+                    r#"{{"filename":"chunked.flac","original_path":"/chunked.flac","file_size":{total_len},"expected_hash":"{total_hash}","uploaded_by":"tester"}}"#
                 )))
                 .unwrap(),
         )

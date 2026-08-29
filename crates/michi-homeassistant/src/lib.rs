@@ -175,11 +175,6 @@ async fn publish_states(client: &AsyncClient, engine: &PlaybackEngineHandle, db:
         }
     };
 
-    let is_flowing = matches!(
-        snap.lifecycle,
-        PlaybackLifecycle::AudioFlowing | PlaybackLifecycle::Playing
-    );
-
     let (title, artist, album, track_duration_ms) = if let Some(ref track_id) = snap.track_id {
         match michi_db::get_track(db, track_id).await {
             Ok(Some(track)) => (
@@ -194,7 +189,7 @@ async fn publish_states(client: &AsyncClient, engine: &PlaybackEngineHandle, db:
         (String::new(), String::new(), String::new(), 0)
     };
 
-    let status = if is_flowing { "playing" } else { "paused" };
+    let status = snap.lifecycle.as_str();
     let volume_pct = snap.volume as u32;
 
     let states = [

@@ -205,6 +205,53 @@ impl EngineSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "event", content = "data", rename_all = "snake_case")]
+pub enum EngineEvent {
+    LifecycleChanged {
+        lifecycle: PlaybackLifecycle,
+        track_id: Option<Uuid>,
+    },
+    TrackChanged {
+        track_id: Option<Uuid>,
+        index: usize,
+    },
+    PositionCheckpoint {
+        track_id: Option<Uuid>,
+        position_ms: u64,
+    },
+    Paused {
+        track_id: Option<Uuid>,
+        position_ms: u64,
+    },
+    Stopped,
+    Seeked {
+        track_id: Option<Uuid>,
+        position_ms: u64,
+    },
+    Ended {
+        track_id: Option<Uuid>,
+    },
+    Failed {
+        error: String,
+    },
+    VolumeChanged {
+        volume: u8,
+    },
+    ShuffleChanged {
+        shuffle: bool,
+    },
+    RepeatChanged {
+        repeat: RepeatMode,
+    },
+    QueueChanged {
+        len: usize,
+    },
+    OutputChanged {
+        output_health: String,
+    },
+}
+
 pub enum EngineCommand {
     Play {
         track: Box<Track>,

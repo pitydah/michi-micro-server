@@ -1300,6 +1300,81 @@ pub fn auto_restore_playback_state(
     });
 }
 
+pub fn spawn_playback_event_projection_task(
+    db: sqlx::SqlitePool,
+    playback_state: std::sync::Arc<tokio::sync::RwLock<michi_sync::PlaybackState>>,
+    playback_engine: michi_playback::PlaybackEngineHandle,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    let mut event_rx = playback_engine.subscribe_events();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    break;
+                }
+                event_res = event_rx.recv() => {
+                    match event_res {
+                        Ok(event) => {
+                            if let Ok(snap) = playback_engine.snapshot().await {
+                                let is_playing = snap.is_playing();
+                                let position_ms = if snap.lifecycle == michi_playback::PlaybackLifecycle::Stopped
+                                    || snap.lifecycle == michi_playback::PlaybackLifecycle::Ended
+                                {
+                                    0
+                                } else {
+                                    snap.position_ms
+                                };
+
+                                {
+                                    let mut ps = playback_state.write().await;
+                                    ps.track_id = snap.track_id;
+                                    ps.position_ms = position_ms;
+                                    ps.playing = is_playing;
+                                    ps.volume = (snap.volume as f64) / 100.0;
+                                    ps.shuffle = snap.shuffle;
+                                    ps.repeat = snap.repeat.as_str().to_string();
+                                    ps.updated_at = Utc::now();
+                                }
+
+                                match event {
+                                    michi_playback::EngineEvent::PositionCheckpoint { .. }
+                                    | michi_playback::EngineEvent::Seeked { .. }
+                                    | michi_playback::EngineEvent::LifecycleChanged { .. }
+                                    | michi_playback::EngineEvent::VolumeChanged { .. }
+                                    | michi_playback::EngineEvent::ShuffleChanged { .. }
+                                    | michi_playback::EngineEvent::RepeatChanged { .. }
+                                    | michi_playback::EngineEvent::Stopped
+                                    | michi_playback::EngineEvent::Ended { .. } => {
+                                        if is_playing || snap.lifecycle == michi_playback::PlaybackLifecycle::Stopped {
+                                            if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&db).await {
+                                                sess.current_track_id = snap.track_id;
+                                                sess.position_ms = position_ms;
+                                                sess.playing = is_playing;
+                                                sess.volume = (snap.volume as f64) / 100.0;
+                                                sess.shuffle = snap.shuffle;
+                                                sess.repeat_mode = snap.repeat.as_str().to_string();
+                                                let _ = michi_db::update_playback_session(&db, &sess).await;
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(lagged)) => {
+                            tracing::warn!("playback event projection task lagged by {} events", lagged);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[derive(Debug, Deserialize)]
 pub struct HandoffBody {
     pub track_id: Uuid,

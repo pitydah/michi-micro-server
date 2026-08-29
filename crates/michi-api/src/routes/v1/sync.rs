@@ -57,12 +57,18 @@ pub async fn sync_upload_init_handler(
         uploaded_by: body.uploaded_by,
     };
 
-    let file_id = state.sync_manager.init_upload(init).await.map_err(|e| {
-        v1_error(
+    let file_id = state.sync_manager.init_upload(init).await.map_err(|e| match &e {
+        michi_sync::SyncError::InvalidChunkParameter(_) => {
+            v1_error(StatusCode::BAD_REQUEST, "INVALID_PARAMETER", &e.to_string())
+        }
+        michi_sync::SyncError::DatabaseError(_) => {
+            v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string())
+        }
+        _ => v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "UPLOAD_INIT_ERROR",
             &e.to_string(),
-        )
+        ),
     })?;
 
     Ok(Json(serde_json::json!({
@@ -89,8 +95,26 @@ pub async fn sync_upload_chunk_handler(
         .upload_chunk(chunk)
         .await
         .map_err(|e| match &e {
+            michi_sync::SyncError::SessionNotFound(_) => {
+                v1_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", &e.to_string())
+            }
+            michi_sync::SyncError::ChunkConflict { .. } => {
+                v1_error(StatusCode::CONFLICT, "CHUNK_CONFLICT", &e.to_string())
+            }
+            michi_sync::SyncError::UploadAlreadyCompleted(_) => {
+                v1_error(StatusCode::CONFLICT, "ALREADY_COMPLETED", &e.to_string())
+            }
+            michi_sync::SyncError::UploadCancelled(_) => {
+                v1_error(StatusCode::GONE, "UPLOAD_CANCELLED", &e.to_string())
+            }
+            michi_sync::SyncError::InvalidChunkParameter(_) => {
+                v1_error(StatusCode::BAD_REQUEST, "INVALID_PARAMETER", &e.to_string())
+            }
             michi_sync::SyncError::HashMismatch { .. } => {
                 v1_error(StatusCode::BAD_REQUEST, "HASH_MISMATCH", &e.to_string())
+            }
+            michi_sync::SyncError::DatabaseError(_) => {
+                v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string())
             }
             _ => v1_error(
                 StatusCode::INTERNAL_SERVER_ERROR,

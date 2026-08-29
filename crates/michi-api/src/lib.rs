@@ -349,6 +349,14 @@ impl AppState {
             self.config.music_paths.clone(),
         );
 
+        // Event-driven playback state projection (siempre corre)
+        routes::v1::playback::spawn_playback_event_projection_task(
+            db.clone(),
+            self.playback_state.clone(),
+            self.playback_engine.clone(),
+            shutdown.clone(),
+        );
+
         // DB maintenance scheduler (siempre corre)
         let maintenance_db = db.clone();
         let maint_shutdown = shutdown.clone();
@@ -1158,7 +1166,8 @@ fn v1_link_routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/sync/upload/:file_id/chunk",
-            post(routes::v1::sync::sync_upload_chunk_handler),
+            post(routes::v1::sync::sync_upload_chunk_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
         )
         .route(
             "/api/v1/sync/upload/:file_id/status",
@@ -1166,7 +1175,8 @@ fn v1_link_routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/sync/upload/file",
-            post(routes::v1::sync::sync_upload_file_handler),
+            post(routes::v1::sync::sync_upload_file_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
         )
         .route(
             "/api/v1/sync/playlist",

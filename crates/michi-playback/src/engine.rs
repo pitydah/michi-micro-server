@@ -46,6 +46,8 @@ pub struct PlaybackEngine {
     network_bytes_sent_total: u64,
     output_health: String,
     last_error: Option<String>,
+    event_tx: tokio::sync::broadcast::Sender<crate::model::EngineEvent>,
+    last_checkpoint: Instant,
 }
 
 impl PlaybackEngine {
@@ -53,6 +55,16 @@ impl PlaybackEngine {
         receiver: mpsc::Receiver<EngineCommand>,
         resolver: Arc<dyn TrackResolver>,
         format: PcmFormat,
+    ) -> Self {
+        let (event_tx, _) = tokio::sync::broadcast::channel(128);
+        Self::new_with_events(receiver, resolver, format, event_tx)
+    }
+
+    pub fn new_with_events(
+        receiver: mpsc::Receiver<EngineCommand>,
+        resolver: Arc<dyn TrackResolver>,
+        format: PcmFormat,
+        event_tx: tokio::sync::broadcast::Sender<crate::model::EngineEvent>,
     ) -> Self {
         Self {
             receiver,
@@ -79,7 +91,17 @@ impl PlaybackEngine {
             network_bytes_sent_total: 0,
             output_health: "none".to_string(),
             last_error: None,
+            event_tx,
+            last_checkpoint: Instant::now(),
         }
+    }
+
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<crate::model::EngineEvent> {
+        self.event_tx.subscribe()
+    }
+
+    fn emit_event(&self, event: crate::model::EngineEvent) {
+        let _ = self.event_tx.send(event);
     }
 
     pub fn resolver(&self) -> &Arc<dyn TrackResolver> {
@@ -136,11 +158,16 @@ impl PlaybackEngine {
         }
     }
 
-    pub fn snapshot(&self) -> EngineSnapshot {
+    pub fn calculate_current_position_ms(&self) -> u64 {
         let mut pos = self.base_position_ms;
         if let Some(started) = self.playing_started_at {
             pos += started.elapsed().as_millis() as u64;
         }
+        pos
+    }
+
+    pub fn snapshot(&self) -> EngineSnapshot {
+        let pos = self.calculate_current_position_ms();
         let duration_ms = self.current_track.as_ref().and_then(|t| t.duration_ms);
 
         let sinks = self.sinks.iter().map(|s| s.snapshot()).collect();
@@ -300,11 +327,21 @@ impl PlaybackEngine {
                         let _ = d.stop().await;
                     }
                     self.playing_started_at = None;
+                    self.emit_event(crate::model::EngineEvent::Failed {
+                        error: "all output sinks failed".to_string(),
+                    });
+                    self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                        lifecycle: PlaybackLifecycle::Failed,
+                        track_id: self.current_track.as_ref().map(|t| t.id),
+                    });
                     return;
                 }
 
                 if surviving_sinks.len() < total_sinks {
                     self.output_health = "partial".to_string();
+                    self.emit_event(crate::model::EngineEvent::OutputChanged {
+                        output_health: self.output_health.clone(),
+                    });
                 }
                 self.sinks = surviving_sinks;
 
@@ -331,6 +368,21 @@ impl PlaybackEngine {
                                 as u64
                     {
                         self.state = PlaybackLifecycle::Playing;
+                        self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                            lifecycle: PlaybackLifecycle::Playing,
+                            track_id: self.current_track.as_ref().map(|t| t.id),
+                        });
+                    }
+
+                    if (self.state == PlaybackLifecycle::Playing || self.state == PlaybackLifecycle::AudioFlowing)
+                        && self.last_checkpoint.elapsed() >= Duration::from_millis(2500)
+                    {
+                        self.last_checkpoint = Instant::now();
+                        let pos = self.calculate_current_position_ms();
+                        self.emit_event(crate::model::EngineEvent::PositionCheckpoint {
+                            track_id: self.current_track.as_ref().map(|t| t.id),
+                            position_ms: pos,
+                        });
                     }
                 }
             }
@@ -343,6 +395,13 @@ impl PlaybackEngine {
                     let _ = d.stop().await;
                 }
                 self.playing_started_at = None;
+                self.emit_event(crate::model::EngineEvent::Failed {
+                    error: e.to_string(),
+                });
+                self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                    lifecycle: PlaybackLifecycle::Failed,
+                    track_id: self.current_track.as_ref().map(|t| t.id),
+                });
             }
         }
     }
@@ -365,6 +424,13 @@ impl PlaybackEngine {
         self.state = PlaybackLifecycle::Failed;
         self.last_error = Some(e.to_string());
         self.playing_started_at = None;
+        self.emit_event(crate::model::EngineEvent::Failed {
+            error: e.to_string(),
+        });
+        self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+            lifecycle: PlaybackLifecycle::Failed,
+            track_id: self.current_track.as_ref().map(|t| t.id),
+        });
     }
 
     async fn handle_eof(&mut self) {
@@ -372,6 +438,9 @@ impl PlaybackEngine {
         if let Some(mut d) = self.decoder.take() {
             let _ = d.stop().await;
         }
+        self.emit_event(crate::model::EngineEvent::Ended {
+            track_id: self.current_track.as_ref().map(|t| t.id),
+        });
 
         match self.repeat {
             RepeatMode::One => {
@@ -418,6 +487,10 @@ impl PlaybackEngine {
         }
 
         self.state = PlaybackLifecycle::Ended;
+        self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+            lifecycle: PlaybackLifecycle::Ended,
+            track_id: None,
+        });
         info!("playback reached end of queue");
     }
 
@@ -431,6 +504,13 @@ impl PlaybackEngine {
             self.state = PlaybackLifecycle::Failed;
             self.output_health = "none".to_string();
             self.last_error = Some("no output sinks available".to_string());
+            self.emit_event(crate::model::EngineEvent::Failed {
+                error: "no output sinks available".to_string(),
+            });
+            self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                lifecycle: PlaybackLifecycle::Failed,
+                track_id: Some(track.id),
+            });
             return Err(PlaybackError::NoOutputSelected);
         }
 
@@ -476,6 +556,13 @@ impl PlaybackEngine {
             self.state = PlaybackLifecycle::Failed;
             self.output_health = "failed".to_string();
             self.last_error = Some("all output sinks failed to prepare".to_string());
+            self.emit_event(crate::model::EngineEvent::Failed {
+                error: "all output sinks failed to prepare".to_string(),
+            });
+            self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                lifecycle: PlaybackLifecycle::Failed,
+                track_id: Some(track.id),
+            });
             return Err(PlaybackError::OutputUnavailable(
                 "none of the selected sinks are available".to_string(),
             ));
@@ -500,6 +587,13 @@ impl PlaybackEngine {
             self.state = PlaybackLifecycle::Idle;
             self.output_health = "none".to_string();
             self.last_error = Some(e.to_string());
+            self.emit_event(crate::model::EngineEvent::Failed {
+                error: e.to_string(),
+            });
+            self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                lifecycle: PlaybackLifecycle::Idle,
+                track_id: Some(track.id),
+            });
             return Err(e);
         }
 
@@ -515,6 +609,19 @@ impl PlaybackEngine {
         self.playing_started_at = None;
         self.state = PlaybackLifecycle::Preparing;
         self.last_error = None;
+        self.last_checkpoint = Instant::now();
+
+        self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+            lifecycle: self.state,
+            track_id: self.current_track.as_ref().map(|t| t.id),
+        });
+        self.emit_event(crate::model::EngineEvent::TrackChanged {
+            track_id: self.current_track.as_ref().map(|t| t.id),
+            index: self.queue_index,
+        });
+        self.emit_event(crate::model::EngineEvent::OutputChanged {
+            output_health: self.output_health.clone(),
+        });
 
         Ok(())
     }
@@ -551,6 +658,18 @@ impl PlaybackEngine {
                 self.current_track = Some(*track);
                 self.base_position_ms = position_ms;
                 self.state = PlaybackLifecycle::Paused;
+                self.emit_event(crate::model::EngineEvent::TrackChanged {
+                    track_id: self.current_track.as_ref().map(|t| t.id),
+                    index: self.queue_index,
+                });
+                self.emit_event(crate::model::EngineEvent::Paused {
+                    track_id: self.current_track.as_ref().map(|t| t.id),
+                    position_ms,
+                });
+                self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                    lifecycle: self.state,
+                    track_id: self.current_track.as_ref().map(|t| t.id),
+                });
                 let _ = respond_to.send(Ok(()));
                 true
             }
@@ -579,16 +698,22 @@ impl PlaybackEngine {
                     self.track_pcm_timeline_bytes = 0;
                     self.current_track = Some(target_track);
                     self.base_position_ms = 0;
+                    self.emit_event(crate::model::EngineEvent::TrackChanged {
+                        track_id: self.current_track.as_ref().map(|t| t.id),
+                        index: self.queue_index,
+                    });
                     let _ = respond_to.send(Ok(()));
                 }
                 true
             }
             EngineCommand::Pause { respond_to } => {
+                let pos = self.calculate_current_position_ms();
                 if let Some(ref mut d) = self.decoder {
                     let _ = d.stop().await;
                 }
                 self.decoder = None;
                 self.playing_started_at = None;
+                self.base_position_ms = pos;
                 let mut pause_errors = 0;
                 for sink in self.sinks.iter_mut() {
                     if let Err(e) = sink.pause().await {
@@ -600,6 +725,14 @@ impl PlaybackEngine {
                     self.output_health = "failed".to_string();
                 }
                 self.state = PlaybackLifecycle::Paused;
+                self.emit_event(crate::model::EngineEvent::Paused {
+                    track_id: self.current_track.as_ref().map(|t| t.id),
+                    position_ms: pos,
+                });
+                self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                    lifecycle: self.state,
+                    track_id: self.current_track.as_ref().map(|t| t.id),
+                });
                 let _ = respond_to.send(Ok(()));
                 true
             }
@@ -669,12 +802,28 @@ impl PlaybackEngine {
                         match decoder.start(position_ms).await {
                             Ok(()) => {
                                 self.decoder = Some(decoder);
+                                self.base_position_ms = position_ms;
+                                self.emit_event(crate::model::EngineEvent::Seeked {
+                                    track_id: Some(track.id),
+                                    position_ms,
+                                });
+                                self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                                    lifecycle: self.state,
+                                    track_id: Some(track.id),
+                                });
                                 let _ = respond_to.send(Ok(()));
                             }
                             Err(e) => {
                                 self.state = PlaybackLifecycle::Failed;
                                 self.decoder = None;
                                 self.last_error = Some(e.to_string());
+                                self.emit_event(crate::model::EngineEvent::Failed {
+                                    error: e.to_string(),
+                                });
+                                self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                                    lifecycle: self.state,
+                                    track_id: Some(track.id),
+                                });
                                 let _ = respond_to.send(Err(e));
                             }
                         }
@@ -683,6 +832,10 @@ impl PlaybackEngine {
                     }
                 } else {
                     self.base_position_ms = position_ms;
+                    self.emit_event(crate::model::EngineEvent::Seeked {
+                        track_id: self.current_track.as_ref().map(|t| t.id),
+                        position_ms,
+                    });
                     let _ = respond_to.send(Ok(()));
                 }
                 true
@@ -699,6 +852,10 @@ impl PlaybackEngine {
                         self.current_track = Some(next_track);
                         self.base_position_ms = 0;
                         self.playing_started_at = None;
+                        self.emit_event(crate::model::EngineEvent::TrackChanged {
+                            track_id: self.current_track.as_ref().map(|t| t.id),
+                            index: self.queue_index,
+                        });
                         let _ = respond_to.send(Ok(()));
                     } else {
                         let res = self.start_playback_internal(next_track, 0).await;
@@ -719,6 +876,10 @@ impl PlaybackEngine {
                         self.current_track = Some(next_track);
                         self.base_position_ms = 0;
                         self.playing_started_at = None;
+                        self.emit_event(crate::model::EngineEvent::TrackChanged {
+                            track_id: self.current_track.as_ref().map(|t| t.id),
+                            index: self.queue_index,
+                        });
                         let _ = respond_to.send(Ok(()));
                     } else {
                         let res = self.start_playback_internal(next_track, 0).await;
@@ -727,6 +888,13 @@ impl PlaybackEngine {
                 } else {
                     let _ = self.cleanup_playback().await;
                     self.state = PlaybackLifecycle::Ended;
+                    self.emit_event(crate::model::EngineEvent::Ended {
+                        track_id: self.current_track.as_ref().map(|t| t.id),
+                    });
+                    self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                        lifecycle: PlaybackLifecycle::Ended,
+                        track_id: None,
+                    });
                     let _ = respond_to.send(Ok(()));
                 }
                 true
@@ -761,6 +929,10 @@ impl PlaybackEngine {
                         self.current_track = Some(prev_track);
                         self.base_position_ms = 0;
                         self.playing_started_at = None;
+                        self.emit_event(crate::model::EngineEvent::TrackChanged {
+                            track_id: self.current_track.as_ref().map(|t| t.id),
+                            index: self.queue_index,
+                        });
                         let _ = respond_to.send(Ok(()));
                     } else {
                         let res = self.start_playback_internal(prev_track, 0).await;
@@ -784,11 +956,19 @@ impl PlaybackEngine {
                 let res = self.cleanup_playback().await;
                 self.base_position_ms = 0;
                 self.state = PlaybackLifecycle::Stopped;
+                self.emit_event(crate::model::EngineEvent::Stopped);
+                self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                    lifecycle: self.state,
+                    track_id: None,
+                });
                 let _ = respond_to.send(res);
                 true
             }
             EngineCommand::SetVolume { volume, respond_to } => {
                 self.volume = volume.min(100);
+                self.emit_event(crate::model::EngineEvent::VolumeChanged {
+                    volume: self.volume,
+                });
                 if self.sinks.is_empty() {
                     let _ = respond_to.send(Ok(()));
                 } else {
@@ -818,11 +998,17 @@ impl PlaybackEngine {
             } => {
                 self.shuffle = shuffle;
                 self.recompute_play_order(self.queue_index);
+                self.emit_event(crate::model::EngineEvent::ShuffleChanged {
+                    shuffle: self.shuffle,
+                });
                 let _ = respond_to.send(Ok(()));
                 true
             }
             EngineCommand::SetRepeat { repeat, respond_to } => {
                 self.repeat = repeat;
+                self.emit_event(crate::model::EngineEvent::RepeatChanged {
+                    repeat: self.repeat,
+                });
                 let _ = respond_to.send(Ok(()));
                 true
             }
@@ -848,6 +1034,14 @@ impl PlaybackEngine {
                 if !self.state.is_playing() && self.current_track.is_none() {
                     self.current_track = self.queue.get(self.queue_index).cloned();
                 }
+
+                self.emit_event(crate::model::EngineEvent::QueueChanged {
+                    len: self.queue.len(),
+                });
+                self.emit_event(crate::model::EngineEvent::TrackChanged {
+                    track_id: self.current_track.as_ref().map(|t| t.id),
+                    index: self.queue_index,
+                });
 
                 let _ = respond_to.send(Ok(()));
                 true
@@ -904,11 +1098,24 @@ impl PlaybackEngine {
 #[derive(Debug, Clone)]
 pub struct PlaybackEngineHandle {
     sender: mpsc::Sender<EngineCommand>,
+    event_tx: tokio::sync::broadcast::Sender<crate::model::EngineEvent>,
 }
 
 impl PlaybackEngineHandle {
     pub fn new(sender: mpsc::Sender<EngineCommand>) -> Self {
-        Self { sender }
+        let (event_tx, _) = tokio::sync::broadcast::channel(128);
+        Self { sender, event_tx }
+    }
+
+    pub fn new_with_events(
+        sender: mpsc::Sender<EngineCommand>,
+        event_tx: tokio::sync::broadcast::Sender<crate::model::EngineEvent>,
+    ) -> Self {
+        Self { sender, event_tx }
+    }
+
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<crate::model::EngineEvent> {
+        self.event_tx.subscribe()
     }
 
     pub async fn play(
@@ -1096,8 +1303,9 @@ pub fn spawn_playback_engine(
     format: PcmFormat,
 ) -> (PlaybackEngineHandle, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(64);
-    let engine = PlaybackEngine::new(rx, resolver, format);
-    let handle = PlaybackEngineHandle::new(tx);
+    let (event_tx, _) = tokio::sync::broadcast::channel(128);
+    let engine = PlaybackEngine::new_with_events(rx, resolver, format, event_tx.clone());
+    let handle = PlaybackEngineHandle::new_with_events(tx, event_tx);
     let join_handle = tokio::spawn(engine.run());
     (handle, join_handle)
 }
