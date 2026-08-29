@@ -374,7 +374,8 @@ impl PlaybackEngine {
                         });
                     }
 
-                    if (self.state == PlaybackLifecycle::Playing || self.state == PlaybackLifecycle::AudioFlowing)
+                    if (self.state == PlaybackLifecycle::Playing
+                        || self.state == PlaybackLifecycle::AudioFlowing)
                         && self.last_checkpoint.elapsed() >= Duration::from_millis(2500)
                     {
                         self.last_checkpoint = Instant::now();

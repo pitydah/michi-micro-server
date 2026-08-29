@@ -37,16 +37,26 @@ pub async fn sync_upload_init_handler(
     Json(body): Json<UploadInitBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     // Check if file already exists by hash
-    if let Ok(Some(existing)) = state
+    match state
         .sync_manager
         .check_file_exists(&body.expected_hash)
         .await
     {
-        return Ok(Json(serde_json::json!({
-            "status": "exists",
-            "file_id": existing.id,
-            "filename": existing.filename,
-        })));
+        Ok(Some(existing)) => {
+            return Ok(Json(serde_json::json!({
+                "status": "exists",
+                "file_id": existing.id,
+                "filename": existing.filename,
+            })));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return Err(v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            ));
+        }
     }
 
     let init = michi_sync::UploadInit {
@@ -57,19 +67,25 @@ pub async fn sync_upload_init_handler(
         uploaded_by: body.uploaded_by,
     };
 
-    let file_id = state.sync_manager.init_upload(init).await.map_err(|e| match &e {
-        michi_sync::SyncError::InvalidChunkParameter(_) => {
-            v1_error(StatusCode::BAD_REQUEST, "INVALID_PARAMETER", &e.to_string())
-        }
-        michi_sync::SyncError::DatabaseError(_) => {
-            v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string())
-        }
-        _ => v1_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "UPLOAD_INIT_ERROR",
-            &e.to_string(),
-        ),
-    })?;
+    let file_id = state
+        .sync_manager
+        .init_upload(init)
+        .await
+        .map_err(|e| match &e {
+            michi_sync::SyncError::InvalidChunkParameter(_) => {
+                v1_error(StatusCode::BAD_REQUEST, "INVALID_PARAMETER", &e.to_string())
+            }
+            michi_sync::SyncError::DatabaseError(_) => v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            ),
+            _ => v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPLOAD_INIT_ERROR",
+                &e.to_string(),
+            ),
+        })?;
 
     Ok(Json(serde_json::json!({
         "status": "initialized",
@@ -113,9 +129,11 @@ pub async fn sync_upload_chunk_handler(
             michi_sync::SyncError::HashMismatch { .. } => {
                 v1_error(StatusCode::BAD_REQUEST, "HASH_MISMATCH", &e.to_string())
             }
-            michi_sync::SyncError::DatabaseError(_) => {
-                v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string())
-            }
+            michi_sync::SyncError::DatabaseError(_) => v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            ),
             _ => v1_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "UPLOAD_CHUNK_ERROR",
@@ -211,14 +229,25 @@ pub async fn sync_upload_file_handler(
         })?;
 
     // Check dedup
-    if let Ok(Some(existing)) = state.sync_manager.check_file_exists(&hash).await {
-        let _ = tokio::fs::remove_file(&server_path).await;
-        return Ok(Json(serde_json::json!({
-            "status": "exists",
-            "file_id": existing.id,
-            "filename": existing.filename,
-            "hash": hash,
-        })));
+    match state.sync_manager.check_file_exists(&hash).await {
+        Ok(Some(existing)) => {
+            let _ = tokio::fs::remove_file(&server_path).await;
+            return Ok(Json(serde_json::json!({
+                "status": "exists",
+                "file_id": existing.id,
+                "filename": existing.filename,
+                "hash": hash,
+            })));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&server_path).await;
+            return Err(v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            ));
+        }
     }
 
     let file_id = state
@@ -276,7 +305,14 @@ pub async fn sync_playlist_handler(
         if let Ok(tid) = Uuid::parse_str(tid_str) {
             match michi_db::get_track(&state.db, &tid).await {
                 Ok(Some(_)) => valid_tracks.push(tid),
-                _ => missing_tracks.push(tid_str.clone()),
+                Ok(None) => missing_tracks.push(tid_str.clone()),
+                Err(e) => {
+                    return Err(v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &e.to_string(),
+                    ));
+                }
             }
         } else {
             missing_tracks.push(tid_str.clone());
@@ -298,8 +334,14 @@ pub async fn sync_playlist_handler(
             )
         })?;
 
+    let mut tracks_added = 0;
     for tid in &valid_tracks {
-        let _ = michi_db::add_track_to_playlist(&state.db, &playlist.id, tid).await;
+        if michi_db::add_track_to_playlist(&state.db, &playlist.id, tid)
+            .await
+            .is_ok()
+        {
+            tracks_added += 1;
+        }
     }
 
     let _ = state.tx.send(r#"{"type":"playlist_updated"}"#.to_string());
@@ -307,7 +349,7 @@ pub async fn sync_playlist_handler(
     Ok(Json(serde_json::json!({
         "status": "ok",
         "playlist": playlist,
-        "tracks_added": valid_tracks.len(),
+        "tracks_added": tracks_added,
         "tracks_missing": missing_tracks,
     })))
 }
@@ -410,19 +452,25 @@ pub async fn sync_manifest_delta_handler(
     let mut deleted: Vec<String> = Vec::new();
     let mut updated: Vec<String> = Vec::new();
     if let Some(since) = query.since.as_ref() {
-        if let Ok(changes) = sqlx::query_as::<_, (String, String, String)>(
+        let changes = sqlx::query_as::<_, (String, String, String)>(
             "SELECT entity_id, action, created_at FROM change_journal WHERE created_at > ? ORDER BY created_at ASC LIMIT 500",
         )
         .bind(since)
         .fetch_all(&state.db)
         .await
-        {
-            for (entity_id, action, _created_at) in changes {
-                match action.as_str() {
-                    "delete" => deleted.push(entity_id),
-                    "upsert" => updated.push(entity_id),
-                    _ => {}
-                }
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+        for (entity_id, action, _created_at) in changes {
+            match action.as_str() {
+                "delete" => deleted.push(entity_id),
+                "upsert" => updated.push(entity_id),
+                _ => {}
             }
         }
     }
@@ -449,7 +497,9 @@ pub async fn sync_state_handler(
     State(state): State<AppState>,
     Json(body): Json<SyncStateBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let new_state = michi_sync::PlaybackState {
+    // Functional truth: /sync/state conveys remote peer playback state.
+    // It broadcasts to peers/WebSockets without spoofing local server PlaybackEngine authority.
+    let peer_state = michi_sync::PlaybackState {
         track_id: body.track_id,
         position_ms: body.position_ms,
         playing: body.playing,
@@ -462,12 +512,7 @@ pub async fn sync_state_handler(
         repeat: "off".into(),
     };
 
-    {
-        let mut current = state.playback_state.write().await;
-        *current = new_state.clone();
-    }
-
-    let _ = state.sync_tx.send(new_state.into());
+    let _ = state.sync_tx.send(peer_state.into());
     let _ = state.tx.send(
         serde_json::json!({
             "type": "sync_state",
@@ -478,5 +523,22 @@ pub async fn sync_state_handler(
         .to_string(),
     );
 
-    Ok(Json(serde_json::json!({ "status": "ok" })))
+    // Return authoritative local server state for confirmation
+    let local_snap = state.playback_engine.snapshot().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ENGINE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "received",
+        "server_playback": {
+            "playing": local_snap.is_playing(),
+            "track_id": local_snap.track_id,
+            "position_ms": local_snap.position_ms,
+            "lifecycle": local_snap.lifecycle.as_str(),
+        }
+    })))
 }

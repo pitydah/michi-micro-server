@@ -65,15 +65,68 @@ pub struct SnapClient {
 /// Centralized JSON-RPC 2.0 client for Snapcast communication.
 /// Rigorously validates transport, timeout, HTTP status, JSON validity,
 /// and JSON-RPC error objects.
+pub fn validate_rpc_response(
+    val: serde_json::Value,
+    expected_id: i64,
+) -> Result<serde_json::Value, SnapcastError> {
+    if let Some(version) = val.get("jsonrpc") {
+        if version.as_str() != Some("2.0") {
+            return Err(SnapcastError::InvalidResponse(format!(
+                "invalid jsonrpc version: {version:?}"
+            )));
+        }
+    }
+
+    if let Some(resp_id) = val.get("id") {
+        if resp_id.as_i64() != Some(expected_id) {
+            return Err(SnapcastError::InvalidResponse(format!(
+                "response id mismatch: expected {expected_id}, got {resp_id:?}"
+            )));
+        }
+    }
+
+    let has_error = val.get("error").is_some() && !val["error"].is_null();
+    let has_result = val.get("result").is_some() && !val["result"].is_null();
+
+    if has_error && has_result {
+        return Err(SnapcastError::InvalidResponse(
+            "ambiguous JSON-RPC response containing both result and error".into(),
+        ));
+    }
+
+    if !has_error && !has_result {
+        return Err(SnapcastError::InvalidResponse(
+            "missing 'result' or 'error' in JSON-RPC response".into(),
+        ));
+    }
+
+    if has_error {
+        let err_obj = &val["error"];
+        let code = err_obj
+            .get("code")
+            .and_then(|c| c.as_i64())
+            .unwrap_or(-32000);
+        let msg = err_obj
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown RPC error")
+            .to_string();
+        return Err(SnapcastError::RpcError { code, message: msg });
+    }
+
+    Ok(val["result"].clone())
+}
+
 pub async fn rpc_call(
     url: &str,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, SnapcastError> {
     let client = reqwest::Client::new();
+    let req_id = 1;
     let req_body = serde_json::json!({
         "jsonrpc": "2.0",
-        "id": 1,
+        "id": req_id,
         "method": method,
         "params": params,
     });
@@ -102,26 +155,58 @@ pub async fn rpc_call(
         .await
         .map_err(|e| SnapcastError::JsonParse(e.to_string()))?;
 
-    // Check for JSON-RPC error field
-    if let Some(err_obj) = val.get("error") {
-        if !err_obj.is_null() {
-            let code = err_obj
-                .get("code")
-                .and_then(|c| c.as_i64())
-                .unwrap_or(-32000);
-            let msg = err_obj
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown RPC error")
-                .to_string();
-            return Err(SnapcastError::RpcError { code, message: msg });
-        }
+    validate_rpc_response(val, req_id)
+}
+
+pub fn parse_groups_from_value(result: &serde_json::Value) -> Result<Vec<Room>, SnapcastError> {
+    let groups = result
+        .get("server")
+        .and_then(|s| s.get("groups"))
+        .and_then(|g| g.as_array())
+        .ok_or_else(|| {
+            SnapcastError::InvalidResponse("missing 'server.groups' array in response".to_string())
+        })?;
+
+    let mut rooms = Vec::with_capacity(groups.len());
+    for g in groups {
+        let id = g
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                SnapcastError::InvalidResponse("group missing required non-empty 'id'".to_string())
+            })?;
+
+        let name = g
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(id);
+
+        let clients = g
+            .get("clients")
+            .and_then(|c| c.as_array())
+            .map(|a| a.len() as u32)
+            .unwrap_or(0);
+
+        let muted = g.get("muted").and_then(|v| v.as_bool()).unwrap_or(false);
+        let volume = g
+            .get("volume")
+            .and_then(|v| v.get("percent"))
+            .and_then(|v| v.as_f64())
+            .map(|v| v as u32)
+            .unwrap_or(100);
+
+        rooms.push(Room {
+            id: id.to_string(),
+            name: name.to_string(),
+            muted,
+            volume,
+            client_count: clients,
+        });
     }
 
-    // Extract result field
-    val.get("result")
-        .cloned()
-        .ok_or_else(|| SnapcastError::InvalidResponse("missing 'result' in RPC response".into()))
+    Ok(rooms)
 }
 
 pub async fn check_snapcast() -> SnapcastServerStatus {
@@ -179,44 +264,8 @@ pub async fn get_groups() -> Result<Vec<Room>, SnapcastError> {
         serde_json::json!({}),
     )
     .await?;
-    let groups = result
-        .get("server")
-        .and_then(|s| s.get("groups"))
-        .and_then(|g| g.as_array())
-        .ok_or_else(|| {
-            SnapcastError::InvalidResponse("missing 'server.groups' array in response".to_string())
-        })?;
 
-    Ok(groups
-        .iter()
-        .map(|g| {
-            let clients = g
-                .get("clients")
-                .and_then(|c| c.as_array())
-                .map(|a| a.len() as u32)
-                .unwrap_or(0);
-            Room {
-                id: g
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                name: g
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Unnamed")
-                    .to_string(),
-                muted: g.get("muted").and_then(|v| v.as_bool()).unwrap_or(false),
-                volume: g
-                    .get("volume")
-                    .and_then(|v| v.get("percent"))
-                    .and_then(|v| v.as_f64())
-                    .map(|v| v as u32)
-                    .unwrap_or(100),
-                client_count: clients,
-            }
-        })
-        .collect())
+    parse_groups_from_value(&result)
 }
 
 pub async fn set_group_volume(group_id: &str, volume: u32) -> Result<(), SnapcastError> {
@@ -301,5 +350,96 @@ mod tests {
 
         let err2 = SnapcastError::HttpStatus(502);
         assert_eq!(err2.to_string(), "snapcast HTTP error status 502");
+    }
+
+    // ── Falsification Tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_falsification_jsonrpc_error() {
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32600,
+                "message": "Invalid Request"
+            }
+        });
+        let res = validate_rpc_response(payload, 1);
+        assert!(matches!(
+            res,
+            Err(SnapcastError::RpcError { code: -32600, .. })
+        ));
+    }
+
+    #[test]
+    fn test_falsification_missing_result_and_error() {
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1
+        });
+        let res = validate_rpc_response(payload, 1);
+        assert!(matches!(res, Err(SnapcastError::InvalidResponse(_))));
+    }
+
+    #[test]
+    fn test_falsification_ambiguous_result_and_error() {
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"ok": true},
+            "error": {"code": 1, "message": "fail"}
+        });
+        let res = validate_rpc_response(payload, 1);
+        assert!(matches!(res, Err(SnapcastError::InvalidResponse(_))));
+    }
+
+    #[test]
+    fn test_falsification_wrong_response_id() {
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 999,
+            "result": {"ok": true}
+        });
+        let res = validate_rpc_response(payload, 1);
+        assert!(matches!(res, Err(SnapcastError::InvalidResponse(_))));
+    }
+
+    #[test]
+    fn test_falsification_group_missing_id() {
+        let payload = serde_json::json!({
+            "server": {
+                "groups": [
+                    {
+                        "name": "Living Room",
+                        "clients": []
+                    }
+                ]
+            }
+        });
+        let res = parse_groups_from_value(&payload);
+        assert!(matches!(res, Err(SnapcastError::InvalidResponse(_))));
+    }
+
+    #[test]
+    fn test_falsification_valid_group() {
+        let payload = serde_json::json!({
+            "server": {
+                "groups": [
+                    {
+                        "id": "grp-1",
+                        "name": "Living Room",
+                        "muted": false,
+                        "volume": {"percent": 70},
+                        "clients": [{"id": "c1"}]
+                    }
+                ]
+            }
+        });
+        let res = parse_groups_from_value(&payload).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].id, "grp-1");
+        assert_eq!(res[0].name, "Living Room");
+        assert_eq!(res[0].volume, 70);
+        assert_eq!(res[0].client_count, 1);
     }
 }

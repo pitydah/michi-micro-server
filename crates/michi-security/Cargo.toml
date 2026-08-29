@@ -20,3 +20,6 @@ validator.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true
 dashmap.workspace = true
+
+[dev-dependencies]
+tower.workspace = true

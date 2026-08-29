@@ -140,12 +140,38 @@ def main():
             "topic": "michi/volume_set/cmd",
             "payload": "75"
         })
-        time.sleep(0.5)
-        state = http_get(f"{server_url}/api/v1/playback/state")
-        assert state.get("volume") == 75, f"expected volume 75, got {state.get('volume')}"
+        # Bounded poll for volume change
+        vol_matched = False
+        for _ in range(10):
+            state = http_get(f"{server_url}/api/v1/playback/state")
+            if state.get("volume") == 75:
+                vol_matched = True
+                break
+            time.sleep(0.1)
+        assert vol_matched, f"expected volume 75, got {state.get('volume')}"
     test("Incoming MQTT Volume Set (michi/volume_set/cmd)", test_command_volume_set)
 
-    # 5. Broker Disconnect & Auto-Reconnect Resilience
+    # 5. Test Pause and Stop via MQTT
+    def test_command_pause_stop():
+        http_post(f"{admin_url}/api/mqtt/publish", {
+            "topic": "michi/pause/cmd",
+            "payload": ""
+        })
+        time.sleep(0.2)
+        state = http_get(f"{server_url}/api/v1/playback/state")
+        assert state.get("playing") is False, "expected playing to be false after pause"
+
+        http_post(f"{admin_url}/api/mqtt/publish", {
+            "topic": "michi/stop/cmd",
+            "payload": ""
+        })
+        time.sleep(0.2)
+        state = http_get(f"{server_url}/api/v1/playback/state")
+        assert state.get("playing") is False, "expected playing to be false after stop"
+        assert state.get("position_ms") == 0, f"expected position_ms to be 0 after stop, got {state.get('position_ms')}"
+    test("Incoming MQTT Pause & Stop Commands", test_command_pause_stop)
+
+    # 6. Broker Disconnect & Auto-Reconnect Resilience
     def test_broker_disconnect_reconnect():
         # Drop all connections
         http_post(f"{admin_url}/api/mqtt/drop")

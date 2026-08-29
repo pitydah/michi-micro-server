@@ -94,20 +94,24 @@ pub async fn playback_state_handler(
     }
 
     let current_track = if let Some(tid) = track_id {
-        michi_db::get_track(&state.db, &tid)
-            .await
-            .ok()
-            .flatten()
-            .map(|t| {
-                serde_json::json!({
-                    "id": t.id,
-                    "title": t.title,
-                    "artist": t.artist,
-                    "album": t.album,
-                    "duration_ms": t.duration_ms,
-                    "format": t.format,
-                })
-            })
+        match michi_db::get_track(&state.db, &tid).await {
+            Ok(Some(t)) => Some(serde_json::json!({
+                "id": t.id,
+                "title": t.title,
+                "artist": t.artist,
+                "album": t.album,
+                "duration_ms": t.duration_ms,
+                "format": t.format,
+            })),
+            Ok(None) => None,
+            Err(e) => {
+                return Err(v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                ));
+            }
+        }
     } else {
         None
     };
@@ -179,9 +183,9 @@ pub enum PlaybackRepeatMode {
 impl PlaybackRepeatMode {
     pub fn to_engine_repeat(&self) -> RepeatMode {
         match self {
-            Self::Off => RepeatMode::Off,
-            Self::One => RepeatMode::One,
-            Self::All => RepeatMode::All,
+            PlaybackRepeatMode::Off => RepeatMode::Off,
+            PlaybackRepeatMode::One => RepeatMode::One,
+            PlaybackRepeatMode::All => RepeatMode::All,
         }
     }
 }
@@ -190,13 +194,11 @@ impl PlaybackRepeatMode {
 #[serde(untagged)]
 pub enum PlaybackControlValue {
     Integer(u64),
-    Repeat(PlaybackRepeatMode),
     Boolean(bool),
-    Null,
+    Repeat(PlaybackRepeatMode),
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PlaybackControlBody {
     pub command: String,
     pub track_id: Option<Uuid>,
@@ -279,19 +281,29 @@ pub async fn playback_control_handler(
 
             let active_queue_id = crate::playback_queue::get_or_create_active_queue(&state.db)
                 .await
-                .ok();
-            let first_queue_track = if let Some(ref qid) = active_queue_id {
-                sqlx::query_scalar::<_, String>(
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &e.to_string(),
+                    )
+                })?;
+            let first_queue_track = {
+                let row = sqlx::query_scalar::<_, String>(
                     "SELECT track_id FROM queue_items WHERE queue_id = ? ORDER BY position ASC LIMIT 1",
                 )
-                .bind(qid.to_string())
+                .bind(active_queue_id.to_string())
                 .fetch_optional(&state.db)
                 .await
-                .ok()
-                .flatten()
-                .and_then(|s| Uuid::parse_str(&s).ok())
-            } else {
-                None
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &e.to_string(),
+                    )
+                })?;
+
+                row.and_then(|s| Uuid::parse_str(&s).ok())
             };
 
             let track_id_opt = body.track_id.or(snap.track_id).or(first_queue_track);
@@ -881,14 +893,24 @@ pub async fn playback_session_handler(
         )
     })?;
 
+    let parsed_device_id = match body.device_id.as_deref() {
+        Some(s) if !s.trim().is_empty() => match Uuid::parse_str(s) {
+            Ok(u) => u,
+            Err(_) => {
+                return Err(v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_DEVICE_ID",
+                    &format!("device_id must be a valid UUID, got '{s}'"),
+                ));
+            }
+        },
+        _ => Uuid::nil(),
+    };
+
     // 7. Persist PlaybackSession metadata as preparing/not-yet-playing
     let db_session = michi_core::PlaybackSessionDb {
         id: session_id,
-        device_id: body
-            .device_id
-            .as_deref()
-            .and_then(|d| Uuid::parse_str(d).ok())
-            .unwrap_or_else(Uuid::nil),
+        device_id: parsed_device_id,
         queue_id: Some(queue_id),
         queue_state_json: queue_json,
         current_index: current_index as i32,
@@ -1027,8 +1049,13 @@ pub async fn get_playback_session_handler(
     let queue_items: Vec<serde_json::Value> = if let Some(qid) = session.queue_id {
         michi_db::get_queue_items(&state.db, &qid)
             .await
-            .ok()
-            .unwrap_or_default()
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?
             .into_iter()
             .map(|(tid, pos)| serde_json::json!({ "track_id": tid, "position": pos }))
             .collect()
@@ -1086,7 +1113,16 @@ pub async fn restore_playback_state_handler(
                         .await?;
 
                 let cur_idx = if let Some(ref cur_tid) = session.current_track_id {
-                    tracks.iter().position(|t| t.id == *cur_tid).unwrap_or(0)
+                    match tracks.iter().position(|t| t.id == *cur_tid) {
+                        Some(idx) => idx,
+                        None => {
+                            return Err(v1_error(
+                                StatusCode::BAD_REQUEST,
+                                "CURRENT_TRACK_NOT_IN_RESTORED_QUEUE",
+                                &format!("persisted track id {cur_tid} not found in restored queue"),
+                            ));
+                        }
+                    }
                 } else {
                     0
                 };
@@ -1103,16 +1139,46 @@ pub async fn restore_playback_state_handler(
                         )
                     })?;
 
-                // Restore volume, shuffle, repeat to engine
+                // Restore volume, shuffle, repeat strictly to engine
                 let vol_u8 = (session.volume * 100.0).round().clamp(0.0, 100.0) as u8;
-                let _ = state.playback_engine.set_volume(vol_u8).await;
-                let _ = state.playback_engine.set_shuffle(session.shuffle).await;
+                state
+                    .playback_engine
+                    .set_volume(vol_u8)
+                    .await
+                    .map_err(|e| {
+                        v1_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            e.error_code(),
+                            &e.to_string(),
+                        )
+                    })?;
+                state
+                    .playback_engine
+                    .set_shuffle(session.shuffle)
+                    .await
+                    .map_err(|e| {
+                        v1_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            e.error_code(),
+                            &e.to_string(),
+                        )
+                    })?;
                 let rep_mode = match session.repeat_mode.as_str() {
                     "one" => RepeatMode::One,
                     "all" => RepeatMode::All,
                     _ => RepeatMode::Off,
                 };
-                let _ = state.playback_engine.set_repeat(rep_mode).await;
+                state
+                    .playback_engine
+                    .set_repeat(rep_mode)
+                    .await
+                    .map_err(|e| {
+                        v1_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            e.error_code(),
+                            &e.to_string(),
+                        )
+                    })?;
 
                 if let Some(cur_track) = tracks.get(cur_idx) {
                     let pos_ms = cur_track
@@ -1155,7 +1221,15 @@ pub async fn restore_playback_state_handler(
 
             let mut updated = session;
             updated.restored = true;
-            let _ = michi_db::update_playback_session(&state.db, &updated).await;
+            michi_db::update_playback_session(&state.db, &updated)
+                .await
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &format!("failed to update restored flag: {e}"),
+                    )
+                })?;
 
             Ok(Json(serde_json::json!({
                 "restored": true,
@@ -1195,7 +1269,16 @@ pub fn auto_restore_playback_state(
                                     let cur_idx = if let Some(ref cur_tid) =
                                         session.current_track_id
                                     {
-                                        tracks.iter().position(|t| t.id == *cur_tid).unwrap_or(0)
+                                        match tracks.iter().position(|t| t.id == *cur_tid) {
+                                            Some(idx) => idx,
+                                            None => {
+                                                tracing::warn!(
+                                                    "auto-restore: persisted track {} not in restored queue, skipping auto track selection",
+                                                    cur_tid
+                                                );
+                                                return;
+                                            }
+                                        }
                                     } else {
                                         0
                                     };
@@ -1311,6 +1394,20 @@ pub fn spawn_playback_event_projection_task(
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => {
+                    // Best-effort final snapshot persist with short timeout
+                    let _ = tokio::time::timeout(tokio::time::Duration::from_millis(500), async {
+                        if let Ok(snap) = playback_engine.snapshot().await {
+                            if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&db).await {
+                                sess.current_track_id = snap.track_id;
+                                sess.position_ms = snap.position_ms;
+                                sess.playing = false; // Graceful shutdown means runtime is terminating
+                                sess.volume = (snap.volume as f64) / 100.0;
+                                sess.shuffle = snap.shuffle;
+                                sess.repeat_mode = snap.repeat.as_str().to_string();
+                                let _ = michi_db::update_playback_session(&db, &sess).await;
+                            }
+                        }
+                    }).await;
                     break;
                 }
                 event_res = event_rx.recv() => {
@@ -1318,9 +1415,11 @@ pub fn spawn_playback_event_projection_task(
                         Ok(event) => {
                             if let Ok(snap) = playback_engine.snapshot().await {
                                 let is_playing = snap.is_playing();
-                                let position_ms = if snap.lifecycle == michi_playback::PlaybackLifecycle::Stopped
-                                    || snap.lifecycle == michi_playback::PlaybackLifecycle::Ended
-                                {
+                                let position_ms = if matches!(
+                                    snap.lifecycle,
+                                    michi_playback::PlaybackLifecycle::Stopped
+                                        | michi_playback::PlaybackLifecycle::Ended
+                                ) {
                                     0
                                 } else {
                                     snap.position_ms
@@ -1337,33 +1436,139 @@ pub fn spawn_playback_event_projection_task(
                                     ps.updated_at = Utc::now();
                                 }
 
+                                // Full semantic event persistence matrix
                                 match event {
-                                    michi_playback::EngineEvent::PositionCheckpoint { .. }
-                                    | michi_playback::EngineEvent::Seeked { .. }
-                                    | michi_playback::EngineEvent::LifecycleChanged { .. }
-                                    | michi_playback::EngineEvent::VolumeChanged { .. }
-                                    | michi_playback::EngineEvent::ShuffleChanged { .. }
-                                    | michi_playback::EngineEvent::RepeatChanged { .. }
-                                    | michi_playback::EngineEvent::Stopped
-                                    | michi_playback::EngineEvent::Ended { .. } => {
-                                        if is_playing || snap.lifecycle == michi_playback::PlaybackLifecycle::Stopped {
+                                    michi_playback::EngineEvent::LifecycleChanged { lifecycle, track_id } => {
+                                        let is_flowing = matches!(
+                                            lifecycle,
+                                            michi_playback::PlaybackLifecycle::AudioFlowing
+                                                | michi_playback::PlaybackLifecycle::Playing
+                                        );
+
+                                        if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&db).await {
+                                            sess.current_track_id = track_id.or(snap.track_id);
+                                            if matches!(
+                                                lifecycle,
+                                                michi_playback::PlaybackLifecycle::Stopped
+                                                    | michi_playback::PlaybackLifecycle::Ended
+                                            ) {
+                                                sess.position_ms = 0;
+                                            } else if is_flowing {
+                                                sess.position_ms = snap.position_ms;
+                                            }
+                                            sess.playing = is_flowing;
+                                            sess.volume = (snap.volume as f64) / 100.0;
+                                            sess.shuffle = snap.shuffle;
+                                            sess.repeat_mode = snap.repeat.as_str().to_string();
+                                            let _ = michi_db::update_playback_session(&db, &sess).await;
+                                        }
+                                    }
+                                    michi_playback::EngineEvent::Paused { track_id, position_ms } => {
+                                        if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&db).await {
+                                            sess.current_track_id = track_id.or(snap.track_id);
+                                            sess.position_ms = position_ms;
+                                            sess.playing = false;
+                                            sess.volume = (snap.volume as f64) / 100.0;
+                                            sess.shuffle = snap.shuffle;
+                                            sess.repeat_mode = snap.repeat.as_str().to_string();
+                                            let _ = michi_db::update_playback_session(&db, &sess).await;
+                                        }
+                                    }
+                                    michi_playback::EngineEvent::Stopped | michi_playback::EngineEvent::Ended { .. } => {
+                                        if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&db).await {
+                                            sess.position_ms = 0;
+                                            sess.playing = false;
+                                            let _ = michi_db::update_playback_session(&db, &sess).await;
+                                        }
+                                    }
+                                    michi_playback::EngineEvent::Failed { .. } => {
+                                        if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&db).await {
+                                            sess.playing = false;
+                                            let _ = michi_db::update_playback_session(&db, &sess).await;
+                                        }
+                                    }
+                                    michi_playback::EngineEvent::Seeked { position_ms, .. } => {
+                                        if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&db).await {
+                                            sess.position_ms = position_ms;
+                                            let _ = michi_db::update_playback_session(&db, &sess).await;
+                                        }
+                                    }
+                                    michi_playback::EngineEvent::PositionCheckpoint { position_ms, .. } => {
+                                        if is_playing {
                                             if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&db).await {
-                                                sess.current_track_id = snap.track_id;
                                                 sess.position_ms = position_ms;
                                                 sess.playing = is_playing;
-                                                sess.volume = (snap.volume as f64) / 100.0;
-                                                sess.shuffle = snap.shuffle;
-                                                sess.repeat_mode = snap.repeat.as_str().to_string();
                                                 let _ = michi_db::update_playback_session(&db, &sess).await;
                                             }
                                         }
                                     }
-                                    _ => {}
+                                    michi_playback::EngineEvent::TrackChanged { track_id, index } => {
+                                        if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&db).await {
+                                            sess.current_track_id = track_id;
+                                            sess.current_index = index as i32;
+                                            if is_playing {
+                                                sess.position_ms = snap.position_ms;
+                                            }
+                                            let _ = michi_db::update_playback_session(&db, &sess).await;
+                                        }
+                                    }
+                                    michi_playback::EngineEvent::VolumeChanged { volume } => {
+                                        if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&db).await {
+                                            sess.volume = (volume as f64) / 100.0;
+                                            let _ = michi_db::update_playback_session(&db, &sess).await;
+                                        }
+                                    }
+                                    michi_playback::EngineEvent::ShuffleChanged { shuffle } => {
+                                        if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&db).await {
+                                            sess.shuffle = shuffle;
+                                            let _ = michi_db::update_playback_session(&db, &sess).await;
+                                        }
+                                    }
+                                    michi_playback::EngineEvent::RepeatChanged { repeat } => {
+                                        if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&db).await {
+                                            sess.repeat_mode = repeat.as_str().to_string();
+                                            let _ = michi_db::update_playback_session(&db, &sess).await;
+                                        }
+                                    }
+                                    michi_playback::EngineEvent::QueueChanged { .. } | michi_playback::EngineEvent::OutputChanged { .. } => {}
                                 }
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(lagged)) => {
-                            tracing::warn!("playback event projection task lagged by {} events", lagged);
+                            tracing::warn!("playback event projection task lagged by {} events; reconciling snapshot", lagged);
+                            if let Ok(snap) = playback_engine.snapshot().await {
+                                let is_playing = snap.is_playing();
+                                let position_ms = if matches!(
+                                    snap.lifecycle,
+                                    michi_playback::PlaybackLifecycle::Stopped
+                                        | michi_playback::PlaybackLifecycle::Ended
+                                ) {
+                                    0
+                                } else {
+                                    snap.position_ms
+                                };
+
+                                {
+                                    let mut ps = playback_state.write().await;
+                                    ps.track_id = snap.track_id;
+                                    ps.position_ms = position_ms;
+                                    ps.playing = is_playing;
+                                    ps.volume = (snap.volume as f64) / 100.0;
+                                    ps.shuffle = snap.shuffle;
+                                    ps.repeat = snap.repeat.as_str().to_string();
+                                    ps.updated_at = Utc::now();
+                                }
+
+                                if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&db).await {
+                                    sess.current_track_id = snap.track_id;
+                                    sess.position_ms = position_ms;
+                                    sess.playing = is_playing;
+                                    sess.volume = (snap.volume as f64) / 100.0;
+                                    sess.shuffle = snap.shuffle;
+                                    sess.repeat_mode = snap.repeat.as_str().to_string();
+                                    let _ = michi_db::update_playback_session(&db, &sess).await;
+                                }
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             break;

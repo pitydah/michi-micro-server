@@ -335,4 +335,51 @@ mod tests {
         assert!(state.ip_rate_limiter.contains_key("192.168.1.2"));
         assert!(!state.ip_rate_limiter.contains_key("192.168.1.1"));
     }
+
+    #[tokio::test]
+    async fn test_dynamic_pairing_rate_limit_enforcement() {
+        use axum::{routing::post, Router};
+        use tower::ServiceExt;
+
+        let config = SecurityConfig {
+            pairing_rate_limit_per_minute: 2,
+            ..Default::default()
+        };
+        let state = SecurityState::new(config);
+
+        let app = Router::new()
+            .route("/pair", post(|| async { StatusCode::OK }))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                pairing_rate_limit_middleware,
+            ))
+            .with_state(state);
+
+        // Attempt 1: OK
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("/pair")
+            .body(Body::empty())
+            .unwrap();
+        let resp1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        // Attempt 2: OK
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/pair")
+            .body(Body::empty())
+            .unwrap();
+        let resp2 = app.clone().oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+
+        // Attempt 3: Blocked with 429
+        let req3 = Request::builder()
+            .method("POST")
+            .uri("/pair")
+            .body(Body::empty())
+            .unwrap();
+        let resp3 = app.clone().oneshot(req3).await.unwrap();
+        assert_eq!(resp3.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
 }
