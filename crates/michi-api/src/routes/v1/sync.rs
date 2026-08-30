@@ -142,7 +142,7 @@ pub async fn sync_upload_chunk_handler(
         })?;
 
     Ok(Json(serde_json::json!({
-        "status": if progress.completed { "completed" } else { "in_progress" },
+        "status": progress.status.as_db_str(),
         "progress": progress,
     })))
 }
@@ -165,7 +165,7 @@ pub async fn sync_upload_status_handler(
 
     match progress {
         Some(p) => Ok(Json(serde_json::json!({
-            "status": if p.completed { "completed" } else { "in_progress" },
+            "status": p.status.as_db_str(),
             "progress": p,
         }))),
         None => Ok(Json(serde_json::json!({
@@ -206,7 +206,16 @@ pub async fn sync_upload_file_handler(
         .cache_path
         .join("uploads")
         .join(file_id.to_string());
-    let _ = std::fs::create_dir_all(server_path.parent().unwrap());
+
+    if let Some(parent) = server_path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DIRECTORY_CREATE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+    }
 
     tokio::fs::write(&server_path, &data).await.map_err(|e| {
         v1_error(
@@ -216,22 +225,24 @@ pub async fn sync_upload_file_handler(
         )
     })?;
 
-    let hash = state
-        .sync_manager
-        .calculate_file_hash(&server_path)
-        .await
-        .map_err(|e| {
-            v1_error(
+    let hash = match state.sync_manager.calculate_file_hash(&server_path).await {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&server_path).await;
+            return Err(v1_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "HASH_ERROR",
                 &e.to_string(),
-            )
-        })?;
+            ));
+        }
+    };
 
     // Check dedup
     match state.sync_manager.check_file_exists(&hash).await {
         Ok(Some(existing)) => {
-            let _ = tokio::fs::remove_file(&server_path).await;
+            if let Err(e) = tokio::fs::remove_file(&server_path).await {
+                tracing::warn!(path = ?server_path, error = %e, "failed to clean up deduplicated staging file");
+            }
             return Ok(Json(serde_json::json!({
                 "status": "exists",
                 "file_id": existing.id,
@@ -250,7 +261,7 @@ pub async fn sync_upload_file_handler(
         }
     }
 
-    let file_id = state
+    let file_id = match state
         .sync_manager
         .register_uploaded_file(
             body.filename,
@@ -261,13 +272,17 @@ pub async fn sync_upload_file_handler(
             body.uploaded_by,
         )
         .await
-        .map_err(|e| {
-            v1_error(
+    {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&server_path).await;
+            return Err(v1_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "REGISTER_ERROR",
                 &e.to_string(),
-            )
-        })?;
+            ));
+        }
+    };
 
     Ok(Json(serde_json::json!({
         "status": "uploaded",
@@ -335,12 +350,17 @@ pub async fn sync_playlist_handler(
         })?;
 
     let mut tracks_added = 0;
+    let mut tracks_failed = Vec::new();
     for tid in &valid_tracks {
-        if michi_db::add_track_to_playlist(&state.db, &playlist.id, tid)
-            .await
-            .is_ok()
-        {
-            tracks_added += 1;
+        match michi_db::add_track_to_playlist(&state.db, &playlist.id, tid).await {
+            Ok(_) => tracks_added += 1,
+            Err(e) => {
+                tracing::warn!(playlist_id = %playlist.id, track_id = %tid, error = %e, "failed to add track to playlist during sync");
+                tracks_failed.push(serde_json::json!({
+                    "track_id": tid.to_string(),
+                    "error": e.to_string(),
+                }));
+            }
         }
     }
 
@@ -354,6 +374,7 @@ pub async fn sync_playlist_handler(
         "playlist": playlist,
         "tracks_added": tracks_added,
         "tracks_missing": missing_tracks,
+        "tracks_failed": tracks_failed,
     })))
 }
 

@@ -148,6 +148,7 @@ impl PlayerCompatibility {
 #[derive(Debug, Serialize)]
 pub struct DiagnosticsReport {
     pub healthy: bool,
+    pub degraded: bool,
     pub db: DbStatus,
     pub library: LibraryStatus,
     pub token_store: TokenStoreStatus,
@@ -204,10 +205,12 @@ pub struct ImportStagingStatus {
 
 #[derive(Debug, Serialize)]
 pub struct PlaybackStatus {
+    pub engine_available: bool,
+    pub lifecycle: Option<String>,
     pub track_id: Option<String>,
-    pub playing: bool,
-    pub position_ms: u64,
-    pub volume: u32,
+    pub playing: Option<bool>,
+    pub position_ms: Option<u64>,
+    pub volume: Option<u32>,
     pub restored: bool,
     pub has_queue: bool,
     pub projection: Option<crate::playback_projection::PlaybackProjectionHealth>,
@@ -252,24 +255,44 @@ pub struct ConfigStatus {
 
 pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<DiagnosticsReport> {
     let mut warnings: Vec<String> = Vec::new();
+    let mut degraded = false;
+
+    // Real DB ping check
+    let db_ping = sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&state.db)
+        .await;
+    let db_connected = db_ping.is_ok();
+    if !db_connected {
+        warnings.push("database connection ping failed".into());
+    }
 
     let (total_tracks, _total_albums, _total_artists) =
         match michi_db::library_stats(&state.db).await {
             Ok(s) => (s.tracks, s.albums, s.artists),
             Err(e) => {
                 warnings.push(format!("library_stats failed: {e}"));
+                degraded = true;
                 (0, 0, 0)
             }
         };
 
-    let total_devices = michi_db::list_link_devices(&state.db)
-        .await
-        .map(|d| d.len() as i64)
-        .unwrap_or(0);
-    let total_playlists = michi_db::list_playlists(&state.db, None)
-        .await
-        .map(|p| p.len() as i64)
-        .unwrap_or(0);
+    let total_devices = match michi_db::list_link_devices(&state.db).await {
+        Ok(d) => d.len() as i64,
+        Err(e) => {
+            warnings.push(format!("list_link_devices failed: {e}"));
+            degraded = true;
+            0
+        }
+    };
+
+    let total_playlists = match michi_db::list_playlists(&state.db, None).await {
+        Ok(p) => p.len() as i64,
+        Err(e) => {
+            warnings.push(format!("list_playlists failed: {e}"));
+            degraded = true;
+            0
+        }
+    };
 
     let configured_paths: Vec<String> = state
         .config
@@ -296,12 +319,19 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
         0
     };
 
-    let active_import_sessions: i64 = sqlx::query_scalar(
+    let active_import_sessions: i64 = match sqlx::query_scalar(
         "SELECT COUNT(*) FROM import_sessions WHERE status NOT IN ('committed', 'completed', 'rolled_back', 'expired')",
     )
     .fetch_one(&state.db)
     .await
-    .unwrap_or(0);
+    {
+        Ok(count) => count,
+        Err(e) => {
+            warnings.push(format!("query active import sessions failed: {e}"));
+            degraded = true;
+            0
+        }
+    };
 
     let registered_receivers = state
         .receiver_manager
@@ -337,21 +367,59 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
         }
     };
 
-    let snap = state.playback_engine.snapshot().await.unwrap_or_default();
-    let engine_playing = matches!(
-        snap.lifecycle,
-        michi_playback::PlaybackLifecycle::AudioFlowing
-            | michi_playback::PlaybackLifecycle::Playing
-    );
+    let (
+        engine_available,
+        engine_lifecycle,
+        engine_track_id,
+        engine_playing,
+        engine_position_ms,
+        engine_volume,
+    ) = match state.playback_engine.snapshot().await {
+        Ok(snap) => {
+            let is_playing = matches!(
+                snap.lifecycle,
+                michi_playback::PlaybackLifecycle::AudioFlowing
+                    | michi_playback::PlaybackLifecycle::Playing
+            );
+            (
+                true,
+                Some(snap.lifecycle.as_str().to_string()),
+                snap.track_id.map(|i| i.to_string()),
+                Some(is_playing),
+                Some(snap.position_ms),
+                Some(snap.volume as u32),
+            )
+        }
+        Err(e) => {
+            warnings.push(format!("playback engine snapshot failed: {e}"));
+            degraded = true;
+            (false, None, None, None, None, None)
+        }
+    };
 
-    let total_queues: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM queues")
+    let total_queues: i64 = match sqlx::query_scalar("SELECT COUNT(*) FROM queues")
         .fetch_one(&state.db)
         .await
-        .unwrap_or(0);
-    let total_queue_items: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM queue_items")
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warnings.push(format!("query queues count failed: {e}"));
+            degraded = true;
+            0
+        }
+    };
+
+    let total_queue_items: i64 = match sqlx::query_scalar("SELECT COUNT(*) FROM queue_items")
         .fetch_one(&state.db)
         .await
-        .unwrap_or(0);
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warnings.push(format!("query queue_items count failed: {e}"));
+            degraded = true;
+            0
+        }
+    };
 
     // Check if playback was restored
     let playback_restored = michi_db::get_latest_playback_session(&state.db)
@@ -360,6 +428,12 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
         .flatten()
         .map(|s| s.restored)
         .unwrap_or(false);
+
+    let projection_health = state.playback_projection_health.read().await.clone();
+    if !projection_health.healthy {
+        degraded = true;
+        warnings.push("playback projection coordinator is currently unhealthy".into());
+    }
 
     // Disk free
     let music_free = state.config.music_paths.first().and_then(|p| {
@@ -402,10 +476,16 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
     let binary_size_bytes = read_binary_size();
     let uptime_seconds = state.started_at.elapsed().as_secs();
 
+    let healthy = db_connected;
+    if !warnings.is_empty() {
+        degraded = true;
+    }
+
     Json(DiagnosticsReport {
-        healthy: warnings.is_empty(),
+        healthy,
+        degraded,
         db: DbStatus {
-            connected: !state.db.is_closed(),
+            connected: db_connected,
             total_tracks,
             total_playlists,
             total_devices,
@@ -426,13 +506,15 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
             size_bytes: staging_size,
         },
         playback: PlaybackStatus {
-            track_id: snap.track_id.map(|i| i.to_string()),
+            engine_available,
+            lifecycle: engine_lifecycle,
+            track_id: engine_track_id,
             playing: engine_playing,
-            position_ms: snap.position_ms,
-            volume: snap.volume as u32,
+            position_ms: engine_position_ms,
+            volume: engine_volume,
             restored: playback_restored,
             has_queue: total_queues > 0,
-            projection: Some(state.playback_projection_health.read().await.clone()),
+            projection: Some(projection_health),
         },
         events: EventsStatus {
             websocket: true,

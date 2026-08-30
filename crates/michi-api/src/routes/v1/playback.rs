@@ -1046,38 +1046,42 @@ pub async fn restore_playback_state_handler(
 
     match latest {
         Some(session) => {
+            let mut tracks = Vec::new();
             if let Some(qid) = session.queue_id {
-                let items = michi_db::get_queue_items(&state.db, &qid)
-                    .await
-                    .map_err(|e| {
-                        v1_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "DATABASE_ERROR",
-                            &e.to_string(),
-                        )
-                    })?;
-                let track_ids: Vec<Uuid> = items.into_iter().map(|(id, _)| id).collect();
-                let tracks =
-                    validate_and_load_tracks(&state.db, &track_ids, &state.config.music_paths)
-                        .await?;
+                if let Ok(items) = michi_db::get_queue_items(&state.db, &qid).await {
+                    let track_ids: Vec<Uuid> = items.into_iter().map(|(id, _)| id).collect();
+                    if let Ok(t) = validate_and_load_tracks(&state.db, &track_ids, &state.config.music_paths).await {
+                        tracks = t;
+                    }
+                }
+            }
 
-                let cur_idx = if let Some(ref cur_tid) = session.current_track_id {
-                    match tracks.iter().position(|t| t.id == *cur_tid) {
-                        Some(idx) => idx,
-                        None => {
-                            return Err(v1_error(
-                                StatusCode::BAD_REQUEST,
-                                "CURRENT_TRACK_NOT_IN_RESTORED_QUEUE",
-                                &format!(
-                                    "persisted track id {cur_tid} not found in restored queue"
-                                ),
-                            ));
+            if tracks.is_empty() {
+                if let Ok(active_qid) = crate::playback_queue::get_or_create_active_queue(&state.db).await {
+                    if let Ok(items) = michi_db::get_queue_items(&state.db, &active_qid).await {
+                        let track_ids: Vec<Uuid> = items.into_iter().map(|(id, _)| id).collect();
+                        if let Ok(t) = validate_and_load_tracks(&state.db, &track_ids, &state.config.music_paths).await {
+                            tracks = t;
                         }
                     }
-                } else {
-                    0
-                };
+                }
+            }
 
+            if tracks.is_empty() {
+                if let Some(tid) = session.current_track_id {
+                    if let Ok(t) = validate_and_load_tracks(&state.db, &[tid], &state.config.music_paths).await {
+                        tracks = t;
+                    }
+                }
+            }
+
+            let cur_idx = if let Some(ref cur_tid) = session.current_track_id {
+                tracks.iter().position(|t| t.id == *cur_tid).unwrap_or(0)
+            } else {
+                (session.current_index as usize).min(tracks.len().saturating_sub(1))
+            };
+
+            if !tracks.is_empty() {
                 state
                     .playback_engine
                     .set_queue(tracks.clone(), cur_idx, session.current_track_id)

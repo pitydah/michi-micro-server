@@ -201,6 +201,24 @@ impl AppState {
             }
         }
 
+        tracing::info!("running sync upload startup crash recovery scan");
+        match self.sync_manager.recover_incomplete_uploads().await {
+            Ok(report) => {
+                tracing::info!(
+                    candidates = report.candidates,
+                    completed = report.completed,
+                    deferred = report.deferred,
+                    terminal = report.terminal_failures,
+                    transient = report.transient_failures,
+                    invalid = report.invalid_rows,
+                    "sync upload startup crash recovery completed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("sync upload startup recovery scan encountered error: {}", e);
+            }
+        }
+
         Ok(())
     }
 }

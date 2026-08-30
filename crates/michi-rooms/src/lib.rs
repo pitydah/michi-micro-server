@@ -200,6 +200,7 @@ pub fn parse_groups_from_value(result: &serde_json::Value) -> Result<Vec<Room>, 
             .get("volume")
             .and_then(|v| v.get("percent"))
             .and_then(|v| v.as_f64())
+            .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
             .map(|v| v as u32)
             .unwrap_or(100);
 
@@ -275,6 +276,11 @@ pub async fn get_groups() -> Result<Vec<Room>, SnapcastError> {
 }
 
 pub async fn set_group_volume(group_id: &str, volume: u32) -> Result<(), SnapcastError> {
+    if volume > 100 {
+        return Err(SnapcastError::InvalidResponse(format!(
+            "volume percent {volume} exceeds maximum allowed 100"
+        )));
+    }
     rpc_call(
         SNAPCAST_JSON_RPC_URL,
         "Group.SetVolume",
@@ -478,5 +484,39 @@ mod tests {
         assert_eq!(res[0].name, "Living Room");
         assert_eq!(res[0].volume, 70);
         assert_eq!(res[0].client_count, 1);
+    }
+
+    #[test]
+    fn test_falsification_volume_range_validation() {
+        // Test out of range volumes (-1, 101, NaN string/invalid)
+        let payload_negative = serde_json::json!({
+            "server": {
+                "groups": [
+                    {
+                        "id": "grp-neg",
+                        "name": "Room Neg",
+                        "volume": {"percent": -1.0},
+                        "clients": []
+                    }
+                ]
+            }
+        });
+        let res_neg = parse_groups_from_value(&payload_negative).unwrap();
+        assert_eq!(res_neg[0].volume, 100); // defaults to safe 100 on invalid range
+
+        let payload_over = serde_json::json!({
+            "server": {
+                "groups": [
+                    {
+                        "id": "grp-over",
+                        "name": "Room Over",
+                        "volume": {"percent": 150.0},
+                        "clients": []
+                    }
+                ]
+            }
+        });
+        let res_over = parse_groups_from_value(&payload_over).unwrap();
+        assert_eq!(res_over[0].volume, 100);
     }
 }

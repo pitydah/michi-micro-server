@@ -50,9 +50,24 @@ if [ ! -f "$TARGET_BIN" ]; then
     cargo build --bin michi-server
 fi
 
-# Prepare temporary test directories
+# Prepare temporary test directories and deterministic audio tracks
 mkdir -p /tmp/michi_ha_test /tmp/michi_ha_test/music /tmp/michi_ha_test/cache /tmp/michi_ha_test/config
 rm -f /tmp/michi_ha_test/michi.db
+
+python3 -c '
+import wave, struct, math
+def make_wav(path, freq):
+    with wave.open(path, "w") as f:
+        f.setnchannels(2)
+        f.setsampwidth(2)
+        f.setframerate(48000)
+        for i in range(48000 * 2):
+            s = int(32767 * 0.2 * math.sin(2 * math.pi * freq * i / 48000))
+            f.writeframes(struct.pack("<hh", s, s))
+make_wav("/tmp/michi_ha_test/music/track_a.wav", 440)
+make_wav("/tmp/michi_ha_test/music/track_b.wav", 550)
+make_wav("/tmp/michi_ha_test/music/track_c.wav", 660)
+'
 
 # Run Michi Server with MQTT enabled
 echo "Starting Michi Micro Server with MQTT enabled..."
@@ -83,7 +98,8 @@ done
 # Run Home Assistant & MQTT E2E tests
 python3 "${PROJECT_ROOT}/tests/e2e/test_homeassistant_e2e.py" \
     --admin-url "http://127.0.0.1:${ADMIN_PORT}" \
-    --server-url "http://127.0.0.1:${SERVER_PORT}"
+    --server-url "http://127.0.0.1:${SERVER_PORT}" \
+    --db-path "/tmp/michi_ha_test/michi.db"
 
 echo ""
 echo "=== HOME ASSISTANT & MQTT E2E: SUCCESS ==="

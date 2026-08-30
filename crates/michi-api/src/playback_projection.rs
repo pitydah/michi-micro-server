@@ -31,6 +31,7 @@ pub struct PlaybackProjectionHealth {
     pub last_error: Option<String>,
     pub last_error_kind: Option<ProjectionFailureKind>,
     pub failures_total: u64,
+    pub lag_events_total: u64,
     pub lag_recoveries_total: u64,
     pub lag_recovery_failures_total: u64,
 }
@@ -45,6 +46,7 @@ impl Default for PlaybackProjectionHealth {
             last_error: None,
             last_error_kind: None,
             failures_total: 0,
+            lag_events_total: 0,
             lag_recoveries_total: 0,
             lag_recovery_failures_total: 0,
         }
@@ -118,9 +120,17 @@ impl PlaybackProjectionCoordinator {
                 tokio::select! {
                     _ = shutdown.cancelled() => {
                         let c = coordinator.clone();
-                        let _ = tokio::time::timeout(Duration::from_millis(500), async move {
+                        match tokio::time::timeout(Duration::from_millis(500), async move {
                             c.flush_shutdown().await;
-                        }).await;
+                        }).await {
+                            Ok(_) => {}
+                            Err(_) => {
+                                coordinator.record_failure(
+                                    ProjectionFailureKind::ShutdownFlush,
+                                    "shutdown flush timed out",
+                                ).await;
+                            }
+                        }
                         break;
                     }
                     event_res = event_rx.recv() => {
@@ -138,12 +148,14 @@ impl PlaybackProjectionCoordinator {
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(lagged)) => {
                                 {
                                     let mut h = coordinator.health.write().await;
-                                    h.lag_recoveries_total = h.lag_recoveries_total.saturating_add(1);
+                                    h.lag_events_total = h.lag_events_total.saturating_add(1);
                                 }
                                 warn!(lagged, "playback projection task lagged by events; reconciling snapshot");
                                 match coordinator.engine.snapshot().await {
                                     Ok(snap) => {
                                         coordinator.reconcile_from_snapshot(&snap).await;
+                                        let mut h = coordinator.health.write().await;
+                                        h.lag_recoveries_total = h.lag_recoveries_total.saturating_add(1);
                                     }
                                     Err(e) => {
                                         {
@@ -191,14 +203,13 @@ impl PlaybackProjectionCoordinator {
             ps.updated_at = Utc::now();
         }
 
-        // 2. Fetch existing session from SQLite
-        let mut sess = match michi_db::get_latest_playback_session(&self.db).await {
-            Ok(Some(s)) => s,
-            Ok(None) => return,
+        // 2. Fetch existing or default session from SQLite
+        let mut sess = match michi_db::get_or_create_latest_playback_session(&self.db).await {
+            Ok(s) => s,
             Err(e) => {
                 self.record_failure(
                     ProjectionFailureKind::SessionLoad,
-                    &format!("get_latest_playback_session failed: {e}"),
+                    &format!("get_or_create_latest_playback_session failed: {e}"),
                 )
                 .await;
                 return;
@@ -305,37 +316,71 @@ impl PlaybackProjectionCoordinator {
             ps.updated_at = Utc::now();
         }
 
-        if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&self.db).await {
-            sess.current_track_id = snap.track_id;
-            sess.position_ms = position_ms;
-            sess.playing = is_playing;
-            sess.volume = (snap.volume as f64) / 100.0;
-            sess.shuffle = snap.shuffle;
-            sess.repeat_mode = snap.repeat.as_str().to_string();
-            self.persist_if_changed(&sess).await;
+        // If the engine has no track and is stopped, do not overwrite a persisted session
+        if snap.track_id.is_none() && !is_playing {
+            return;
+        }
+
+        match michi_db::get_or_create_latest_playback_session(&self.db).await {
+            Ok(mut sess) => {
+                sess.current_track_id = snap.track_id;
+                sess.position_ms = position_ms;
+                sess.playing = is_playing;
+                sess.volume = (snap.volume as f64) / 100.0;
+                sess.shuffle = snap.shuffle;
+                sess.repeat_mode = snap.repeat.as_str().to_string();
+                self.persist_if_changed(&sess).await;
+            }
+            Err(e) => {
+                self.record_failure(
+                    ProjectionFailureKind::SessionLoad,
+                    &format!("reconciliation get_or_create_latest_playback_session failed: {e}"),
+                )
+                .await;
+            }
         }
     }
 
     /// Best-effort final state flush on shutdown.
     pub async fn flush_shutdown(&self) {
-        if let Ok(snap) = self.engine.snapshot().await {
-            if let Ok(Some(mut sess)) = michi_db::get_latest_playback_session(&self.db).await {
-                sess.current_track_id = snap.track_id;
-                sess.position_ms = snap.position_ms;
-                sess.playing = false; // Server is terminating
-                sess.volume = (snap.volume as f64) / 100.0;
-                sess.shuffle = snap.shuffle;
-                sess.repeat_mode = snap.repeat.as_str().to_string();
-                if let Err(e) = michi_db::update_playback_session(&self.db, &sess).await {
-                    self.record_failure(
-                        ProjectionFailureKind::ShutdownFlush,
-                        &format!("flush_shutdown failed: {e}"),
-                    )
-                    .await;
-                } else {
-                    self.record_success().await;
-                    info!("playback projection flushed successfully on shutdown");
+        match self.engine.snapshot().await {
+            Ok(snap) => {
+                match michi_db::get_or_create_latest_playback_session(&self.db).await {
+                    Ok(mut sess) => {
+                        sess.current_track_id = snap.track_id;
+                        sess.position_ms = snap.position_ms;
+                        sess.playing = false; // Server is terminating
+                        sess.volume = (snap.volume as f64) / 100.0;
+                        sess.shuffle = snap.shuffle;
+                        sess.repeat_mode = snap.repeat.as_str().to_string();
+                        if let Err(e) = michi_db::update_playback_session(&self.db, &sess).await {
+                            self.record_failure(
+                                ProjectionFailureKind::ShutdownFlush,
+                                &format!("flush_shutdown session update failed: {e}"),
+                            )
+                            .await;
+                        } else {
+                            self.record_success().await;
+                            info!("playback projection flushed successfully on shutdown");
+                        }
+                    }
+                    Err(e) => {
+                        self.record_failure(
+                            ProjectionFailureKind::ShutdownFlush,
+                            &format!(
+                                "flush_shutdown get_or_create_latest_playback_session failed: {e}"
+                            ),
+                        )
+                        .await;
+                    }
                 }
+            }
+            Err(e) => {
+                self.record_failure(
+                    ProjectionFailureKind::ShutdownFlush,
+                    &format!("flush_shutdown engine snapshot failed: {e}"),
+                )
+                .await;
             }
         }
     }

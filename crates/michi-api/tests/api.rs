@@ -5185,7 +5185,7 @@ async fn test_v1_sync_resumable_chunk_upload_flow() {
     let prog1: Value = serde_json::from_str(&body_text(resp).await).unwrap();
     assert_eq!(prog1["progress"]["uploaded_chunks"], 1);
     assert_eq!(prog1["progress"]["completed"], false);
-    assert_eq!(prog1["status"], "in_progress");
+    assert_eq!(prog1["status"], "uploading");
 
     // 3. Status check
     let resp = app

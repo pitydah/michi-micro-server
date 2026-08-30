@@ -276,10 +276,23 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
         run_migration_step!(conn, 43, "sync upload finalize token", migration_043);
     }
     if current < 44 {
-        run_migration_step!(conn, 44, "sync upload lease and recovery tracking", migration_044);
+        run_migration_step!(
+            conn,
+            44,
+            "sync upload lease and recovery tracking",
+            migration_044
+        );
+    }
+    if current < 45 {
+        run_migration_step!(
+            conn,
+            45,
+            "sync upload failure classification and lease deadline",
+            migration_045
+        );
     }
 
-    info!("database schema at version 44");
+    info!("database schema at version 45");
     Ok(())
 }
 
@@ -1144,12 +1157,41 @@ async fn migration_044(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
             .await?;
     }
     if !existing_cols.contains("finalize_attempts") {
-        sqlx::query("ALTER TABLE sync_uploads ADD COLUMN finalize_attempts INTEGER NOT NULL DEFAULT 0")
-            .execute(&mut **tx)
-            .await?;
+        sqlx::query(
+            "ALTER TABLE sync_uploads ADD COLUMN finalize_attempts INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&mut **tx)
+        .await?;
     }
     if !existing_cols.contains("last_error") {
         sqlx::query("ALTER TABLE sync_uploads ADD COLUMN last_error TEXT")
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    Ok(())
+}
+
+async fn migration_045(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    let rows: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as("PRAGMA table_info(sync_uploads)")
+            .fetch_all(&mut **tx)
+            .await?;
+
+    let existing_cols: std::collections::HashSet<String> = rows.into_iter().map(|r| r.1).collect();
+
+    if !existing_cols.contains("failure_class") {
+        sqlx::query("ALTER TABLE sync_uploads ADD COLUMN failure_class TEXT")
+            .execute(&mut **tx)
+            .await?;
+    }
+    if !existing_cols.contains("failure_code") {
+        sqlx::query("ALTER TABLE sync_uploads ADD COLUMN failure_code TEXT")
+            .execute(&mut **tx)
+            .await?;
+    }
+    if !existing_cols.contains("finalize_lease_until") {
+        sqlx::query("ALTER TABLE sync_uploads ADD COLUMN finalize_lease_until TEXT")
             .execute(&mut **tx)
             .await?;
     }
@@ -3698,6 +3740,34 @@ pub async fn get_latest_playback_session(
     .fetch_all(pool)
     .await?;
     Ok(rows.first().map(row_to_playback_session))
+}
+
+pub async fn get_or_create_latest_playback_session(
+    pool: &SqlitePool,
+) -> Result<michi_core::PlaybackSessionDb, DbError> {
+    if let Some(sess) = get_latest_playback_session(pool).await? {
+        return Ok(sess);
+    }
+
+    let default_sess = michi_core::PlaybackSessionDb {
+        id: Uuid::new_v4(),
+        device_id: Uuid::new_v4(),
+        queue_id: None,
+        queue_state_json: "{}".into(),
+        current_index: 0,
+        current_track_id: None,
+        position_ms: 0,
+        playing: false,
+        repeat_mode: "off".into(),
+        shuffle: false,
+        volume: 0.8,
+        source: "local".into(),
+        resume_policy: "keep_position".into(),
+        restored: false,
+    };
+
+    create_playback_session(pool, &default_sess).await?;
+    Ok(default_sess)
 }
 
 pub async fn get_queue_items(
