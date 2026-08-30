@@ -69,20 +69,26 @@ pub fn validate_rpc_response(
     val: serde_json::Value,
     expected_id: i64,
 ) -> Result<serde_json::Value, SnapcastError> {
-    if let Some(version) = val.get("jsonrpc") {
-        if version.as_str() != Some("2.0") {
-            return Err(SnapcastError::InvalidResponse(format!(
-                "invalid jsonrpc version: {version:?}"
-            )));
-        }
+    let version = val
+        .get("jsonrpc")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| SnapcastError::InvalidResponse("missing 'jsonrpc' field".into()))?;
+
+    if version != "2.0" {
+        return Err(SnapcastError::InvalidResponse(format!(
+            "invalid jsonrpc version: {version:?}"
+        )));
     }
 
-    if let Some(resp_id) = val.get("id") {
-        if resp_id.as_i64() != Some(expected_id) {
-            return Err(SnapcastError::InvalidResponse(format!(
-                "response id mismatch: expected {expected_id}, got {resp_id:?}"
-            )));
-        }
+    let resp_id = val
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| SnapcastError::InvalidResponse("missing 'id' field".into()))?;
+
+    if resp_id != expected_id {
+        return Err(SnapcastError::InvalidResponse(format!(
+            "response id mismatch: expected {expected_id}, got {resp_id:?}"
+        )));
     }
 
     let has_error = val.get("error").is_some() && !val["error"].is_null();
@@ -398,6 +404,37 @@ mod tests {
         let payload = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 999,
+            "result": {"ok": true}
+        });
+        let res = validate_rpc_response(payload, 1);
+        assert!(matches!(res, Err(SnapcastError::InvalidResponse(_))));
+    }
+
+    #[test]
+    fn test_falsification_missing_jsonrpc() {
+        let payload = serde_json::json!({
+            "id": 1,
+            "result": {"ok": true}
+        });
+        let res = validate_rpc_response(payload, 1);
+        assert!(matches!(res, Err(SnapcastError::InvalidResponse(_))));
+    }
+
+    #[test]
+    fn test_falsification_missing_id() {
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {"ok": true}
+        });
+        let res = validate_rpc_response(payload, 1);
+        assert!(matches!(res, Err(SnapcastError::InvalidResponse(_))));
+    }
+
+    #[test]
+    fn test_falsification_wrong_version() {
+        let payload = serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": 1,
             "result": {"ok": true}
         });
         let res = validate_rpc_response(payload, 1);

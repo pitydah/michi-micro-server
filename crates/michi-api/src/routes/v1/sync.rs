@@ -346,8 +346,11 @@ pub async fn sync_playlist_handler(
 
     let _ = state.tx.send(r#"{"type":"playlist_updated"}"#.to_string());
 
+    let is_partial = !missing_tracks.is_empty() || tracks_added != valid_tracks.len();
+    let status_str = if is_partial { "partial" } else { "ok" };
+
     Ok(Json(serde_json::json!({
-        "status": "ok",
+        "status": status_str,
         "playlist": playlist,
         "tracks_added": tracks_added,
         "tracks_missing": missing_tracks,

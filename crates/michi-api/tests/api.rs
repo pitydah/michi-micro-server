@@ -5050,11 +5050,18 @@ async fn test_v1_playback_session_persists_without_get_playback_state() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Do NOT call GET /api/v1/playback/state !
-    // Directly query database to verify persistence projection was executed faithfully
-    let loaded = michi_db::get_latest_playback_session(&pool)
-        .await
-        .unwrap()
-        .expect("playback session must exist");
+    // Bounded wait for asynchronous event projection task to persist state to SQLite
+    let mut loaded = None;
+    for _ in 0..20 {
+        if let Ok(Some(sess)) = michi_db::get_latest_playback_session(&pool).await {
+            if sess.shuffle && sess.repeat_mode == "all" {
+                loaded = Some(sess);
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let loaded = loaded.expect("playback session must exist and reflect projected settings");
     assert_eq!((loaded.volume * 100.0).round() as u32, 90);
     assert!(loaded.shuffle);
     assert_eq!(loaded.repeat_mode, "all");

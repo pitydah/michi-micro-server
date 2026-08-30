@@ -210,6 +210,7 @@ pub struct PlaybackStatus {
     pub volume: u32,
     pub restored: bool,
     pub has_queue: bool,
+    pub projection: Option<crate::playback_projection::PlaybackProjectionHealth>,
 }
 
 #[derive(Debug, Serialize)]
@@ -431,6 +432,7 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
             volume: snap.volume as u32,
             restored: playback_restored,
             has_queue: total_queues > 0,
+            projection: Some(state.playback_projection_health.read().await.clone()),
         },
         events: EventsStatus {
             websocket: true,

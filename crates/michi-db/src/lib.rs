@@ -272,8 +272,11 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
     if current < 42 {
         run_migration_step!(conn, 42, "sync uploads and resumable chunks", migration_042);
     }
+    if current < 43 {
+        run_migration_step!(conn, 43, "sync upload finalize token", migration_043);
+    }
 
-    info!("database schema at version 42");
+    info!("database schema at version 43");
     Ok(())
 }
 
@@ -1103,6 +1106,23 @@ async fn migration_042(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
     )
     .execute(&mut **tx)
     .await?;
+
+    Ok(())
+}
+
+async fn migration_043(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    let has_column: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('sync_uploads') WHERE name = 'finalize_token'",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .unwrap_or(false);
+
+    if !has_column {
+        sqlx::query("ALTER TABLE sync_uploads ADD COLUMN finalize_token TEXT")
+            .execute(&mut **tx)
+            .await?;
+    }
 
     Ok(())
 }

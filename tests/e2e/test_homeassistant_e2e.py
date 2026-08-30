@@ -169,7 +169,57 @@ def main():
         state = http_get(f"{server_url}/api/v1/playback/state")
         assert state.get("playing") is False, "expected playing to be false after stop"
         assert state.get("position_ms") == 0, f"expected position_ms to be 0 after stop, got {state.get('position_ms')}"
-    test("Incoming MQTT Pause & Stop Commands", test_command_pause_stop)
+
+        # Verify DB session persistence reflects stopped state
+        session = http_get(f"{server_url}/api/v1/playback/session")
+        if session:
+            assert session.get("playing") is False, "persisted session must reflect playing=false"
+            assert session.get("position_ms") == 0, "persisted session must reflect position_ms=0 on stop"
+    test("Incoming MQTT Pause & Stop Commands with DB Persistence Verification", test_command_pause_stop)
+
+    # 6. Test Next and Previous Track Commands via MQTT
+    def test_command_next_previous():
+        # Query library tracks to build a test queue if available
+        tracks_resp = http_get(f"{server_url}/api/v1/tracks")
+        tracks = tracks_resp.get("tracks", [])
+        if len(tracks) >= 2:
+            track_ids = [t["id"] for t in tracks[:2]]
+            http_post(f"{server_url}/api/v1/playback/queue", {
+                "tracks": track_ids,
+                "replace": True,
+            })
+            time.sleep(0.2)
+
+            # Issue next_track command
+            http_post(f"{admin_url}/api/mqtt/publish", {
+                "topic": "michi/next_track/cmd",
+                "payload": ""
+            })
+            time.sleep(0.3)
+            state_next = http_get(f"{server_url}/api/v1/playback/state")
+            assert state_next.get("track_id") == track_ids[1], f"expected track_id {track_ids[1]}, got {state_next.get('track_id')}"
+
+            # Issue previous_track command
+            http_post(f"{admin_url}/api/mqtt/publish", {
+                "topic": "michi/previous_track/cmd",
+                "payload": ""
+            })
+            time.sleep(0.3)
+            state_prev = http_get(f"{server_url}/api/v1/playback/state")
+            assert state_prev.get("track_id") == track_ids[0], f"expected track_id {track_ids[0]}, got {state_prev.get('track_id')}"
+        else:
+            # Send commands to verify non-crashing safe dispatch
+            http_post(f"{admin_url}/api/mqtt/publish", {
+                "topic": "michi/next_track/cmd",
+                "payload": ""
+            })
+            time.sleep(0.1)
+            http_post(f"{admin_url}/api/mqtt/publish", {
+                "topic": "michi/previous_track/cmd",
+                "payload": ""
+            })
+            time.sleep(0.1)
+    test("Incoming MQTT Next & Previous Navigation Commands", test_command_next_previous)
 
     # 6. Broker Disconnect & Auto-Reconnect Resilience
     def test_broker_disconnect_reconnect():

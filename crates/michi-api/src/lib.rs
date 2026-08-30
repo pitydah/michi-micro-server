@@ -44,6 +44,8 @@ mod ws;
 
 pub mod output;
 pub use output::{PlaybackOutputSelection, ResolvedOutputPlan};
+pub mod playback_projection;
+pub use playback_projection::PlaybackProjectionHealth;
 pub mod playback_queue;
 pub mod routes;
 pub use routes::v1::audit::record_audit;
@@ -83,6 +85,8 @@ pub struct AppState {
     pub pairing_sessions_display: Arc<RwLock<HashMap<String, String>>>,
     /// Real autonomous playback engine handle.
     pub playback_engine: michi_playback::PlaybackEngineHandle,
+    /// Observable health metrics of the playback projection coordinator.
+    pub playback_projection_health: Arc<RwLock<PlaybackProjectionHealth>>,
     /// Explicit output target selection (Receiver, RoomGroup, or Chain).
     pub playback_output_selection: Arc<RwLock<Option<output::PlaybackOutputSelection>>>,
     /// Encrypted credential store for paired receivers (None if persistent key unavailable).
@@ -300,6 +304,14 @@ impl AppState {
 
         let playback_output_selection = Arc::new(RwLock::new(None));
 
+        let (playback_projector, playback_projection_health) =
+            playback_projection::PlaybackProjectionCoordinator::new(
+                db.clone(),
+                playback_state.clone(),
+                playback_engine.clone(),
+            );
+        playback_projector.spawn(shutdown_token.clone());
+
         let state = Self {
             config,
             db,
@@ -325,6 +337,7 @@ impl AppState {
             pairing_display,
             pairing_sessions_display,
             playback_engine,
+            playback_projection_health,
             playback_output_selection,
             receiver_credential_store,
         };
@@ -347,14 +360,6 @@ impl AppState {
             self.playback_state.clone(),
             self.playback_engine.clone(),
             self.config.music_paths.clone(),
-        );
-
-        // Event-driven playback state projection (siempre corre)
-        routes::v1::playback::spawn_playback_event_projection_task(
-            db.clone(),
-            self.playback_state.clone(),
-            self.playback_engine.clone(),
-            shutdown.clone(),
         );
 
         // DB maintenance scheduler (siempre corre)

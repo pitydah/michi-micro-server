@@ -433,20 +433,44 @@ impl SyncManager {
         if let Some((existing_hash, existing_size)) = existing_chunk {
             if existing_hash == chunk.chunk_hash && existing_size == chunk.data.len() as i64 {
                 // Idempotent retransmission: already persisted, do not rewrite file or DB
-                let uploads = self.uploads.read().await;
-                let current_meta = uploads.get(&chunk.file_id).cloned().unwrap_or(meta);
-                let uploaded_chunks = current_meta.received_chunks.len() as u32;
-                let total_chunks = current_meta.total_chunks.max(1);
-                let completed = current_meta.total_chunks > 0
+                let current_meta = self.get_or_load_session(chunk.file_id).await?;
+                if current_meta.status == "completed" {
+                    return Ok(UploadProgress {
+                        file_id: chunk.file_id,
+                        uploaded_chunks: current_meta.total_chunks,
+                        total_chunks: current_meta.total_chunks,
+                        percentage: 100.0,
+                        completed: true,
+                    });
+                }
+
+                let all_received = current_meta.total_chunks > 0
                     && (0..current_meta.total_chunks)
                         .all(|i| current_meta.received_chunks.contains(&i));
 
+                if all_received {
+                    let _ = self.verify_and_finalize_upload(chunk.file_id).await;
+                    let refreshed = self.get_or_load_session(chunk.file_id).await?;
+                    let is_completed = refreshed.status == "completed";
+                    let count = refreshed.received_chunks.len() as u32;
+                    let total = refreshed.total_chunks.max(1);
+                    return Ok(UploadProgress {
+                        file_id: chunk.file_id,
+                        uploaded_chunks: count,
+                        total_chunks: total,
+                        percentage: (count as f64 / total as f64) * 100.0,
+                        completed: is_completed,
+                    });
+                }
+
+                let count = current_meta.received_chunks.len() as u32;
+                let total = current_meta.total_chunks.max(1);
                 return Ok(UploadProgress {
                     file_id: chunk.file_id,
-                    uploaded_chunks,
-                    total_chunks,
-                    percentage: (uploaded_chunks as f64 / total_chunks as f64) * 100.0,
-                    completed,
+                    uploaded_chunks: count,
+                    total_chunks: total,
+                    percentage: (count as f64 / total as f64) * 100.0,
+                    completed: false,
                 });
             } else {
                 return Err(SyncError::ChunkConflict {
@@ -483,7 +507,7 @@ impl SyncManager {
         // 6. Commit persistent chunk receipt in SQLite
         let now = Utc::now().to_rfc3339();
         sqlx::query(
-            "INSERT INTO sync_upload_chunks (file_id, chunk_index, chunk_hash, size, created_at)
+            "INSERT OR IGNORE INTO sync_upload_chunks (file_id, chunk_index, chunk_hash, size, created_at)
              VALUES (?, ?, ?, ?, ?)",
         )
         .bind(chunk.file_id.to_string())
@@ -622,12 +646,14 @@ impl SyncManager {
         }
 
         // 1. Atomic finalization ownership acquisition:
-        // Transition status from 'uploading', 'failed', or 'finalizing' to 'finalizing'
+        // Transition status from 'uploading' or 'failed' to 'finalizing' with unique token
+        let token = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         let rows_affected = sqlx::query(
-            "UPDATE sync_uploads SET status = 'finalizing', updated_at = ?
-             WHERE id = ? AND status IN ('uploading', 'failed', 'finalizing')",
+            "UPDATE sync_uploads SET status = 'finalizing', finalize_token = ?, updated_at = ?
+             WHERE id = ? AND status IN ('uploading', 'failed')",
         )
+        .bind(&token)
         .bind(&now)
         .bind(file_id.to_string())
         .execute(&self.db_pool)
@@ -635,7 +661,7 @@ impl SyncManager {
         .rows_affected();
 
         if rows_affected == 0 {
-            // Check if already completed by another task
+            // Check if already completed or being finalized by another worker
             let current_status =
                 sqlx::query_as::<_, (String,)>("SELECT status FROM sync_uploads WHERE id = ?")
                     .bind(file_id.to_string())
@@ -649,6 +675,26 @@ impl SyncManager {
                         m.status = "completed".into();
                     }
                     return Ok(());
+                } else if st == "finalizing" {
+                    // Poll briefly for the other worker to finish finalization
+                    for _ in 0..10 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        let st_poll = sqlx::query_as::<_, (String,)>(
+                            "SELECT status FROM sync_uploads WHERE id = ?",
+                        )
+                        .bind(file_id.to_string())
+                        .fetch_optional(&self.db_pool)
+                        .await?;
+                        if let Some((s,)) = st_poll {
+                            if s == "completed" {
+                                let mut uploads = self.uploads.write().await;
+                                if let Some(m) = uploads.get_mut(&file_id) {
+                                    m.status = "completed".into();
+                                }
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
             }
             return Err(SyncError::UploadFailed(
@@ -986,6 +1032,7 @@ mod tests {
                 total_chunks INTEGER NOT NULL,
                 chunk_size INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'uploading',
+                finalize_token TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",
@@ -1536,12 +1583,17 @@ mod tests {
             .await
             .unwrap();
 
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let b1 = barrier.clone();
+        let b2 = barrier.clone();
+
         let mgr1 = sync_mgr.clone();
         let mgr2 = sync_mgr.clone();
         let h1 = expected_hash.clone();
         let h2 = expected_hash.clone();
 
         let t1 = tokio::spawn(async move {
+            b1.wait().await;
             mgr1.upload_chunk(UploadChunk {
                 file_id,
                 chunk_index: 0,
@@ -1553,6 +1605,7 @@ mod tests {
         });
 
         let t2 = tokio::spawn(async move {
+            b2.wait().await;
             mgr2.upload_chunk(UploadChunk {
                 file_id,
                 chunk_index: 0,
@@ -1567,7 +1620,11 @@ mod tests {
         let prog1 = r1.unwrap();
         let prog2 = r2.unwrap();
 
-        assert!(prog1.is_ok() || prog2.is_ok());
+        // Both concurrent calls must resolve successfully with completed state
+        assert!(prog1.is_ok());
+        assert!(prog2.is_ok());
+        assert!(prog1.unwrap().completed);
+        assert!(prog2.unwrap().completed);
 
         // Check DB has exactly one registered synced_file
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM synced_files WHERE file_hash = ?")
@@ -1577,6 +1634,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(count.0, 1);
+
+        // Verify exactly one final file on disk
+        let final_file = temp_dir.path().join(file_id.to_string());
+        assert!(tokio::fs::metadata(&final_file).await.is_ok());
     }
 
     // ── Test K: Crash recovery after rename before status updated ─────
