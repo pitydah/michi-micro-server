@@ -81,18 +81,6 @@ pub async fn playback_state_handler(
         snap.position_ms
     };
 
-    // Sync projection to keep legacy subscriptions updated
-    {
-        let mut ps = state.playback_state.write().await;
-        ps.track_id = track_id;
-        ps.position_ms = position_ms;
-        ps.playing = is_playing;
-        ps.volume = (snap.volume as f64) / 100.0;
-        ps.shuffle = snap.shuffle;
-        ps.repeat = snap.repeat.as_str().to_string();
-        ps.updated_at = snap.updated_at;
-    }
-
     let current_track = if let Some(tid) = track_id {
         match michi_db::get_track(&state.db, &tid).await {
             Ok(Some(t)) => Some(serde_json::json!({

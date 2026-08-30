@@ -21,4 +21,8 @@ Todo desarrollo debe seguir estrictamente este ciclo:
 ## Reglas Críticas
 - **NEVER push code that has not passed `cargo fmt --all -- --check`**.
 - **GitHub Actions is a certification gate, not a replacement for local validation**.
+- **A local test result is evidence, not release certification**.
+- **Any new integration test must be validated against the actual router/API contract before push**.
+- **Never introduce a test path, route, payload or fixture from assumption. Inspect the current implementation first**.
+- **Never claim completion before GitHub CI is completely green**.
 - **Commit y Push obligatorio**: Siempre realizar `git commit` con un mensaje descriptivo y `git push` al terminar cualquier tarea o trabajo de modificación.

@@ -310,7 +310,8 @@ impl AppState {
                 playback_state.clone(),
                 playback_engine.clone(),
             );
-        playback_projector.spawn(shutdown_token.clone());
+        let projector_handle = playback_projector.spawn(shutdown_token.clone());
+        task_handles.lock().unwrap().push(projector_handle);
 
         let state = Self {
             config,

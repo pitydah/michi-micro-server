@@ -10,26 +10,43 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+/// Category of playback projection failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionFailureKind {
+    EngineSnapshot,
+    SessionLoad,
+    SessionPersist,
+    LagReconciliation,
+    ShutdownFlush,
+}
+
 /// Observability health model for playback event projection.
 #[derive(Debug, Clone, Serialize)]
 pub struct PlaybackProjectionHealth {
     pub healthy: bool,
+    pub consecutive_failures: u64,
     pub last_success_at: Option<DateTime<Utc>>,
     pub last_error_at: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
+    pub last_error_kind: Option<ProjectionFailureKind>,
     pub failures_total: u64,
     pub lag_recoveries_total: u64,
+    pub lag_recovery_failures_total: u64,
 }
 
 impl Default for PlaybackProjectionHealth {
     fn default() -> Self {
         Self {
             healthy: true,
+            consecutive_failures: 0,
             last_success_at: None,
             last_error_at: None,
             last_error: None,
+            last_error_kind: None,
             failures_total: 0,
             lag_recoveries_total: 0,
+            lag_recovery_failures_total: 0,
         }
     }
 }
@@ -76,20 +93,23 @@ impl PlaybackProjectionCoordinator {
     async fn record_success(&self) {
         let mut h = self.health.write().await;
         h.healthy = true;
+        h.consecutive_failures = 0;
         h.last_success_at = Some(Utc::now());
     }
 
-    async fn record_failure(&self, err_msg: &str) {
+    async fn record_failure(&self, kind: ProjectionFailureKind, err_msg: &str) {
         let mut h = self.health.write().await;
         h.healthy = false;
+        h.consecutive_failures = h.consecutive_failures.saturating_add(1);
         h.last_error_at = Some(Utc::now());
         h.last_error = Some(err_msg.to_string());
+        h.last_error_kind = Some(kind);
         h.failures_total = h.failures_total.saturating_add(1);
-        warn!(error = %err_msg, "playback projection coordinator failure recorded");
+        warn!(kind = ?kind, error = %err_msg, "playback projection coordinator failure recorded");
     }
 
     /// Spawns the background projection task listening to engine events.
-    pub fn spawn(self, shutdown: CancellationToken) {
+    pub fn spawn(self, shutdown: CancellationToken) -> tokio::task::JoinHandle<()> {
         let mut event_rx = self.engine.subscribe_events();
         let coordinator = Arc::new(self);
 
@@ -106,8 +126,13 @@ impl PlaybackProjectionCoordinator {
                     event_res = event_rx.recv() => {
                         match event_res {
                             Ok(event) => {
-                                if let Ok(snap) = coordinator.engine.snapshot().await {
-                                    coordinator.handle_event(&event, &snap).await;
+                                match coordinator.engine.snapshot().await {
+                                    Ok(snap) => {
+                                        coordinator.handle_event(&event, &snap).await;
+                                    }
+                                    Err(e) => {
+                                        coordinator.record_failure(ProjectionFailureKind::EngineSnapshot, &format!("snapshot failed: {e}")).await;
+                                    }
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(lagged)) => {
@@ -116,8 +141,17 @@ impl PlaybackProjectionCoordinator {
                                     h.lag_recoveries_total = h.lag_recoveries_total.saturating_add(1);
                                 }
                                 warn!(lagged, "playback projection task lagged by events; reconciling snapshot");
-                                if let Ok(snap) = coordinator.engine.snapshot().await {
-                                    coordinator.reconcile_from_snapshot(&snap).await;
+                                match coordinator.engine.snapshot().await {
+                                    Ok(snap) => {
+                                        coordinator.reconcile_from_snapshot(&snap).await;
+                                    }
+                                    Err(e) => {
+                                        {
+                                            let mut h = coordinator.health.write().await;
+                                            h.lag_recovery_failures_total = h.lag_recovery_failures_total.saturating_add(1);
+                                        }
+                                        coordinator.record_failure(ProjectionFailureKind::LagReconciliation, &format!("reconciliation snapshot failed: {e}")).await;
+                                    }
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -127,7 +161,7 @@ impl PlaybackProjectionCoordinator {
                     }
                 }
             }
-        });
+        })
     }
 
     /// Handles a single EngineEvent paired with a fresh EngineSnapshot.
@@ -162,8 +196,11 @@ impl PlaybackProjectionCoordinator {
             Ok(Some(s)) => s,
             Ok(None) => return,
             Err(e) => {
-                self.record_failure(&format!("get_latest_playback_session failed: {e}"))
-                    .await;
+                self.record_failure(
+                    ProjectionFailureKind::SessionLoad,
+                    &format!("get_latest_playback_session failed: {e}"),
+                )
+                .await;
                 return;
             }
         };
@@ -290,8 +327,11 @@ impl PlaybackProjectionCoordinator {
                 sess.shuffle = snap.shuffle;
                 sess.repeat_mode = snap.repeat.as_str().to_string();
                 if let Err(e) = michi_db::update_playback_session(&self.db, &sess).await {
-                    self.record_failure(&format!("flush_shutdown failed: {e}"))
-                        .await;
+                    self.record_failure(
+                        ProjectionFailureKind::ShutdownFlush,
+                        &format!("flush_shutdown failed: {e}"),
+                    )
+                    .await;
                 } else {
                     self.record_success().await;
                     info!("playback projection flushed successfully on shutdown");
@@ -323,8 +363,11 @@ impl PlaybackProjectionCoordinator {
                     self.record_success().await;
                 }
                 Err(e) => {
-                    self.record_failure(&format!("update_playback_session failed: {e}"))
-                        .await;
+                    self.record_failure(
+                        ProjectionFailureKind::SessionPersist,
+                        &format!("update_playback_session failed: {e}"),
+                    )
+                    .await;
                 }
             }
         }

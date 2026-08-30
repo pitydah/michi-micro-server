@@ -275,8 +275,11 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
     if current < 43 {
         run_migration_step!(conn, 43, "sync upload finalize token", migration_043);
     }
+    if current < 44 {
+        run_migration_step!(conn, 44, "sync upload lease and recovery tracking", migration_044);
+    }
 
-    info!("database schema at version 43");
+    info!("database schema at version 44");
     Ok(())
 }
 
@@ -1120,6 +1123,33 @@ async fn migration_043(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
 
     if !has_column {
         sqlx::query("ALTER TABLE sync_uploads ADD COLUMN finalize_token TEXT")
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    Ok(())
+}
+
+async fn migration_044(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    let rows: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as("PRAGMA table_info(sync_uploads)")
+            .fetch_all(&mut **tx)
+            .await?;
+
+    let existing_cols: std::collections::HashSet<String> = rows.into_iter().map(|r| r.1).collect();
+
+    if !existing_cols.contains("finalize_started_at") {
+        sqlx::query("ALTER TABLE sync_uploads ADD COLUMN finalize_started_at TEXT")
+            .execute(&mut **tx)
+            .await?;
+    }
+    if !existing_cols.contains("finalize_attempts") {
+        sqlx::query("ALTER TABLE sync_uploads ADD COLUMN finalize_attempts INTEGER NOT NULL DEFAULT 0")
+            .execute(&mut **tx)
+            .await?;
+    }
+    if !existing_cols.contains("last_error") {
+        sqlx::query("ALTER TABLE sync_uploads ADD COLUMN last_error TEXT")
             .execute(&mut **tx)
             .await?;
     }

@@ -99,13 +99,51 @@ pub struct UploadChunk {
     pub chunk_hash: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadStatus {
+    Uploading,
+    Finalizing,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl UploadStatus {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Uploading => "uploading",
+            Self::Finalizing => "finalizing",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Result<Self, SyncError> {
+        match value {
+            "uploading" => Ok(Self::Uploading),
+            "finalizing" => Ok(Self::Finalizing),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            other => Err(SyncError::InvalidPersistedState(format!(
+                "unknown upload status in database: {other}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UploadProgress {
     pub file_id: Uuid,
     pub uploaded_chunks: u32,
     pub total_chunks: u32,
     pub percentage: f64,
+    pub status: UploadStatus,
     pub completed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -192,6 +230,8 @@ pub enum SyncError {
     HashMismatch { expected: String, actual: String },
     #[error("Upload failed: {0}")]
     UploadFailed(String),
+    #[error("Invalid persisted state: {0}")]
+    InvalidPersistedState(String),
     #[error(transparent)]
     DatabaseError(#[from] sqlx::Error),
     #[error(transparent)]
@@ -231,6 +271,12 @@ impl SyncMessage {
     }
 }
 
+pub const FINALIZATION_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn is_valid_sha256_hex(h: &str) -> bool {
+    h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct UploadMeta {
@@ -242,8 +288,18 @@ struct UploadMeta {
     uploaded_by: String,
     total_chunks: u32,
     chunk_size: usize,
-    status: String,
+    status: UploadStatus,
+    finalize_token: Option<String>,
+    finalize_started_at: Option<String>,
+    finalize_attempts: i64,
+    last_error: Option<String>,
     received_chunks: HashSet<u32>,
+}
+
+impl UploadMeta {
+    pub fn is_completed(&self) -> bool {
+        self.status == UploadStatus::Completed
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -300,9 +356,19 @@ impl SyncManager {
             ));
         }
 
+        if !is_valid_sha256_hex(&init.expected_hash) {
+            return Err(SyncError::InvalidChunkParameter(
+                "expected_hash must be a 64-character hexadecimal SHA-256 string".into(),
+            ));
+        }
+
+        let file_size_usize = usize::try_from(init.file_size).map_err(|_| {
+            SyncError::InvalidChunkParameter("file_size exceeds memory address space".into())
+        })?;
+
         let file_id = Uuid::new_v4();
         let filename = init.filename.clone();
-        let total_chunks = (init.file_size as usize).div_ceil(self.chunk_size) as u32;
+        let total_chunks = file_size_usize.div_ceil(self.chunk_size) as u32;
 
         let meta = UploadMeta {
             id: file_id,
@@ -313,7 +379,11 @@ impl SyncManager {
             uploaded_by: init.uploaded_by.clone(),
             total_chunks,
             chunk_size: self.chunk_size,
-            status: "uploading".into(),
+            status: UploadStatus::Uploading,
+            finalize_token: None,
+            finalize_started_at: None,
+            finalize_attempts: 0,
+            last_error: None,
             received_chunks: HashSet::new(),
         };
 
@@ -354,6 +424,11 @@ impl SyncManager {
                 "total_chunks must be greater than 0".into(),
             ));
         }
+        if !is_valid_sha256_hex(&chunk.chunk_hash) {
+            return Err(SyncError::InvalidChunkParameter(
+                "chunk_hash must be a 64-character hexadecimal SHA-256 string".into(),
+            ));
+        }
 
         // 1. Verify individual chunk hash
         let mut hasher = Sha256::new();
@@ -370,10 +445,10 @@ impl SyncManager {
         let meta = self.get_or_load_session(chunk.file_id).await?;
 
         // 3. Validate session invariants and chunk parameters
-        if meta.status == "completed" {
+        if meta.status == UploadStatus::Completed {
             return Err(SyncError::UploadAlreadyCompleted(chunk.file_id));
         }
-        if meta.status == "cancelled" {
+        if meta.status == UploadStatus::Cancelled {
             return Err(SyncError::UploadCancelled(chunk.file_id));
         }
 
@@ -394,34 +469,28 @@ impl SyncManager {
             )));
         }
 
-        // Check chunk byte length according to contractual negotiated chunk_size
         let is_last_chunk = chunk.chunk_index == meta.total_chunks - 1;
-        if !is_last_chunk {
-            if chunk.data.len() != meta.chunk_size {
-                return Err(SyncError::InvalidChunkParameter(format!(
-                    "non-final chunk {} must have size {}, got {}",
-                    chunk.chunk_index,
-                    meta.chunk_size,
-                    chunk.data.len()
-                )));
+        let expected_size = if is_last_chunk {
+            let rem = meta.file_size as usize % meta.chunk_size;
+            if rem == 0 {
+                meta.chunk_size
+            } else {
+                rem
             }
         } else {
-            let expected_last_size = (meta.file_size as usize)
-                .checked_sub((meta.total_chunks - 1) as usize * meta.chunk_size)
-                .ok_or_else(|| {
-                    SyncError::InvalidChunkParameter("arithmetic underflow in file size".into())
-                })?;
-            if chunk.data.len() != expected_last_size {
-                return Err(SyncError::InvalidChunkParameter(format!(
-                    "final chunk {} must have size {}, got {}",
-                    chunk.chunk_index,
-                    expected_last_size,
-                    chunk.data.len()
-                )));
-            }
+            meta.chunk_size
+        };
+
+        if chunk.data.len() != expected_size {
+            return Err(SyncError::InvalidChunkParameter(format!(
+                "invalid chunk size on index {}: expected {} bytes, got {} bytes",
+                chunk.chunk_index,
+                expected_size,
+                chunk.data.len()
+            )));
         }
 
-        // 4. Check persistent chunk idempotency
+        // 4. Check existing chunk
         let existing_chunk = sqlx::query_as::<_, (String, i64)>(
             "SELECT chunk_hash, size FROM sync_upload_chunks WHERE file_id = ? AND chunk_index = ?",
         )
@@ -432,15 +501,18 @@ impl SyncManager {
 
         if let Some((existing_hash, existing_size)) = existing_chunk {
             if existing_hash == chunk.chunk_hash && existing_size == chunk.data.len() as i64 {
-                // Idempotent retransmission: already persisted, do not rewrite file or DB
                 let current_meta = self.get_or_load_session(chunk.file_id).await?;
-                if current_meta.status == "completed" {
+                if current_meta.status == UploadStatus::Completed {
+                    let count = current_meta.received_chunks.len() as u32;
+                    let total = current_meta.total_chunks.max(1);
                     return Ok(UploadProgress {
                         file_id: chunk.file_id,
-                        uploaded_chunks: current_meta.total_chunks,
-                        total_chunks: current_meta.total_chunks,
+                        uploaded_chunks: count,
+                        total_chunks: total,
                         percentage: 100.0,
+                        status: UploadStatus::Completed,
                         completed: true,
+                        error: None,
                     });
                 }
 
@@ -449,17 +521,26 @@ impl SyncManager {
                         .all(|i| current_meta.received_chunks.contains(&i));
 
                 if all_received {
-                    let _ = self.verify_and_finalize_upload(chunk.file_id).await;
+                    let finalize_res = self.verify_and_finalize_upload(chunk.file_id).await;
                     let refreshed = self.get_or_load_session(chunk.file_id).await?;
-                    let is_completed = refreshed.status == "completed";
+                    let is_completed = refreshed.is_completed();
                     let count = refreshed.received_chunks.len() as u32;
                     let total = refreshed.total_chunks.max(1);
+
+                    if let Err(e) = finalize_res {
+                        if !is_completed {
+                            return Err(e);
+                        }
+                    }
+
                     return Ok(UploadProgress {
                         file_id: chunk.file_id,
                         uploaded_chunks: count,
                         total_chunks: total,
                         percentage: (count as f64 / total as f64) * 100.0,
+                        status: refreshed.status,
                         completed: is_completed,
+                        error: refreshed.last_error,
                     });
                 }
 
@@ -470,7 +551,9 @@ impl SyncManager {
                     uploaded_chunks: count,
                     total_chunks: total,
                     percentage: (count as f64 / total as f64) * 100.0,
+                    status: current_meta.status,
                     completed: false,
+                    error: current_meta.last_error,
                 });
             } else {
                 return Err(SyncError::ChunkConflict {
@@ -526,7 +609,6 @@ impl SyncManager {
             }
         }
 
-        // 7. Check if upload is complete
         // 7. Check if all chunks have been received and finalize
         let (uploaded_chunks, total_chunks, all_chunks_present) = {
             let uploads = self.uploads.read().await;
@@ -543,21 +625,18 @@ impl SyncManager {
             self.verify_and_finalize_upload(chunk.file_id).await?;
         }
 
-        // Functional truth: completed is true ONLY when session status in DB/memory is 'completed'
-        let is_completed = {
-            let uploads = self.uploads.read().await;
-            uploads
-                .get(&chunk.file_id)
-                .map(|m| m.status == "completed")
-                .unwrap_or(false)
-        };
+        // Functional truth: query the latest status from memory or DB
+        let meta_refreshed = self.get_or_load_session(chunk.file_id).await.unwrap_or(meta);
+        let is_completed = meta_refreshed.is_completed();
 
         let progress = UploadProgress {
             file_id: chunk.file_id,
             uploaded_chunks,
             total_chunks,
             percentage: (uploaded_chunks as f64 / total_chunks as f64) * 100.0,
+            status: meta_refreshed.status,
             completed: is_completed,
+            error: meta_refreshed.last_error,
         };
 
         Ok(progress)
@@ -585,9 +664,13 @@ impl SyncManager {
                 i64,
                 i64,
                 String,
+                Option<String>,
+                Option<String>,
+                i64,
+                Option<String>,
             ),
         >(
-            "SELECT id, filename, original_path, file_size, expected_hash, uploaded_by, total_chunks, chunk_size, status
+            "SELECT id, filename, original_path, file_size, expected_hash, uploaded_by, total_chunks, chunk_size, status, finalize_token, finalize_started_at, finalize_attempts, last_error
              FROM sync_uploads WHERE id = ?"
         )
         .bind(file_id.to_string())
@@ -610,6 +693,8 @@ impl SyncManager {
             received.insert(idx as u32);
         }
 
+        let status = UploadStatus::from_db(&row.8)?;
+
         let meta = UploadMeta {
             id: file_id,
             filename: row.1,
@@ -619,7 +704,11 @@ impl SyncManager {
             uploaded_by: row.5,
             total_chunks: row.6 as u32,
             chunk_size: row.7 as usize,
-            status: row.8,
+            status,
+            finalize_token: row.9,
+            finalize_started_at: row.10,
+            finalize_attempts: row.11,
+            last_error: row.12,
             received_chunks: received,
         };
 
@@ -632,81 +721,177 @@ impl SyncManager {
         Ok(meta)
     }
 
-    async fn verify_and_finalize_upload(&self, file_id: Uuid) -> Result<(), SyncError> {
+    async fn mark_upload_completed(&self, file_id: Uuid, token: &str) -> Result<(), SyncError> {
+        let now = Utc::now().to_rfc3339();
+        let rows = sqlx::query(
+            "UPDATE sync_uploads SET status = 'completed', finalize_token = NULL, finalize_started_at = NULL, last_error = NULL, updated_at = ?
+             WHERE id = ? AND status = 'finalizing' AND finalize_token = ?"
+        )
+        .bind(&now)
+        .bind(file_id.to_string())
+        .bind(token)
+        .execute(&self.db_pool)
+        .await?
+        .rows_affected();
+
+        if rows == 0 {
+            return Err(SyncError::UploadFailed(
+                "fencing token mismatch or upload no longer in finalizing state".into(),
+            ));
+        }
+
+        let mut uploads = self.uploads.write().await;
+        if let Some(m) = uploads.get_mut(&file_id) {
+            m.status = UploadStatus::Completed;
+            m.finalize_token = None;
+            m.finalize_started_at = None;
+            m.last_error = None;
+        }
+
+        Ok(())
+    }
+
+    async fn mark_upload_failed(&self, file_id: Uuid, reason: &str) -> Result<(), SyncError> {
+        let now = Utc::now().to_rfc3339();
+        let _ = sqlx::query(
+            "UPDATE sync_uploads SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?"
+        )
+        .bind(reason)
+        .bind(&now)
+        .bind(file_id.to_string())
+        .execute(&self.db_pool)
+        .await;
+
+        let mut uploads = self.uploads.write().await;
+        if let Some(m) = uploads.get_mut(&file_id) {
+            m.status = UploadStatus::Failed;
+            m.last_error = Some(reason.to_string());
+        }
+        Ok(())
+    }
+
+    pub async fn verify_and_finalize_upload(&self, file_id: Uuid) -> Result<(), SyncError> {
         let meta = self.get_or_load_session(file_id).await?;
 
-        if meta.status == "completed" {
+        if meta.status == UploadStatus::Completed {
             let final_file_path = self.upload_dir.join(file_id.to_string());
             if tokio::fs::metadata(&final_file_path).await.is_ok() {
                 return Ok(());
             }
         }
-        if meta.status == "cancelled" {
+        if meta.status == UploadStatus::Cancelled {
             return Err(SyncError::UploadCancelled(file_id));
         }
 
         // 1. Atomic finalization ownership acquisition:
-        // Transition status from 'uploading' or 'failed' to 'finalizing' with unique token
         let token = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
+        let now_dt = Utc::now();
+        let now = now_dt.to_rfc3339();
+
         let rows_affected = sqlx::query(
-            "UPDATE sync_uploads SET status = 'finalizing', finalize_token = ?, updated_at = ?
+            "UPDATE sync_uploads SET status = 'finalizing', finalize_token = ?, finalize_started_at = ?, finalize_attempts = finalize_attempts + 1, last_error = NULL, updated_at = ?
              WHERE id = ? AND status IN ('uploading', 'failed')",
         )
         .bind(&token)
+        .bind(&now)
         .bind(&now)
         .bind(file_id.to_string())
         .execute(&self.db_pool)
         .await?
         .rows_affected();
 
-        if rows_affected == 0 {
-            // Check if already completed or being finalized by another worker
-            let current_status =
-                sqlx::query_as::<_, (String,)>("SELECT status FROM sync_uploads WHERE id = ?")
-                    .bind(file_id.to_string())
-                    .fetch_optional(&self.db_pool)
-                    .await?;
+        let owner_token = if rows_affected == 1 {
+            token
+        } else {
+            let row = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                "SELECT status, finalize_token, finalize_started_at FROM sync_uploads WHERE id = ?"
+            )
+            .bind(file_id.to_string())
+            .fetch_optional(&self.db_pool)
+            .await?;
 
-            if let Some((st,)) = current_status {
-                if st == "completed" {
-                    let mut uploads = self.uploads.write().await;
-                    if let Some(m) = uploads.get_mut(&file_id) {
-                        m.status = "completed".into();
+            match row {
+                Some((st_str, existing_token, started_at_str)) => {
+                    let st = UploadStatus::from_db(&st_str)?;
+                    if st == UploadStatus::Completed {
+                        let mut uploads = self.uploads.write().await;
+                        if let Some(m) = uploads.get_mut(&file_id) {
+                            m.status = UploadStatus::Completed;
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
-                } else if st == "finalizing" {
-                    // Poll briefly for the other worker to finish finalization
-                    for _ in 0..10 {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                        let st_poll = sqlx::query_as::<_, (String,)>(
-                            "SELECT status FROM sync_uploads WHERE id = ?",
-                        )
-                        .bind(file_id.to_string())
-                        .fetch_optional(&self.db_pool)
-                        .await?;
-                        if let Some((s,)) = st_poll {
-                            if s == "completed" {
-                                let mut uploads = self.uploads.write().await;
-                                if let Some(m) = uploads.get_mut(&file_id) {
-                                    m.status = "completed".into();
+
+                    if st == UploadStatus::Finalizing {
+                        let is_stale = if let Some(s_str) = started_at_str.as_ref() {
+                            if let Ok(started_dt) = DateTime::parse_from_rfc3339(s_str) {
+                                (Utc::now() - started_dt.with_timezone(&Utc)).to_std().unwrap_or_default() >= FINALIZATION_STALE_AFTER
+                            } else {
+                                true
+                            }
+                        } else {
+                            true
+                        };
+
+                        if !is_stale {
+                            // Active worker is running: poll briefly
+                            for _ in 0..20 {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                                let poll_st = sqlx::query_scalar::<_, String>(
+                                    "SELECT status FROM sync_uploads WHERE id = ?"
+                                )
+                                .bind(file_id.to_string())
+                                .fetch_optional(&self.db_pool)
+                                .await?;
+
+                                if let Some(s) = poll_st {
+                                    if s == "completed" {
+                                        let mut uploads = self.uploads.write().await;
+                                        if let Some(m) = uploads.get_mut(&file_id) {
+                                            m.status = UploadStatus::Completed;
+                                        }
+                                        return Ok(());
+                                    }
                                 }
-                                return Ok(());
+                            }
+                            return Err(SyncError::UploadFailed("finalization currently owned by another active worker".into()));
+                        } else {
+                            // Stale lease takeover CAS
+                            let takeover_token = Uuid::new_v4().to_string();
+                            let takeover_now = Utc::now().to_rfc3339();
+                            let takeover_rows = sqlx::query(
+                                "UPDATE sync_uploads SET finalize_token = ?, finalize_started_at = ?, finalize_attempts = finalize_attempts + 1, updated_at = ?
+                                 WHERE id = ? AND status = 'finalizing' AND finalize_token IS ? AND finalize_started_at IS ?"
+                            )
+                            .bind(&takeover_token)
+                            .bind(&takeover_now)
+                            .bind(&takeover_now)
+                            .bind(file_id.to_string())
+                            .bind(&existing_token)
+                            .bind(&started_at_str)
+                            .execute(&self.db_pool)
+                            .await?
+                            .rows_affected();
+
+                            if takeover_rows == 1 {
+                                takeover_token
+                            } else {
+                                return Err(SyncError::UploadFailed("failed to acquire stale finalization lease".into()));
                             }
                         }
+                    } else {
+                        return Err(SyncError::UploadFailed(format!("cannot finalize upload in status {st_str}")));
                     }
                 }
+                None => return Err(SyncError::SessionNotFound(file_id)),
             }
-            return Err(SyncError::UploadFailed(
-                "could not acquire finalization ownership".into(),
-            ));
-        }
+        };
 
         // Update in-memory status
         {
             let mut uploads = self.uploads.write().await;
             if let Some(m) = uploads.get_mut(&file_id) {
-                m.status = "finalizing".into();
+                m.status = UploadStatus::Finalizing;
+                m.finalize_token = Some(owner_token.clone());
             }
         }
 
@@ -724,17 +909,7 @@ impl SyncManager {
                 let err_msg = format!(
                     "cannot finalize: missing chunk index {expected_idx} in persistent storage"
                 );
-                let _ = sqlx::query(
-                    "UPDATE sync_uploads SET status = 'failed', updated_at = ? WHERE id = ?",
-                )
-                .bind(Utc::now().to_rfc3339())
-                .bind(file_id.to_string())
-                .execute(&self.db_pool)
-                .await;
-                let mut uploads = self.uploads.write().await;
-                if let Some(m) = uploads.get_mut(&file_id) {
-                    m.status = "failed".into();
-                }
+                self.mark_upload_failed(file_id, &err_msg).await?;
                 return Err(SyncError::UploadFailed(err_msg));
             }
         }
@@ -746,23 +921,13 @@ impl SyncManager {
         let target_file_to_verify = if tokio::fs::metadata(&part_file_path).await.is_ok() {
             part_file_path.clone()
         } else if tokio::fs::metadata(&final_file_path).await.is_ok() {
-            // Already renamed before crash/restart: verify final file directly
             final_file_path.clone()
         } else {
-            let _ = sqlx::query(
-                "UPDATE sync_uploads SET status = 'failed', updated_at = ? WHERE id = ?",
-            )
-            .bind(Utc::now().to_rfc3339())
-            .bind(file_id.to_string())
-            .execute(&self.db_pool)
-            .await;
-            let mut uploads = self.uploads.write().await;
-            if let Some(m) = uploads.get_mut(&file_id) {
-                m.status = "failed".into();
-            }
-            return Err(SyncError::FileNotFound(format!(
+            let err_msg = format!(
                 "neither staging file {part_file_path:?} nor final file {final_file_path:?} exists on disk"
-            )));
+            );
+            self.mark_upload_failed(file_id, &err_msg).await?;
+            return Err(SyncError::FileNotFound(err_msg));
         };
 
         let actual_size = tokio::fs::metadata(&target_file_to_verify).await?.len() as i64;
@@ -772,21 +937,12 @@ impl SyncManager {
                 "File size mismatch for {}: expected {}, got {}",
                 file_id, meta.file_size, actual_size
             );
-            let _ = sqlx::query(
-                "UPDATE sync_uploads SET status = 'failed', updated_at = ? WHERE id = ?",
-            )
-            .bind(Utc::now().to_rfc3339())
-            .bind(file_id.to_string())
-            .execute(&self.db_pool)
-            .await;
-            let mut uploads = self.uploads.write().await;
-            if let Some(m) = uploads.get_mut(&file_id) {
-                m.status = "failed".into();
-            }
-            return Err(SyncError::UploadFailed(format!(
+            let err_msg = format!(
                 "file size mismatch: expected {}, got {}",
                 meta.file_size, actual_size
-            )));
+            );
+            self.mark_upload_failed(file_id, &err_msg).await?;
+            return Err(SyncError::UploadFailed(err_msg));
         }
 
         // 4. Verify whole-file SHA-256
@@ -796,17 +952,11 @@ impl SyncManager {
                 "Hash mismatch for {}: expected {}, got {}",
                 file_id, meta.expected_hash, computed_hash
             );
-            let _ = sqlx::query(
-                "UPDATE sync_uploads SET status = 'failed', updated_at = ? WHERE id = ?",
+            self.mark_upload_failed(
+                file_id,
+                &format!("hash mismatch: expected {}, got {}", meta.expected_hash, computed_hash),
             )
-            .bind(Utc::now().to_rfc3339())
-            .bind(file_id.to_string())
-            .execute(&self.db_pool)
-            .await;
-            let mut uploads = self.uploads.write().await;
-            if let Some(m) = uploads.get_mut(&file_id) {
-                m.status = "failed".into();
-            }
+            .await?;
             return Err(SyncError::HashMismatch {
                 expected: meta.expected_hash.clone(),
                 actual: computed_hash,
@@ -830,25 +980,32 @@ impl SyncManager {
         )
         .await?;
 
-        // 7. Update upload session status to completed
-        let now = Utc::now().to_rfc3339();
-        sqlx::query("UPDATE sync_uploads SET status = 'completed', updated_at = ? WHERE id = ?")
-            .bind(&now)
-            .bind(file_id.to_string())
-            .execute(&self.db_pool)
-            .await?;
-
-        // 8. Update in-memory metadata
-        let mut uploads = self.uploads.write().await;
-        if let Some(m) = uploads.get_mut(&file_id) {
-            m.status = "completed".into();
-        }
+        // 7. Update upload session status to completed using fencing token
+        self.mark_upload_completed(file_id, &owner_token).await?;
 
         info!(
             "Upload finalized and verified for {} ({})",
             meta.filename, file_id
         );
         Ok(())
+    }
+
+    pub async fn recover_incomplete_uploads(&self) -> Result<usize, SyncError> {
+        let candidate_rows = sqlx::query_as::<_, (String,)>(
+            "SELECT id FROM sync_uploads WHERE status IN ('finalizing', 'failed')",
+        )
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        let mut recovered_count = 0;
+        for (id_str,) in candidate_rows {
+            if let Ok(file_id) = Uuid::parse_str(&id_str) {
+                if self.verify_and_finalize_upload(file_id).await.is_ok() {
+                    recovered_count += 1;
+                }
+            }
+        }
+        Ok(recovered_count)
     }
 
     pub async fn get_upload_progress(
@@ -863,14 +1020,16 @@ impl SyncManager {
 
         let uploaded = meta.received_chunks.len() as u32;
         let total = meta.total_chunks.max(1);
-        let completed = meta.status == "completed";
+        let completed = meta.is_completed();
 
         Ok(Some(UploadProgress {
             file_id: *file_id,
             uploaded_chunks: uploaded,
             total_chunks: total,
             percentage: (uploaded as f64 / total as f64) * 100.0,
+            status: meta.status,
             completed,
+            error: meta.last_error,
         }))
     }
 
@@ -1033,6 +1192,9 @@ mod tests {
                 chunk_size INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'uploading',
                 finalize_token TEXT,
+                finalize_started_at TEXT,
+                finalize_attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",
@@ -1263,17 +1425,17 @@ mod tests {
         assert_eq!(p2.uploaded_chunks, 1);
     }
 
-    // ── Test C: Same chunk index with conflicting content is rejected
+    // ── Test C: Conflicting chunk rejected & logged ──────────────────
     #[tokio::test]
     async fn test_falsification_c_chunk_conflict() {
         let pool = create_test_db().await;
         let temp_dir = tempfile::tempdir().unwrap();
         let sync_mgr = SyncManager::new_with_chunk_size(pool, temp_dir.path().to_path_buf(), 4);
 
-        let chunk0_a = b"AAAA".to_vec();
+        let chunk0_a = b"ABCD".to_vec();
         let hash0_a = format!("{:x}", Sha256::digest(&chunk0_a));
 
-        let chunk0_b = b"BBBB".to_vec();
+        let chunk0_b = b"WXYZ".to_vec();
         let hash0_b = format!("{:x}", Sha256::digest(&chunk0_b));
 
         let file_id = sync_mgr
@@ -1281,7 +1443,7 @@ mod tests {
                 filename: "conflict.bin".into(),
                 original_path: "/tmp/conflict.bin".into(),
                 file_size: 8,
-                expected_hash: "dummyhash".into(),
+                expected_hash: format!("{:x}", Sha256::digest(b"conflict_full")),
                 uploaded_by: "tester".into(),
             })
             .await
@@ -1322,17 +1484,14 @@ mod tests {
 
         let chunk0_data = b"HEAD".to_vec();
         let hash0 = format!("{:x}", Sha256::digest(&chunk0_data));
-
         let chunk1_data = b"TAIL".to_vec();
         let hash1 = format!("{:x}", Sha256::digest(&chunk1_data));
-
-        let mut h_total = Sha256::new();
-        h_total.update(b"HEADTAIL");
-        let expected_hash = format!("{:x}", h_total.finalize());
+        let full_data = b"HEADTAIL".to_vec();
+        let expected_hash = format!("{:x}", Sha256::digest(&full_data));
 
         let file_id = {
             let sync_mgr = SyncManager::new_with_chunk_size(pool.clone(), upload_path.clone(), 4);
-            let file_id = sync_mgr
+            let fid = sync_mgr
                 .init_upload(UploadInit {
                     filename: "restart.bin".into(),
                     original_path: "/tmp/restart.bin".into(),
@@ -1343,9 +1502,10 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Upload chunk 0
             sync_mgr
                 .upload_chunk(UploadChunk {
-                    file_id,
+                    file_id: fid,
                     chunk_index: 0,
                     total_chunks: 2,
                     data: chunk0_data,
@@ -1354,24 +1514,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            file_id
-            // sync_mgr dropped here
+            fid
+            // Instance sync_mgr dropped here
         };
 
-        // Construct brand new SyncManager with empty memory cache
-        let sync_mgr2 = SyncManager::new_with_chunk_size(pool.clone(), upload_path, 4);
+        // Fresh SyncManager instance
+        let sync_mgr2 = SyncManager::new_with_chunk_size(pool, upload_path, 4);
 
-        // Progress check from DB
-        let progress = sync_mgr2
-            .get_upload_progress(&file_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(progress.uploaded_chunks, 1);
-        assert!(!progress.completed);
-
-        // Complete upload using new instance
-        let prog_final = sync_mgr2
+        // Upload chunk 1 into new manager
+        let prog = sync_mgr2
             .upload_chunk(UploadChunk {
                 file_id,
                 chunk_index: 1,
@@ -1382,8 +1533,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(prog_final.uploaded_chunks, 2);
-        assert!(prog_final.completed);
+        assert!(prog.completed);
+        assert_eq!(prog.uploaded_chunks, 2);
 
         let final_bytes = std::fs::read(temp_dir.path().join(file_id.to_string())).unwrap();
         assert_eq!(final_bytes, b"HEADTAIL");
@@ -1405,7 +1556,7 @@ mod tests {
                 filename: "err.bin".into(),
                 original_path: "/tmp/err.bin".into(),
                 file_size: 10,
-                expected_hash: "hash".into(),
+                expected_hash: format!("{:x}", Sha256::digest(b"err")),
                 uploaded_by: "tester".into(),
             })
             .await;
@@ -1428,8 +1579,7 @@ mod tests {
                 filename: "fakehash.bin".into(),
                 original_path: "/tmp/fakehash.bin".into(),
                 file_size: 4,
-                expected_hash: "0000000000000000000000000000000000000000000000000000000000000000"
-                    .into(),
+                expected_hash: format!("{:x}", Sha256::digest(b"DIFFERENT")),
                 uploaded_by: "tester".into(),
             })
             .await
@@ -1461,7 +1611,7 @@ mod tests {
                 filename: "badsize.bin".into(),
                 original_path: "/tmp/badsize.bin".into(),
                 file_size: 0, // invalid <= 0
-                expected_hash: "hash".into(),
+                expected_hash: format!("{:x}", Sha256::digest(b"badsize")),
                 uploaded_by: "tester".into(),
             })
             .await
@@ -1470,7 +1620,7 @@ mod tests {
         assert!(matches!(err, SyncError::InvalidChunkParameter(_)));
     }
 
-    // ── Test H: Total chunks mutation rejected ───────────────────────
+    // ── Test H: Total chunks mutation on subsequent chunks rejected ──
     #[tokio::test]
     async fn test_falsification_h_total_chunks_mutation() {
         let pool = create_test_db().await;
@@ -1482,7 +1632,7 @@ mod tests {
                 filename: "mut.bin".into(),
                 original_path: "/tmp/mut.bin".into(),
                 file_size: 8, // expects 2 chunks
-                expected_hash: "hash".into(),
+                expected_hash: format!("{:x}", Sha256::digest(b"mut_full")),
                 uploaded_by: "tester".into(),
             })
             .await
@@ -1518,7 +1668,7 @@ mod tests {
                 filename: "fail_finalize.bin".into(),
                 original_path: "/tmp/fail_finalize.bin".into(),
                 file_size: 4,
-                expected_hash: "wrong_full_hash".into(),
+                expected_hash: format!("{:x}", Sha256::digest(b"wrong_full_hash")),
                 uploaded_by: "tester".into(),
             })
             .await
@@ -1815,5 +1965,180 @@ mod tests {
             .unwrap();
         assert!(prog_done.completed);
         assert_eq!(prog_done.uploaded_chunks, 1);
+    }
+
+    // ── Test N: Stale finalization lease is recovered by another worker ──
+    #[tokio::test]
+    async fn test_falsification_n_stale_finalization_is_recovered() {
+        let pool = create_test_db().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let upload_path = temp_dir.path().to_path_buf();
+
+        let chunk_data = b"STALE".to_vec();
+        let expected_hash = format!("{:x}", Sha256::digest(&chunk_data));
+        let file_id = Uuid::new_v4();
+
+        // Stale timestamp 60 seconds ago
+        let stale_time = (Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
+        let stale_token = Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO sync_uploads (id, filename, original_path, file_size, expected_hash, uploaded_by, total_chunks, chunk_size, status, finalize_token, finalize_started_at, finalize_attempts, created_at, updated_at)
+             VALUES (?, 'stale.bin', '/tmp/stale.bin', 5, ?, 'tester', 1, 5, 'finalizing', ?, ?, 1, ?, ?)"
+        )
+        .bind(file_id.to_string())
+        .bind(&expected_hash)
+        .bind(&stale_token)
+        .bind(&stale_time)
+        .bind(&stale_time)
+        .bind(&stale_time)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO sync_upload_chunks (file_id, chunk_index, chunk_hash, size, created_at)
+             VALUES (?, 0, ?, 5, ?)"
+        )
+        .bind(file_id.to_string())
+        .bind(&expected_hash)
+        .bind(&stale_time)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Write .part file to disk
+        let part_path = upload_path.join(format!("{file_id}.part"));
+        tokio::fs::write(&part_path, &chunk_data).await.unwrap();
+
+        // Fresh sync manager recovers stale upload
+        let sync_mgr = SyncManager::new_with_chunk_size(pool.clone(), upload_path, 5);
+        let res = sync_mgr.verify_and_finalize_upload(file_id).await;
+        assert!(res.is_ok());
+
+        let prog = sync_mgr
+            .get_upload_progress(&file_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(prog.completed);
+        assert_eq!(prog.status, UploadStatus::Completed);
+    }
+
+    // ── Test O: Old owner is fenced after lease takeover ──────────────
+    #[tokio::test]
+    async fn test_falsification_o_old_owner_is_fenced_after_takeover() {
+        let pool = create_test_db().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let upload_path = temp_dir.path().to_path_buf();
+        let sync_mgr = SyncManager::new_with_chunk_size(pool.clone(), upload_path, 5);
+
+        let file_id = Uuid::new_v4();
+        let token_a = "token-worker-a";
+        let token_b = "token-worker-b";
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO sync_uploads (id, filename, original_path, file_size, expected_hash, uploaded_by, total_chunks, chunk_size, status, finalize_token, finalize_started_at, finalize_attempts, created_at, updated_at)
+             VALUES (?, 'fence.bin', '/tmp/fence.bin', 5, 'hash', 'tester', 1, 5, 'finalizing', ?, ?, 1, ?, ?)"
+        )
+        .bind(file_id.to_string())
+        .bind(token_b) // Worker B is current owner
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Worker A attempts to mark upload completed with stale token A -> fenced!
+        let err = sync_mgr.mark_upload_completed(file_id, token_a).await.unwrap_err();
+        assert!(matches!(err, SyncError::UploadFailed(_)));
+
+        // Verify DB row remains in finalizing status under token B
+        let row = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT status, finalize_token FROM sync_uploads WHERE id = ?"
+        )
+        .bind(file_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.0, "finalizing");
+        assert_eq!(row.1, Some(token_b.to_string()));
+    }
+
+    // ── Test P: Corrupt status in DB fails closed ─────────────────────
+    #[tokio::test]
+    async fn test_falsification_p_status_corrupt_fails_closed() {
+        let pool = create_test_db().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sync_mgr = SyncManager::new_with_chunk_size(pool.clone(), temp_dir.path().to_path_buf(), 4);
+
+        let file_id = Uuid::new_v4();
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO sync_uploads (id, filename, original_path, file_size, expected_hash, uploaded_by, total_chunks, chunk_size, status, created_at, updated_at)
+             VALUES (?, 'corrupt.bin', '/tmp/corrupt.bin', 4, 'hash', 'tester', 1, 4, 'CORRUPT_STATE_XYZ', ?, ?)"
+        )
+        .bind(file_id.to_string())
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let err = sync_mgr.get_upload_progress(&file_id).await.unwrap_err();
+        assert!(matches!(err, SyncError::InvalidPersistedState(_)));
+    }
+
+    // ── Test Q: recover_incomplete_uploads processes all candidates ───
+    #[tokio::test]
+    async fn test_falsification_q_recover_incomplete_uploads() {
+        let pool = create_test_db().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let upload_path = temp_dir.path().to_path_buf();
+
+        let chunk_data = b"BATCH".to_vec();
+        let expected_hash = format!("{:x}", Sha256::digest(&chunk_data));
+
+        let file_id = Uuid::new_v4();
+        let stale_time = (Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO sync_uploads (id, filename, original_path, file_size, expected_hash, uploaded_by, total_chunks, chunk_size, status, finalize_started_at, created_at, updated_at)
+             VALUES (?, 'batch.bin', '/tmp/batch.bin', 5, ?, 'tester', 1, 5, 'finalizing', ?, ?, ?)"
+        )
+        .bind(file_id.to_string())
+        .bind(&expected_hash)
+        .bind(&stale_time)
+        .bind(&stale_time)
+        .bind(&stale_time)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO sync_upload_chunks (file_id, chunk_index, chunk_hash, size, created_at)
+             VALUES (?, 0, ?, 5, ?)"
+        )
+        .bind(file_id.to_string())
+        .bind(&expected_hash)
+        .bind(&stale_time)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let part_path = upload_path.join(format!("{file_id}.part"));
+        tokio::fs::write(&part_path, &chunk_data).await.unwrap();
+
+        let sync_mgr = SyncManager::new_with_chunk_size(pool.clone(), upload_path, 5);
+        let recovered = sync_mgr.recover_incomplete_uploads().await.unwrap();
+        assert_eq!(recovered, 1);
+
+        let prog = sync_mgr.get_upload_progress(&file_id).await.unwrap().unwrap();
+        assert!(prog.completed);
+        assert_eq!(prog.status, UploadStatus::Completed);
     }
 }
