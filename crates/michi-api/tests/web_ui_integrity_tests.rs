@@ -493,10 +493,16 @@ async fn test_canonical_active_queue_lifecycle() {
         .await
         .unwrap();
     assert_eq!(jump_res.status(), StatusCode::OK);
-    let ps = state.playback_state.read().await;
+    let mut ps = state.playback_state.read().await.clone();
+    for _ in 0..50 {
+        if ps.track_id == Some(t2.id) {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        ps = state.playback_state.read().await.clone();
+    }
     assert_eq!(ps.track_id, Some(t2.id));
     assert_eq!(ps.position_ms, 0);
-    drop(ps);
 
     // UI-010: Queue Delete removes queue and items transactionally
     let del_res = app

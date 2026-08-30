@@ -91,18 +91,6 @@ pub async fn queue_handler(
         None
     };
 
-    // Update legacy playback state projection
-    {
-        let mut ps = state.playback_state.write().await;
-        ps.track_id = snap.track_id;
-        ps.position_ms = position_ms;
-        ps.playing = is_playing;
-        ps.volume = (snap.volume as f64) / 100.0;
-        ps.shuffle = snap.shuffle;
-        ps.repeat = snap.repeat.as_str().to_string();
-        ps.updated_at = snap.updated_at;
-    }
-
     Ok(Json(serde_json::json!({
         "queue_id": active_queue_id,
         "items_count": items.len(),
@@ -432,22 +420,6 @@ pub async fn queue_jump_handler(
                 &e.to_string(),
             )
         })?;
-
-    let snap = state.playback_engine.snapshot().await.map_err(|e| {
-        v1_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "ENGINE_ERROR",
-            &e.to_string(),
-        )
-    })?;
-
-    {
-        let mut current = state.playback_state.write().await;
-        current.track_id = Some(target_track_id);
-        current.position_ms = snap.position_ms;
-        current.playing = snap.is_playing();
-        current.updated_at = chrono::Utc::now();
-    }
 
     let _ = state.tx.send(
         serde_json::json!({

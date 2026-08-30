@@ -65,6 +65,30 @@ pub struct PersistentPlaybackProjection {
     pub repeat_mode: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileOutcome {
+    NoPersistentSessionNeeded,
+    AlreadyConverged,
+    Persisted,
+}
+
+#[derive(Debug)]
+pub enum ProjectionError {
+    SessionLoad(String),
+    SessionPersist(String),
+}
+
+impl std::fmt::Display for ProjectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionLoad(msg) => write!(f, "Database session load error: {msg}"),
+            Self::SessionPersist(msg) => write!(f, "Database session persist error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ProjectionError {}
+
 /// Cohesive coordinator responsible for projecting PlaybackEngine runtime events
 /// into authoritative in-memory state and persistent SQLite PlaybackSession.
 pub struct PlaybackProjectionCoordinator {
@@ -97,6 +121,8 @@ impl PlaybackProjectionCoordinator {
         h.healthy = true;
         h.consecutive_failures = 0;
         h.last_success_at = Some(Utc::now());
+        h.last_error = None;
+        h.last_error_kind = None;
     }
 
     async fn record_failure(&self, kind: ProjectionFailureKind, err_msg: &str) {
@@ -153,9 +179,16 @@ impl PlaybackProjectionCoordinator {
                                 warn!(lagged, "playback projection task lagged by events; reconciling snapshot");
                                 match coordinator.engine.snapshot().await {
                                     Ok(snap) => {
-                                        coordinator.reconcile_from_snapshot(&snap).await;
-                                        let mut h = coordinator.health.write().await;
-                                        h.lag_recoveries_total = h.lag_recoveries_total.saturating_add(1);
+                                        match coordinator.reconcile_from_snapshot(&snap).await {
+                                            Ok(_) => {
+                                                let mut h = coordinator.health.write().await;
+                                                h.lag_recoveries_total = h.lag_recoveries_total.saturating_add(1);
+                                            }
+                                            Err(_) => {
+                                                let mut h = coordinator.health.write().await;
+                                                h.lag_recovery_failures_total = h.lag_recovery_failures_total.saturating_add(1);
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         {
@@ -287,11 +320,14 @@ impl PlaybackProjectionCoordinator {
         }
 
         // 4. Check dedup and persist
-        self.persist_if_changed(&sess).await;
+        let _ = self.persist_if_changed(&sess).await;
     }
 
     /// Reconciles state from an engine snapshot (e.g. after event lag or startup).
-    pub async fn reconcile_from_snapshot(&self, snap: &EngineSnapshot) {
+    pub async fn reconcile_from_snapshot(
+        &self,
+        snap: &EngineSnapshot,
+    ) -> Result<ReconcileOutcome, ProjectionError> {
         let is_playing = matches!(
             snap.lifecycle,
             PlaybackLifecycle::AudioFlowing | PlaybackLifecycle::Playing
@@ -318,7 +354,7 @@ impl PlaybackProjectionCoordinator {
 
         // If the engine has no track and is stopped, do not overwrite a persisted session
         if snap.track_id.is_none() && !is_playing {
-            return;
+            return Ok(ReconcileOutcome::NoPersistentSessionNeeded);
         }
 
         match michi_db::get_or_create_latest_playback_session(&self.db).await {
@@ -329,7 +365,11 @@ impl PlaybackProjectionCoordinator {
                 sess.volume = (snap.volume as f64) / 100.0;
                 sess.shuffle = snap.shuffle;
                 sess.repeat_mode = snap.repeat.as_str().to_string();
-                self.persist_if_changed(&sess).await;
+                match self.persist_if_changed(&sess).await {
+                    Ok(true) => Ok(ReconcileOutcome::Persisted),
+                    Ok(false) => Ok(ReconcileOutcome::AlreadyConverged),
+                    Err(e) => Err(e),
+                }
             }
             Err(e) => {
                 self.record_failure(
@@ -337,6 +377,7 @@ impl PlaybackProjectionCoordinator {
                     &format!("reconciliation get_or_create_latest_playback_session failed: {e}"),
                 )
                 .await;
+                Err(ProjectionError::SessionLoad(e.to_string()))
             }
         }
     }
@@ -385,7 +426,10 @@ impl PlaybackProjectionCoordinator {
         }
     }
 
-    async fn persist_if_changed(&self, sess: &michi_core::PlaybackSessionDb) {
+    async fn persist_if_changed(
+        &self,
+        sess: &michi_core::PlaybackSessionDb,
+    ) -> Result<bool, ProjectionError> {
         let projection = PersistentPlaybackProjection {
             current_track_id: sess.current_track_id,
             current_index: sess.current_index,
@@ -406,6 +450,7 @@ impl PlaybackProjectionCoordinator {
                 Ok(_) => {
                     *self.last_projection.write().await = Some(projection);
                     self.record_success().await;
+                    Ok(true)
                 }
                 Err(e) => {
                     self.record_failure(
@@ -413,8 +458,11 @@ impl PlaybackProjectionCoordinator {
                         &format!("update_playback_session failed: {e}"),
                     )
                     .await;
+                    Err(ProjectionError::SessionPersist(e.to_string()))
                 }
             }
+        } else {
+            Ok(false)
         }
     }
 }

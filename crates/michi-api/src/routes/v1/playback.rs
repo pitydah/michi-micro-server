@@ -231,11 +231,6 @@ pub async fn playback_control_handler(
                 .resume()
                 .await
                 .map_err(|e| v1_error(playback_error_status(&e), e.error_code(), &e.to_string()))?;
-            {
-                let mut current = state.playback_state.write().await;
-                current.playing = false;
-                current.updated_at = Utc::now();
-            }
             Ok(Json(serde_json::json!({
                 "status": "accepted",
                 "lifecycle": "preparing",
@@ -258,9 +253,6 @@ pub async fn playback_control_handler(
                     };
                     v1_error(status, e.error_code(), &e.to_string())
                 })?;
-                let mut current = state.playback_state.write().await;
-                current.playing = false;
-                current.updated_at = Utc::now();
                 return Ok(Json(serde_json::json!({
                     "status": "accepted",
                     "lifecycle": "preparing",
@@ -278,50 +270,30 @@ pub async fn playback_control_handler(
                 })?;
             let first_queue_track = {
                 let row = sqlx::query_scalar::<_, String>(
-                    "SELECT track_id FROM queue_items WHERE queue_id = ? ORDER BY position ASC LIMIT 1",
+                    "SELECT track_id FROM queue_items WHERE queue_id = ? ORDER BY position ASC LIMIT 1"
                 )
                 .bind(active_queue_id.to_string())
                 .fetch_optional(&state.db)
                 .await
-                .map_err(|e| {
-                    v1_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "DATABASE_ERROR",
-                        &e.to_string(),
-                    )
-                })?;
+                .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
 
                 row.and_then(|s| Uuid::parse_str(&s).ok())
             };
 
-            let track_id_opt = body.track_id.or(snap.track_id).or(first_queue_track);
-
-            let pos_ms = body
-                .position_ms
-                .or(match body.value {
-                    Some(PlaybackControlValue::Integer(ms)) => Some(ms),
-                    _ => None,
-                })
-                .unwrap_or(0);
-
-            let track = match track_id_opt {
-                Some(tid) => {
-                    let resolver = michi_playback::SqliteTrackResolver::new(
-                        state.db.clone(),
-                        state.config.music_paths.clone(),
-                    );
-                    resolver.get_track(tid).await.map_err(|e| {
-                        v1_error(StatusCode::NOT_FOUND, e.error_code(), &e.to_string())
-                    })?
-                }
+            let track_id = match body.track_id.or(first_queue_track) {
+                Some(id) => id,
                 None => {
                     return Err(v1_error_code(
                         StatusCode::BAD_REQUEST,
                         michi_link::MichiLinkErrorCode::InvalidRequest,
-                        "no track selected for playback",
+                        "no track_id specified and queue is empty",
                     ));
                 }
             };
+
+            let tracks =
+                validate_and_load_tracks(&state.db, &[track_id], &state.config.music_paths).await?;
+            let track = tracks.into_iter().next().expect("validated above");
 
             let selection = state
                 .playback_output_selection
@@ -340,7 +312,7 @@ pub async fn playback_control_handler(
                 .await
                 .map_err(|e| v1_error(StatusCode::BAD_GATEWAY, e.error_code(), &e.to_string()))?;
 
-            let track_id = track.id;
+            let pos_ms = body.position_ms.unwrap_or(0);
             state
                 .playback_engine
                 .play(track, plan.sinks, plan.description, pos_ms)
@@ -352,14 +324,6 @@ pub async fn playback_control_handler(
                         &e.to_string(),
                     )
                 })?;
-
-            {
-                let mut current = state.playback_state.write().await;
-                current.track_id = Some(track_id);
-                current.position_ms = pos_ms;
-                current.playing = false;
-                current.updated_at = Utc::now();
-            }
 
             Ok(Json(serde_json::json!({
                 "status": "accepted",
@@ -374,12 +338,6 @@ pub async fn playback_control_handler(
                     &e.to_string(),
                 )
             })?;
-
-            {
-                let mut current = state.playback_state.write().await;
-                current.playing = false;
-                current.updated_at = Utc::now();
-            }
 
             Ok(Json(serde_json::json!({
                 "status": "accepted",
@@ -399,11 +357,6 @@ pub async fn playback_control_handler(
                 state.playback_engine.pause().await.map_err(|e| {
                     v1_error(playback_error_status(&e), e.error_code(), &e.to_string())
                 })?;
-                {
-                    let mut current = state.playback_state.write().await;
-                    current.playing = false;
-                    current.updated_at = Utc::now();
-                }
                 Ok(Json(serde_json::json!({
                     "status": "accepted",
                     "lifecycle": "paused",
@@ -424,13 +377,6 @@ pub async fn playback_control_handler(
                 .stop()
                 .await
                 .map_err(|e| v1_error(playback_error_status(&e), e.error_code(), &e.to_string()))?;
-
-            {
-                let mut current = state.playback_state.write().await;
-                current.position_ms = 0;
-                current.playing = false;
-                current.updated_at = Utc::now();
-            }
 
             Ok(Json(serde_json::json!({
                 "status": "accepted",
@@ -460,11 +406,6 @@ pub async fn playback_control_handler(
                 )
             })?;
 
-            {
-                let mut current = state.playback_state.write().await;
-                current.position_ms = pos_ms;
-            }
-
             Ok(Json(serde_json::json!({
                 "status": "accepted",
                 "position_ms": pos_ms,
@@ -479,21 +420,6 @@ pub async fn playback_control_handler(
                 )
             })?;
 
-            let snap = state.playback_engine.snapshot().await.map_err(|e| {
-                v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "ENGINE_ERROR",
-                    &e.to_string(),
-                )
-            })?;
-            {
-                let mut current = state.playback_state.write().await;
-                current.track_id = snap.track_id;
-                current.position_ms = snap.position_ms;
-                current.playing = snap.is_playing();
-                current.updated_at = Utc::now();
-            }
-
             Ok(Json(serde_json::json!({
                 "status": "accepted",
             })))
@@ -506,21 +432,6 @@ pub async fn playback_control_handler(
                     &e.to_string(),
                 )
             })?;
-
-            let snap = state.playback_engine.snapshot().await.map_err(|e| {
-                v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "ENGINE_ERROR",
-                    &e.to_string(),
-                )
-            })?;
-            {
-                let mut current = state.playback_state.write().await;
-                current.track_id = snap.track_id;
-                current.position_ms = snap.position_ms;
-                current.playing = snap.is_playing();
-                current.updated_at = Utc::now();
-            }
 
             Ok(Json(serde_json::json!({
                 "status": "accepted",
@@ -555,11 +466,6 @@ pub async fn playback_control_handler(
                 )
             })?;
 
-            {
-                let mut current = state.playback_state.write().await;
-                current.volume = (vol as f64) / 100.0;
-            }
-
             Ok(Json(serde_json::json!({
                 "status": "accepted",
                 "volume": vol,
@@ -574,11 +480,6 @@ pub async fn playback_control_handler(
                 )
             })?;
 
-            {
-                let mut current = state.playback_state.write().await;
-                current.volume = 0.0;
-            }
-
             Ok(Json(serde_json::json!({
                 "status": "accepted",
                 "volume": 0,
@@ -592,11 +493,6 @@ pub async fn playback_control_handler(
                     &e.to_string(),
                 )
             })?;
-
-            {
-                let mut current = state.playback_state.write().await;
-                current.volume = 0.8;
-            }
 
             Ok(Json(serde_json::json!({
                 "status": "accepted",
@@ -616,11 +512,6 @@ pub async fn playback_control_handler(
                     &e.to_string(),
                 )
             })?;
-
-            {
-                let mut current = state.playback_state.write().await;
-                current.shuffle = shuf;
-            }
 
             Ok(Json(serde_json::json!({
                 "status": "accepted",
@@ -645,11 +536,6 @@ pub async fn playback_control_handler(
                         &e.to_string(),
                     )
                 })?;
-
-            {
-                let mut current = state.playback_state.write().await;
-                current.repeat = rep_mode.as_str().to_string();
-            }
 
             Ok(Json(serde_json::json!({
                 "status": "accepted",
@@ -1050,17 +936,28 @@ pub async fn restore_playback_state_handler(
             if let Some(qid) = session.queue_id {
                 if let Ok(items) = michi_db::get_queue_items(&state.db, &qid).await {
                     let track_ids: Vec<Uuid> = items.into_iter().map(|(id, _)| id).collect();
-                    if let Ok(t) = validate_and_load_tracks(&state.db, &track_ids, &state.config.music_paths).await {
+                    if let Ok(t) =
+                        validate_and_load_tracks(&state.db, &track_ids, &state.config.music_paths)
+                            .await
+                    {
                         tracks = t;
                     }
                 }
             }
 
             if tracks.is_empty() {
-                if let Ok(active_qid) = crate::playback_queue::get_or_create_active_queue(&state.db).await {
+                if let Ok(active_qid) =
+                    crate::playback_queue::get_or_create_active_queue(&state.db).await
+                {
                     if let Ok(items) = michi_db::get_queue_items(&state.db, &active_qid).await {
                         let track_ids: Vec<Uuid> = items.into_iter().map(|(id, _)| id).collect();
-                        if let Ok(t) = validate_and_load_tracks(&state.db, &track_ids, &state.config.music_paths).await {
+                        if let Ok(t) = validate_and_load_tracks(
+                            &state.db,
+                            &track_ids,
+                            &state.config.music_paths,
+                        )
+                        .await
+                        {
                             tracks = t;
                         }
                     }
@@ -1069,7 +966,9 @@ pub async fn restore_playback_state_handler(
 
             if tracks.is_empty() {
                 if let Some(tid) = session.current_track_id {
-                    if let Ok(t) = validate_and_load_tracks(&state.db, &[tid], &state.config.music_paths).await {
+                    if let Ok(t) =
+                        validate_and_load_tracks(&state.db, &[tid], &state.config.music_paths).await
+                    {
                         tracks = t;
                     }
                 }

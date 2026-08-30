@@ -422,12 +422,15 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
     };
 
     // Check if playback was restored
-    let playback_restored = michi_db::get_latest_playback_session(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(|s| s.restored)
-        .unwrap_or(false);
+    let playback_restored = match michi_db::get_latest_playback_session(&state.db).await {
+        Ok(Some(s)) => s.restored,
+        Ok(None) => false,
+        Err(e) => {
+            warnings.push(format!("get_latest_playback_session failed: {e}"));
+            degraded = true;
+            false
+        }
+    };
 
     let projection_health = state.playback_projection_health.read().await.clone();
     if !projection_health.healthy {

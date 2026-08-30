@@ -261,6 +261,53 @@ impl Default for SyncRuntimeConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadFailureCode {
+    HashMismatch,
+    SizeMismatch,
+    MissingChunk,
+    ArtifactMissing,
+    InvalidPersistedState,
+    IoTemporary,
+    DatabaseTemporary,
+}
+
+impl UploadFailureCode {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::HashMismatch => "hash_mismatch",
+            Self::SizeMismatch => "size_mismatch",
+            Self::MissingChunk => "missing_chunk",
+            Self::ArtifactMissing => "artifact_missing",
+            Self::InvalidPersistedState => "invalid_persisted_state",
+            Self::IoTemporary => "io_temporary",
+            Self::DatabaseTemporary => "database_temporary",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "hash_mismatch" | "HASH_MISMATCH" => Some(Self::HashMismatch),
+            "size_mismatch" | "SIZE_MISMATCH" => Some(Self::SizeMismatch),
+            "missing_chunk" | "MISSING_CHUNK" => Some(Self::MissingChunk),
+            "artifact_missing" | "ARTIFACT_MISSING" => Some(Self::ArtifactMissing),
+            "invalid_persisted_state" | "INVALID_PERSISTED_STATE" => {
+                Some(Self::InvalidPersistedState)
+            }
+            "io_temporary" | "IO_TEMPORARY" => Some(Self::IoTemporary),
+            "database_temporary" | "DATABASE_TEMPORARY" => Some(Self::DatabaseTemporary),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for UploadFailureCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_db_str())
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum SyncError {
     #[error("File not found: {0}")]
@@ -269,6 +316,24 @@ pub enum SyncError {
     SessionNotFound(Uuid),
     #[error("Finalization ownership lost for upload {0}")]
     FinalizationOwnershipLost(Uuid),
+    #[error("Finalization lease expired for upload {0}")]
+    FinalizationLeaseExpired(Uuid),
+    #[error("Finalization lease active for upload {file_id}")]
+    FinalizationLeaseActive {
+        file_id: Uuid,
+        owner_epoch: Option<String>,
+        lease_until: Option<DateTime<Utc>>,
+    },
+    #[error("Terminal upload failure for upload {file_id}: {code}")]
+    TerminalUploadFailure {
+        file_id: Uuid,
+        code: UploadFailureCode,
+    },
+    #[error("Recoverable upload failure for upload {file_id}: {code}")]
+    RecoverableUploadFailure {
+        file_id: Uuid,
+        code: UploadFailureCode,
+    },
     #[error("Chunk conflict on index {index}: {message}")]
     ChunkConflict { index: u32, message: String },
     #[error("Invalid chunk parameter: {0}")]
@@ -341,6 +406,7 @@ struct UploadMeta {
     chunk_size: usize,
     status: UploadStatus,
     finalize_token: Option<String>,
+    finalize_owner_epoch: Option<String>,
     finalize_started_at: Option<String>,
     finalize_attempts: i64,
     finalize_lease_until: Option<String>,
@@ -356,11 +422,34 @@ impl UploadMeta {
     }
 }
 
+#[derive(sqlx::FromRow)]
+#[allow(dead_code)]
+struct SyncUploadRow {
+    id: String,
+    filename: String,
+    original_path: String,
+    file_size: i64,
+    expected_hash: String,
+    uploaded_by: String,
+    total_chunks: i64,
+    chunk_size: i64,
+    status: String,
+    finalize_token: Option<String>,
+    finalize_owner_epoch: Option<String>,
+    finalize_started_at: Option<String>,
+    finalize_attempts: i64,
+    finalize_lease_until: Option<String>,
+    failure_class: Option<String>,
+    failure_code: Option<String>,
+    last_error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SyncManager {
     db_pool: SqlitePool,
     upload_dir: PathBuf,
     runtime_config: SyncRuntimeConfig,
+    process_epoch: Uuid,
     uploads: Arc<RwLock<HashMap<Uuid, UploadMeta>>>,
 }
 
@@ -389,12 +478,26 @@ impl SyncManager {
         upload_dir: PathBuf,
         runtime_config: SyncRuntimeConfig,
     ) -> Self {
+        Self::new_with_config_and_epoch(db_pool, upload_dir, runtime_config, Uuid::new_v4())
+    }
+
+    pub fn new_with_config_and_epoch(
+        db_pool: SqlitePool,
+        upload_dir: PathBuf,
+        runtime_config: SyncRuntimeConfig,
+        process_epoch: Uuid,
+    ) -> Self {
         Self {
             db_pool,
             upload_dir,
             runtime_config,
+            process_epoch,
             uploads: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub fn process_epoch(&self) -> Uuid {
+        self.process_epoch
     }
 
     pub async fn calculate_file_hash<P: AsRef<Path>>(&self, path: P) -> Result<String, SyncError> {
@@ -454,7 +557,12 @@ impl SyncManager {
 
         let file_id = Uuid::new_v4();
         let filename = init.filename.clone();
-        let total_chunks = file_size_usize.div_ceil(self.runtime_config.chunk_size) as u32;
+        let chunks = file_size_usize.div_ceil(self.runtime_config.chunk_size);
+        let total_chunks = u32::try_from(chunks).map_err(|_| {
+            SyncError::InvalidChunkParameter(
+                "upload requires more chunks than protocol can represent".into(),
+            )
+        })?;
 
         let meta = UploadMeta {
             id: file_id,
@@ -467,6 +575,7 @@ impl SyncManager {
             chunk_size: self.runtime_config.chunk_size,
             status: UploadStatus::Uploading,
             finalize_token: None,
+            finalize_owner_epoch: None,
             finalize_started_at: None,
             finalize_attempts: 0,
             finalize_lease_until: None,
@@ -734,38 +843,19 @@ impl SyncManager {
         Ok(progress)
     }
 
-    async fn get_or_load_session(&self, file_id: Uuid) -> Result<UploadMeta, SyncError> {
-        // 1. Fast path: check in-memory cache with read lock
-        {
-            let uploads = self.uploads.read().await;
-            if let Some(meta) = uploads.get(&file_id) {
-                return Ok(meta.clone());
-            }
-        }
+    pub(crate) async fn reload_session_from_db(
+        &self,
+        file_id: Uuid,
+    ) -> Result<UploadMeta, SyncError> {
+        let meta = self.load_session_from_db_internal(file_id).await?;
+        let mut uploads = self.uploads.write().await;
+        uploads.insert(file_id, meta.clone());
+        Ok(meta)
+    }
 
-        // 2. Load from DB without holding RwLock (prevents head-of-line blocking)
-        let row = sqlx::query_as::<
-            _,
-            (
-                String,
-                String,
-                String,
-                i64,
-                String,
-                String,
-                i64,
-                i64,
-                String,
-                Option<String>,
-                Option<String>,
-                i64,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-            ),
-        >(
-            "SELECT id, filename, original_path, file_size, expected_hash, uploaded_by, total_chunks, chunk_size, status, finalize_token, finalize_started_at, finalize_attempts, finalize_lease_until, failure_class, failure_code, last_error
+    async fn load_session_from_db_internal(&self, file_id: Uuid) -> Result<UploadMeta, SyncError> {
+        let row = sqlx::query_as::<_, SyncUploadRow>(
+            "SELECT id, filename, original_path, file_size, expected_hash, uploaded_by, total_chunks, chunk_size, status, finalize_token, finalize_owner_epoch, finalize_started_at, finalize_attempts, finalize_lease_until, failure_class, failure_code, last_error
              FROM sync_uploads WHERE id = ?"
         )
         .bind(file_id.to_string())
@@ -788,28 +878,45 @@ impl SyncManager {
             received.insert(idx as u32);
         }
 
-        let status = UploadStatus::from_db(&row.8)?;
-        let failure_class = row.13.as_deref().and_then(UploadFailureClass::from_db);
+        let status = UploadStatus::from_db(&row.status)?;
+        let failure_class = row
+            .failure_class
+            .as_deref()
+            .and_then(UploadFailureClass::from_db);
 
-        let meta = UploadMeta {
+        Ok(UploadMeta {
             id: file_id,
-            filename: row.1,
-            original_path: row.2,
-            file_size: row.3,
-            expected_hash: row.4,
-            uploaded_by: row.5,
-            total_chunks: row.6 as u32,
-            chunk_size: row.7 as usize,
+            filename: row.filename,
+            original_path: row.original_path,
+            file_size: row.file_size,
+            expected_hash: row.expected_hash,
+            uploaded_by: row.uploaded_by,
+            total_chunks: row.total_chunks as u32,
+            chunk_size: row.chunk_size as usize,
             status,
-            finalize_token: row.9,
-            finalize_started_at: row.10,
-            finalize_attempts: row.11,
-            finalize_lease_until: row.12,
+            finalize_token: row.finalize_token,
+            finalize_owner_epoch: row.finalize_owner_epoch,
+            finalize_started_at: row.finalize_started_at,
+            finalize_attempts: row.finalize_attempts,
+            finalize_lease_until: row.finalize_lease_until,
             failure_class,
-            failure_code: row.14,
-            last_error: row.15,
+            failure_code: row.failure_code,
+            last_error: row.last_error,
             received_chunks: received,
-        };
+        })
+    }
+
+    async fn get_or_load_session(&self, file_id: Uuid) -> Result<UploadMeta, SyncError> {
+        // 1. Fast path: check in-memory cache with read lock
+        {
+            let uploads = self.uploads.read().await;
+            if let Some(meta) = uploads.get(&file_id) {
+                return Ok(meta.clone());
+            }
+        }
+
+        // 2. Load from DB without holding RwLock (prevents head-of-line blocking)
+        let meta = self.load_session_from_db_internal(file_id).await?;
 
         // 3. Insert with write lock (double check)
         let mut uploads = self.uploads.write().await;
@@ -825,17 +932,33 @@ impl SyncManager {
         file_id: Uuid,
         token: &str,
     ) -> Result<(), SyncError> {
-        let row = sqlx::query_as::<_, (String, Option<String>)>(
-            "SELECT status, finalize_token FROM sync_uploads WHERE id = ?",
+        let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+            "SELECT status, finalize_token, finalize_owner_epoch, finalize_lease_until FROM sync_uploads WHERE id = ?",
         )
         .bind(file_id.to_string())
         .fetch_optional(&self.db_pool)
         .await?;
 
-        match row {
-            Some((st, Some(tok))) if st == "finalizing" && tok == token => Ok(()),
-            _ => Err(SyncError::FinalizationOwnershipLost(file_id)),
+        let Some((status, db_token, db_epoch, lease_until)) = row else {
+            return Err(SyncError::SessionNotFound(file_id));
+        };
+
+        if status != "finalizing"
+            || db_token.as_deref() != Some(token)
+            || db_epoch.as_deref() != Some(&self.process_epoch.to_string())
+        {
+            return Err(SyncError::FinalizationOwnershipLost(file_id));
         }
+
+        if let Some(l_str) = lease_until {
+            if let Ok(l_dt) = DateTime::parse_from_rfc3339(&l_str) {
+                if Utc::now() >= l_dt.with_timezone(&Utc) {
+                    return Err(SyncError::FinalizationLeaseExpired(file_id));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn renew_finalization_lease(
@@ -852,12 +975,13 @@ impl SyncManager {
 
         let rows = sqlx::query(
             "UPDATE sync_uploads SET finalize_lease_until = ?, updated_at = ?
-             WHERE id = ? AND status = 'finalizing' AND finalize_token = ?",
+             WHERE id = ? AND status = 'finalizing' AND finalize_token = ? AND finalize_owner_epoch = ?",
         )
         .bind(&lease_until)
         .bind(&now)
         .bind(file_id.to_string())
         .bind(token)
+        .bind(self.process_epoch.to_string())
         .execute(&self.db_pool)
         .await?
         .rows_affected();
@@ -885,8 +1009,8 @@ impl SyncManager {
         let now = Utc::now().to_rfc3339();
         let rows = sqlx::query(
             "UPDATE sync_uploads
-             SET status = 'failed', failure_class = ?, failure_code = ?, last_error = ?, finalize_token = NULL, finalize_lease_until = NULL, updated_at = ?
-             WHERE id = ? AND status = 'finalizing' AND finalize_token = ?",
+             SET status = 'failed', failure_class = ?, failure_code = ?, last_error = ?, finalize_token = NULL, finalize_owner_epoch = NULL, finalize_lease_until = NULL, updated_at = ?
+             WHERE id = ? AND status = 'finalizing' AND finalize_token = ? AND finalize_owner_epoch = ?",
         )
         .bind(failure_class.as_db_str())
         .bind(failure_code)
@@ -894,12 +1018,13 @@ impl SyncManager {
         .bind(&now)
         .bind(file_id.to_string())
         .bind(token)
+        .bind(self.process_epoch.to_string())
         .execute(&self.db_pool)
         .await?
         .rows_affected();
 
         if rows == 0 {
-            let _ = self.get_or_load_session(file_id).await;
+            let _ = self.reload_session_from_db(file_id).await;
             return Err(SyncError::FinalizationOwnershipLost(file_id));
         }
 
@@ -910,6 +1035,7 @@ impl SyncManager {
             m.failure_code = Some(failure_code.to_string());
             m.last_error = Some(reason.to_string());
             m.finalize_token = None;
+            m.finalize_owner_epoch = None;
             m.finalize_lease_until = None;
         }
 
@@ -955,18 +1081,19 @@ impl SyncManager {
         let now = Utc::now().to_rfc3339();
         let rows = sqlx::query(
             "UPDATE sync_uploads
-             SET status = 'completed', finalize_token = NULL, finalize_started_at = NULL, finalize_lease_until = NULL, failure_class = NULL, failure_code = NULL, last_error = NULL, updated_at = ?
-             WHERE id = ? AND status = 'finalizing' AND finalize_token = ?",
+             SET status = 'completed', finalize_token = NULL, finalize_owner_epoch = NULL, finalize_started_at = NULL, finalize_lease_until = NULL, failure_class = NULL, failure_code = NULL, last_error = NULL, updated_at = ?
+             WHERE id = ? AND status = 'finalizing' AND finalize_token = ? AND finalize_owner_epoch = ?",
         )
         .bind(&now)
         .bind(file_id.to_string())
         .bind(token)
+        .bind(self.process_epoch.to_string())
         .execute(&self.db_pool)
         .await?
         .rows_affected();
 
         if rows == 0 {
-            let _ = self.get_or_load_session(file_id).await;
+            let _ = self.reload_session_from_db(file_id).await;
             return Err(SyncError::FinalizationOwnershipLost(file_id));
         }
 
@@ -974,6 +1101,7 @@ impl SyncManager {
         if let Some(m) = uploads.get_mut(&file_id) {
             m.status = UploadStatus::Completed;
             m.finalize_token = None;
+            m.finalize_owner_epoch = None;
             m.finalize_started_at = None;
             m.finalize_lease_until = None;
             m.failure_class = None;
@@ -1008,10 +1136,11 @@ impl SyncManager {
         // 1. Attempt atomic initial acquisition from uploading or recoverable failed
         let rows_affected = sqlx::query(
             "UPDATE sync_uploads
-             SET status = 'finalizing', finalize_token = ?, finalize_started_at = ?, finalize_lease_until = ?, finalize_attempts = finalize_attempts + 1, last_error = NULL, updated_at = ?
+             SET status = 'finalizing', finalize_token = ?, finalize_owner_epoch = ?, finalize_started_at = ?, finalize_lease_until = ?, finalize_attempts = finalize_attempts + 1, last_error = NULL, updated_at = ?
              WHERE id = ? AND (status = 'uploading' OR (status = 'failed' AND (failure_class IS NULL OR failure_class = 'recoverable')))",
         )
         .bind(&token)
+        .bind(self.process_epoch.to_string())
         .bind(&now)
         .bind(&lease_until)
         .bind(&now)
@@ -1031,9 +1160,10 @@ impl SyncManager {
                     Option<String>,
                     Option<String>,
                     Option<String>,
+                    Option<String>,
                 ),
             >(
-                "SELECT status, finalize_token, finalize_started_at, finalize_lease_until, failure_class FROM sync_uploads WHERE id = ?",
+                "SELECT status, finalize_token, finalize_owner_epoch, finalize_started_at, finalize_lease_until, failure_class FROM sync_uploads WHERE id = ?",
             )
             .bind(file_id.to_string())
             .fetch_optional(&self.db_pool)
@@ -1043,6 +1173,7 @@ impl SyncManager {
                 Some((
                     st_str,
                     existing_token,
+                    existing_epoch,
                     started_at_str,
                     lease_until_str,
                     failure_class_str,
@@ -1059,13 +1190,20 @@ impl SyncManager {
                     if st == UploadStatus::Failed
                         && failure_class_str.as_deref() == Some("terminal")
                     {
-                        return Err(SyncError::UploadFailed(
-                            "terminal upload failure cannot be finalized".into(),
-                        ));
+                        return Err(SyncError::TerminalUploadFailure {
+                            file_id,
+                            code: UploadFailureCode::InvalidPersistedState,
+                        });
                     }
 
                     if st == UploadStatus::Finalizing {
-                        let is_stale = if let Some(l_str) = lease_until_str.as_ref() {
+                        let is_from_previous_process =
+                            existing_epoch.as_deref() != Some(&self.process_epoch.to_string());
+
+                        let is_stale = if is_from_previous_process {
+                            // Crash recovery rule: an owner from a prior dead process is dead immediately
+                            true
+                        } else if let Some(l_str) = lease_until_str.as_ref() {
                             if let Ok(l_dt) = DateTime::parse_from_rfc3339(l_str) {
                                 Utc::now() >= l_dt.with_timezone(&Utc)
                             } else {
@@ -1085,7 +1223,7 @@ impl SyncManager {
                         };
 
                         if !is_stale {
-                            // Active worker holds unexpired lease: poll briefly
+                            // Active worker in current process holds unexpired lease: poll briefly
                             for _ in 0..20 {
                                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                                 let poll_st = sqlx::query_scalar::<_, String>(
@@ -1105,11 +1243,18 @@ impl SyncManager {
                                     }
                                 }
                             }
-                            return Err(SyncError::UploadFailed(
-                                "finalization currently owned by another active worker".into(),
-                            ));
+                            let lease_dt = lease_until_str.as_deref().and_then(|s| {
+                                DateTime::parse_from_rfc3339(s)
+                                    .ok()
+                                    .map(|d| d.with_timezone(&Utc))
+                            });
+                            return Err(SyncError::FinalizationLeaseActive {
+                                file_id,
+                                owner_epoch: existing_epoch,
+                                lease_until: lease_dt,
+                            });
                         } else {
-                            // Stale lease takeover CAS
+                            // Takeover CAS: reclaim from dead process epoch or expired lease
                             let takeover_token = Uuid::new_v4().to_string();
                             let takeover_now_dt = Utc::now();
                             let takeover_now = takeover_now_dt.to_rfc3339();
@@ -1120,28 +1265,45 @@ impl SyncManager {
                                 .unwrap_or_else(|_| chrono::Duration::seconds(30)))
                             .to_rfc3339();
 
-                            let takeover_rows = sqlx::query(
-                                "UPDATE sync_uploads
-                                 SET finalize_token = ?, finalize_started_at = ?, finalize_lease_until = ?, finalize_attempts = finalize_attempts + 1, updated_at = ?
-                                 WHERE id = ? AND status = 'finalizing' AND finalize_token IS ? AND finalize_lease_until IS ?",
-                            )
-                            .bind(&takeover_token)
-                            .bind(&takeover_now)
-                            .bind(&takeover_lease_until)
-                            .bind(&takeover_now)
-                            .bind(file_id.to_string())
-                            .bind(&existing_token)
-                            .bind(&lease_until_str)
-                            .execute(&self.db_pool)
-                            .await?
-                            .rows_affected();
+                            let takeover_rows = if is_from_previous_process {
+                                sqlx::query(
+                                    "UPDATE sync_uploads
+                                     SET finalize_token = ?, finalize_owner_epoch = ?, finalize_started_at = ?, finalize_lease_until = ?, finalize_attempts = finalize_attempts + 1, updated_at = ?
+                                     WHERE id = ? AND status = 'finalizing' AND (finalize_owner_epoch IS NULL OR finalize_owner_epoch IS NOT ?)",
+                                )
+                                .bind(&takeover_token)
+                                .bind(self.process_epoch.to_string())
+                                .bind(&takeover_now)
+                                .bind(&takeover_lease_until)
+                                .bind(&takeover_now)
+                                .bind(file_id.to_string())
+                                .bind(self.process_epoch.to_string())
+                                .execute(&self.db_pool)
+                                .await?
+                                .rows_affected()
+                            } else {
+                                sqlx::query(
+                                    "UPDATE sync_uploads
+                                     SET finalize_token = ?, finalize_owner_epoch = ?, finalize_started_at = ?, finalize_lease_until = ?, finalize_attempts = finalize_attempts + 1, updated_at = ?
+                                     WHERE id = ? AND status = 'finalizing' AND finalize_token IS ? AND finalize_lease_until IS ?",
+                                )
+                                .bind(&takeover_token)
+                                .bind(self.process_epoch.to_string())
+                                .bind(&takeover_now)
+                                .bind(&takeover_lease_until)
+                                .bind(&takeover_now)
+                                .bind(file_id.to_string())
+                                .bind(&existing_token)
+                                .bind(&lease_until_str)
+                                .execute(&self.db_pool)
+                                .await?
+                                .rows_affected()
+                            };
 
                             if takeover_rows == 1 {
                                 takeover_token
                             } else {
-                                return Err(SyncError::UploadFailed(
-                                    "failed to acquire stale finalization lease".into(),
-                                ));
+                                return Err(SyncError::FinalizationOwnershipLost(file_id));
                             }
                         }
                     } else {
@@ -1160,6 +1322,7 @@ impl SyncManager {
             if let Some(m) = uploads.get_mut(&file_id) {
                 m.status = UploadStatus::Finalizing;
                 m.finalize_token = Some(owner_token.clone());
+                m.finalize_owner_epoch = Some(self.process_epoch.to_string());
                 m.finalize_lease_until = Some(lease_until.clone());
             }
         }
@@ -1183,11 +1346,14 @@ impl SyncManager {
                         file_id,
                         &owner_token,
                         UploadFailureClass::Terminal,
-                        "MISSING_CHUNK",
+                        UploadFailureCode::MissingChunk.as_db_str(),
                         &err_msg,
                     )
                     .await;
-                return Err(SyncError::UploadFailed(err_msg));
+                return Err(SyncError::TerminalUploadFailure {
+                    file_id,
+                    code: UploadFailureCode::MissingChunk,
+                });
             }
         }
 
@@ -1211,7 +1377,7 @@ impl SyncManager {
                     file_id,
                     &owner_token,
                     UploadFailureClass::Terminal,
-                    "ARTIFACT_MISSING",
+                    UploadFailureCode::ArtifactMissing.as_db_str(),
                     &err_msg,
                 )
                 .await;
@@ -1234,11 +1400,14 @@ impl SyncManager {
                     file_id,
                     &owner_token,
                     UploadFailureClass::Terminal,
-                    "SIZE_MISMATCH",
+                    UploadFailureCode::SizeMismatch.as_db_str(),
                     &err_msg,
                 )
                 .await;
-            return Err(SyncError::UploadFailed(err_msg));
+            return Err(SyncError::TerminalUploadFailure {
+                file_id,
+                code: UploadFailureCode::SizeMismatch,
+            });
         }
 
         // 4. Verify whole-file SHA-256 with periodic lease renewal
@@ -1258,7 +1427,7 @@ impl SyncManager {
                     file_id,
                     &owner_token,
                     UploadFailureClass::Terminal,
-                    "HASH_MISMATCH",
+                    UploadFailureCode::HashMismatch.as_db_str(),
                     &format!(
                         "hash mismatch: expected {}, got {}",
                         meta.expected_hash, computed_hash
@@ -1337,15 +1506,12 @@ impl SyncManager {
                     info!(upload_id = %file_id, "successfully recovered incomplete sync upload");
                     report.completed += 1;
                 }
-                Err(SyncError::UploadFailed(ref msg))
-                    if msg.contains("currently owned by another active worker") =>
-                {
+                Err(SyncError::FinalizationLeaseActive { .. }) => {
                     report.deferred += 1;
                 }
-                Err(SyncError::UploadFailed(ref msg)) if msg.contains("terminal") => {
-                    report.terminal_failures += 1;
-                }
-                Err(SyncError::HashMismatch { .. }) | Err(SyncError::FileNotFound(_)) => {
+                Err(SyncError::TerminalUploadFailure { .. })
+                | Err(SyncError::HashMismatch { .. })
+                | Err(SyncError::FileNotFound(_)) => {
                     report.terminal_failures += 1;
                 }
                 Err(e) => {
@@ -1420,25 +1586,13 @@ impl SyncManager {
         file_size: i64,
         uploaded_by: String,
     ) -> Result<Uuid, SyncError> {
-        // Idempotency check: don't create duplicate entries if already registered with same hash and path
-        let existing = sqlx::query_as::<_, (Uuid,)>(
-            "SELECT id FROM synced_files WHERE file_hash = ? AND server_path = ?",
-        )
-        .bind(&file_hash)
-        .bind(&server_path)
-        .fetch_optional(&self.db_pool)
-        .await?;
-
-        if let Some((existing_id,)) = existing {
-            return Ok(existing_id);
-        }
-
         let id = Uuid::new_v4();
         let now = Utc::now();
 
         sqlx::query(
             "INSERT INTO synced_files (id, filename, original_path, server_path, file_hash, file_size, uploaded_at, uploaded_by, checksum_verified)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)"
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+             ON CONFLICT(file_hash, server_path) DO NOTHING",
         )
         .bind(id)
         .bind(&filename)
@@ -1451,7 +1605,15 @@ impl SyncManager {
         .execute(&self.db_pool)
         .await?;
 
-        Ok(id)
+        let canonical_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM synced_files WHERE file_hash = ? AND server_path = ?",
+        )
+        .bind(&file_hash)
+        .bind(&server_path)
+        .fetch_one(&self.db_pool)
+        .await?;
+
+        Ok(canonical_id)
     }
 
     pub async fn get_playback_state(&self) -> Result<PlaybackState, SyncError> {
@@ -1537,7 +1699,8 @@ mod tests {
                 file_size INTEGER NOT NULL,
                 uploaded_at TEXT NOT NULL,
                 uploaded_by TEXT NOT NULL,
-                checksum_verified INTEGER NOT NULL DEFAULT 1
+                checksum_verified INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(file_hash, server_path)
             )",
         )
         .execute(&pool)
@@ -1556,6 +1719,7 @@ mod tests {
                 chunk_size INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'uploading',
                 finalize_token TEXT,
+                finalize_owner_epoch TEXT,
                 finalize_started_at TEXT,
                 finalize_attempts INTEGER NOT NULL DEFAULT 0,
                 finalize_lease_until TEXT,
@@ -2595,11 +2759,12 @@ mod tests {
         let lease_until = (now_dt + chrono::Duration::milliseconds(200)).to_rfc3339();
 
         sqlx::query(
-            "INSERT INTO sync_uploads (id, filename, original_path, file_size, expected_hash, uploaded_by, total_chunks, chunk_size, status, finalize_token, finalize_started_at, finalize_lease_until, finalize_attempts, created_at, updated_at)
-             VALUES (?, 'live_lease.bin', '/tmp/live_lease.bin', 5, 'hash', 'tester', 1, 5, 'finalizing', ?, ?, ?, 1, ?, ?)"
+            "INSERT INTO sync_uploads (id, filename, original_path, file_size, expected_hash, uploaded_by, total_chunks, chunk_size, status, finalize_token, finalize_owner_epoch, finalize_started_at, finalize_lease_until, finalize_attempts, created_at, updated_at)
+             VALUES (?, 'live_lease.bin', '/tmp/live_lease.bin', 5, 'hash', 'tester', 1, 5, 'finalizing', ?, ?, ?, ?, 1, ?, ?)"
         )
         .bind(file_id.to_string())
         .bind(token_a)
+        .bind(sync_mgr.process_epoch().to_string())
         .bind(&now)
         .bind(&lease_until)
         .bind(&now)
@@ -2620,7 +2785,7 @@ mod tests {
             .verify_and_finalize_upload(file_id)
             .await
             .unwrap_err();
-        assert!(matches!(err, SyncError::UploadFailed(_)));
+        assert!(matches!(err, SyncError::FinalizationLeaseActive { .. }));
 
         let row = sqlx::query_as::<_, (String, Option<String>)>(
             "SELECT status, finalize_token FROM sync_uploads WHERE id = ?",

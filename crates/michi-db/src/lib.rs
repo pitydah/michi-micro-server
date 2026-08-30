@@ -291,8 +291,16 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
             migration_045
         );
     }
+    if current < 46 {
+        run_migration_step!(
+            conn,
+            46,
+            "sync upload process epoch and synced files unique index",
+            migration_046
+        );
+    }
 
-    info!("database schema at version 45");
+    info!("database schema at version 46");
     Ok(())
 }
 
@@ -1085,8 +1093,15 @@ async fn migration_042(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
             file_size INTEGER NOT NULL,
             uploaded_at TEXT NOT NULL,
             uploaded_by TEXT NOT NULL,
-            checksum_verified INTEGER NOT NULL DEFAULT 1
+            checksum_verified INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(file_hash, server_path)
         )",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_synced_files_hash_path ON synced_files(file_hash, server_path)",
     )
     .execute(&mut **tx)
     .await?;
@@ -1195,6 +1210,30 @@ async fn migration_045(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
             .execute(&mut **tx)
             .await?;
     }
+
+    Ok(())
+}
+
+async fn migration_046(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    let rows: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as("PRAGMA table_info(sync_uploads)")
+            .fetch_all(&mut **tx)
+            .await?;
+
+    let existing_cols: std::collections::HashSet<String> = rows.into_iter().map(|r| r.1).collect();
+
+    if !existing_cols.contains("finalize_owner_epoch") {
+        sqlx::query("ALTER TABLE sync_uploads ADD COLUMN finalize_owner_epoch TEXT")
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    // Ensure synced_files has a unique index on (file_hash, server_path) for atomic DB-level dedup
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_synced_files_hash_path ON synced_files(file_hash, server_path)",
+    )
+    .execute(&mut **tx)
+    .await?;
 
     Ok(())
 }

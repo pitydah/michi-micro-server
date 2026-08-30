@@ -202,7 +202,12 @@ pub fn parse_groups_from_value(result: &serde_json::Value) -> Result<Vec<Room>, 
             .and_then(|v| v.as_f64())
             .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
             .map(|v| v as u32)
-            .unwrap_or(100);
+            .ok_or_else(|| {
+                SnapcastError::InvalidResponse(
+                    "group missing valid volume.percent (must be finite number between 0 and 100)"
+                        .to_string(),
+                )
+            })?;
 
         rooms.push(Room {
             id: id.to_string(),
@@ -488,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_falsification_volume_range_validation() {
-        // Test out of range volumes (-1, 101, NaN string/invalid)
+        // Test out of range volumes (-1, 101, missing volume, NaN/string)
         let payload_negative = serde_json::json!({
             "server": {
                 "groups": [
@@ -501,8 +506,8 @@ mod tests {
                 ]
             }
         });
-        let res_neg = parse_groups_from_value(&payload_negative).unwrap();
-        assert_eq!(res_neg[0].volume, 100); // defaults to safe 100 on invalid range
+        let res_neg = parse_groups_from_value(&payload_negative);
+        assert!(matches!(res_neg, Err(SnapcastError::InvalidResponse(_))));
 
         let payload_over = serde_json::json!({
             "server": {
@@ -516,7 +521,21 @@ mod tests {
                 ]
             }
         });
-        let res_over = parse_groups_from_value(&payload_over).unwrap();
-        assert_eq!(res_over[0].volume, 100);
+        let res_over = parse_groups_from_value(&payload_over);
+        assert!(matches!(res_over, Err(SnapcastError::InvalidResponse(_))));
+
+        let payload_missing = serde_json::json!({
+            "server": {
+                "groups": [
+                    {
+                        "id": "grp-miss",
+                        "name": "Room Missing Vol",
+                        "clients": []
+                    }
+                ]
+            }
+        });
+        let res_miss = parse_groups_from_value(&payload_missing);
+        assert!(matches!(res_miss, Err(SnapcastError::InvalidResponse(_))));
     }
 }

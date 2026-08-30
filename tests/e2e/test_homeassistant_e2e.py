@@ -71,6 +71,14 @@ def get_latest_playback_session_db(db_path):
         "volume": row[4],
     }
 
+def wait_for_db_session(db_path, predicate, timeout=5.0, desc="db playback session condition"):
+    def check():
+        sess = get_latest_playback_session_db(db_path)
+        if sess and predicate(sess):
+            return sess
+        return None
+    return poll_until(check, timeout=timeout, desc=desc)
+
 def test(name, func):
     global PASS, FAIL
     try:
@@ -167,18 +175,22 @@ def main():
         assert state["playing"] is False, f"expected playing to be false without output, got {state['playing']}"
     test("Incoming MQTT Command Handling (michi/play_pause/cmd fail-closed)", test_command_play_pause)
 
-    # 4. Test Volume Set via MQTT
+    # 4. Test Volume Set via MQTT (non-vacuous change from initial)
     def test_command_volume_set():
+        current_state = http_get(f"{server_url}/api/v1/playback/state")
+        initial_vol = current_state.get("volume", 80)
+        target_vol = 75 if initial_vol != 75 else 65
+
         http_post(f"{admin_url}/api/mqtt/publish", {
             "topic": "michi/volume_set/cmd",
-            "payload": "75"
+            "payload": str(target_vol)
         })
         
         def check_vol():
             st = http_get(f"{server_url}/api/v1/playback/state")
-            return st.get("volume") == 75
+            return st.get("volume") == target_vol
 
-        poll_until(check_vol, timeout=5.0, desc="volume set to 75")
+        poll_until(check_vol, timeout=5.0, desc=f"volume set to {target_vol}")
     test("Incoming MQTT Volume Set (michi/volume_set/cmd)", test_command_volume_set)
 
     # 5. Test Pause and Stop via MQTT with SQLite verification
@@ -203,20 +215,22 @@ def main():
             return st.get("playing") is False and st.get("position_ms") == 0
         poll_until(check_stop, timeout=3.0, desc="playback stopped")
 
-        # Verify DB directly
-        sess = get_latest_playback_session_db(db_path)
-        if sess:
-            assert sess["playing"] is False, f"persisted session must reflect playing=false, got {sess}"
-            assert sess["position_ms"] == 0, f"persisted session must reflect position_ms=0, got {sess}"
+        # Verify DB directly with retry helper
+        sess = wait_for_db_session(
+            db_path,
+            lambda s: s["playing"] is False and s["position_ms"] == 0,
+            timeout=5.0,
+            desc="persisted session reflecting playing=false and position_ms=0"
+        )
+        assert sess["playing"] is False, f"persisted session must reflect playing=false, got {sess}"
+        assert sess["position_ms"] == 0, f"persisted session must reflect position_ms=0, got {sess}"
     test("Incoming MQTT Pause & Stop Commands with Direct SQLite Verification", test_command_pause_stop)
 
     # 6. Library Scan and Queue Navigation (Next / Previous) with direct SQLite validation
     def test_command_next_previous():
-        # Trigger scan and wait for >= 3 tracks
-        try:
-            http_post(f"{server_url}/api/v1/library/scan")
-        except Exception:
-            pass
+        # Trigger scan and handle response
+        scan_resp = http_post(f"{server_url}/api/v1/library/scan")
+        assert "scan_id" in scan_resp or "status" in scan_resp, f"unexpected scan response: {scan_resp}"
 
         def check_tracks():
             resp = http_get(f"{server_url}/api/v1/tracks")
@@ -231,8 +245,14 @@ def main():
         # Add tracks to queue
         http_post(f"{server_url}/api/v1/queue/items", {"track_ids": track_ids})
 
-        # Jump to index 0 (Track A)
+        # Jump to index 0 (Track A) and verify initial precondition
         http_post(f"{server_url}/api/v1/queue/jump", {"index": 0})
+
+        def check_precondition_a():
+            st = http_get(f"{server_url}/api/v1/playback/state")
+            return st.get("track_id") == track_ids[0]
+
+        poll_until(check_precondition_a, timeout=3.0, desc="precondition: track A active at index 0")
 
         # Issue Next Track via MQTT
         http_post(f"{admin_url}/api/mqtt/publish", {
@@ -247,8 +267,12 @@ def main():
         poll_until(check_next, timeout=5.0, desc="Engine switching to track B on MQTT Next command")
 
         # Direct SQLite verification: current_track_id == B, current_index == 1
-        sess_b = get_latest_playback_session_db(db_path)
-        assert sess_b is not None, "playback session must exist in SQLite"
+        sess_b = wait_for_db_session(
+            db_path,
+            lambda s: s["current_track_id"] == track_ids[1] and s["current_index"] == 1,
+            timeout=5.0,
+            desc="persisted session reflecting track B at index 1"
+        )
         assert sess_b["current_track_id"] == track_ids[1], f"expected SQLite track_id {track_ids[1]}, got {sess_b['current_track_id']}"
         assert sess_b["current_index"] == 1, f"expected SQLite current_index 1, got {sess_b['current_index']}"
 
@@ -265,8 +289,12 @@ def main():
         poll_until(check_prev, timeout=5.0, desc="Engine switching back to track A on MQTT Previous command")
 
         # Direct SQLite verification: current_track_id == A, current_index == 0
-        sess_a = get_latest_playback_session_db(db_path)
-        assert sess_a is not None, "playback session must exist in SQLite"
+        sess_a = wait_for_db_session(
+            db_path,
+            lambda s: s["current_track_id"] == track_ids[0] and s["current_index"] == 0,
+            timeout=5.0,
+            desc="persisted session reflecting track A at index 0"
+        )
         assert sess_a["current_track_id"] == track_ids[0], f"expected SQLite track_id {track_ids[0]}, got {sess_a['current_track_id']}"
         assert sess_a["current_index"] == 0, f"expected SQLite current_index 0, got {sess_a['current_index']}"
 
