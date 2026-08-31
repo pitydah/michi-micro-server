@@ -1228,6 +1228,18 @@ async fn migration_046(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
             .await?;
     }
 
+    // Deduplicate any pre-existing duplicates by keeping the earliest canonical record (MIN(rowid))
+    sqlx::query(
+        "DELETE FROM synced_files
+         WHERE rowid NOT IN (
+             SELECT MIN(rowid)
+             FROM synced_files
+             GROUP BY file_hash, server_path
+         )",
+    )
+    .execute(&mut **tx)
+    .await?;
+
     // Ensure synced_files has a unique index on (file_hash, server_path) for atomic DB-level dedup
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_synced_files_hash_path ON synced_files(file_hash, server_path)",
@@ -4333,6 +4345,101 @@ mod tests {
             get_job(&pool, &job.id).await.unwrap().unwrap().state,
             "cancelled"
         );
+    }
+
+    #[tokio::test]
+    async fn test_migration_046_deduplication_upgrade_safety() {
+        let pool = test_pool().await;
+
+        // 1. Recreate synced_files without table-level UNIQUE constraint to simulate dirty legacy state
+        sqlx::query("DROP TABLE IF EXISTS synced_files")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE synced_files (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                original_path TEXT NOT NULL,
+                server_path TEXT NOT NULL,
+                file_hash TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                uploaded_at TEXT NOT NULL,
+                uploaded_by TEXT NOT NULL,
+                checksum_verified INTEGER NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 2. Insert duplicate rows with identical (file_hash, server_path)
+        let hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let path = "/music/song.flac";
+        let id1 = uuid::Uuid::new_v4().to_string();
+        let id2 = uuid::Uuid::new_v4().to_string();
+        let id3 = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO synced_files (id, filename, original_path, server_path, file_hash, file_size, uploaded_at, uploaded_by)
+             VALUES (?, 'song.flac', '/music/song.flac', ?, ?, 100, ?, 'user1')"
+        )
+        .bind(&id1)
+        .bind(path)
+        .bind(hash)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO synced_files (id, filename, original_path, server_path, file_hash, file_size, uploaded_at, uploaded_by)
+             VALUES (?, 'song.flac', '/music/song.flac', ?, ?, 100, ?, 'user2')"
+        )
+        .bind(&id2)
+        .bind(path)
+        .bind(hash)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO synced_files (id, filename, original_path, server_path, file_hash, file_size, uploaded_at, uploaded_by)
+             VALUES (?, 'song.flac', '/music/song.flac', ?, ?, 100, ?, 'user3')"
+        )
+        .bind(&id3)
+        .bind(path)
+        .bind(hash)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM synced_files")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count_before, 3);
+
+        // 3. Run migration 046
+        let mut tx = pool.begin().await.unwrap();
+        migration_046(&mut tx).await.unwrap();
+        tx.commit().await.unwrap();
+
+        // 4. Verify exactly 1 canonical row remains and unique index exists
+        let count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM synced_files")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count_after, 1);
+
+        let canonical_id: String = sqlx::query_scalar("SELECT id FROM synced_files")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(canonical_id, id1);
     }
 }
 

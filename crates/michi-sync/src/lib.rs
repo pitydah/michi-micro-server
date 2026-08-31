@@ -250,6 +250,7 @@ pub struct SyncRecoveryReport {
 pub struct SyncRuntimeConfig {
     pub chunk_size: usize,
     pub finalize_lease_duration: std::time::Duration,
+    pub finalize_heartbeat_interval: std::time::Duration,
 }
 
 impl Default for SyncRuntimeConfig {
@@ -257,6 +258,7 @@ impl Default for SyncRuntimeConfig {
         Self {
             chunk_size: 1024 * 1024,
             finalize_lease_duration: std::time::Duration::from_secs(30),
+            finalize_heartbeat_interval: std::time::Duration::from_secs(10),
         }
     }
 }
@@ -469,6 +471,7 @@ impl SyncManager {
             SyncRuntimeConfig {
                 chunk_size: chunk_size.max(1),
                 finalize_lease_duration: std::time::Duration::from_secs(30),
+                finalize_heartbeat_interval: std::time::Duration::from_secs(10),
             },
         )
     }
@@ -500,20 +503,44 @@ impl SyncManager {
         self.process_epoch
     }
 
-    pub async fn calculate_file_hash<P: AsRef<Path>>(&self, path: P) -> Result<String, SyncError> {
-        self.calculate_file_hash_with_heartbeat(path, None).await
+    pub fn spawn_finalization_heartbeat(
+        &self,
+        file_id: Uuid,
+        token: String,
+    ) -> (
+        tokio_util::sync::CancellationToken,
+        tokio::task::JoinHandle<Result<(), SyncError>>,
+    ) {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_child = cancel.clone();
+        let manager = self.clone();
+        let interval_duration = self
+            .runtime_config
+            .finalize_heartbeat_interval
+            .max(std::time::Duration::from_millis(10));
+
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval_duration);
+            ticker.tick().await;
+            loop {
+                tokio::select! {
+                    _ = cancel_child.cancelled() => {
+                        return Ok(());
+                    }
+                    _ = ticker.tick() => {
+                        manager.renew_finalization_lease(file_id, &token).await?;
+                    }
+                }
+            }
+        });
+
+        (cancel, handle)
     }
 
-    pub async fn calculate_file_hash_with_heartbeat<P: AsRef<Path>>(
-        &self,
-        path: P,
-        heartbeat: Option<(Uuid, &str)>,
-    ) -> Result<String, SyncError> {
+    pub async fn calculate_file_hash<P: AsRef<Path>>(&self, path: P) -> Result<String, SyncError> {
         let mut file = File::open(path.as_ref()).await?;
         let mut hasher = Sha256::new();
         let mut buffer = vec![0u8; self.runtime_config.chunk_size.min(1024 * 1024)];
-        let mut bytes_since_heartbeat: usize = 0;
-        const HEARTBEAT_INTERVAL_BYTES: usize = 4 * 1024 * 1024; // 4MB
 
         loop {
             let bytes_read = file.read(&mut buffer).await?;
@@ -521,18 +548,6 @@ impl SyncManager {
                 break;
             }
             hasher.update(&buffer[..bytes_read]);
-            bytes_since_heartbeat = bytes_since_heartbeat.saturating_add(bytes_read);
-
-            if let Some((fid, tok)) = heartbeat {
-                if bytes_since_heartbeat >= HEARTBEAT_INTERVAL_BYTES {
-                    self.renew_finalization_lease(fid, tok).await?;
-                    bytes_since_heartbeat = 0;
-                }
-            }
-        }
-
-        if let Some((fid, tok)) = heartbeat {
-            self.renew_finalization_lease(fid, tok).await?;
         }
 
         Ok(format!("{:x}", hasher.finalize()))
@@ -1327,6 +1342,10 @@ impl SyncManager {
             }
         }
 
+        // 2. Spawn time-based finalization lease heartbeat during disk & hashing operations
+        let (heartbeat_cancel, heartbeat_handle) =
+            self.spawn_finalization_heartbeat(file_id, owner_token.clone());
+
         // 2. Verify DB contains all chunks
         let db_chunks = sqlx::query_as::<_, (i64,)>(
             "SELECT chunk_index FROM sync_upload_chunks WHERE file_id = ?",
@@ -1338,6 +1357,8 @@ impl SyncManager {
         let db_chunk_set: HashSet<u32> = db_chunks.into_iter().map(|(idx,)| idx as u32).collect();
         for expected_idx in 0..meta.total_chunks {
             if !db_chunk_set.contains(&expected_idx) {
+                heartbeat_cancel.cancel();
+                let _ = heartbeat_handle.await;
                 let err_msg = format!(
                     "cannot finalize: missing chunk index {expected_idx} in persistent storage"
                 );
@@ -1357,9 +1378,6 @@ impl SyncManager {
             }
         }
 
-        // Renew lease before disk operations
-        self.renew_finalization_lease(file_id, &owner_token).await?;
-
         // 3. Verify physical staging file `<uuid>.part` or recovered `<uuid>`
         let part_file_path = self.upload_dir.join(format!("{file_id}.part"));
         let final_file_path = self.upload_dir.join(file_id.to_string());
@@ -1369,6 +1387,8 @@ impl SyncManager {
         } else if tokio::fs::metadata(&final_file_path).await.is_ok() {
             final_file_path.clone()
         } else {
+            heartbeat_cancel.cancel();
+            let _ = heartbeat_handle.await;
             let err_msg = format!(
                 "neither staging file {part_file_path:?} nor final file {final_file_path:?} exists on disk"
             );
@@ -1387,6 +1407,8 @@ impl SyncManager {
         let actual_size = tokio::fs::metadata(&target_file_to_verify).await?.len() as i64;
 
         if actual_size != meta.file_size {
+            heartbeat_cancel.cancel();
+            let _ = heartbeat_handle.await;
             warn!(
                 "File size mismatch for {}: expected {}, got {}",
                 file_id, meta.file_size, actual_size
@@ -1410,14 +1432,19 @@ impl SyncManager {
             });
         }
 
-        // 4. Verify whole-file SHA-256 with periodic lease renewal
-        let computed_hash = self
-            .calculate_file_hash_with_heartbeat(
-                &target_file_to_verify,
-                Some((file_id, &owner_token)),
-            )
-            .await?;
+        // 4. Verify whole-file SHA-256 with concurrent time heartbeat
+        let computed_hash = match self.calculate_file_hash(&target_file_to_verify).await {
+            Ok(h) => h,
+            Err(e) => {
+                heartbeat_cancel.cancel();
+                let _ = heartbeat_handle.await;
+                return Err(e);
+            }
+        };
+
         if computed_hash != meta.expected_hash {
+            heartbeat_cancel.cancel();
+            let _ = heartbeat_handle.await;
             warn!(
                 "Hash mismatch for {}: expected {}, got {}",
                 file_id, meta.expected_hash, computed_hash
@@ -1441,29 +1468,57 @@ impl SyncManager {
         }
 
         // Fencing check before promote
-        self.assert_finalization_owner(file_id, &owner_token)
-            .await?;
+        if let Err(e) = self.assert_finalization_owner(file_id, &owner_token).await {
+            heartbeat_cancel.cancel();
+            let _ = heartbeat_handle.await;
+            return Err(e);
+        }
 
         // 5. Atomic rename staging file to final file if still in .part staging
         if target_file_to_verify == part_file_path {
-            tokio::fs::rename(&part_file_path, &final_file_path).await?;
+            if let Err(e) = tokio::fs::rename(&part_file_path, &final_file_path).await {
+                heartbeat_cancel.cancel();
+                let _ = heartbeat_handle.await;
+                return Err(e.into());
+            }
         }
 
         // Fencing check before register
-        self.assert_finalization_owner(file_id, &owner_token)
-            .await?;
+        if let Err(e) = self.assert_finalization_owner(file_id, &owner_token).await {
+            heartbeat_cancel.cancel();
+            let _ = heartbeat_handle.await;
+            return Err(e);
+        }
 
         // 6. Idempotent registration in synced_files
         let server_path = final_file_path.to_string_lossy().to_string();
-        self.register_uploaded_file(
-            meta.filename.clone(),
-            meta.original_path.clone(),
-            server_path,
-            meta.expected_hash.clone(),
-            meta.file_size,
-            meta.uploaded_by.clone(),
-        )
-        .await?;
+        if let Err(e) = self
+            .register_uploaded_file(
+                meta.filename.clone(),
+                meta.original_path.clone(),
+                server_path,
+                meta.expected_hash.clone(),
+                meta.file_size,
+                meta.uploaded_by.clone(),
+            )
+            .await
+        {
+            heartbeat_cancel.cancel();
+            let _ = heartbeat_handle.await;
+            return Err(e);
+        }
+
+        // Stop heartbeat before final completion marker
+        heartbeat_cancel.cancel();
+        let heartbeat_res = match heartbeat_handle.await {
+            Ok(res) => res,
+            Err(_) => Ok(()),
+        };
+        if let Err(hb_err) = heartbeat_res {
+            if matches!(hb_err, SyncError::FinalizationOwnershipLost(_)) {
+                return Err(hb_err);
+            }
+        }
 
         // 7. Update upload session status to completed using fencing token
         self.mark_upload_completed(file_id, &owner_token).await?;
@@ -1617,7 +1672,16 @@ impl SyncManager {
     }
 
     pub async fn get_playback_state(&self) -> Result<PlaybackState, SyncError> {
-        let row = sqlx::query_as::<_, (String, String, bool, f64, String)>(
+        let row = sqlx::query_as::<
+            _,
+            (
+                Option<String>,
+                Option<i64>,
+                Option<bool>,
+                Option<f64>,
+                Option<String>,
+            ),
+        >(
             "SELECT current_track_id, position_ms, playing, volume, updated_at
              FROM playback_sessions ORDER BY updated_at DESC LIMIT 1",
         )
@@ -1625,20 +1689,51 @@ impl SyncManager {
         .await?;
 
         match row {
-            Some((tid, pos, playing, vol, updated)) => Ok(PlaybackState {
-                track_id: Some(Uuid::parse_str(&tid).unwrap_or_default()),
-                position_ms: pos.parse().unwrap_or(0),
-                playing,
-                volume: vol,
-                updated_at: DateTime::parse_from_rfc3339(&updated)
-                    .map(|d| d.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now()),
-                playlist_id: None,
-                queue_position: None,
-                device_id: Some("server".into()),
-                shuffle: false,
-                repeat: "none".into(),
-            }),
+            Some((tid_opt, pos_opt, playing_opt, vol_opt, updated_opt)) => {
+                let track_id = match tid_opt {
+                    Some(tid) if !tid.trim().is_empty() => {
+                        Some(Uuid::parse_str(&tid).map_err(|e| {
+                            SyncError::InvalidPersistedState(format!(
+                                "invalid track UUID '{tid}': {e}"
+                            ))
+                        })?)
+                    }
+                    _ => None,
+                };
+                let position_ms = match pos_opt {
+                    Some(pos) => u64::try_from(pos).map_err(|_| {
+                        SyncError::InvalidPersistedState(format!(
+                            "negative playback position '{pos}'"
+                        ))
+                    })?,
+                    None => 0,
+                };
+                let playing = playing_opt.unwrap_or(false);
+                let volume = vol_opt.unwrap_or(0.8);
+                let updated_at = match updated_opt {
+                    Some(s) => DateTime::parse_from_rfc3339(&s)
+                        .map(|d| d.with_timezone(&Utc))
+                        .map_err(|e| {
+                            SyncError::InvalidPersistedState(format!(
+                                "invalid rfc3339 timestamp '{s}': {e}"
+                            ))
+                        })?,
+                    None => Utc::now(),
+                };
+
+                Ok(PlaybackState {
+                    track_id,
+                    position_ms,
+                    playing,
+                    volume,
+                    updated_at,
+                    playlist_id: None,
+                    queue_position: None,
+                    device_id: Some("server".into()),
+                    shuffle: false,
+                    repeat: "none".into(),
+                })
+            }
             None => Ok(PlaybackState::default()),
         }
     }
@@ -1742,6 +1837,26 @@ mod tests {
                 size INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (file_id, chunk_index)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS playback_sessions (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL,
+                queue_state TEXT NOT NULL DEFAULT '[]',
+                current_index INTEGER NOT NULL DEFAULT 0,
+                current_track_id TEXT,
+                position_ms INTEGER NOT NULL DEFAULT 0,
+                playing INTEGER NOT NULL DEFAULT 0,
+                repeat_mode TEXT NOT NULL DEFAULT 'none',
+                shuffle INTEGER NOT NULL DEFAULT 0,
+                volume REAL NOT NULL DEFAULT 0.8,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )",
         )
         .execute(&pool)
@@ -2749,6 +2864,7 @@ mod tests {
             SyncRuntimeConfig {
                 chunk_size: 5,
                 finalize_lease_duration: std::time::Duration::from_millis(200),
+                finalize_heartbeat_interval: std::time::Duration::from_millis(50),
             },
         );
 
@@ -2797,5 +2913,94 @@ mod tests {
 
         assert_eq!(row.0, "finalizing");
         assert_eq!(row.1, Some(token_a.to_string()));
+    }
+
+    // ── Test T: Time heartbeat maintains ownership through long operations ─
+    #[tokio::test]
+    async fn test_falsification_t_time_heartbeat_keeps_long_operation_alive() {
+        let pool = create_test_db().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let upload_path = temp_dir.path().to_path_buf();
+        let sync_mgr = SyncManager::new_with_config(
+            pool.clone(),
+            upload_path,
+            SyncRuntimeConfig {
+                chunk_size: 5,
+                finalize_lease_duration: std::time::Duration::from_millis(150),
+                finalize_heartbeat_interval: std::time::Duration::from_millis(30),
+            },
+        );
+
+        let file_id = Uuid::new_v4();
+        let token = "token-long-worker".to_string();
+        let now_dt = Utc::now();
+        let now = now_dt.to_rfc3339();
+        let lease_until = (now_dt + chrono::Duration::milliseconds(150)).to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO sync_uploads (id, filename, original_path, file_size, expected_hash, uploaded_by, total_chunks, chunk_size, status, finalize_token, finalize_owner_epoch, finalize_started_at, finalize_lease_until, finalize_attempts, created_at, updated_at)
+             VALUES (?, 'long_op.bin', '/tmp/long_op.bin', 5, 'hash', 'tester', 1, 5, 'finalizing', ?, ?, ?, ?, 1, ?, ?)"
+        )
+        .bind(file_id.to_string())
+        .bind(&token)
+        .bind(sync_mgr.process_epoch().to_string())
+        .bind(&now)
+        .bind(&lease_until)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Spawn time heartbeat
+        let (cancel, handle) = sync_mgr.spawn_finalization_heartbeat(file_id, token.clone());
+
+        // Sleep 350ms (more than 2x the 150ms lease duration)
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+
+        // Cancel heartbeat
+        cancel.cancel();
+        let res = handle.await.unwrap();
+        assert!(res.is_ok());
+
+        // Check that lease in DB was continuously renewed and is still in the future
+        let row = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            "SELECT status, finalize_token, finalize_lease_until FROM sync_uploads WHERE id = ?",
+        )
+        .bind(file_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.0, "finalizing");
+        assert_eq!(row.1, Some(token));
+        let renewed_until = DateTime::parse_from_rfc3339(row.2.as_ref().unwrap()).unwrap();
+        assert!(renewed_until.with_timezone(&Utc) > Utc::now());
+    }
+
+    // ── Test U: Corrupt persisted playback state fails closed ────────
+    #[tokio::test]
+    async fn test_falsification_u_corrupt_persisted_playback_state_fails_closed() {
+        let pool = create_test_db().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let upload_path = temp_dir.path().to_path_buf();
+        let sync_mgr = SyncManager::new(pool.clone(), upload_path);
+
+        // Insert corrupt track UUID into playback_sessions
+        let sess_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO playback_sessions (id, device_id, current_track_id, position_ms, playing, volume, created_at, updated_at)
+             VALUES (?, 'server', 'NOT-A-VALID-UUID', 1000, 0, 0.8, ?, ?)"
+        )
+        .bind(&sess_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let err = sync_mgr.get_playback_state().await.unwrap_err();
+        assert!(matches!(err, SyncError::InvalidPersistedState(_)));
     }
 }

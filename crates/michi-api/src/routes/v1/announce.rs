@@ -43,15 +43,13 @@ pub async fn announce_handler(
         })
     };
 
-    // Pause current playback
-    {
-        let mut ps = state.playback_state.write().await;
-        if mode == "pause" {
-            ps.playing = false;
-        }
-        if let Some(v) = body.volume {
-            ps.volume = v;
-        }
+    // Pause current playback via real engine
+    if mode == "pause" {
+        let _ = state.playback_engine.pause().await;
+    }
+    if let Some(v) = body.volume {
+        let vol_u8 = (v * 100.0).round().clamp(0.0, 100.0) as u8;
+        let _ = state.playback_engine.set_volume(vol_u8).await;
     }
 
     Ok(Json(serde_json::json!({

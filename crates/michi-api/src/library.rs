@@ -6,6 +6,7 @@ use axum::{
     Json,
 };
 use chrono::Utc;
+use michi_playback::TrackResolver;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use utoipa::ToSchema;
@@ -871,28 +872,69 @@ pub async fn set_playback_state_handler(
     State(state): State<AppState>,
     Json(input): Json<SetPlaybackState>,
 ) -> Result<Json<michi_sync::PlaybackState>, (StatusCode, Json<ErrorResponse>)> {
-    let new_state = michi_sync::PlaybackState {
-        track_id: input.track_id,
-        position_ms: input.position_ms,
-        playing: input.playing,
-        volume: input.volume.unwrap_or(0.8),
+    if let Some(vol) = input.volume {
+        let vol_u8 = (vol * 100.0).round().clamp(0.0, 100.0) as u8;
+        let _ = state.playback_engine.set_volume(vol_u8).await;
+    }
+    if let Some(tid) = input.track_id {
+        let resolver = michi_playback::SqliteTrackResolver::new(
+            state.db.clone(),
+            state.config.music_paths.clone(),
+        );
+        if let Ok(track) = resolver.get_track(tid).await {
+            let _ = state
+                .playback_engine
+                .load_track(track, input.position_ms)
+                .await;
+        }
+    }
+    if input.playing {
+        let selection_opt = state.playback_output_selection.read().await.clone();
+        if let Some(selection) = selection_opt {
+            if let Ok(plan) = crate::output::resolve_output(&selection, &state).await {
+                if let Some(tid) = input.track_id {
+                    let resolver = michi_playback::SqliteTrackResolver::new(
+                        state.db.clone(),
+                        state.config.music_paths.clone(),
+                    );
+                    if let Ok(track) = resolver.get_track(tid).await {
+                        let _ = state
+                            .playback_engine
+                            .play(track, plan.sinks, plan.description, input.position_ms)
+                            .await;
+                    }
+                }
+            }
+        }
+    } else {
+        let _ = state.playback_engine.pause().await;
+    }
+
+    let snap = state.playback_engine.snapshot().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                status: "ENGINE_ERROR".into(),
+                message: e.to_string(),
+            }),
+        )
+    })?;
+
+    let out_state = michi_sync::PlaybackState {
+        track_id: snap.track_id,
+        position_ms: snap.position_ms,
+        playing: snap.is_playing(),
+        volume: (snap.volume as f64) / 100.0,
         updated_at: Utc::now(),
         playlist_id: None,
         queue_position: None,
         device_id: Some("server".into()),
-        shuffle: false,
-        repeat: "off".into(),
+        shuffle: snap.shuffle,
+        repeat: snap.repeat.as_str().into(),
     };
 
-    {
-        let mut current = state.playback_state.write().await;
-        *current = new_state.clone();
-    }
-
-    // Broadcast to sync peers
-    let _ = state.sync_tx.send(new_state.clone().into());
-
-    Ok(Json(new_state))
+    let _ = state.sync_tx.send(out_state.clone().into());
+    Ok(Json(out_state))
 }
 
 #[utoipa::path(

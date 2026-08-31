@@ -4,6 +4,7 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
+use michi_playback::TrackResolver;
 use tracing::info;
 
 use crate::AppState;
@@ -130,28 +131,22 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                         transferred_at: chrono::Utc::now(),
                                     });
 
-                                // Update local playback state with received position
+                                // Update local playback engine with received position
                                 if let Some(tid) = session.track_id {
-                                    let new_state = michi_sync::PlaybackState {
-                                        track_id: Some(tid),
-                                        position_ms: session.position_ms,
-                                        playing: session.playing,
-                                        volume: session.volume,
-                                        updated_at: chrono::Utc::now(),
-                                        playlist_id: session.playlist_id,
-                                        queue_position: session.queue_position,
-                                        device_id: Some("server".into()),
-                                        shuffle: false,
-                                        repeat: "off".into(),
-                                    };
-                                    {
-                                        let mut current = state_clone.playback_state.write().await;
-                                        *current = new_state;
-                                    }
-                                    info!(
-                                        "handoff: takeover track={} at position={}",
-                                        tid, session.position_ms
+                                    let resolver = michi_playback::SqliteTrackResolver::new(
+                                        state_clone.db.clone(),
+                                        state_clone.config.music_paths.clone(),
                                     );
+                                    if let Ok(track) = resolver.get_track(tid).await {
+                                        let _ = state_clone
+                                            .playback_engine
+                                            .load_track(track, session.position_ms)
+                                            .await;
+                                        info!(
+                                            "handoff: takeover track={} at position={}",
+                                            tid, session.position_ms
+                                        );
+                                    }
                                 }
 
                                 let accept = michi_sync::SyncMessage::handoff_accept(session);

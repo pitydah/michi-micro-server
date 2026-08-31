@@ -193,40 +193,7 @@ def main():
         poll_until(check_vol, timeout=5.0, desc=f"volume set to {target_vol}")
     test("Incoming MQTT Volume Set (michi/volume_set/cmd)", test_command_volume_set)
 
-    # 5. Test Pause and Stop via MQTT with SQLite verification
-    def test_command_pause_stop():
-        http_post(f"{admin_url}/api/mqtt/publish", {
-            "topic": "michi/pause/cmd",
-            "payload": ""
-        })
-        
-        def check_pause():
-            st = http_get(f"{server_url}/api/v1/playback/state")
-            return st.get("playing") is False
-        poll_until(check_pause, timeout=3.0, desc="playback paused")
-
-        http_post(f"{admin_url}/api/mqtt/publish", {
-            "topic": "michi/stop/cmd",
-            "payload": ""
-        })
-        
-        def check_stop():
-            st = http_get(f"{server_url}/api/v1/playback/state")
-            return st.get("playing") is False and st.get("position_ms") == 0
-        poll_until(check_stop, timeout=3.0, desc="playback stopped")
-
-        # Verify DB directly with retry helper
-        sess = wait_for_db_session(
-            db_path,
-            lambda s: s["playing"] is False and s["position_ms"] == 0,
-            timeout=5.0,
-            desc="persisted session reflecting playing=false and position_ms=0"
-        )
-        assert sess["playing"] is False, f"persisted session must reflect playing=false, got {sess}"
-        assert sess["position_ms"] == 0, f"persisted session must reflect position_ms=0, got {sess}"
-    test("Incoming MQTT Pause & Stop Commands with Direct SQLite Verification", test_command_pause_stop)
-
-    # 6. Library Scan and Queue Navigation (Next / Previous) with direct SQLite validation
+    # 5. Library Scan and Queue Navigation (Next / Previous) with direct SQLite validation
     def test_command_next_previous():
         # Trigger scan and handle response
         scan_resp = http_post(f"{server_url}/api/v1/library/scan")
@@ -299,6 +266,60 @@ def main():
         assert sess_a["current_index"] == 0, f"expected SQLite current_index 0, got {sess_a['current_index']}"
 
     test("Library Scan & MQTT Next/Previous Navigation with Direct SQLite Verification", test_command_next_previous)
+
+    # 6. Test Pause and Stop via MQTT with Non-Vacuous Position and Direct SQLite Verification
+    def test_command_pause_stop():
+        # Set non-zero position precondition (5000 ms)
+        http_post(f"{server_url}/api/v1/playback/seek", {"position_ms": 5000})
+
+        def check_seek_precondition():
+            st = http_get(f"{server_url}/api/v1/playback/state")
+            return st.get("position_ms") == 5000
+        poll_until(check_seek_precondition, timeout=3.0, desc="precondition: position_ms = 5000")
+
+        # Issue Pause via MQTT
+        http_post(f"{admin_url}/api/mqtt/publish", {
+            "topic": "michi/pause/cmd",
+            "payload": ""
+        })
+
+        def check_pause():
+            st = http_get(f"{server_url}/api/v1/playback/state")
+            return st.get("playing") is False and st.get("position_ms") == 5000
+        poll_until(check_pause, timeout=3.0, desc="playback paused preserving non-zero position")
+
+        # Verify DB directly with retry helper
+        sess_paused = wait_for_db_session(
+            db_path,
+            lambda s: s["playing"] is False and s["position_ms"] == 5000,
+            timeout=5.0,
+            desc="persisted session reflecting playing=false and position_ms=5000"
+        )
+        assert sess_paused["playing"] is False, f"persisted session must reflect playing=false, got {sess_paused}"
+        assert sess_paused["position_ms"] == 5000, f"persisted session must reflect position_ms=5000, got {sess_paused}"
+
+        # Issue Stop via MQTT -> position must transition strictly to 0
+        http_post(f"{admin_url}/api/mqtt/publish", {
+            "topic": "michi/stop/cmd",
+            "payload": ""
+        })
+
+        def check_stop():
+            st = http_get(f"{server_url}/api/v1/playback/state")
+            return st.get("playing") is False and st.get("position_ms") == 0
+        poll_until(check_stop, timeout=3.0, desc="playback stopped transitioning to position 0")
+
+        # Verify DB directly with retry helper
+        sess_stopped = wait_for_db_session(
+            db_path,
+            lambda s: s["playing"] is False and s["position_ms"] == 0,
+            timeout=5.0,
+            desc="persisted session reflecting playing=false and position_ms=0"
+        )
+        assert sess_stopped["playing"] is False, f"persisted session must reflect playing=false, got {sess_stopped}"
+        assert sess_stopped["position_ms"] == 0, f"persisted session must reflect position_ms=0, got {sess_stopped}"
+
+    test("Incoming MQTT Pause & Stop Commands with Direct SQLite Verification", test_command_pause_stop)
 
     # 7. Broker Disconnect, Auto-Reconnect & Post-Reconnect Command Execution
     def test_broker_disconnect_reconnect():

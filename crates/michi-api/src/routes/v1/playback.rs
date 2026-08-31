@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use chrono::Utc;
+use michi_core::Track;
 use michi_playback::{PlaybackLifecycle, RepeatMode, TrackResolver};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -277,7 +277,16 @@ pub async fn playback_control_handler(
                 .await
                 .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
 
-                row.and_then(|s| Uuid::parse_str(&s).ok())
+                match row {
+                    Some(raw) => Some(Uuid::parse_str(&raw).map_err(|e| {
+                        v1_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "DATABASE_INVARIANT_VIOLATION",
+                            &format!("invalid persisted queue track UUID '{raw}': {e}"),
+                        )
+                    })?),
+                    None => None,
+                }
             };
 
             let track_id = match body.track_id.or(first_queue_track) {
@@ -917,6 +926,59 @@ pub async fn get_playback_session_handler(
     })))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum RestoreError {
+    CurrentTrackMissing { track_id: Uuid },
+    InvalidCurrentIndex { index: i32, queue_len: usize },
+    EmptyQueue,
+}
+
+impl std::fmt::Display for RestoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CurrentTrackMissing { track_id } => {
+                write!(
+                    f,
+                    "persisted current track {track_id} is missing from validated queue"
+                )
+            }
+            Self::InvalidCurrentIndex { index, queue_len } => {
+                write!(
+                    f,
+                    "persisted current index {index} is out of bounds for queue length {queue_len}"
+                )
+            }
+            Self::EmptyQueue => write!(f, "no tracks available in restored queue"),
+        }
+    }
+}
+
+impl std::error::Error for RestoreError {}
+
+pub fn resolve_restore_index(
+    tracks: &[Track],
+    current_track_id: Option<Uuid>,
+    persisted_index: i32,
+) -> Result<usize, RestoreError> {
+    if tracks.is_empty() {
+        return Err(RestoreError::EmptyQueue);
+    }
+    if let Some(cur_tid) = current_track_id {
+        tracks
+            .iter()
+            .position(|t| t.id == cur_tid)
+            .ok_or(RestoreError::CurrentTrackMissing { track_id: cur_tid })
+    } else {
+        if persisted_index < 0 || (persisted_index as usize) >= tracks.len() {
+            return Err(RestoreError::InvalidCurrentIndex {
+                index: persisted_index,
+                queue_len: tracks.len(),
+            });
+        }
+        Ok(persisted_index as usize)
+    }
+}
+
 pub async fn restore_playback_state_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -974,30 +1036,77 @@ pub async fn restore_playback_state_handler(
                 }
             }
 
-            let cur_idx = if let Some(ref cur_tid) = session.current_track_id {
-                tracks.iter().position(|t| t.id == *cur_tid).unwrap_or(0)
-            } else {
-                (session.current_index as usize).min(tracks.len().saturating_sub(1))
+            let cur_idx =
+                resolve_restore_index(&tracks, session.current_track_id, session.current_index)
+                    .map_err(|e| {
+                        v1_error(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            "INVALID_RESTORE_STATE",
+                            &e.to_string(),
+                        )
+                    })?;
+
+            state
+                .playback_engine
+                .set_queue(tracks.clone(), cur_idx, session.current_track_id)
+                .await
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "RUNTIME_SYNC_FAILED",
+                        &e.to_string(),
+                    )
+                })?;
+
+            // Restore volume, shuffle, repeat strictly to engine
+            let vol_u8 = (session.volume * 100.0).round().clamp(0.0, 100.0) as u8;
+            state
+                .playback_engine
+                .set_volume(vol_u8)
+                .await
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        e.error_code(),
+                        &e.to_string(),
+                    )
+                })?;
+            state
+                .playback_engine
+                .set_shuffle(session.shuffle)
+                .await
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        e.error_code(),
+                        &e.to_string(),
+                    )
+                })?;
+            let rep_mode = match session.repeat_mode.as_str() {
+                "one" => RepeatMode::One,
+                "all" => RepeatMode::All,
+                _ => RepeatMode::Off,
             };
+            state
+                .playback_engine
+                .set_repeat(rep_mode)
+                .await
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        e.error_code(),
+                        &e.to_string(),
+                    )
+                })?;
 
-            if !tracks.is_empty() {
+            if let Some(cur_track) = tracks.get(cur_idx) {
+                let pos_ms = cur_track
+                    .duration_ms
+                    .map(|d| session.position_ms.min(d))
+                    .unwrap_or(session.position_ms);
                 state
                     .playback_engine
-                    .set_queue(tracks.clone(), cur_idx, session.current_track_id)
-                    .await
-                    .map_err(|e| {
-                        v1_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "RUNTIME_SYNC_FAILED",
-                            &e.to_string(),
-                        )
-                    })?;
-
-                // Restore volume, shuffle, repeat strictly to engine
-                let vol_u8 = (session.volume * 100.0).round().clamp(0.0, 100.0) as u8;
-                state
-                    .playback_engine
-                    .set_volume(vol_u8)
+                    .load_track(cur_track.clone(), pos_ms)
                     .await
                     .map_err(|e| {
                         v1_error(
@@ -1006,51 +1115,6 @@ pub async fn restore_playback_state_handler(
                             &e.to_string(),
                         )
                     })?;
-                state
-                    .playback_engine
-                    .set_shuffle(session.shuffle)
-                    .await
-                    .map_err(|e| {
-                        v1_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            e.error_code(),
-                            &e.to_string(),
-                        )
-                    })?;
-                let rep_mode = match session.repeat_mode.as_str() {
-                    "one" => RepeatMode::One,
-                    "all" => RepeatMode::All,
-                    _ => RepeatMode::Off,
-                };
-                state
-                    .playback_engine
-                    .set_repeat(rep_mode)
-                    .await
-                    .map_err(|e| {
-                        v1_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            e.error_code(),
-                            &e.to_string(),
-                        )
-                    })?;
-
-                if let Some(cur_track) = tracks.get(cur_idx) {
-                    let pos_ms = cur_track
-                        .duration_ms
-                        .map(|d| session.position_ms.min(d))
-                        .unwrap_or(session.position_ms);
-                    state
-                        .playback_engine
-                        .load_track(cur_track.clone(), pos_ms)
-                        .await
-                        .map_err(|e| {
-                            v1_error(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                e.error_code(),
-                                &e.to_string(),
-                            )
-                        })?;
-                }
             }
 
             let snap = state.playback_engine.snapshot().await.map_err(|e| {
@@ -1060,18 +1124,6 @@ pub async fn restore_playback_state_handler(
                     &e.to_string(),
                 )
             })?;
-
-            // Sync projection from engine snapshot
-            {
-                let mut current = state.playback_state.write().await;
-                current.track_id = snap.track_id;
-                current.position_ms = snap.position_ms;
-                current.playing = false; // never auto-play on restore
-                current.volume = (snap.volume as f64) / 100.0;
-                current.shuffle = snap.shuffle;
-                current.repeat = snap.repeat.as_str().to_string();
-                current.updated_at = Utc::now();
-            }
 
             let mut updated = session;
             updated.restored = true;
@@ -1106,7 +1158,7 @@ pub async fn restore_playback_state_handler(
 
 pub fn auto_restore_playback_state(
     db: sqlx::SqlitePool,
-    playback_state: std::sync::Arc<tokio::sync::RwLock<michi_sync::PlaybackState>>,
+    _playback_state: std::sync::Arc<tokio::sync::RwLock<michi_sync::PlaybackState>>,
     playback_engine: michi_playback::PlaybackEngineHandle,
     music_paths: Vec<std::path::PathBuf>,
 ) {
@@ -1120,21 +1172,18 @@ pub fn auto_restore_playback_state(
                                 items.into_iter().map(|(id, _)| id).collect();
                             match validate_and_load_tracks(&db, &track_ids, &music_paths).await {
                                 Ok(tracks) => {
-                                    let cur_idx = if let Some(ref cur_tid) =
-                                        session.current_track_id
-                                    {
-                                        match tracks.iter().position(|t| t.id == *cur_tid) {
-                                            Some(idx) => idx,
-                                            None => {
-                                                tracing::warn!(
-                                                    "auto-restore: persisted track {} not in restored queue, skipping auto track selection",
-                                                    cur_tid
-                                                );
-                                                return;
-                                            }
+                                    let cur_idx = match resolve_restore_index(
+                                        &tracks,
+                                        session.current_track_id,
+                                        session.current_index,
+                                    ) {
+                                        Ok(idx) => idx,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "auto-restore: invalid restore state ({e}), skipping auto track selection"
+                                            );
+                                            return;
                                         }
-                                    } else {
-                                        0
                                     };
                                     if let Err(e) = playback_engine
                                         .set_queue(
@@ -1182,28 +1231,16 @@ pub fn auto_restore_playback_state(
                                             return;
                                         }
                                     }
-                                    if let Ok(snap) = playback_engine.snapshot().await {
-                                        let mut state = playback_state.write().await;
-                                        state.track_id = snap.track_id;
-                                        state.position_ms = snap.position_ms;
-                                        state.playing = false; // never auto-play on restart
-                                        state.volume = (snap.volume as f64) / 100.0;
-                                        state.shuffle = snap.shuffle;
-                                        state.repeat = snap.repeat.as_str().to_string();
-                                        state.updated_at = Utc::now();
-                                        drop(state);
 
-                                        let mut updated = session.clone();
-                                        updated.restored = true;
-                                        let _ =
-                                            michi_db::update_playback_session(&db, &updated).await;
+                                    let mut updated = session.clone();
+                                    updated.restored = true;
+                                    let _ = michi_db::update_playback_session(&db, &updated).await;
 
-                                        info!(
-                                            "restored {} queue items from session {}",
-                                            tracks.len(),
-                                            session.id
-                                        );
-                                    }
+                                    info!(
+                                        "restored {} queue items from session {}",
+                                        tracks.len(),
+                                        session.id
+                                    );
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -1261,6 +1298,21 @@ pub async fn handoff_handler(
         .await
         .map_err(|e| v1_error(StatusCode::NOT_FOUND, e.error_code(), &e.to_string()))?;
 
+    if let Some(vol_f64) = body.volume {
+        let vol_u8 = (vol_f64 * 100.0).round().clamp(0.0, 100.0) as u8;
+        state
+            .playback_engine
+            .set_volume(vol_u8)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    e.error_code(),
+                    &e.to_string(),
+                )
+            })?;
+    }
+
     if body.playing {
         let selection_opt = state.playback_output_selection.read().await.clone();
         let selection = selection_opt.ok_or_else(|| {
@@ -1300,25 +1352,13 @@ pub async fn handoff_handler(
             })?;
     }
 
-    let snap = state.playback_engine.snapshot().await.unwrap_or_default();
-
-    let new_state = michi_sync::PlaybackState {
-        track_id: Some(body.track_id),
-        position_ms: snap.position_ms,
-        playing: snap.is_playing(),
-        volume: body.volume.unwrap_or(0.8),
-        updated_at: Utc::now(),
-        playlist_id: body.playlist_id,
-        queue_position: body.queue_position,
-        device_id: Some("server".into()),
-        shuffle: snap.shuffle,
-        repeat: snap.repeat.as_str().into(),
-    };
-
-    {
-        let mut current = state.playback_state.write().await;
-        *current = new_state.clone();
-    }
+    let snap = state.playback_engine.snapshot().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ENGINE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     let from = body.from_device.unwrap_or_else(|| "unknown".into());
     let handoff_msg = michi_sync::SyncMessage::handoff_request(from.clone(), "server".into());

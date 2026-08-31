@@ -5225,3 +5225,126 @@ async fn test_v1_sync_resumable_chunk_upload_flow() {
     assert_eq!(prog0["progress"]["completed"], true);
     assert_eq!(prog0["status"], "completed");
 }
+
+#[test]
+fn test_falsification_resolve_restore_index_missing_track_fails_closed() {
+    use michi_api::routes::v1::playback::{resolve_restore_index, RestoreError};
+    use michi_core::{AudioFormat, Track};
+
+    let track_a = Track {
+        id: Uuid::new_v4(),
+        title: Some("A".into()),
+        artist: None,
+        album: None,
+        album_artist: None,
+        duration_ms: Some(1000),
+        file_path: "/music/a.flac".into(),
+        format: AudioFormat::Flac,
+        sample_rate: Some(44100),
+        bit_depth: Some(16),
+        channels: Some(2),
+        artwork_id: None,
+        genre: None,
+        year: None,
+        track_number: None,
+        disc_number: None,
+        content_hash: None,
+        file_size: None,
+        file_mtime_ns: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let track_b = Track {
+        id: Uuid::new_v4(),
+        title: Some("B".into()),
+        artist: None,
+        album: None,
+        album_artist: None,
+        duration_ms: Some(2000),
+        file_path: "/music/b.flac".into(),
+        format: AudioFormat::Flac,
+        sample_rate: Some(44100),
+        bit_depth: Some(16),
+        channels: Some(2),
+        artwork_id: None,
+        genre: None,
+        year: None,
+        track_number: None,
+        disc_number: None,
+        content_hash: None,
+        file_size: None,
+        file_mtime_ns: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    let tracks = vec![track_a.clone(), track_b.clone()];
+    let missing_id = Uuid::new_v4();
+
+    // 1. Missing current_track_id must return RestoreError::CurrentTrackMissing, NEVER 0
+    let err = resolve_restore_index(&tracks, Some(missing_id), 0).unwrap_err();
+    assert_eq!(
+        err,
+        RestoreError::CurrentTrackMissing {
+            track_id: missing_id
+        }
+    );
+
+    // 2. Existing current_track_id resolves to exact position
+    let idx_b = resolve_restore_index(&tracks, Some(track_b.id), 0).unwrap();
+    assert_eq!(idx_b, 1);
+
+    // 3. No current_track_id but out-of-bounds index fails closed
+    let err_oob = resolve_restore_index(&tracks, None, 5).unwrap_err();
+    assert_eq!(
+        err_oob,
+        RestoreError::InvalidCurrentIndex {
+            index: 5,
+            queue_len: 2
+        }
+    );
+
+    // 4. Valid index without current_track_id succeeds
+    let idx_0 = resolve_restore_index(&tracks, None, 0).unwrap();
+    assert_eq!(idx_0, 0);
+}
+
+#[tokio::test]
+async fn test_falsification_handoff_fails_closed_without_output_when_playing() {
+    let (app, pool) = make_app().await;
+    let tid = seed_track(&pool, "/music/handoff_test.flac", "Handoff Song").await;
+
+    let body = serde_json::json!({
+        "track_id": tid,
+        "position_ms": 1234,
+        "playing": true,
+        "volume": 0.8
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/handoff")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Must fail with 409 Conflict because no output target is selected
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let text = body_text(resp).await;
+    assert!(text.contains("OUTPUT_REQUIRED"));
+}

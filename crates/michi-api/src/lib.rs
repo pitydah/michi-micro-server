@@ -85,6 +85,8 @@ pub struct AppState {
     pub pairing_sessions_display: Arc<RwLock<HashMap<String, String>>>,
     /// Real autonomous playback engine handle.
     pub playback_engine: michi_playback::PlaybackEngineHandle,
+    /// Playback projection coordinator for authorative single-writer persistence.
+    pub playback_projection: playback_projection::PlaybackProjectionCoordinator,
     /// Observable health metrics of the playback projection coordinator.
     pub playback_projection_health: Arc<RwLock<PlaybackProjectionHealth>>,
     /// Explicit output target selection (Receiver, RoomGroup, or Chain).
@@ -99,13 +101,27 @@ impl AppState {
     }
 
     pub async fn shutdown_and_wait(&self, timeout: Duration) {
-        self.shutdown_token.cancel();
+        // 1. Explicit bounded projection flush while PlaybackEngine is active
+        let flush_timeout = Duration::from_millis(1500).min(timeout);
+        if let Err(e) =
+            tokio::time::timeout(flush_timeout, self.playback_projection.flush_shutdown()).await
+        {
+            tracing::warn!("shutdown playback projection flush timed out: {e:?}");
+        }
+        // 2. Shutdown PlaybackEngine cleanly
         self.playback_engine.shutdown().await;
+        // 3. Cancel remaining background tasks
+        self.shutdown_token.cancel();
+        // 4. Join all tracked tasks
         let handles: Vec<tokio::task::JoinHandle<()>> =
             std::mem::take(&mut *self.task_handles.lock().unwrap());
         for handle in handles {
             let _ = tokio::time::timeout(timeout, handle).await;
         }
+        // 5. Explicit WAL checkpoint
+        let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&self.db)
+            .await;
     }
 
     pub async fn bootstrap_runtime(&self) -> Result<(), String> {
@@ -201,23 +217,34 @@ impl AppState {
             }
         }
 
-        tracing::info!("running sync upload startup crash recovery scan");
-        match self.sync_manager.recover_incomplete_uploads().await {
-            Ok(report) => {
-                tracing::info!(
-                    candidates = report.candidates,
-                    completed = report.completed,
-                    deferred = report.deferred,
-                    terminal = report.terminal_failures,
-                    transient = report.transient_failures,
-                    invalid = report.invalid_rows,
-                    "sync upload startup crash recovery completed"
-                );
+        tracing::info!("spawning sync upload startup crash recovery scan in background");
+        let sync_mgr = self.sync_manager.clone();
+        let shutdown_tok = self.shutdown_token.clone();
+        self.track_task(tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown_tok.cancelled() => {
+                    tracing::info!("sync startup recovery aborted by shutdown");
+                }
+                res = sync_mgr.recover_incomplete_uploads() => {
+                    match res {
+                        Ok(report) => {
+                            tracing::info!(
+                                candidates = report.candidates,
+                                completed = report.completed,
+                                deferred = report.deferred,
+                                terminal = report.terminal_failures,
+                                transient = report.transient_failures,
+                                invalid = report.invalid_rows,
+                                "sync upload startup crash recovery completed"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("sync upload startup recovery scan encountered error: {}", e);
+                        }
+                    }
+                }
             }
-            Err(e) => {
-                tracing::warn!("sync upload startup recovery scan encountered error: {}", e);
-            }
-        }
+        }));
 
         Ok(())
     }
@@ -328,7 +355,7 @@ impl AppState {
                 playback_state.clone(),
                 playback_engine.clone(),
             );
-        let projector_handle = playback_projector.spawn(shutdown_token.clone());
+        let projector_handle = playback_projector.clone().spawn(shutdown_token.clone());
         task_handles.lock().unwrap().push(projector_handle);
 
         let state = Self {
@@ -356,6 +383,7 @@ impl AppState {
             pairing_display,
             pairing_sessions_display,
             playback_engine,
+            playback_projection: playback_projector,
             playback_projection_health,
             playback_output_selection,
             receiver_credential_store,
@@ -395,13 +423,19 @@ impl AppState {
                 tokio::select! {
                     _ = maint_shutdown.cancelled() => break,
                     _ = hourly.tick() => {
-                        let _ = michi_db::run_hourly_maintenance(&maintenance_db).await;
+                        if let Err(e) = michi_db::run_hourly_maintenance(&maintenance_db).await {
+                            tracing::warn!(error = %e, "hourly database maintenance failed");
+                        }
                     }
                     _ = daily.tick() => {
-                        let _ = michi_db::run_daily_maintenance(&maintenance_db).await;
+                        if let Err(e) = michi_db::run_daily_maintenance(&maintenance_db).await {
+                            tracing::warn!(error = %e, "daily database maintenance failed");
+                        }
                     }
                     _ = weekly.tick() => {
-                        let _ = michi_db::run_weekly_maintenance(&maintenance_db).await;
+                        if let Err(e) = michi_db::run_weekly_maintenance(&maintenance_db).await {
+                            tracing::warn!(error = %e, "weekly database maintenance failed");
+                        }
                     }
                 }
             }

@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use michi_playback::{EngineEvent, EngineSnapshot, PlaybackEngineHandle, PlaybackLifecycle};
@@ -7,7 +6,7 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Category of playback projection failure.
@@ -91,6 +90,7 @@ impl std::error::Error for ProjectionError {}
 
 /// Cohesive coordinator responsible for projecting PlaybackEngine runtime events
 /// into authoritative in-memory state and persistent SQLite PlaybackSession.
+#[derive(Debug, Clone)]
 pub struct PlaybackProjectionCoordinator {
     db: SqlitePool,
     legacy_playback_state: Arc<RwLock<michi_sync::PlaybackState>>,
@@ -145,18 +145,7 @@ impl PlaybackProjectionCoordinator {
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => {
-                        let c = coordinator.clone();
-                        match tokio::time::timeout(Duration::from_millis(500), async move {
-                            c.flush_shutdown().await;
-                        }).await {
-                            Ok(_) => {}
-                            Err(_) => {
-                                coordinator.record_failure(
-                                    ProjectionFailureKind::ShutdownFlush,
-                                    "shutdown flush timed out",
-                                ).await;
-                            }
-                        }
+                        debug!("playback projection task exiting on shutdown cancellation");
                         break;
                     }
                     event_res = event_rx.recv() => {
