@@ -160,6 +160,7 @@ pub struct DiagnosticsReport {
     pub receiver: ReceiverStatus,
     pub player_compatibility: PlayerCompatibility,
     pub config: ConfigStatus,
+    pub homeassistant: michi_homeassistant::HaRuntimeStatus,
     pub system: SystemStatus,
     pub warnings: Vec<String>,
 }
@@ -542,6 +543,14 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
             registered_receivers > 0,
             active_import_sessions > 0,
         ),
+        homeassistant: {
+            let mut ha = michi_homeassistant::get_runtime_status();
+            let disabled_mods = state.disabled_modules.read().await;
+            if disabled_mods.contains("homeassistant") {
+                ha.enabled = false;
+            }
+            ha
+        },
         system: SystemStatus {
             memory_rss_mb,
             memory_vm_mb,

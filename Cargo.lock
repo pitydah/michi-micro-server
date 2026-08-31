@@ -1884,6 +1884,7 @@ dependencies = [
  "michi-connect",
  "michi-core",
  "michi-db",
+ "michi-homeassistant",
  "michi-identity",
  "michi-ingest",
  "michi-link",

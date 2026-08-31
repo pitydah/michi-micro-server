@@ -1,11 +1,53 @@
+use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 use michi_config::Config;
 use michi_playback::{PlaybackEngineHandle, PlaybackLifecycle};
 use rumqttc::{AsyncClient, MqttOptions, Packet, QoS};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use tracing::{error, info, warn};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HaRuntimeStatus {
+    pub enabled: bool,
+    pub configured: bool,
+    pub connected: bool,
+    pub broker: Option<String>,
+    pub discovery_published: bool,
+    pub last_published_at: Option<String>,
+    pub last_error: Option<String>,
+}
+
+static HA_STATUS: OnceLock<RwLock<HaRuntimeStatus>> = OnceLock::new();
+
+fn ha_status_store() -> &'static RwLock<HaRuntimeStatus> {
+    HA_STATUS.get_or_init(|| {
+        RwLock::new(HaRuntimeStatus {
+            enabled: true,
+            configured: false,
+            connected: false,
+            broker: None,
+            discovery_published: false,
+            last_published_at: None,
+            last_error: None,
+        })
+    })
+}
+
+pub fn get_runtime_status() -> HaRuntimeStatus {
+    ha_status_store().read().unwrap().clone()
+}
+
+pub fn update_runtime_status<F>(f: F)
+where
+    F: FnOnce(&mut HaRuntimeStatus),
+{
+    if let Ok(mut status) = ha_status_store().write() {
+        f(&mut status);
+    }
+}
 
 const DISCOVERY_PREFIX: &str = "homeassistant";
 const STATE_INTERVAL_SECS: u64 = 2;
@@ -303,6 +345,11 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
     let host = match std::env::var("MICHI_MQTT_HOST") {
         Ok(h) => h,
         Err(_) => {
+            update_runtime_status(|s| {
+                s.configured = false;
+                s.connected = false;
+                s.broker = None;
+            });
             error!("MICHI_MQTT_HOST not set, HA integration disabled");
             return;
         }
@@ -314,6 +361,12 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
     let user = std::env::var("MICHI_MQTT_USER").ok();
     let pass = std::env::var("MICHI_MQTT_PASS").ok();
     let client_id = format!("michi-{}", config.sync_name);
+    let broker_str = format!("{host}:{port}");
+
+    update_runtime_status(|s| {
+        s.configured = true;
+        s.broker = Some(broker_str.clone());
+    });
 
     loop {
         info!("connecting to MQTT broker at {}:{}", host, port);
@@ -322,6 +375,10 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
             match mqtt_connect(&host, port, &user, &pass, &client_id).await {
                 Ok(c) => c,
                 Err(e) => {
+                    update_runtime_status(|s| {
+                        s.connected = false;
+                        s.last_error = Some(e.to_string());
+                    });
                     error!("failed to create MQTT client: {}", e);
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
@@ -329,6 +386,12 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
             };
 
         publish_discovery(&client).await;
+        update_runtime_status(|s| {
+            s.connected = true;
+            s.discovery_published = true;
+            s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
+            s.last_error = None;
+        });
 
         for cmd in &[
             "play_pause",
@@ -369,6 +432,9 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                             handle_command(&topic, &payload, &engine).await;
                             // Immediately publish updated states after command execution
                             publish_states(&client, &engine, &db).await;
+                            update_runtime_status(|s| {
+                                s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
+                            });
                             last_state_publish = tokio::time::Instant::now();
                         }
                     }
@@ -376,20 +442,36 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                         info!("MQTT connected/reconnected");
                         publish_discovery(&client).await;
                         publish_states(&client, &engine, &db).await;
+                        update_runtime_status(|s| {
+                            s.connected = true;
+                            s.discovery_published = true;
+                            s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
+                            s.last_error = None;
+                        });
                     }
                     _ => {}
                 },
                 Ok(Err(e)) => {
+                    update_runtime_status(|s| {
+                        s.connected = false;
+                        s.last_error = Some(format!("{e:?}"));
+                    });
                     error!("MQTT error: {:?}", e);
                     break;
                 }
                 Err(_) => {
                     publish_states(&client, &engine, &db).await;
+                    update_runtime_status(|s| {
+                        s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
+                    });
                     last_state_publish = tokio::time::Instant::now();
                 }
             }
         }
 
+        update_runtime_status(|s| {
+            s.connected = false;
+        });
         warn!("MQTT connection lost, reconnecting in 5 seconds...");
         tokio::time::sleep(Duration::from_secs(5)).await;
     }

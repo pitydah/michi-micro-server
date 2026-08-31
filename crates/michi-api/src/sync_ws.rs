@@ -73,7 +73,7 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                 );
                                 // Dispatch state commands to PlaybackEngine so PlaybackProjectionCoordinator
                                 // remains the single authoritative writer of PlaybackState.
-                                let mut applied = true;
+                                let mut all_applied = true;
                                 if let Some(tid) = track_id {
                                     let resolver = michi_playback::SqliteTrackResolver::new(
                                         state_clone.db.clone(),
@@ -87,32 +87,46 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                                 .await
                                             {
                                                 warn!("sync: failed to load track {tid}: {e}");
-                                                applied = false;
+                                                all_applied = false;
                                             }
                                         }
                                         Err(e) => {
                                             warn!("sync: track {tid} not found locally: {e}");
-                                            applied = false;
+                                            all_applied = false;
                                         }
                                     }
                                 } else if let Err(e) =
                                     state_clone.playback_engine.seek(*position_ms).await
                                 {
                                     warn!("sync: failed to seek to {position_ms}ms: {e}");
-                                    applied = false;
+                                    all_applied = false;
                                 }
 
-                                if applied {
-                                    if *playing {
-                                        let _ = state_clone.playback_engine.resume().await;
+                                if all_applied {
+                                    let play_res = if *playing {
+                                        state_clone.playback_engine.resume().await
                                     } else {
-                                        let _ = state_clone.playback_engine.pause().await;
+                                        state_clone.playback_engine.pause().await
+                                    };
+                                    if let Err(e) = play_res {
+                                        warn!("sync: failed to transition playback state: {e}");
+                                        all_applied = false;
                                     }
+                                }
+
+                                if all_applied {
                                     let vol_u8 =
                                         ((*volume * 100.0).round().clamp(0.0, 100.0)) as u8;
-                                    let _ = state_clone.playback_engine.set_volume(vol_u8).await;
+                                    if let Err(e) =
+                                        state_clone.playback_engine.set_volume(vol_u8).await
+                                    {
+                                        warn!("sync: failed to set volume {vol_u8}: {e}");
+                                        all_applied = false;
+                                    }
+                                }
 
-                                    // Notify local UI clients only when state is truthfully applied
+                                if all_applied {
+                                    // Notify local UI clients only when every single operation succeeded
                                     let tid = track_id
                                         .map(|id| format!("\"{id}\""))
                                         .unwrap_or_else(|| "null".into());
@@ -148,27 +162,62 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                     .await
                                 {
                                     Ok(session) => {
-                                        // Update local playback engine with received position
+                                        let mut takeover_ok = true;
                                         if let Some(tid) = session.track_id {
                                             let resolver = michi_playback::SqliteTrackResolver::new(
                                                 state_clone.db.clone(),
                                                 state_clone.config.music_paths.clone(),
                                             );
-                                            if let Ok(track) = resolver.get_track(tid).await {
-                                                let _ = state_clone
-                                                    .playback_engine
-                                                    .load_track(track, session.position_ms)
-                                                    .await;
-                                                info!(
-                                                    "handoff: takeover track={} at position={}",
-                                                    tid, session.position_ms
-                                                );
+                                            match resolver.get_track(tid).await {
+                                                Ok(track) => {
+                                                    if let Err(e) = state_clone
+                                                        .playback_engine
+                                                        .load_track(track, session.position_ms)
+                                                        .await
+                                                    {
+                                                        warn!("handoff: failed to load track {tid} on takeover: {e}");
+                                                        takeover_ok = false;
+                                                    } else {
+                                                        info!(
+                                                            "handoff: takeover track={} at position={}",
+                                                            tid, session.position_ms
+                                                        );
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    warn!("handoff: track {tid} not resolved locally for takeover: {e}");
+                                                    takeover_ok = false;
+                                                }
                                             }
                                         }
+                                        if takeover_ok {
+                                            if session.playing {
+                                                if let Err(e) =
+                                                    state_clone.playback_engine.resume().await
+                                                {
+                                                    warn!(
+                                                        "handoff: failed to resume playback on takeover: {e}"
+                                                    );
+                                                }
+                                            }
+                                            let vol_u8 = ((session.volume * 100.0)
+                                                .round()
+                                                .clamp(0.0, 100.0))
+                                                as u8;
+                                            let _ = state_clone
+                                                .playback_engine
+                                                .set_volume(vol_u8)
+                                                .await;
 
-                                        let accept =
-                                            michi_sync::SyncMessage::handoff_accept(session);
-                                        let _ = state_clone.sync_tx.send(accept);
+                                            let accept =
+                                                michi_sync::SyncMessage::handoff_accept(session);
+                                            let _ = state_clone.sync_tx.send(accept);
+                                        } else {
+                                            warn!(
+                                                "handoff: takeover failed to apply state locally; refusing handoff_accept for {} -> {}",
+                                                from_device, to_device
+                                            );
+                                        }
                                     }
                                     Err(e) => {
                                         warn!(

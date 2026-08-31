@@ -2326,7 +2326,95 @@ function playEpisode(episodeId, resumePositionMs) {
   });
 }
 
-// ── Streaming SHA-256 (Constant Memory) ─────────────────────────
+// ── Pure JS SHA-256 (Constant Memory & Insecure HTTP / LAN Safe) ─
+function computeBytesSha256(bytes) {
+  var K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+  ];
+  var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  var W = new Int32Array(64);
+  var buffer = new Uint8Array(64);
+  var bufLen = 0;
+  var totalBytes = bytes.length;
+
+  function rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
+
+  function processBlock(block, offset) {
+    for (var i = 0; i < 16; i++) {
+      var idx = offset + i * 4;
+      W[i] = (block[idx] << 24) | (block[idx + 1] << 16) | (block[idx + 2] << 8) | block[idx + 3];
+    }
+    for (var i = 16; i < 64; i++) {
+      var s0 = rotr(W[i - 15], 7) ^ rotr(W[i - 15], 18) ^ (W[i - 15] >>> 3);
+      var s1 = rotr(W[i - 2], 17) ^ rotr(W[i - 2], 19) ^ (W[i - 2] >>> 10);
+      W[i] = (W[i - 16] + s0 + W[i - 7] + s1) | 0;
+    }
+    var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+    for (var i = 0; i < 64; i++) {
+      var S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      var ch = (e & f) ^ ((~e) & g);
+      var temp1 = (h + S1 + ch + K[i] + W[i]) | 0;
+      var S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      var maj = (a & b) ^ (a & c) ^ (b & c);
+      var temp2 = (S0 + maj) | 0;
+      h = g; g = f; f = e; e = (d + temp1) | 0; d = c; c = b; b = a; a = (temp1 + temp2) | 0;
+    }
+    H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+    H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+  }
+
+  var offset = 0;
+  while (offset < bytes.length) {
+    if (bufLen > 0) {
+      var needed = 64 - bufLen;
+      var toCopy = Math.min(needed, bytes.length - offset);
+      buffer.set(bytes.subarray(offset, offset + toCopy), bufLen);
+      bufLen += toCopy;
+      offset += toCopy;
+      if (bufLen === 64) {
+        processBlock(buffer, 0);
+        bufLen = 0;
+      }
+    } else if (bytes.length - offset >= 64) {
+      processBlock(bytes, offset);
+      offset += 64;
+    } else {
+      var rem = bytes.length - offset;
+      buffer.set(bytes.subarray(offset, offset + rem), 0);
+      bufLen = rem;
+      offset += rem;
+    }
+  }
+
+  buffer[bufLen++] = 0x80;
+  if (bufLen > 56) {
+    buffer.fill(0, bufLen, 64);
+    processBlock(buffer, 0);
+    bufLen = 0;
+  }
+  buffer.fill(0, bufLen, 56);
+  var totalBits = totalBytes * 8;
+  var highBits = Math.floor(totalBytes / 0x20000000);
+  buffer[56] = (highBits >>> 24) & 0xff;
+  buffer[57] = (highBits >>> 16) & 0xff;
+  buffer[58] = (highBits >>> 8) & 0xff;
+  buffer[59] = highBits & 0xff;
+  buffer[60] = (totalBits >>> 24) & 0xff;
+  buffer[61] = (totalBits >>> 16) & 0xff;
+  buffer[62] = (totalBits >>> 8) & 0xff;
+  buffer[63] = totalBits & 0xff;
+  processBlock(buffer, 0);
+
+  return H.map(function(w) { return (w >>> 0).toString(16).padStart(8, '0'); }).join('');
+}
+
 async function computeFileSha256Streaming(file, onProgress) {
   var chunkSize = 1024 * 1024;
   var totalChunks = Math.ceil(file.size / chunkSize) || 1;
@@ -2442,45 +2530,72 @@ async function uploadFile() {
   if (progressFill) progressFill.style.width = '0%';
   if (progressText) progressText.textContent = 'Verifying checksum for: ' + file.name;
 
+  var sessionKey = null;
+
   try {
-    // 1. Calculate file SHA-256 incrementally (constant memory streaming)
+    // 1. Calculate file SHA-256 incrementally (constant memory streaming, LAN safe)
     var expectedHash = await computeFileSha256Streaming(file, function(cur, tot) {
       if (progressText) progressText.textContent = 'Hashing ' + file.name + ' (' + Math.round((cur / tot) * 100) + '%)...';
     });
 
-    if (progressText) progressText.textContent = 'Initializing upload session (' + file.size + ' bytes)...';
-
-    var initResp = await MichiAPI.syncUploadInit({
-      filename: file.name,
-      original_path: file.name,
-      file_size: file.size,
-      expected_hash: expectedHash,
-      uploaded_by: 'web-ui',
-    });
-
-    if (initResp.status === 'exists') {
-      if (progressFill) progressFill.style.width = '100%';
-      if (progressText) progressText.textContent = '✓ File already exists on server: ' + file.name;
-      showToast('File already synchronized: ' + file.name);
-      fileInput.value = '';
-      return;
-    }
-
-    var fileId = initResp.file_id;
+    sessionKey = 'michi_upload_session_' + expectedHash;
+    var fileId = null;
+    var startChunk = 0;
     var chunkSize = 1024 * 1024; // 1 MiB standard chunk size matching backend
     var totalChunks = Math.ceil(file.size / chunkSize) || 1;
 
-    for (var chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+    // Check for cached resumable session
+    try {
+      var savedRaw = localStorage.getItem(sessionKey);
+      if (savedRaw) {
+        var savedSession = JSON.parse(savedRaw);
+        if (savedSession && savedSession.fileId) {
+          var checkStatus = await MichiAPI.syncUploadStatus(savedSession.fileId);
+          var currentSt = checkStatus.status || checkStatus.progress?.status;
+          if (currentSt === 'uploading' && checkStatus.progress) {
+            fileId = savedSession.fileId;
+            startChunk = checkStatus.progress.uploaded_chunks || 0;
+            if (progressText) progressText.textContent = 'Resuming upload from chunk ' + (startChunk + 1) + '/' + totalChunks + '...';
+          }
+        }
+      }
+    } catch (_) {}
+
+    if (!fileId) {
+      if (progressText) progressText.textContent = 'Initializing upload session (' + file.size + ' bytes)...';
+
+      var initResp = await MichiAPI.syncUploadInit({
+        filename: file.name,
+        original_path: file.name,
+        file_size: file.size,
+        expected_hash: expectedHash,
+        uploaded_by: 'web-ui',
+      });
+
+      if (initResp.status === 'exists') {
+        if (progressFill) progressFill.style.width = '100%';
+        if (progressText) progressText.textContent = '✓ File already exists on server: ' + file.name;
+        showToast('File already synchronized: ' + file.name);
+        fileInput.value = '';
+        try { localStorage.removeItem(sessionKey); } catch (_) {}
+        return;
+      }
+
+      fileId = initResp.file_id;
+      try {
+        localStorage.setItem(sessionKey, JSON.stringify({ fileId: fileId, expectedHash: expectedHash, totalChunks: totalChunks, filename: file.name }));
+      } catch (_) {}
+    }
+
+    for (var chunkIndex = startChunk; chunkIndex < totalChunks; chunkIndex++) {
       var start = chunkIndex * chunkSize;
       var end = Math.min(file.size, start + chunkSize);
       var sliceBlob = file.slice(start, end);
       var sliceBuf = await sliceBlob.arrayBuffer();
       var sliceBytes = new Uint8Array(sliceBuf);
 
-      // Compute slice hash
-      var chunkHashBuf = await crypto.subtle.digest('SHA-256', sliceBuf);
-      var chunkHashArr = Array.from(new Uint8Array(chunkHashBuf));
-      var chunkHash = chunkHashArr.map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+      // Compute slice hash in pure JS (LAN & Insecure Context Invariant)
+      var chunkHash = computeBytesSha256(sliceBytes);
 
       await MichiAPI.syncUploadChunk(fileId, {
         file_id: fileId,
@@ -2523,6 +2638,7 @@ async function uploadFile() {
     if (progressText) progressText.textContent = '✓ Upload completed and verified: ' + file.name;
     showToast('File uploaded successfully: ' + file.name);
     fileInput.value = '';
+    try { localStorage.removeItem(sessionKey); } catch (_) {}
   } catch (e) {
     if (progressText) progressText.textContent = '✗ Upload failed: ' + e.message;
     showToast('Upload failed: ' + e.message, true);
@@ -2611,13 +2727,18 @@ async function transferHandoff() {
     });
 
     var readback = null;
-    var converged = false;
+    var trackConverged = false;
+    var stateConverged = false;
     for (var attempt = 0; attempt < 5; attempt++) {
       readback = await MichiAPI.playbackState();
       var curId = readback.track_id || readback.track?.id;
+      var curPlaying = !!(readback.playing || readback.is_playing);
       if (curId === trackId) {
-        converged = true;
-        break;
+        trackConverged = true;
+        if (curPlaying === playing) {
+          stateConverged = true;
+          break;
+        }
       }
       await new Promise(function(r) { setTimeout(r, 200); });
     }
@@ -2626,9 +2747,12 @@ async function transferHandoff() {
       curStateEl.textContent = JSON.stringify(readback, null, 2);
     }
     if (resEl) {
-      if (converged) {
+      if (stateConverged) {
         resEl.innerHTML = '<span style="color:var(--green)">✓ Playback state transferred and verified converged</span>';
         showToast('Playback handoff state verified');
+      } else if (trackConverged) {
+        resEl.innerHTML = '<span style="color:var(--green)">✓ Track handoff verified (state synchronizing)</span>';
+        showToast('Track handoff verified');
       } else {
         resEl.innerHTML = '<span style="color:var(--amber)">⚠ Handoff command dispatched (server state: ' + esc(readback?.track_id || 'idle') + ')</span>';
         showToast('Playback handoff dispatched (pending server convergence)');
@@ -2923,8 +3047,8 @@ async function loadDiagnostics() {
       statusEl.textContent = isOk ? 'Healthy' : (diag.degraded ? 'Degraded' : 'Unhealthy');
       statusEl.className = isOk ? 'badge stable' : 'badge disabled';
     }
-    if (ffmpegEl) ffmpegEl.textContent = settings.ffmpeg_available ? 'Available (Transcoding active)' : 'Unavailable (Direct play only)';
-    if (transEl) transEl.textContent = '0 / ' + (settings.effective_transcode_workers || 0) + ' active (Capacity: ' + (settings.effective_transcode_workers || 0) + ' worker slots)';
+    if (ffmpegEl) ffmpegEl.textContent = settings.ffmpeg_available ? 'Available (Transcoding ready)' : 'Unavailable (Direct play only)';
+    if (transEl) transEl.textContent = 'Capacity: ' + (settings.effective_transcode_workers || 0) + ' worker slots';
     if (poolEl) poolEl.textContent = (settings.effective_db_pool || 8) + ' connections (Tracks: ' + (diag.db?.total_tracks || 0) + ')';
 
     if (capsEl && diag.player_compatibility) {
@@ -2995,17 +3119,24 @@ async function loadIntegrations() {
 
   try {
     var settings = await MichiAPI.settings();
-    var modulesData = await MichiAPI.modules();
-
-    var haModule = (modulesData.modules || []).find(function(m) { return m.name === 'homeassistant'; });
-    var haEnabled = haModule ? haModule.enabled : true;
+    var diag = await MichiAPI.diagnostics();
+    var ha = diag.homeassistant || {};
 
     if (haStatusEl) {
-      if (!haEnabled) {
-        haStatusEl.textContent = 'Disabled';
+      if (ha.enabled === false) {
+        haStatusEl.textContent = 'Disabled (Module deactivated)';
         haStatusEl.className = 'badge disabled';
+      } else if (!ha.configured) {
+        haStatusEl.textContent = 'Not Configured (MICHI_MQTT_HOST unset)';
+        haStatusEl.className = 'badge format';
+      } else if (!ha.connected) {
+        haStatusEl.textContent = 'Disconnected (' + (ha.broker || 'broker') + ')';
+        haStatusEl.className = 'badge disabled';
+      } else if (ha.discovery_published) {
+        haStatusEl.textContent = 'Connected (' + (ha.broker || '') + ') — Discovery Active';
+        haStatusEl.className = 'badge stable';
       } else {
-        haStatusEl.textContent = 'Enabled (Auto-Discovery Active)';
+        haStatusEl.textContent = 'Connected (' + (ha.broker || '') + ') — Discovery Pending';
         haStatusEl.className = 'badge stable';
       }
     }

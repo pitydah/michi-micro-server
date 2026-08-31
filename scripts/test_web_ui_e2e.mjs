@@ -46,6 +46,7 @@ window.transferHandoff  = transferHandoff;
 window.loadDiagnostics  = loadDiagnostics;
 window.loadIntegrations = loadIntegrations;
 window.loadJobs         = loadJobs;
+window.computeBytesSha256 = computeBytesSha256;
 })(window, document, window.navigator, window.localStorage, window.sessionStorage,
    window.fetch,
    globalThis.setTimeout, globalThis.clearTimeout,
@@ -228,7 +229,9 @@ function createDOM() {
     'settings-resource-profile', 'settings-stream-profile', 'settings-format-policy',
     'settings-music-paths', 'settings-sync-name', 'settings-cors', 'settings-sync-peers',
     'settings-auth', 'settings-dev-mode', 'settings-scrobble',
-    'settings-scan-concurrency', 'settings-max-transcodes', 'settings-db-pool'
+    'settings-scan-concurrency', 'settings-max-transcodes', 'settings-db-pool',
+    'ha-discovery-status', 'integ-sync-peers', 'integ-reconnect-max',
+    'diag-status', 'diag-ffmpeg', 'diag-transcodes', 'diag-db-pool', 'diag-caps-list'
   ];
   for (const sid of settingIds) {
     pageSettings.appendChild(el('div', sid));
@@ -564,6 +567,61 @@ async function runE2E() {
     const resp = await window.MichiAPI.restoreBackup({ ...restorePayload, force: true });
     assert(resp.playlists === 2, 'Restore executed successfully');
     assert(restoreBody && restoreBody.force === true, 'Restore request explicitly sets force: true');
+  }
+
+  // ── Test G: computeBytesSha256 NIST Vector & SubtleCrypto Independence ──
+  {
+    const { sandbox, window } = makeSandbox();
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    // NIST vector for "abc" -> ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+    const bytes = new TextEncoder().encode('abc');
+    const hash = window.computeBytesSha256(bytes);
+    assert(hash === 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+      'computeBytesSha256 matches NIST SHA-256 standard without SubtleCrypto');
+  }
+
+  // ── Test H: Home Assistant Live Status Telemetry Invariants ──
+  {
+    const haFetch = async (url) => {
+      if (url.includes('/api/v1/diagnostics')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            healthy: true,
+            degraded: false,
+            homeassistant: {
+              enabled: true,
+              configured: true,
+              connected: true,
+              broker: '127.0.0.1:1883',
+              discovery_published: true,
+              last_published_at: '2026-08-31T00:00:00Z',
+              last_error: null
+            }
+          })
+        };
+      }
+      if (url.includes('/api/v1/settings')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({})
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+
+    const { sandbox, window, document } = makeSandbox({ fetchImpl: haFetch });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    await window.loadIntegrations();
+    const haEl = document.getElementById('ha-discovery-status');
+    assert(haEl && haEl.textContent.includes('Connected') && haEl.textContent.includes('Discovery Active'),
+      'loadIntegrations renders real MQTT connectivity and discovery state');
   }
 
   console.log('======================================================================');

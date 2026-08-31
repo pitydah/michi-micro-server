@@ -1223,7 +1223,6 @@ mod tests {
             let chunk = res.unwrap();
             pcm_out.extend_from_slice(&chunk);
         }
-        assert!(!pcm_out.is_empty(), "PCM transcode must output bytes");
         assert_eq!(
             &pcm_out[0..4],
             b"RIFF",
@@ -1234,5 +1233,38 @@ mod tests {
             b"WAVE",
             "PCM WAV output must contain WAVE format"
         );
+        let pcm_channels = u16::from_le_bytes(pcm_out[22..24].try_into().unwrap());
+        let pcm_sample_rate = u32::from_le_bytes(pcm_out[24..28].try_into().unwrap());
+        let pcm_bits = u16::from_le_bytes(pcm_out[34..36].try_into().unwrap());
+        assert_eq!(pcm_channels, 2, "PCM output must have 2 channels");
+        assert_eq!(
+            pcm_sample_rate, 48000,
+            "PCM output must have 48000Hz sample rate"
+        );
+        assert_eq!(pcm_bits, 24, "PCM output must have 24 bits per sample");
+
+        // 4. If ffprobe is available, certify stream parameter compliance on Opus & MP3
+        let opus_file = tmp.path().join("out.opus");
+        std::fs::write(&opus_file, &opus_out).unwrap();
+        if let Ok(output) = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=channels,sample_rate",
+                "-of",
+                "csv=p=0",
+                opus_file.to_str().unwrap(),
+            ])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    stdout.contains("48000"),
+                    "Opus stream analysis should confirm 48000Hz: {stdout}"
+                );
+            }
+        }
     }
 }
