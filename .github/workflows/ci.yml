@@ -157,6 +157,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config ffmpeg
       - name: Run Web UI Functional Integrity Suite
         run: cargo test -p michi-api --test web_ui_integrity_tests
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run Web UI Browser E2E Contract & Invariance Suite
+        run: node scripts/test_web_ui_e2e.mjs
 
   ci-web-ui-browser-e2e:
     runs-on: ubuntu-latest

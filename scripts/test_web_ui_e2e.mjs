@@ -67,8 +67,8 @@ class MockElement {
     this.tagName = tag.toUpperCase();
     this._id = id;
     this.className = className;
-    this.innerHTML = '';
-    this.textContent = '';
+    this._innerHTML = '';
+    this._textContent = '';
     this.style = {};
     this.children = [];
     this.parentNode = null;
@@ -78,6 +78,22 @@ class MockElement {
     this.eventListeners = {};
     this.dataset = {};
     this.offsetHeight = 0;
+  }
+
+  get textContent() {
+    if (this._textContent) return this._textContent;
+    if (this._innerHTML) return this._innerHTML.replace(/<[^>]*>/g, '');
+    return '';
+  }
+  set textContent(val) {
+    this._textContent = String(val);
+    this._innerHTML = String(val);
+  }
+
+  get innerHTML() { return this._innerHTML || ''; }
+  set innerHTML(val) {
+    this._innerHTML = String(val);
+    this._textContent = String(val).replace(/<[^>]*>/g, '');
   }
 
   get id() { return this._id || ''; }
@@ -231,7 +247,8 @@ function createDOM() {
     'settings-auth', 'settings-dev-mode', 'settings-scrobble',
     'settings-scan-concurrency', 'settings-max-transcodes', 'settings-db-pool',
     'ha-discovery-status', 'integ-sync-peers', 'integ-reconnect-max',
-    'diag-status', 'diag-ffmpeg', 'diag-transcodes', 'diag-db-pool', 'diag-caps-list'
+    'diag-status', 'diag-ffmpeg', 'diag-transcodes', 'diag-db-pool', 'diag-caps-list',
+    'handoff-track-id', 'handoff-position', 'handoff-playing', 'handoff-result', 'handoff-current-state'
   ];
   for (const sid of settingIds) {
     pageSettings.appendChild(el('div', sid));
@@ -622,6 +639,48 @@ async function runE2E() {
     const haEl = document.getElementById('ha-discovery-status');
     assert(haEl && haEl.textContent.includes('Connected') && haEl.textContent.includes('Discovery Active'),
       'loadIntegrations renders real MQTT connectivity and discovery state');
+  }
+
+  // ── Test I: transferHandoff Full State & Position Drift Convergence ──
+  {
+    const handoffFetch = async (url) => {
+      if (url.includes('/playback/state')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            track_id: 'track-xyz',
+            position_ms: 120050,
+            playing: true,
+          })
+        };
+      }
+      if (url.includes('/playback/handoff')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ status: 'handoff_initiated' })
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+
+    const { sandbox, window, document } = makeSandbox({ fetchImpl: handoffFetch });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    const trackInput = document.getElementById('handoff-track-id');
+    const posInput = document.getElementById('handoff-position');
+    const playInput = document.getElementById('handoff-playing');
+    const resEl = document.getElementById('handoff-result');
+
+    trackInput.value = 'track-xyz';
+    posInput.value = '120000';
+    playInput.checked = true;
+
+    await window.transferHandoff();
+    assert(resEl && resEl.textContent.includes('verified converged (track, state, position)'),
+      'transferHandoff verifies track, playing state, and position drift');
   }
 
   console.log('======================================================================');

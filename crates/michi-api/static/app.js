@@ -2552,10 +2552,25 @@ async function uploadFile() {
         if (savedSession && savedSession.fileId) {
           var checkStatus = await MichiAPI.syncUploadStatus(savedSession.fileId);
           var currentSt = checkStatus.status || checkStatus.progress?.status;
-          if (currentSt === 'uploading' && checkStatus.progress) {
+          if (currentSt === 'completed') {
+            if (progressFill) progressFill.style.width = '100%';
+            if (progressText) progressText.textContent = '✓ File already synchronized: ' + file.name;
+            showToast('File already synchronized: ' + file.name);
+            fileInput.value = '';
+            try { localStorage.removeItem(sessionKey); } catch (_) {}
+            return;
+          } else if (currentSt === 'finalizing') {
+            fileId = savedSession.fileId;
+            startChunk = totalChunks; // all chunks uploaded, jump straight to finalization polling
+            if (progressFill) progressFill.style.width = '100%';
+            if (progressText) progressText.textContent = 'Reconnected to finalizing session...';
+          } else if (currentSt === 'uploading' && checkStatus.progress) {
             fileId = savedSession.fileId;
             startChunk = checkStatus.progress.uploaded_chunks || 0;
             if (progressText) progressText.textContent = 'Resuming upload from chunk ' + (startChunk + 1) + '/' + totalChunks + '...';
+          } else {
+            // failed, cancelled, or unknown: clean up stale cache
+            try { localStorage.removeItem(sessionKey); } catch (_) {}
           }
         }
       }
@@ -2719,6 +2734,7 @@ async function transferHandoff() {
 
   if (resEl) resEl.innerHTML = '<span style="color:var(--text-3)">Transferring playback state to server...</span>';
 
+  var startTime = Date.now();
   try {
     await MichiAPI.handoff({
       track_id: trackId,
@@ -2729,15 +2745,25 @@ async function transferHandoff() {
     var readback = null;
     var trackConverged = false;
     var stateConverged = false;
+    var fullConverged = false;
+    var observedPos = 0;
+
     for (var attempt = 0; attempt < 5; attempt++) {
       readback = await MichiAPI.playbackState();
       var curId = readback.track_id || readback.track?.id;
       var curPlaying = !!(readback.playing || readback.is_playing);
+      observedPos = readback.position_ms || 0;
+
       if (curId === trackId) {
         trackConverged = true;
         if (curPlaying === playing) {
           stateConverged = true;
-          break;
+          var expectedPos = playing ? (posMs + (Date.now() - startTime)) : posMs;
+          var posTolerance = playing ? 2500 : 1000;
+          if (Math.abs(observedPos - expectedPos) <= posTolerance) {
+            fullConverged = true;
+            break;
+          }
         }
       }
       await new Promise(function(r) { setTimeout(r, 200); });
@@ -2747,9 +2773,12 @@ async function transferHandoff() {
       curStateEl.textContent = JSON.stringify(readback, null, 2);
     }
     if (resEl) {
-      if (stateConverged) {
-        resEl.innerHTML = '<span style="color:var(--green)">✓ Playback state transferred and verified converged</span>';
+      if (fullConverged) {
+        resEl.innerHTML = '<span style="color:var(--green)">✓ Playback state transferred and verified converged (track, state, position)</span>';
         showToast('Playback handoff state verified');
+      } else if (stateConverged) {
+        resEl.innerHTML = '<span style="color:var(--green)">✓ Track and play state verified (position syncing: ' + observedPos + 'ms vs requested ' + posMs + 'ms)</span>';
+        showToast('Track handoff verified');
       } else if (trackConverged) {
         resEl.innerHTML = '<span style="color:var(--green)">✓ Track handoff verified (state synchronizing)</span>';
         showToast('Track handoff verified');

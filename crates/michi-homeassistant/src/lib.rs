@@ -365,7 +365,10 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
 
     update_runtime_status(|s| {
         s.configured = true;
+        s.connected = false;
+        s.discovery_published = false;
         s.broker = Some(broker_str.clone());
+        s.last_error = None;
     });
 
     loop {
@@ -377,6 +380,7 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                 Err(e) => {
                     update_runtime_status(|s| {
                         s.connected = false;
+                        s.discovery_published = false;
                         s.last_error = Some(e.to_string());
                     });
                     error!("failed to create MQTT client: {}", e);
@@ -384,14 +388,6 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                     continue;
                 }
             };
-
-        publish_discovery(&client).await;
-        update_runtime_status(|s| {
-            s.connected = true;
-            s.discovery_published = true;
-            s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
-            s.last_error = None;
-        });
 
         for cmd in &[
             "play_pause",
@@ -408,9 +404,7 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
             }
         }
 
-        publish_states(&client, &engine, &db).await;
-        info!("HA integration running");
-
+        info!("HA integration client initialized; waiting for broker ConnAck");
         let mut last_state_publish = tokio::time::Instant::now();
 
         loop {
@@ -449,21 +443,31 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                             s.last_error = None;
                         });
                     }
+                    rumqttc::Event::Incoming(Packet::Disconnect) => {
+                        info!("MQTT broker disconnected");
+                        update_runtime_status(|s| {
+                            s.connected = false;
+                            s.discovery_published = false;
+                        });
+                    }
                     _ => {}
                 },
                 Ok(Err(e)) => {
                     update_runtime_status(|s| {
                         s.connected = false;
+                        s.discovery_published = false;
                         s.last_error = Some(format!("{e:?}"));
                     });
                     error!("MQTT error: {:?}", e);
                     break;
                 }
                 Err(_) => {
-                    publish_states(&client, &engine, &db).await;
-                    update_runtime_status(|s| {
-                        s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
-                    });
+                    if get_runtime_status().connected {
+                        publish_states(&client, &engine, &db).await;
+                        update_runtime_status(|s| {
+                            s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
+                        });
+                    }
                     last_state_publish = tokio::time::Instant::now();
                 }
             }
@@ -471,6 +475,7 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
 
         update_runtime_status(|s| {
             s.connected = false;
+            s.discovery_published = false;
         });
         warn!("MQTT connection lost, reconnecting in 5 seconds...");
         tokio::time::sleep(Duration::from_secs(5)).await;

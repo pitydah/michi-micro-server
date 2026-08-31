@@ -1,7 +1,10 @@
+use std::net::{IpAddr, SocketAddr};
+
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::State,
-    response::IntoResponse,
+    extract::{ConnectInfo, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
 use michi_playback::TrackResolver;
@@ -9,11 +12,47 @@ use tracing::{info, warn};
 
 use crate::AppState;
 
+fn is_local_or_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.octets()[0] == 10
+                || (v4.octets()[0] == 172 && (16..=31).contains(&v4.octets()[1]))
+                || (v4.octets()[0] == 192 && v4.octets()[1] == 168)
+        }
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unicast_link_local() || v6.is_unique_local(),
+    }
+}
+
 pub async fn sync_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     State(state): State<AppState>,
-) -> impl IntoResponse {
+) -> Response {
+    if !state.config.remote_sync {
+        let client_ip = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .and_then(|s| s.trim().parse::<IpAddr>().ok())
+            .or_else(|| connect_info.map(|ci| ci.0.ip()));
+
+        if let Some(ip) = client_ip {
+            if !is_local_or_private_ip(ip) {
+                warn!("sync_ws: rejected remote sync connection from {ip} because remote_sync is disabled");
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Remote sync is disabled on this server",
+                )
+                    .into_response();
+            }
+        }
+    }
     ws.on_upgrade(move |socket| handle_sync(socket, state))
+        .into_response()
 }
 
 async fn handle_sync(socket: WebSocket, state: AppState) {
@@ -189,32 +228,67 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                                     takeover_ok = false;
                                                 }
                                             }
+                                        } else if let Err(e) =
+                                            state_clone.playback_engine.stop().await
+                                        {
+                                            warn!("handoff: failed to stop playback on empty track takeover: {e}");
+                                            takeover_ok = false;
                                         }
-                                        if takeover_ok {
-                                            if session.playing {
-                                                if let Err(e) =
-                                                    state_clone.playback_engine.resume().await
-                                                {
-                                                    warn!(
-                                                        "handoff: failed to resume playback on takeover: {e}"
-                                                    );
-                                                }
+
+                                        if takeover_ok && session.track_id.is_some() {
+                                            let play_res = if session.playing {
+                                                state_clone.playback_engine.resume().await
+                                            } else {
+                                                state_clone.playback_engine.pause().await
+                                            };
+                                            if let Err(e) = play_res {
+                                                warn!("handoff: failed to transition playback state on takeover: {e}");
+                                                takeover_ok = false;
                                             }
+                                        }
+
+                                        if takeover_ok {
                                             let vol_u8 = ((session.volume * 100.0)
                                                 .round()
                                                 .clamp(0.0, 100.0))
                                                 as u8;
-                                            let _ = state_clone
-                                                .playback_engine
-                                                .set_volume(vol_u8)
-                                                .await;
+                                            if let Err(e) =
+                                                state_clone.playback_engine.set_volume(vol_u8).await
+                                            {
+                                                warn!("handoff: failed to set volume on takeover: {e}");
+                                                takeover_ok = false;
+                                            }
+                                        }
 
+                                        if takeover_ok {
+                                            // Validate snapshot convergence
+                                            if let Ok(snap) =
+                                                state_clone.playback_engine.snapshot().await
+                                            {
+                                                let track_matches =
+                                                    snap.track_id == session.track_id;
+                                                let play_matches = if session.track_id.is_none() {
+                                                    !snap.lifecycle.is_playing()
+                                                } else {
+                                                    snap.lifecycle.is_playing() == session.playing
+                                                };
+                                                if !track_matches || !play_matches {
+                                                    warn!(
+                                                        "handoff: snapshot readback mismatch (expected track={:?}, playing={}; got track={:?}, lifecycle={:?})",
+                                                        session.track_id, session.playing, snap.track_id, snap.lifecycle
+                                                    );
+                                                    takeover_ok = false;
+                                                }
+                                            }
+                                        }
+
+                                        if takeover_ok {
                                             let accept =
                                                 michi_sync::SyncMessage::handoff_accept(session);
                                             let _ = state_clone.sync_tx.send(accept);
                                         } else {
                                             warn!(
-                                                "handoff: takeover failed to apply state locally; refusing handoff_accept for {} -> {}",
+                                                "handoff: takeover failed to apply or converge state locally; refusing handoff_accept for {} -> {}",
                                                 from_device, to_device
                                             );
                                         }

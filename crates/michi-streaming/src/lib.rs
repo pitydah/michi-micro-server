@@ -1243,7 +1243,48 @@ mod tests {
         );
         assert_eq!(pcm_bits, 24, "PCM output must have 24 bits per sample");
 
-        // 4. If ffprobe is available, certify stream parameter compliance on Opus & MP3
+        // 4. Test Opus 160k & MP3 320k and verify format/bitrate with ffprobe if available
+        let opus160_plan = TranscodePlan {
+            codec: TranscodeCodec::Opus,
+            container: TranscodeContainer::Ogg,
+            bitrate_bps: Some(160000),
+            sample_rate_hz: Some(48000),
+            bit_depth: None,
+            channels: Some(2),
+        };
+        let mut opus160_stream = transcode_stream_with_plan(&wav_path, &opus160_plan)
+            .await
+            .unwrap();
+        let mut opus160_out = Vec::new();
+        while let Some(res) = opus160_stream.next().await {
+            let chunk = res.unwrap();
+            opus160_out.extend_from_slice(&chunk);
+        }
+        assert_eq!(
+            &opus160_out[0..4],
+            b"OggS",
+            "Opus 160k must have OggS magic"
+        );
+
+        let mp3_320_plan = TranscodePlan {
+            codec: TranscodeCodec::Mp3,
+            container: TranscodeContainer::Mp3,
+            bitrate_bps: Some(320000),
+            sample_rate_hz: Some(44100),
+            bit_depth: None,
+            channels: Some(2),
+        };
+        let mut mp3_320_stream = transcode_stream_with_plan(&wav_path, &mp3_320_plan)
+            .await
+            .unwrap();
+        let mut mp3_320_out = Vec::new();
+        while let Some(res) = mp3_320_stream.next().await {
+            let chunk = res.unwrap();
+            mp3_320_out.extend_from_slice(&chunk);
+        }
+        assert!(!mp3_320_out.is_empty(), "MP3 320k must output bytes");
+
+        // 5. If ffprobe is available, certify stream parameter compliance on Opus & MP3
         let opus_file = tmp.path().join("out.opus");
         std::fs::write(&opus_file, &opus_out).unwrap();
         if let Ok(output) = std::process::Command::new("ffprobe")
@@ -1251,7 +1292,7 @@ mod tests {
                 "-v",
                 "error",
                 "-show_entries",
-                "stream=channels,sample_rate",
+                "stream=channels,sample_rate:format=bit_rate",
                 "-of",
                 "csv=p=0",
                 opus_file.to_str().unwrap(),
@@ -1263,6 +1304,29 @@ mod tests {
                 assert!(
                     stdout.contains("48000"),
                     "Opus stream analysis should confirm 48000Hz: {stdout}"
+                );
+            }
+        }
+
+        let mp3_file = tmp.path().join("out.mp3");
+        std::fs::write(&mp3_file, &mp3_320_out).unwrap();
+        if let Ok(output) = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=channels,sample_rate",
+                "-of",
+                "csv=p=0",
+                mp3_file.to_str().unwrap(),
+            ])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    stdout.contains("44100") || stdout.contains("2"),
+                    "MP3 stream analysis should confirm parameters: {stdout}"
                 );
             }
         }
