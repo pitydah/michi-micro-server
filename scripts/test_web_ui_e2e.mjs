@@ -40,6 +40,12 @@ window.selectLocalBrowserOutput = selectLocalBrowserOutput;
 window.saveSetting      = saveSetting;
 window.loadSettings     = loadSettings;
 window.playEpisode      = playEpisode;
+window.uploadFile       = uploadFile;
+window.restoreBackup    = restoreBackup;
+window.transferHandoff  = transferHandoff;
+window.loadDiagnostics  = loadDiagnostics;
+window.loadIntegrations = loadIntegrations;
+window.loadJobs         = loadJobs;
 })(window, document, window.navigator, window.localStorage, window.sessionStorage,
    window.fetch,
    globalThis.setTimeout, globalThis.clearTimeout,
@@ -401,7 +407,7 @@ async function runE2E() {
           ok: true,
           status: 200,
           headers: { get: (h) => h === 'content-type' ? 'application/json' : null },
-          json: async () => ({ restart_required: true, resource_profile: 'performance' }),
+          json: async () => ({ restart_required: true, pending_restart_fields: ['resource_profile'], resource_profile: 'performance' }),
         };
       }
       if (url.includes('/api/v1/settings')) {
@@ -409,6 +415,8 @@ async function runE2E() {
           ok: true, status: 200,
           headers: { get: (h) => h === 'content-type' ? 'application/json' : null },
           json: async () => ({
+            restart_required: true,
+            pending_restart_fields: ['resource_profile'],
             resource_profile: 'performance',
             effective_scan_workers: 4,
             effective_transcode_workers: 4,
@@ -424,12 +432,12 @@ async function runE2E() {
     vm.runInContext(jsContent, sandbox);
 
     await window.saveSetting('resource_profile', 'performance');
-    assert(window.localStorage.getItem('michi_restart_required') === 'true',
-      'Restart required state stored in localStorage');
+    const bannerDirect = document.getElementById('settings-restart-banner');
+    assert(bannerDirect !== null,
+      'Restart banner displayed immediately upon save when backend requires restart');
 
     // Simulate F5
     const { sandbox: sandboxR, window: winR, document: docR } = makeSandbox({ fetchImpl: settingsFetch });
-    winR.localStorage.setItem('michi_restart_required', 'true');
     vm.createContext(sandboxR);
     vm.runInContext(jsContent, sandboxR);
 
@@ -437,7 +445,7 @@ async function runE2E() {
     winR.AuthSession.state = 'authenticated';
     await winR.loadSettings();
     const banner = docR.getElementById('settings-restart-banner');
-    assert(banner !== null, 'Restart banner persists in Settings after F5 reload');
+    assert(banner !== null, 'Restart banner rendered from server authoritative restart_required flag');
   }
 
   // ── Test D: Failed audio.play does NOT mark episode played ──
@@ -461,6 +469,101 @@ async function runE2E() {
 
     assert(playedEndpointCalled === false,
       'Failed audio.play does NOT call mark episode as played');
+  }
+
+  // ── Test E: Chunked Resumable Upload Flow ──
+  {
+    const recordedRequests = [];
+    const uploadFetch = async (url, opts) => {
+      const parsedBody = opts?.body ? JSON.parse(opts.body) : null;
+      recordedRequests.push({ url, method: opts?.method || 'GET', body: parsedBody });
+
+      if (url.includes('/api/v1/sync/upload/init')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ status: 'initialized', file_id: '550e8400-e29b-41d4-a716-446655440000' })
+        };
+      }
+      if (url.includes('/chunk')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ status: 'uploading', progress: { uploaded_chunks: 1, total_chunks: 1, completed: false } })
+        };
+      }
+      if (url.includes('/status')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ status: 'completed', progress: { uploaded_chunks: 1, total_chunks: 1, completed: true } })
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+
+    const { sandbox, window, document } = makeSandbox({ fetchImpl: uploadFetch });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    const initRes = await window.MichiAPI.syncUploadInit({
+      filename: 'sample.flac',
+      original_path: 'sample.flac',
+      file_size: 1048576,
+      expected_hash: 'a'.repeat(64),
+      uploaded_by: 'web-ui'
+    });
+    assert(initRes.status === 'initialized', 'Sync upload initialized correctly');
+
+    const chunkRes = await window.MichiAPI.syncUploadChunk(initRes.file_id, {
+      file_id: initRes.file_id,
+      chunk_index: 0,
+      total_chunks: 1,
+      data: [1, 2, 3, 4],
+      chunk_hash: 'b'.repeat(64)
+    });
+    assert(chunkRes.status === 'uploading', 'Chunk uploaded successfully');
+
+    const statusRes = await window.MichiAPI.syncUploadStatus(initRes.file_id);
+    assert(statusRes.status === 'completed', 'Durable upload status verified completed');
+
+    assert(recordedRequests.some(r => r.url.endsWith('/init') && r.body.filename === 'sample.flac'),
+      'Init request sent correct UploadInitBody');
+    assert(recordedRequests.some(r => r.url.includes('/chunk') && r.body.chunk_index === 0),
+      'Chunk request sent correct UploadChunk schema');
+  }
+
+  // ── Test F: Restore Backup sends force=true ──
+  {
+    let restoreBody = null;
+    const restoreFetch = async (url, opts) => {
+      if (url.includes('/api/v1/backup/restore')) {
+        restoreBody = JSON.parse(opts.body);
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ playlists: 2, starred: 5, history: 10 })
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+
+    const { sandbox, window, document } = makeSandbox({ fetchImpl: restoreFetch });
+    window.confirm = () => true;
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    const restorePayload = {
+      version: 1,
+      tracks: [],
+      playlists: [{ name: 'Favorites', track_ids: [] }],
+      starred_tracks: [],
+      play_history: []
+    };
+
+    const resp = await window.MichiAPI.restoreBackup({ ...restorePayload, force: true });
+    assert(resp.playlists === 2, 'Restore executed successfully');
+    assert(restoreBody && restoreBody.force === true, 'Restore request explicitly sets force: true');
   }
 
   console.log('======================================================================');

@@ -285,25 +285,19 @@ const MichiAPI = {
   },
 
   // Sync API
-  syncUploadInit(filename, file_size, content_hash) {
+  syncUploadInit(body) {
     return this.request('/api/v1/sync/upload/init', {
       method: 'POST',
-      body: { filename, file_size: file_size || 0, content_hash: content_hash || '' }
+      body
     });
   },
-  syncUploadChunk(id, chunk_index, total_chunks, dataBase64, chunk_hash) {
+  syncUploadChunk(id, body) {
     return this.request('/api/v1/sync/upload/' + id + '/chunk', {
       method: 'POST',
-      body: { chunk_index, total_chunks, data: dataBase64, chunk_hash: chunk_hash || '' }
+      body
     });
   },
   syncUploadStatus(id) { return this.request('/api/v1/sync/upload/' + id + '/status'); },
-  syncUploadFinalize(id, file_size, content_hash) {
-    return this.request('/api/v1/sync/upload/' + id + '/finalize', {
-      method: 'POST',
-      body: { file_size: file_size || 0, content_hash: content_hash || '' }
-    });
-  },
   syncPlaylist(name, track_ids) {
     return this.request('/api/v1/playlists', {
       method: 'POST',
@@ -2332,6 +2326,106 @@ function playEpisode(episodeId, resumePositionMs) {
   });
 }
 
+// ── Streaming SHA-256 (Constant Memory) ─────────────────────────
+async function computeFileSha256Streaming(file, onProgress) {
+  var chunkSize = 1024 * 1024;
+  var totalChunks = Math.ceil(file.size / chunkSize) || 1;
+  var K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+  ];
+  var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  var W = new Int32Array(64);
+  var buffer = new Uint8Array(64);
+  var bufLen = 0;
+  var totalBytes = 0;
+
+  function rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
+
+  function processBlock(block, offset) {
+    for (var i = 0; i < 16; i++) {
+      var idx = offset + i * 4;
+      W[i] = (block[idx] << 24) | (block[idx + 1] << 16) | (block[idx + 2] << 8) | block[idx + 3];
+    }
+    for (var i = 16; i < 64; i++) {
+      var s0 = rotr(W[i - 15], 7) ^ rotr(W[i - 15], 18) ^ (W[i - 15] >>> 3);
+      var s1 = rotr(W[i - 2], 17) ^ rotr(W[i - 2], 19) ^ (W[i - 2] >>> 10);
+      W[i] = (W[i - 16] + s0 + W[i - 7] + s1) | 0;
+    }
+    var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+    for (var i = 0; i < 64; i++) {
+      var S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      var ch = (e & f) ^ ((~e) & g);
+      var temp1 = (h + S1 + ch + K[i] + W[i]) | 0;
+      var S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      var maj = (a & b) ^ (a & c) ^ (b & c);
+      var temp2 = (S0 + maj) | 0;
+      h = g; g = f; f = e; e = (d + temp1) | 0; d = c; c = b; b = a; a = (temp1 + temp2) | 0;
+    }
+    H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+    H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+  }
+
+  for (var ci = 0; ci < totalChunks; ci++) {
+    var s = ci * chunkSize;
+    var e = Math.min(file.size, s + chunkSize);
+    var slice = await file.slice(s, e).arrayBuffer();
+    var bytes = new Uint8Array(slice);
+    totalBytes += bytes.length;
+
+    var offset = 0;
+    while (offset < bytes.length) {
+      if (bufLen > 0) {
+        var needed = 64 - bufLen;
+        var toCopy = Math.min(needed, bytes.length - offset);
+        buffer.set(bytes.subarray(offset, offset + toCopy), bufLen);
+        bufLen += toCopy;
+        offset += toCopy;
+        if (bufLen === 64) {
+          processBlock(buffer, 0);
+          bufLen = 0;
+        }
+      } else if (bytes.length - offset >= 64) {
+        processBlock(bytes, offset);
+        offset += 64;
+      } else {
+        var rem = bytes.length - offset;
+        buffer.set(bytes.subarray(offset, offset + rem), 0);
+        bufLen = rem;
+        offset += rem;
+      }
+    }
+    if (onProgress) onProgress(ci + 1, totalChunks);
+  }
+
+  buffer[bufLen++] = 0x80;
+  if (bufLen > 56) {
+    buffer.fill(0, bufLen, 64);
+    processBlock(buffer, 0);
+    bufLen = 0;
+  }
+  buffer.fill(0, bufLen, 56);
+  var totalBits = totalBytes * 8;
+  var highBits = Math.floor(totalBytes / 0x20000000);
+  buffer[56] = (highBits >>> 24) & 0xff;
+  buffer[57] = (highBits >>> 16) & 0xff;
+  buffer[58] = (highBits >>> 8) & 0xff;
+  buffer[59] = highBits & 0xff;
+  buffer[60] = (totalBits >>> 24) & 0xff;
+  buffer[61] = (totalBits >>> 16) & 0xff;
+  buffer[62] = (totalBits >>> 8) & 0xff;
+  buffer[63] = totalBits & 0xff;
+  processBlock(buffer, 0);
+
+  return H.map(function(w) { return (w >>> 0).toString(16).padStart(8, '0'); }).join('');
+}
+
 // ── Sync & Handoff Handlers ─────────────────────────────────────
 async function uploadFile() {
   var fileInput = $('#settings-file-input');
@@ -2346,14 +2440,13 @@ async function uploadFile() {
   var file = fileInput.files[0];
   if (progressWrap) progressWrap.classList.remove('hidden');
   if (progressFill) progressFill.style.width = '0%';
-  if (progressText) progressText.textContent = 'Preparing upload for: ' + file.name;
+  if (progressText) progressText.textContent = 'Verifying checksum for: ' + file.name;
 
   try {
-    // 1. Calculate file SHA-256
-    var buffer = await file.arrayBuffer();
-    var hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-    var hashArray = Array.from(new Uint8Array(hashBuffer));
-    var expectedHash = hashArray.map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+    // 1. Calculate file SHA-256 incrementally (constant memory streaming)
+    var expectedHash = await computeFileSha256Streaming(file, function(cur, tot) {
+      if (progressText) progressText.textContent = 'Hashing ' + file.name + ' (' + Math.round((cur / tot) * 100) + '%)...';
+    });
 
     if (progressText) progressText.textContent = 'Initializing upload session (' + file.size + ' bytes)...';
 
@@ -2374,7 +2467,7 @@ async function uploadFile() {
     }
 
     var fileId = initResp.file_id;
-    var chunkSize = 512 * 1024; // 512KB
+    var chunkSize = 1024 * 1024; // 1 MiB standard chunk size matching backend
     var totalChunks = Math.ceil(file.size / chunkSize) || 1;
 
     for (var chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
@@ -2389,18 +2482,11 @@ async function uploadFile() {
       var chunkHashArr = Array.from(new Uint8Array(chunkHashBuf));
       var chunkHash = chunkHashArr.map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
 
-      // Base64 encode chunk
-      var binary = '';
-      for (var i = 0; i < sliceBytes.byteLength; i++) {
-        binary += String.fromCharCode(sliceBytes[i]);
-      }
-      var chunkBase64 = btoa(binary);
-
       await MichiAPI.syncUploadChunk(fileId, {
         file_id: fileId,
         chunk_index: chunkIndex,
         total_chunks: totalChunks,
-        data_base64: chunkBase64,
+        data: Array.from(sliceBytes),
         chunk_hash: chunkHash,
       });
 
@@ -2409,17 +2495,34 @@ async function uploadFile() {
       if (progressText) progressText.textContent = 'Uploading chunk ' + (chunkIndex + 1) + '/' + totalChunks + ' (' + pct + '%)...';
     }
 
-    if (progressText) progressText.textContent = 'Finalizing upload...';
-    var finResp = await MichiAPI.syncUploadFinalize(fileId, file.size, expectedHash);
+    // 2. Poll server for verified durable completion (never treat finalizing as completed)
+    if (progressText) progressText.textContent = 'Server finalizing track...';
+    var maxPolls = 30;
+    var statusResp = null;
+    var isDone = false;
 
-    if (finResp && (finResp.status === 'completed' || finResp.status === 'finalizing' || finResp.status === 'initialized')) {
-      if (progressFill) progressFill.style.width = '100%';
-      if (progressText) progressText.textContent = '✓ Upload completed: ' + file.name;
-      showToast('File uploaded successfully: ' + file.name);
-      fileInput.value = '';
-    } else {
-      throw new Error('Upload finalization reported uncompleted status: ' + (finResp ? finResp.status : 'unknown'));
+    while (maxPolls-- > 0) {
+      statusResp = await MichiAPI.syncUploadStatus(fileId);
+      var st = statusResp.status || statusResp.progress?.status;
+      if (st === 'completed') {
+        isDone = true;
+        break;
+      }
+      if (st === 'failed' || st === 'cancelled') {
+        throw new Error('Upload ' + st + ': ' + (statusResp.error || statusResp.progress?.error || 'unknown'));
+      }
+      if (progressText) progressText.textContent = 'Server finalizing track (' + (st || 'processing') + ')...';
+      await new Promise(function(resolve) { setTimeout(resolve, 500); });
     }
+
+    if (!isDone) {
+      throw new Error('Upload finalization timed out waiting for server completion');
+    }
+
+    if (progressFill) progressFill.style.width = '100%';
+    if (progressText) progressText.textContent = '✓ Upload completed and verified: ' + file.name;
+    showToast('File uploaded successfully: ' + file.name);
+    fileInput.value = '';
   } catch (e) {
     if (progressText) progressText.textContent = '✗ Upload failed: ' + e.message;
     showToast('Upload failed: ' + e.message, true);
@@ -2507,14 +2610,30 @@ async function transferHandoff() {
       playing: playing,
     });
 
-    var readback = await MichiAPI.playbackState();
+    var readback = null;
+    var converged = false;
+    for (var attempt = 0; attempt < 5; attempt++) {
+      readback = await MichiAPI.playbackState();
+      var curId = readback.track_id || readback.track?.id;
+      if (curId === trackId) {
+        converged = true;
+        break;
+      }
+      await new Promise(function(r) { setTimeout(r, 200); });
+    }
+
     if (curStateEl) {
       curStateEl.textContent = JSON.stringify(readback, null, 2);
     }
     if (resEl) {
-      resEl.innerHTML = '<span style="color:var(--green)">✓ Playback state transferred successfully</span>';
+      if (converged) {
+        resEl.innerHTML = '<span style="color:var(--green)">✓ Playback state transferred and verified converged</span>';
+        showToast('Playback handoff state verified');
+      } else {
+        resEl.innerHTML = '<span style="color:var(--amber)">⚠ Handoff command dispatched (server state: ' + esc(readback?.track_id || 'idle') + ')</span>';
+        showToast('Playback handoff dispatched (pending server convergence)');
+      }
     }
-    showToast('Playback handoff state transferred');
   } catch (e) {
     if (resEl) resEl.innerHTML = '<span style="color:var(--error)">✗ Handoff failed: ' + esc(e.message) + '</span>';
     showToast('Handoff failed: ' + e.message, true);
@@ -2608,11 +2727,15 @@ async function loadSettings() {
       }
     });
 
-    if (s.restart_required || localStorage.getItem('michi_restart_required') === 'true') {
+    if (s.restart_required) {
       var pendingList = s.pending_restart_fields && s.pending_restart_fields.length > 0
         ? ' (' + s.pending_restart_fields.join(', ') + ')'
         : '';
       renderRestartBanner(pendingList);
+    } else {
+      var banner = $('#settings-restart-banner');
+      if (banner) banner.remove();
+      localStorage.removeItem('michi_restart_required');
     }
   } catch (e) { console.warn('settings:', e.message); }
 }
@@ -2644,7 +2767,6 @@ async function saveSetting(key, value) {
   try {
     var res = await MichiAPI.updateSettings(body);
     if (res && res.restart_required) {
-      localStorage.setItem('michi_restart_required', 'true');
       var pStr = res.pending_restart_fields && res.pending_restart_fields.length > 0
         ? ' (' + res.pending_restart_fields.join(', ') + ')'
         : '';
@@ -2740,6 +2862,10 @@ async function restoreBackup() {
     var text = await file.text();
     var payload = JSON.parse(text);
 
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid JSON structure in backup file');
+    }
+
     var tracksCount = (payload.tracks || []).length;
     var playlistsCount = (payload.playlists || []).length;
     var starredCount = (payload.starred_tracks || []).length;
@@ -2751,8 +2877,8 @@ async function restoreBackup() {
       '• Starred Favorites: ' + starredCount + '\n' +
       '• Play History: ' + historyCount + '\n' +
       '• Track References: ' + tracksCount + '\n\n' +
-      'WARNING: Restoring will overwrite existing playlists and metadata.\n' +
-      'Do you wish to proceed?'
+      'WARNING: Restoring will overwrite existing playlists and metadata on server.\n' +
+      'Do you wish to proceed with force restore?'
     );
 
     if (!confirmed) {
@@ -2760,7 +2886,10 @@ async function restoreBackup() {
       return;
     }
 
-    if (resEl) resEl.innerHTML = '<span style="color:var(--text-dim)">Applying restore payload...</span>';
+    // Explicitly send force=true so server does not reject with 409 RESTORE_REQUIRES_FORCE
+    payload.force = true;
+
+    if (resEl) resEl.innerHTML = '<span style="color:var(--text-dim)">Applying restore payload (force=true)...</span>';
     var resp = await MichiAPI.restoreBackup(payload);
 
     if (resEl) {
@@ -2786,24 +2915,24 @@ async function loadDiagnostics() {
   var capsEl = $('#diag-caps-list');
 
   try {
-    var health = await MichiAPI.health();
-    var caps = await MichiAPI.serverCapabilities();
+    var diag = await MichiAPI.diagnostics();
     var settings = await MichiAPI.settings();
 
     if (statusEl) {
-      statusEl.textContent = health.status === 'ok' ? 'Healthy' : health.status;
-      statusEl.className = health.status === 'ok' ? 'badge stable' : 'badge disabled';
+      var isOk = diag.healthy && !diag.degraded;
+      statusEl.textContent = isOk ? 'Healthy' : (diag.degraded ? 'Degraded' : 'Unhealthy');
+      statusEl.className = isOk ? 'badge stable' : 'badge disabled';
     }
     if (ffmpegEl) ffmpegEl.textContent = settings.ffmpeg_available ? 'Available (Transcoding active)' : 'Unavailable (Direct play only)';
-    if (transEl) transEl.textContent = settings.effective_transcode_workers + ' worker slots';
-    if (poolEl) poolEl.textContent = settings.effective_db_pool + ' connections';
+    if (transEl) transEl.textContent = '0 / ' + (settings.effective_transcode_workers || 0) + ' active (Capacity: ' + (settings.effective_transcode_workers || 0) + ' worker slots)';
+    if (poolEl) poolEl.textContent = (settings.effective_db_pool || 8) + ' connections (Tracks: ' + (diag.db?.total_tracks || 0) + ')';
 
-    if (capsEl && caps.capabilities) {
-      var lines = Object.keys(caps.capabilities).map(function(k) {
-        var v = caps.capabilities[k];
-        return '<div>' + esc(k) + ': <strong>' + (v ? 'Enabled' : 'Disabled') + '</strong></div>';
-      }).join('');
-      capsEl.innerHTML = lines;
+    if (capsEl && diag.player_compatibility) {
+      var pc = diag.player_compatibility;
+      capsEl.innerHTML = '<div>Contract Status: <strong>' + esc(pc.contract_status) + '</strong></div>' +
+        '<div>Queue Transfer: <strong>' + (pc.supports_queue_transfer ? 'Yes' : 'No') + '</strong></div>' +
+        '<div>Import Preflight: <strong>' + (pc.supports_import_preflight ? 'Yes' : 'No') + '</strong></div>' +
+        '<div>Receiver E2E Ready: <strong>' + (pc.receiver_e2e_ready ? 'Yes' : 'No') + '</strong></div>';
     }
   } catch (e) {
     console.warn('diagnostics failed:', e.message);
@@ -2828,10 +2957,17 @@ async function loadJobs() {
           var statusBadge = j.status === 'running'
             ? '<span class="badge stable">Running</span>'
             : (j.status === 'succeeded' ? '<span class="badge format">Completed</span>' : '<span class="badge disabled">' + esc(j.status) + '</span>');
-          return '<div class="panel-row" style="border-bottom:1px solid var(--border);padding:8px 0">' +
-            '<span class="panel-label" style="flex:2">' + esc(j.kind || j.type || 'Job') + ' (' + esc(j.id ? j.id.slice(0, 8) : '') + ')</span>' +
-            '<span style="flex:1">' + statusBadge + '</span>' +
-            '<span class="panel-mono" style="font-size:0.75rem">' + esc(j.created_at || '') + '</span>' +
+          var cancelBtn = (j.status === 'running' || j.status === 'pending')
+            ? '<button class="btn btn-ghost btn-sm" style="color:var(--error);margin-left:8px;" onclick="cancelJobAction(\'' + esc(j.id) + '\')">Cancel</button>'
+            : '';
+          var errDetail = j.error || j.last_error ? '<div style="color:var(--error);font-size:0.75rem;margin-top:2px;">' + esc(j.error || j.last_error) + '</div>' : '';
+          return '<div class="panel-row" style="border-bottom:1px solid var(--border);padding:8px 0;flex-direction:column;align-items:flex-start;">' +
+            '<div style="display:flex;width:100%;align-items:center;justify-content:space-between;">' +
+              '<span class="panel-label">' + esc(j.kind || j.type || 'Job') + ' <span class="panel-mono" style="font-size:0.75rem">(' + esc(j.id ? j.id.slice(0, 8) : '') + ')</span></span>' +
+              '<div>' + statusBadge + cancelBtn + '</div>' +
+            '</div>' +
+            errDetail +
+            '<span class="panel-mono" style="font-size:0.75rem;color:var(--text-dim);margin-top:2px;">' + esc(j.created_at || '') + '</span>' +
             '</div>';
         }).join('');
       }
@@ -2841,12 +2977,39 @@ async function loadJobs() {
   }
 }
 
+async function cancelJobAction(id) {
+  if (!confirm('Are you sure you want to cancel job ' + id + '?')) return;
+  try {
+    await MichiAPI.cancelJob(id);
+    showToast('Job cancelled');
+    loadJobs();
+  } catch (e) {
+    showToast('Failed to cancel job: ' + e.message, true);
+  }
+}
+
 async function loadIntegrations() {
   var peersEl = $('#integ-sync-peers');
   var delayEl = $('#integ-reconnect-max');
+  var haStatusEl = $('#ha-discovery-status');
 
   try {
     var settings = await MichiAPI.settings();
+    var modulesData = await MichiAPI.modules();
+
+    var haModule = (modulesData.modules || []).find(function(m) { return m.name === 'homeassistant'; });
+    var haEnabled = haModule ? haModule.enabled : true;
+
+    if (haStatusEl) {
+      if (!haEnabled) {
+        haStatusEl.textContent = 'Disabled';
+        haStatusEl.className = 'badge disabled';
+      } else {
+        haStatusEl.textContent = 'Enabled (Auto-Discovery Active)';
+        haStatusEl.className = 'badge stable';
+      }
+    }
+
     if (peersEl) peersEl.textContent = (settings.sync_peers || []).join(', ') || 'No mesh peers configured';
     if (delayEl) delayEl.textContent = (settings.reconnect_delay_max || 300) + ' seconds backoff cap';
   } catch (e) {

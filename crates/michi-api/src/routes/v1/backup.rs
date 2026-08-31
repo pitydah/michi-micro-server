@@ -522,9 +522,26 @@ pub async fn run_auto_backup_cycle(state: &AppState) -> Result<String, String> {
     entries.sort(); // lexical sort by timestamp in filename
     if entries.len() > max_keep {
         let to_remove = entries.len() - max_keep;
+        let mut pruned = 0;
+        let mut prune_errors = 0;
         for p in entries.iter().take(to_remove) {
-            let _ = tokio::fs::remove_file(p).await;
+            match tokio::fs::remove_file(p).await {
+                Ok(_) => pruned += 1,
+                Err(e) => {
+                    tracing::warn!(
+                        "auto_backup: failed to prune old backup {}: {e}",
+                        p.display()
+                    );
+                    prune_errors += 1;
+                }
+            }
         }
+        tracing::info!(
+            "auto_backup: retention policy applied (kept: {}, pruned: {}, errors: {})",
+            max_keep,
+            pruned,
+            prune_errors
+        );
     }
 
     Ok(filename)

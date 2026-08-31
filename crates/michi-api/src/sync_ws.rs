@@ -73,41 +73,58 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                 );
                                 // Dispatch state commands to PlaybackEngine so PlaybackProjectionCoordinator
                                 // remains the single authoritative writer of PlaybackState.
+                                let mut applied = true;
                                 if let Some(tid) = track_id {
                                     let resolver = michi_playback::SqliteTrackResolver::new(
                                         state_clone.db.clone(),
                                         state_clone.config.music_paths.clone(),
                                     );
-                                    if let Ok(track) = resolver.get_track(*tid).await {
-                                        let _ = state_clone
-                                            .playback_engine
-                                            .load_track(track, *position_ms)
-                                            .await;
+                                    match resolver.get_track(*tid).await {
+                                        Ok(track) => {
+                                            if let Err(e) = state_clone
+                                                .playback_engine
+                                                .load_track(track, *position_ms)
+                                                .await
+                                            {
+                                                warn!("sync: failed to load track {tid}: {e}");
+                                                applied = false;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!("sync: track {tid} not found locally: {e}");
+                                            applied = false;
+                                        }
                                     }
-                                } else {
-                                    let _ = state_clone.playback_engine.seek(*position_ms).await;
+                                } else if let Err(e) =
+                                    state_clone.playback_engine.seek(*position_ms).await
+                                {
+                                    warn!("sync: failed to seek to {position_ms}ms: {e}");
+                                    applied = false;
                                 }
 
-                                if *playing {
-                                    let _ = state_clone.playback_engine.resume().await;
-                                } else {
-                                    let _ = state_clone.playback_engine.pause().await;
-                                }
-                                let vol_u8 = ((*volume * 100.0).round().clamp(0.0, 100.0)) as u8;
-                                let _ = state_clone.playback_engine.set_volume(vol_u8).await;
+                                if applied {
+                                    if *playing {
+                                        let _ = state_clone.playback_engine.resume().await;
+                                    } else {
+                                        let _ = state_clone.playback_engine.pause().await;
+                                    }
+                                    let vol_u8 =
+                                        ((*volume * 100.0).round().clamp(0.0, 100.0)) as u8;
+                                    let _ = state_clone.playback_engine.set_volume(vol_u8).await;
 
-                                // Notify local UI clients
-                                let tid = track_id
-                                    .map(|id| format!("\"{id}\""))
-                                    .unwrap_or_else(|| "null".into());
-                                let msg = format!(
-                                    "{{\"type\":\"sync_state\",\
-                                     \"track_id\":{tid},\
-                                     \"position_ms\":{position_ms},\
-                                     \"playing\":{playing},\
-                                     \"volume\":{volume}}}",
-                                );
-                                let _ = state_clone.tx.send(msg);
+                                    // Notify local UI clients only when state is truthfully applied
+                                    let tid = track_id
+                                        .map(|id| format!("\"{id}\""))
+                                        .unwrap_or_else(|| "null".into());
+                                    let msg = format!(
+                                        "{{\"type\":\"sync_state\",\
+                                         \"track_id\":{tid},\
+                                         \"position_ms\":{position_ms},\
+                                         \"playing\":{playing},\
+                                         \"volume\":{volume}}}",
+                                    );
+                                    let _ = state_clone.tx.send(msg);
+                                }
                             }
                             michi_sync::SyncMessage::Identify { name, .. } => {
                                 info!("sync: peer identified as '{}'", name);

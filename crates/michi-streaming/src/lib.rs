@@ -428,6 +428,10 @@ pub async fn transcode_stream_with_plan(
         }
     }
 
+    if let Some(channels) = plan.channels {
+        cmd.arg("-ac").arg(channels.to_string());
+    }
+
     cmd.arg("-")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
@@ -1113,5 +1117,122 @@ mod tests {
         .unwrap();
         assert!(dec5.needs_transcode());
         assert_eq!(dec5.output_mime_type, "audio/ogg");
+    }
+
+    #[tokio::test]
+    async fn test_real_ffmpeg_transcode_effect_execution() {
+        use futures_util::StreamExt;
+
+        if !check_ffmpeg() {
+            eprintln!("ffmpeg not available in environment; skipping real effect test");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wav_path = tmp.path().join("source.wav");
+
+        // Write a valid 44.1kHz 16-bit Stereo PCM WAV file with 0.1s of audio (4410 frames = 17640 bytes)
+        let sample_rate: u32 = 44100;
+        let channels: u16 = 2;
+        let bits_per_sample: u16 = 16;
+        let num_samples = 4410; // 0.1s
+        let data_size = num_samples * (channels as u32) * ((bits_per_sample / 8) as u32);
+        let file_size = 36 + data_size;
+
+        let mut wav_bytes = Vec::with_capacity((file_size + 8) as usize);
+        wav_bytes.extend_from_slice(b"RIFF");
+        wav_bytes.extend_from_slice(&(file_size).to_le_bytes());
+        wav_bytes.extend_from_slice(b"WAVEfmt ");
+        wav_bytes.extend_from_slice(&(16u32).to_le_bytes()); // subchunk1 size
+        wav_bytes.extend_from_slice(&(1u16).to_le_bytes()); // PCM
+        wav_bytes.extend_from_slice(&channels.to_le_bytes());
+        wav_bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        let byte_rate = sample_rate * (channels as u32) * (bits_per_sample as u32 / 8);
+        wav_bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        let block_align = channels * (bits_per_sample / 8);
+        wav_bytes.extend_from_slice(&block_align.to_le_bytes());
+        wav_bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+        wav_bytes.extend_from_slice(b"data");
+        wav_bytes.extend_from_slice(&data_size.to_le_bytes());
+        wav_bytes.resize(wav_bytes.len() + data_size as usize, 0x80);
+
+        std::fs::write(&wav_path, &wav_bytes).unwrap();
+
+        // 1. Test Opus Transcode Plan
+        let opus_plan = TranscodePlan {
+            codec: TranscodeCodec::Opus,
+            container: TranscodeContainer::Ogg,
+            bitrate_bps: Some(96000),
+            sample_rate_hz: Some(48000),
+            bit_depth: None,
+            channels: Some(2),
+        };
+        let mut opus_stream = transcode_stream_with_plan(&wav_path, &opus_plan)
+            .await
+            .unwrap();
+        let mut opus_out = Vec::new();
+        while let Some(res) = opus_stream.next().await {
+            let chunk = res.unwrap();
+            opus_out.extend_from_slice(&chunk);
+        }
+        assert!(!opus_out.is_empty(), "Opus transcode must output bytes");
+        assert_eq!(
+            &opus_out[0..4],
+            b"OggS",
+            "Opus in Ogg container must start with OggS magic bytes"
+        );
+
+        // 2. Test MP3 Transcode Plan
+        let mp3_plan = TranscodePlan {
+            codec: TranscodeCodec::Mp3,
+            container: TranscodeContainer::Mp3,
+            bitrate_bps: Some(192000),
+            sample_rate_hz: Some(44100),
+            bit_depth: None,
+            channels: Some(2),
+        };
+        let mut mp3_stream = transcode_stream_with_plan(&wav_path, &mp3_plan)
+            .await
+            .unwrap();
+        let mut mp3_out = Vec::new();
+        while let Some(res) = mp3_stream.next().await {
+            let chunk = res.unwrap();
+            mp3_out.extend_from_slice(&chunk);
+        }
+        assert!(!mp3_out.is_empty(), "MP3 transcode must output bytes");
+        let has_mp3_header = &mp3_out[0..3] == b"ID3" || mp3_out[0] == 0xFF;
+        assert!(
+            has_mp3_header,
+            "MP3 output must contain ID3 header or sync frame"
+        );
+
+        // 3. Test PCM 24/48 Transcode Plan
+        let pcm_plan = TranscodePlan {
+            codec: TranscodeCodec::Pcm,
+            container: TranscodeContainer::Wav,
+            bitrate_bps: None,
+            sample_rate_hz: Some(48000),
+            bit_depth: Some(24),
+            channels: Some(2),
+        };
+        let mut pcm_stream = transcode_stream_with_plan(&wav_path, &pcm_plan)
+            .await
+            .unwrap();
+        let mut pcm_out = Vec::new();
+        while let Some(res) = pcm_stream.next().await {
+            let chunk = res.unwrap();
+            pcm_out.extend_from_slice(&chunk);
+        }
+        assert!(!pcm_out.is_empty(), "PCM transcode must output bytes");
+        assert_eq!(
+            &pcm_out[0..4],
+            b"RIFF",
+            "PCM WAV output must start with RIFF header"
+        );
+        assert_eq!(
+            &pcm_out[8..12],
+            b"WAVE",
+            "PCM WAV output must contain WAVE format"
+        );
     }
 }
