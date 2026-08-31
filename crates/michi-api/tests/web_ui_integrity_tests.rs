@@ -2018,7 +2018,14 @@ async fn test_static_ast_html_and_js_symbol_completeness() {
 
     // 1. Every HTML handler (onclick="...", onchange="...", etc.) must be defined in app.js
     let mut missing_handlers = Vec::new();
-    let events = ["onclick=\"", "onchange=\"", "oninput=\"", "onsubmit=\"", "onkeydown=\"", "onkeyup=\""];
+    let events = [
+        "onclick=\"",
+        "onchange=\"",
+        "oninput=\"",
+        "onsubmit=\"",
+        "onkeydown=\"",
+        "onkeyup=\"",
+    ];
 
     for evt in events {
         let mut rest = html;
@@ -2038,9 +2045,9 @@ async fn test_static_ast_html_and_js_symbol_completeness() {
                             && !fn_name.starts_with("event")
                             && !fn_name.starts_with("window")
                         {
-                            let pat1 = format!("function {}", fn_name);
-                            let pat2 = format!("{} =", fn_name);
-                            let pat3 = format!("{}=", fn_name);
+                            let pat1 = format!("function {fn_name}");
+                            let pat2 = format!("{fn_name} =");
+                            let pat3 = format!("{fn_name}=");
                             if !js.contains(&pat1) && !js.contains(&pat2) && !js.contains(&pat3) {
                                 missing_handlers.push(fn_name.to_string());
                             }
@@ -2057,14 +2064,17 @@ async fn test_static_ast_html_and_js_symbol_completeness() {
     missing_handlers.dedup();
     assert!(
         missing_handlers.is_empty(),
-        "Found missing event handlers referenced in index.html: {:?}",
-        missing_handlers
+        "Found missing event handlers referenced in index.html: {missing_handlers:?}"
     );
 
     // 2. Every MichiAPI.<method>() call in app.js must have a corresponding method in const MichiAPI = { ... }
-    let api_start = js.find("const MichiAPI = {").expect("MichiAPI definition must exist");
+    let api_start = js
+        .find("const MichiAPI = {")
+        .expect("MichiAPI definition must exist");
     let api_sub = &js[api_start..];
-    let api_end = api_sub.find("\n};").expect("MichiAPI closing brace must exist");
+    let api_end = api_sub
+        .find("\n};")
+        .expect("MichiAPI closing brace must exist");
     let api_body = &api_sub[..api_end];
 
     let mut defined_methods = std::collections::HashSet::new();
@@ -2102,8 +2112,7 @@ async fn test_static_ast_html_and_js_symbol_completeness() {
     missing_api_calls.dedup();
     assert!(
         missing_api_calls.is_empty(),
-        "Found MichiAPI methods invoked in app.js but not defined: {:?}",
-        missing_api_calls
+        "Found MichiAPI methods invoked in app.js but not defined: {missing_api_calls:?}"
     );
 }
 
@@ -2119,15 +2128,20 @@ async fn test_settings_strict_validation_rejects_invalid_enums_and_ranges() {
                 .method("PUT")
                 .uri("/api/v1/settings")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::json!({
-                    "resource_profile": "turbo_unsupported"
-                }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({
+                        "resource_profile": "turbo_unsupported"
+                    })
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let val: Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(val["error"]["code"], "VALIDATION_ERROR");
 
@@ -2139,9 +2153,12 @@ async fn test_settings_strict_validation_rejects_invalid_enums_and_ranges() {
                 .method("PUT")
                 .uri("/api/v1/settings")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::json!({
-                    "job_max_concurrent": 100
-                }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({
+                        "job_max_concurrent": 100
+                    })
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -2155,10 +2172,13 @@ async fn test_settings_strict_validation_rejects_invalid_enums_and_ranges() {
                 .method("PUT")
                 .uri("/api/v1/settings")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::json!({
-                    "resource_profile": "performance",
-                    "job_max_concurrent": 4
-                }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({
+                        "resource_profile": "performance",
+                        "job_max_concurrent": 4
+                    })
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -2182,7 +2202,9 @@ async fn test_settings_reports_active_and_configured_state() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let val: Value = serde_json::from_slice(&body_bytes).unwrap();
     assert!(val.get("active").is_some());
     assert!(val.get("configured").is_some());

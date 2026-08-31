@@ -279,6 +279,45 @@ impl Config {
             .and_then(|content| serde_json::from_str::<Config>(&content).ok())
     }
 
+    pub fn get_env_overrides() -> std::collections::HashSet<String> {
+        let mut overrides = std::collections::HashSet::new();
+        let env_keys = [
+            ("MICHI_PORT", "port"),
+            ("MICHI_MUSIC_PATH", "music_paths"),
+            ("MICHI_RESOURCE_PROFILE", "resource_profile"),
+            ("MICHI_STREAM_PROFILE", "stream_profile"),
+            ("MICHI_FORMAT_POLICY", "format_policy"),
+            ("MICHI_SYNC_PEERS", "sync_peers"),
+            ("MICHI_SYNC_NAME", "sync_name"),
+            ("MICHI_SCROBBLE_ENABLED", "scrobble_enabled"),
+            ("MICHI_ALLOW_REGISTRATION", "allow_registration"),
+            ("MICHI_CORS_ORIGIN", "cors_origin"),
+            ("MICHI_DEV_MODE", "dev_mode"),
+            ("MICHI_MAX_REMOTE_BITRATE", "max_remote_bitrate"),
+            ("MICHI_REMOTE_SYNC", "remote_sync"),
+            ("MICHI_LANG", "language"),
+            ("MICHI_AUTO_BACKUP", "auto_backup_enabled"),
+            ("MICHI_BACKUP_KEEP", "backup_max_keep"),
+            ("MICHI_MAX_JOBS", "job_max_concurrent"),
+            ("MICHI_RECONNECT_MAX", "reconnect_delay_max"),
+            ("MICHI_TRUST_PROXY", "trust_proxy"),
+            ("MICHI_TRUSTED_PROXIES", "trusted_proxies"),
+        ];
+
+        for (env_var, field_name) in env_keys {
+            if env::var(env_var).is_ok() {
+                overrides.insert(field_name.to_string());
+            }
+        }
+        overrides
+    }
+
+    pub fn compute_reconnect_backoff(attempt: u64, max_delay_secs: u64) -> std::time::Duration {
+        let max_sec = max_delay_secs.max(1);
+        let base = (attempt.saturating_mul(5)).min(max_sec);
+        std::time::Duration::from_secs(base.max(1))
+    }
+
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = env::var("MICHI_PORT") {
             if let Ok(p) = v.parse::<u16>() {
@@ -788,6 +827,31 @@ mod tests {
                 assert!(cfg.is_trusted_proxy(&"10.0.0.1".parse().unwrap()));
                 assert!(cfg.is_trusted_proxy(&"192.168.1.50".parse().unwrap()));
                 assert!(!cfg.is_trusted_proxy(&"1.1.1.1".parse().unwrap()));
+            },
+        );
+    }
+
+    #[test]
+    fn test_compute_reconnect_backoff() {
+        assert_eq!(Config::compute_reconnect_backoff(0, 300).as_secs(), 1);
+        assert_eq!(Config::compute_reconnect_backoff(1, 300).as_secs(), 5);
+        assert_eq!(Config::compute_reconnect_backoff(2, 300).as_secs(), 10);
+        assert_eq!(Config::compute_reconnect_backoff(3, 300).as_secs(), 15);
+        assert_eq!(Config::compute_reconnect_backoff(20, 60).as_secs(), 60);
+    }
+
+    #[test]
+    fn test_get_env_overrides() {
+        temp_env::with_vars(
+            [
+                ("MICHI_RESOURCE_PROFILE", Some("performance")),
+                ("MICHI_DEV_MODE", Some("true")),
+            ],
+            || {
+                let overrides = Config::get_env_overrides();
+                assert!(overrides.contains("resource_profile"));
+                assert!(overrides.contains("dev_mode"));
+                assert!(!overrides.contains("stream_profile"));
             },
         );
     }

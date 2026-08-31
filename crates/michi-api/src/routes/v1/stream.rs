@@ -142,101 +142,86 @@ pub async fn stream_handler(
 
     let music_paths = &state.config.music_paths;
 
-    let format_str_opt = query.format.clone().or_else(|| {
-        if state.config.stream_profile.needs_transcode() {
-            Some(state.config.stream_profile.target_codec().to_string())
+    let decision = michi_streaming::resolve_stream_decision(
+        &track.format,
+        track.sample_rate,
+        track.bit_depth.map(|d| d as u32),
+        query.format.as_deref(),
+        state.config.stream_profile,
+        state.config.format_policy,
+        state.config.resource_profile,
+        state.config.max_remote_bitrate,
+    )
+    .map_err(|e| {
+        if e.starts_with("TRANSCODING_FORBIDDEN_BY_POLICY") {
+            v1_error(
+                StatusCode::BAD_REQUEST,
+                "TRANSCODING_FORBIDDEN_BY_POLICY",
+                &e,
+            )
+        } else if e.starts_with("TRANSCODING_DISABLED") {
+            v1_error(StatusCode::BAD_REQUEST, "TRANSCODING_DISABLED", &e)
+        } else if e.starts_with("INVALID_STREAM_PROFILE") {
+            v1_error(StatusCode::BAD_REQUEST, "INVALID_STREAM_PROFILE", &e)
+        } else if e.starts_with("UNSUPPORTED_TRANSCODE_PLAN") {
+            v1_error(StatusCode::BAD_REQUEST, "UNSUPPORTED_TRANSCODE_PLAN", &e)
         } else {
-            None
+            v1_error(StatusCode::BAD_REQUEST, "STREAM_RESOLUTION_ERROR", &e)
         }
-    });
+    })?;
 
-    if let Some(ref format_str) = format_str_opt {
-        // Policy check
-        match state.config.format_policy {
-            michi_core::AudioFormatPolicy::DirectPlay => {
+    match decision.mode {
+        michi_streaming::StreamMode::Direct => {
+            stream_file(music_paths, &track, &headers, None).await
+        }
+        michi_streaming::StreamMode::Transcode(plan) => {
+            let permit = state
+                .transcode_semaphore
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| {
+                    v1_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "MAX_TRANSCODES_REACHED",
+                        "maximum concurrent transcodes reached; please retry later",
+                    )
+                })?;
+
+            if !michi_streaming::check_ffmpeg() {
                 return Err(v1_error(
                     StatusCode::BAD_REQUEST,
-                    "TRANSCODING_FORBIDDEN_BY_POLICY",
-                    "transcoding is forbidden under direct play format policy",
+                    "FFMPEG_UNAVAILABLE",
+                    "ffmpeg is not available on this system",
                 ));
             }
-            michi_core::AudioFormatPolicy::LosslessOnly => {
-                if format_str != "flac" && format_str != "wav" {
-                    return Err(v1_error(
-                        StatusCode::BAD_REQUEST,
-                        "TRANSCODING_FORBIDDEN_BY_POLICY",
-                        "lossy transcoding is forbidden under lossless only format policy",
-                    ));
-                }
-            }
-            michi_core::AudioFormatPolicy::StandardOnly => {}
+
+            let file_path = std::path::Path::new(&track.file_path);
+            let canonical = michi_streaming::validate_track_path(music_paths, file_path)
+                .map_err(|e| v1_error(StatusCode::NOT_FOUND, "FILE_NOT_FOUND", &e.to_string()))?;
+            let stream = michi_streaming::transcode_stream_with_plan(&canonical, &plan)
+                .await
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "TRANSCODING_FAILED",
+                        &e.to_string(),
+                    )
+                })?;
+            let mime = decision.output_mime_type;
+
+            use futures_util::StreamExt;
+            let owned_permit = permit;
+            let monitored_stream = stream.map(move |chunk| {
+                let _keep_permit = &owned_permit;
+                chunk
+            });
+
+            Ok(Response::builder()
+                .header(header::CONTENT_TYPE, mime)
+                .body(Body::from_stream(monitored_stream))
+                .unwrap())
         }
-
-        // Concurrency limiter check
-        if state.config.resource_profile.max_transcodes() == 0 {
-            return Err(v1_error(
-                StatusCode::BAD_REQUEST,
-                "TRANSCODING_DISABLED",
-                "transcoding is disabled in current resource profile (eco)",
-            ));
-        }
-
-        let permit = state
-            .transcode_semaphore
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| {
-                v1_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "MAX_TRANSCODES_REACHED",
-                    "maximum concurrent transcodes reached; please retry later",
-                )
-            })?;
-
-        if !michi_streaming::check_ffmpeg() {
-            return Err(v1_error(
-                StatusCode::BAD_REQUEST,
-                "FFMPEG_UNAVAILABLE",
-                "ffmpeg is not available on this system",
-            ));
-        }
-        let tf = format_str
-            .parse::<michi_streaming::TranscodeFormat>()
-            .map_err(|_| {
-                v1_error(
-                    StatusCode::BAD_REQUEST,
-                    "INVALID_FORMAT",
-                    &format!("invalid format: '{format_str}'. Supported: mp3, ogg, hls"),
-                )
-            })?;
-        let file_path = std::path::Path::new(&track.file_path);
-        let canonical = michi_streaming::validate_track_path(music_paths, file_path)
-            .map_err(|e| v1_error(StatusCode::NOT_FOUND, "FILE_NOT_FOUND", &e.to_string()))?;
-        let stream = michi_streaming::transcode_stream(&canonical, &tf)
-            .await
-            .map_err(|e| {
-                v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "TRANSCODING_FAILED",
-                    &e.to_string(),
-                )
-            })?;
-        let mime = tf.mime_type();
-
-        use futures_util::StreamExt;
-        let owned_permit = permit;
-        let monitored_stream = stream.map(move |chunk| {
-            let _keep_permit = &owned_permit;
-            chunk
-        });
-
-        return Ok(Response::builder()
-            .header(header::CONTENT_TYPE, mime)
-            .body(Body::from_stream(monitored_stream))
-            .unwrap());
     }
-
-    stream_file(music_paths, &track, &headers, None).await
 }
 
 pub async fn download_handler(

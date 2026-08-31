@@ -558,6 +558,33 @@ pub async fn playback_control_handler(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PlaybackSeekDirectBody {
+    pub position_ms: u64,
+}
+
+pub async fn playback_seek_handler(
+    State(state): State<AppState>,
+    Json(body): Json<PlaybackSeekDirectBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .playback_engine
+        .seek(body.position_ms)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                e.error_code(),
+                &e.to_string(),
+            )
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "accepted",
+        "position_ms": body.position_ms,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PlaybackSessionBody {
     #[serde(default, alias = "queue_state")]
     pub queue: Vec<Uuid>,
@@ -1099,7 +1126,7 @@ pub async fn restore_playback_state_handler(
                     )
                 })?;
 
-            if let Some(cur_track) = tracks.get(cur_idx) {
+            let effective_pos_ms = if let Some(cur_track) = tracks.get(cur_idx) {
                 let pos_ms = cur_track
                     .duration_ms
                     .map(|d| session.position_ms.min(d))
@@ -1115,7 +1142,10 @@ pub async fn restore_playback_state_handler(
                             &e.to_string(),
                         )
                     })?;
-            }
+                pos_ms
+            } else {
+                session.position_ms
+            };
 
             let snap = state.playback_engine.snapshot().await.map_err(|e| {
                 v1_error(
@@ -1141,7 +1171,7 @@ pub async fn restore_playback_state_handler(
                 "restored": true,
                 "session_id": updated.id,
                 "track_id": snap.track_id,
-                "position_ms": snap.position_ms,
+                "position_ms": effective_pos_ms,
                 "playing": false,
                 "volume": snap.volume,
                 "shuffle": snap.shuffle,

@@ -373,6 +373,9 @@
                 <button class="tab" role="tab" aria-selected="false" data-stab="receivers" onclick="switchSettingsTab('receivers')">Receivers</button>
                 <button class="tab" role="tab" aria-selected="false" data-stab="webhook" onclick="switchSettingsTab('webhook')">Webhook</button>
                 <button class="tab" role="tab" aria-selected="false" data-stab="backup" onclick="switchSettingsTab('backup')">Backup</button>
+                <button class="tab" role="tab" aria-selected="false" data-stab="diagnostics" onclick="switchSettingsTab('diagnostics')">Diagnostics</button>
+                <button class="tab" role="tab" aria-selected="false" data-stab="jobs" onclick="switchSettingsTab('jobs')">Jobs</button>
+                <button class="tab" role="tab" aria-selected="false" data-stab="integrations" onclick="switchSettingsTab('integrations')">Integrations</button>
             </div>
 
             <!-- General -->
@@ -584,16 +587,66 @@
             <!-- Backup -->
             <div class="stab-content hidden" id="stab-backup">
                 <div class="panel">
-                    <div class="panel-header">Library Snapshot</div>
-                    <p style="color:var(--text-3);font-size:.78rem;margin-bottom:8px">Records catalog statistics snapshot (tracks, albums, artists counts).</p>
+                    <div class="panel-header">Library Snapshot & Export</div>
+                    <p style="color:var(--text-3);font-size:.78rem;margin-bottom:8px">Records catalog statistics snapshot or downloads the complete canonical JSON backup payload.</p>
                     <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="createSnapshot()">Create Library Snapshot</button><button class="btn btn-ghost btn-sm" onclick="downloadBackup()">Download Full Backup</button></div>
                     <div id="snapshot-result" class="panel-result"></div>
+                </div>
+                <div class="panel">
+                    <div class="panel-header">Restore Backup</div>
+                    <p style="color:var(--text-3);font-size:.78rem;margin-bottom:8px">Restore database playlists, favorites, and listening history from a canonical backup file.</p>
+                    <div class="panel-row"><span class="panel-label">Backup JSON</span><input type="file" id="backup-restore-file" class="panel-input" accept=".json"></div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="restoreBackup()">Restore Database</button></div>
+                    <div id="backup-restore-result" class="panel-result"></div>
                 </div>
                 <div class="panel">
                     <div class="panel-header">File Availability Check</div>
                     <p style="color:var(--text-3);font-size:.78rem;margin-bottom:8px">Checks track file existence on local storage.</p>
                     <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="verifyIntegrity()">Check Files</button></div>
                     <div id="integrity-result" class="panel-result"></div>
+                </div>
+            </div>
+
+            <!-- Diagnostics -->
+            <div class="stab-content hidden" id="stab-diagnostics">
+                <div class="panel">
+                    <div class="panel-header">Server Health & Capabilities</div>
+                    <div class="panel-row"><span class="panel-label">Status</span><span id="diag-status" class="badge stable">Checking...</span></div>
+                    <div class="panel-row"><span class="panel-label">FFmpeg Audio Core</span><span id="diag-ffmpeg" class="panel-mono">--</span></div>
+                    <div class="panel-row"><span class="panel-label">Active Transcodes</span><span id="diag-transcodes" class="panel-mono">--</span></div>
+                    <div class="panel-row"><span class="panel-label">Database Pool</span><span id="diag-db-pool" class="panel-mono">--</span></div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-ghost btn-sm" onclick="loadDiagnostics()">Refresh Diagnostics</button></div>
+                </div>
+                <div class="panel">
+                    <div class="panel-header">Capability Flags</div>
+                    <div id="diag-caps-list" class="panel-mono" style="font-size:0.75rem;line-height:1.4">Loading capabilities...</div>
+                </div>
+            </div>
+
+            <!-- Jobs -->
+            <div class="stab-content hidden" id="stab-jobs">
+                <div class="panel">
+                    <div class="panel-header">Job Queue & Workers</div>
+                    <div class="panel-row"><span class="panel-label">Max Concurrency</span><span id="jobs-max-concurrent" class="panel-mono">--</span></div>
+                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-ghost btn-sm" onclick="loadJobs()">Refresh Jobs</button></div>
+                </div>
+                <div class="section">
+                    <div class="section-header"><h3>Active & Recent Jobs</h3></div>
+                    <div id="jobs-list" style="margin-top:8px">Loading jobs...</div>
+                </div>
+            </div>
+
+            <!-- Integrations -->
+            <div class="stab-content hidden" id="stab-integrations">
+                <div class="panel">
+                    <div class="panel-header">Home Assistant (MQTT)</div>
+                    <div class="panel-row"><span class="panel-label">Auto-Discovery</span><span id="ha-discovery-status" class="badge stable">Active</span></div>
+                    <div class="panel-row"><span class="panel-label">Prefix</span><span class="panel-mono">homeassistant/ / michi/</span></div>
+                </div>
+                <div class="panel">
+                    <div class="panel-header">Sync Mesh Peers</div>
+                    <div class="panel-row"><span class="panel-label">Configured Peers</span><span id="integ-sync-peers" class="panel-mono">--</span></div>
+                    <div class="panel-row"><span class="panel-label">Auto-Reconnect Max</span><span id="integ-reconnect-max" class="panel-mono">--</span></div>
                 </div>
             </div>
         </section>

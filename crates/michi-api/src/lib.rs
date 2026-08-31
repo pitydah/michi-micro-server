@@ -11,6 +11,7 @@ use axum::{
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use michi_config::Config;
+use michi_playback::TrackResolver;
 use michi_security::SecurityState;
 use michi_sync::PlaybackState;
 use michi_sync::SyncManager;
@@ -947,7 +948,10 @@ pub fn start_sync_peers(state: &AppState) {
     let sync_name = state.config.sync_name.clone();
     let sync_tx = state.sync_tx.clone();
     let tx = state.tx.clone();
-    let playback_state = state.playback_state.clone();
+    let engine = state.playback_engine.clone();
+    let db = state.db.clone();
+    let music_paths = state.config.music_paths.clone();
+    let reconnect_max = state.config.reconnect_delay_max as u64;
     let shutdown = state.shutdown_token.clone();
     let dm = state.disabled_modules.clone();
     let sync_cancel = state
@@ -972,7 +976,9 @@ pub fn start_sync_peers(state: &AppState) {
                     let sync_name = sync_name.clone();
                     let sync_tx = sync_tx.clone();
                     let tx = tx.clone();
-                    let playback_state = playback_state.clone();
+                    let peer_engine = engine.clone();
+                    let peer_db = db.clone();
+                    let peer_music_paths = music_paths.clone();
                     let peer_shutdown = shutdown.clone();
                     let peer_dm = dm.clone();
 
@@ -1016,7 +1022,9 @@ pub fn start_sync_peers(state: &AppState) {
                                             });
 
                                             let recv_tx = tx.clone();
-                                            let recv_playback = playback_state.clone();
+                                            let recv_engine = peer_engine.clone();
+                                            let recv_db = peer_db.clone();
+                                            let recv_paths = peer_music_paths.clone();
                                             let recv_task = tokio::spawn(async move {
                                                 while let Some(Ok(msg)) = receiver.next().await {
                                                     match msg {
@@ -1029,22 +1037,26 @@ pub fn start_sync_peers(state: &AppState) {
                                                                 ..
                                                             }) = michi_sync::SyncMessage::deserialize(&text)
                                                             {
-                                                                let new_state = michi_sync::PlaybackState {
-                                                                    track_id,
-                                                                    position_ms,
-                                                                    playing,
-                                                                    volume,
-                                                                    updated_at: chrono::Utc::now(),
-                                                                    playlist_id: None,
-                                                                    queue_position: None,
-                                                                    device_id: None,
-                                                                    shuffle: false,
-                                                                    repeat: "off".into(),
-                                                                };
-                                                                {
-                                                                    let mut current = recv_playback.write().await;
-                                                                    *current = new_state;
+                                                                if let Some(tid) = track_id {
+                                                                    let resolver = michi_playback::SqliteTrackResolver::new(
+                                                                        recv_db.clone(),
+                                                                        recv_paths.clone(),
+                                                                    );
+                                                                    if let Ok(track) = resolver.get_track(tid).await {
+                                                                        let _ = recv_engine.load_track(track, position_ms).await;
+                                                                    }
+                                                                } else {
+                                                                    let _ = recv_engine.seek(position_ms).await;
                                                                 }
+
+                                                                if playing {
+                                                                    let _ = recv_engine.resume().await;
+                                                                } else {
+                                                                    let _ = recv_engine.pause().await;
+                                                                }
+                                                                let vol_u8 = ((volume * 100.0).round().clamp(0.0, 100.0)) as u8;
+                                                                let _ = recv_engine.set_volume(vol_u8).await;
+
                                                                 let tid = track_id
                                                                     .map(|id| format!("\"{id}\""))
                                                                     .unwrap_or_else(|| "null".into());
@@ -1080,9 +1092,7 @@ pub fn start_sync_peers(state: &AppState) {
                                     }
 
                                     attempt += 1;
-                                    let delay = Duration::from_secs(
-                                        std::cmp::min(attempt * 5, 300) + rand::random::<u64>() % 10,
-                                    );
+                                    let delay = michi_config::Config::compute_reconnect_backoff(attempt, reconnect_max);
                                     info!("sync peer {}: reconnecting in {}s", peer, delay.as_secs());
                                     tokio::time::sleep(delay).await;
                                 } => {}
@@ -1453,6 +1463,10 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/playback/control",
             post(routes::v1::playback::playback_control_handler),
+        )
+        .route(
+            "/api/v1/playback/seek",
+            post(routes::v1::playback::playback_seek_handler),
         )
         .route(
             "/api/v1/playback/session",

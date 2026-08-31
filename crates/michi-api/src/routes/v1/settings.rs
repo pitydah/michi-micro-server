@@ -61,51 +61,95 @@ pub struct SettingsResponse {
     pub configured: serde_json::Value,
     pub restart_required: bool,
     pub pending_restart_fields: Vec<String>,
+    pub effective_sources: std::collections::HashMap<String, String>,
+    pub env_overrides: Vec<String>,
 }
 
 pub async fn get_settings_handler(State(state): State<AppState>) -> Json<SettingsResponse> {
     let cfg = &state.config;
     let disk_cfg = cfg.read_file_config();
+    let env_overrides_set = michi_config::Config::get_env_overrides();
+
+    let all_fields = [
+        "resource_profile",
+        "stream_profile",
+        "format_policy",
+        "auto_backup_enabled",
+        "backup_max_keep",
+        "job_max_concurrent",
+        "reconnect_delay_max",
+        "max_remote_bitrate",
+        "remote_sync",
+        "scrobble_enabled",
+        "dev_mode",
+        "sync_name",
+        "sync_peers",
+    ];
+
+    let mut effective_sources = std::collections::HashMap::new();
+    for f in all_fields {
+        if env_overrides_set.contains(f) {
+            effective_sources.insert(f.to_string(), "environment".to_string());
+        } else if disk_cfg.is_some() {
+            effective_sources.insert(f.to_string(), "file".to_string());
+        } else {
+            effective_sources.insert(f.to_string(), "default".to_string());
+        }
+    }
 
     let mut pending_restart_fields = Vec::new();
     if let Some(ref d) = disk_cfg {
-        if d.resource_profile != cfg.resource_profile {
+        if d.resource_profile != cfg.resource_profile
+            && !env_overrides_set.contains("resource_profile")
+        {
             pending_restart_fields.push("resource_profile".to_string());
         }
-        if d.stream_profile != cfg.stream_profile {
+        if d.stream_profile != cfg.stream_profile && !env_overrides_set.contains("stream_profile") {
             pending_restart_fields.push("stream_profile".to_string());
         }
-        if d.format_policy != cfg.format_policy {
+        if d.format_policy != cfg.format_policy && !env_overrides_set.contains("format_policy") {
             pending_restart_fields.push("format_policy".to_string());
         }
-        if d.auto_backup_enabled != cfg.auto_backup_enabled {
+        if d.auto_backup_enabled != cfg.auto_backup_enabled
+            && !env_overrides_set.contains("auto_backup_enabled")
+        {
             pending_restart_fields.push("auto_backup_enabled".to_string());
         }
-        if d.backup_max_keep != cfg.backup_max_keep {
+        if d.backup_max_keep != cfg.backup_max_keep
+            && !env_overrides_set.contains("backup_max_keep")
+        {
             pending_restart_fields.push("backup_max_keep".to_string());
         }
-        if d.job_max_concurrent != cfg.job_max_concurrent {
+        if d.job_max_concurrent != cfg.job_max_concurrent
+            && !env_overrides_set.contains("job_max_concurrent")
+        {
             pending_restart_fields.push("job_max_concurrent".to_string());
         }
-        if d.reconnect_delay_max != cfg.reconnect_delay_max {
+        if d.reconnect_delay_max != cfg.reconnect_delay_max
+            && !env_overrides_set.contains("reconnect_delay_max")
+        {
             pending_restart_fields.push("reconnect_delay_max".to_string());
         }
-        if d.max_remote_bitrate != cfg.max_remote_bitrate {
+        if d.max_remote_bitrate != cfg.max_remote_bitrate
+            && !env_overrides_set.contains("max_remote_bitrate")
+        {
             pending_restart_fields.push("max_remote_bitrate".to_string());
         }
-        if d.remote_sync != cfg.remote_sync {
+        if d.remote_sync != cfg.remote_sync && !env_overrides_set.contains("remote_sync") {
             pending_restart_fields.push("remote_sync".to_string());
         }
-        if d.scrobble_enabled != cfg.scrobble_enabled {
+        if d.scrobble_enabled != cfg.scrobble_enabled
+            && !env_overrides_set.contains("scrobble_enabled")
+        {
             pending_restart_fields.push("scrobble_enabled".to_string());
         }
-        if d.dev_mode != cfg.dev_mode {
+        if d.dev_mode != cfg.dev_mode && !env_overrides_set.contains("dev_mode") {
             pending_restart_fields.push("dev_mode".to_string());
         }
-        if d.sync_name != cfg.sync_name {
+        if d.sync_name != cfg.sync_name && !env_overrides_set.contains("sync_name") {
             pending_restart_fields.push("sync_name".to_string());
         }
-        if d.sync_peers != cfg.sync_peers {
+        if d.sync_peers != cfg.sync_peers && !env_overrides_set.contains("sync_peers") {
             pending_restart_fields.push("sync_peers".to_string());
         }
     }
@@ -154,6 +198,9 @@ pub async fn get_settings_handler(State(state): State<AppState>) -> Json<Setting
         active_val.clone()
     };
 
+    let mut env_overrides_list: Vec<String> = env_overrides_set.into_iter().collect();
+    env_overrides_list.sort();
+
     Json(SettingsResponse {
         port: cfg.port(),
         music_paths: cfg
@@ -191,6 +238,8 @@ pub async fn get_settings_handler(State(state): State<AppState>) -> Json<Setting
         configured: configured_val,
         restart_required,
         pending_restart_fields,
+        effective_sources,
+        env_overrides: env_overrides_list,
     })
 }
 

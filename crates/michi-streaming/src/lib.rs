@@ -200,19 +200,80 @@ pub async fn read_range_from_file_async(
     Ok(buf)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscodeCodec {
+    Opus,
+    Mp3,
+    Pcm,
+    Ogg,
+    Hls,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscodeContainer {
+    Ogg,
+    Mp3,
+    Wav,
+    Hls,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscodePlan {
+    pub codec: TranscodeCodec,
+    pub container: TranscodeContainer,
+    pub bitrate_bps: Option<u32>,
+    pub sample_rate_hz: Option<u32>,
+    pub bit_depth: Option<u8>,
+    pub channels: Option<u8>,
+}
+
+impl TranscodePlan {
+    pub fn mime_type(&self) -> &'static str {
+        match self.container {
+            TranscodeContainer::Ogg => "audio/ogg",
+            TranscodeContainer::Mp3 => "audio/mpeg",
+            TranscodeContainer::Wav => "audio/wav",
+            TranscodeContainer::Hls => "application/vnd.apple.mpegurl",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamMode {
+    Direct,
+    Transcode(TranscodePlan),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamDecision {
+    pub mode: StreamMode,
+    pub source_format: AudioFormat,
+    pub output_mime_type: &'static str,
+    pub reason: String,
+}
+
+impl StreamDecision {
+    pub fn needs_transcode(&self) -> bool {
+        matches!(self.mode, StreamMode::Transcode(_))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TranscodeFormat {
     Mp3,
     Ogg,
+    Opus,
     Hls,
+    Pcm,
 }
 
 impl TranscodeFormat {
     pub fn mime_type(&self) -> &'static str {
         match self {
             Self::Mp3 => "audio/mpeg",
-            Self::Ogg => "audio/ogg",
+            Self::Ogg | Self::Opus => "audio/ogg",
             Self::Hls => "application/vnd.apple.mpegurl",
+            Self::Pcm => "audio/wav",
         }
     }
 
@@ -220,7 +281,9 @@ impl TranscodeFormat {
         match self {
             Self::Mp3 => "mp3",
             Self::Ogg => "ogg",
+            Self::Opus => "ogg",
             Self::Hls => "hls",
+            Self::Pcm => "wav",
         }
     }
 
@@ -228,7 +291,9 @@ impl TranscodeFormat {
         match self {
             Self::Mp3 => "mp3",
             Self::Ogg => "ogg",
+            Self::Opus => "opus",
             Self::Hls => "m3u8",
+            Self::Pcm => "wav",
         }
     }
 }
@@ -239,7 +304,9 @@ impl FromStr for TranscodeFormat {
         match s.to_lowercase().as_str() {
             "mp3" => Ok(Self::Mp3),
             "ogg" => Ok(Self::Ogg),
+            "opus" => Ok(Self::Opus),
             "hls" => Ok(Self::Hls),
+            "pcm" | "wav" => Ok(Self::Pcm),
             _ => Err(()),
         }
     }
@@ -259,22 +326,113 @@ pub async fn transcode_stream(
     file_path: &Path,
     format: &TranscodeFormat,
 ) -> Result<impl Stream<Item = Result<Vec<u8>, io::Error>>, StreamError> {
+    let plan = match format {
+        TranscodeFormat::Mp3 => TranscodePlan {
+            codec: TranscodeCodec::Mp3,
+            container: TranscodeContainer::Mp3,
+            bitrate_bps: Some(192000),
+            sample_rate_hz: None,
+            bit_depth: None,
+            channels: Some(2),
+        },
+        TranscodeFormat::Opus => TranscodePlan {
+            codec: TranscodeCodec::Opus,
+            container: TranscodeContainer::Ogg,
+            bitrate_bps: Some(128000),
+            sample_rate_hz: None,
+            bit_depth: None,
+            channels: Some(2),
+        },
+        TranscodeFormat::Ogg => TranscodePlan {
+            codec: TranscodeCodec::Ogg,
+            container: TranscodeContainer::Ogg,
+            bitrate_bps: None,
+            sample_rate_hz: None,
+            bit_depth: None,
+            channels: Some(2),
+        },
+        TranscodeFormat::Pcm => TranscodePlan {
+            codec: TranscodeCodec::Pcm,
+            container: TranscodeContainer::Wav,
+            bitrate_bps: None,
+            sample_rate_hz: Some(48000),
+            bit_depth: Some(24),
+            channels: Some(2),
+        },
+        TranscodeFormat::Hls => TranscodePlan {
+            codec: TranscodeCodec::Hls,
+            container: TranscodeContainer::Hls,
+            bitrate_bps: None,
+            sample_rate_hz: None,
+            bit_depth: None,
+            channels: Some(2),
+        },
+    };
+
+    transcode_stream_with_plan(file_path, &plan).await
+}
+
+pub async fn transcode_stream_with_plan(
+    file_path: &Path,
+    plan: &TranscodePlan,
+) -> Result<impl Stream<Item = Result<Vec<u8>, io::Error>>, StreamError> {
     use futures_util::StreamExt;
     use tokio::process::Command;
     use tokio_util::io::ReaderStream;
 
-    let fmt = format.ffmpeg_format().to_string();
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-i").arg(file_path).arg("-vn");
 
-    let mut child = Command::new("ffmpeg")
-        .arg("-i")
-        .arg(file_path)
-        .arg("-f")
-        .arg(&fmt)
-        .arg("-")
+    match plan.codec {
+        TranscodeCodec::Opus => {
+            cmd.arg("-c:a").arg("libopus");
+            if let Some(bps) = plan.bitrate_bps {
+                let kbps = (bps / 1000).max(32);
+                cmd.arg("-b:a").arg(format!("{kbps}k"));
+            }
+            cmd.arg("-f").arg("ogg");
+        }
+        TranscodeCodec::Mp3 => {
+            cmd.arg("-c:a").arg("libmp3lame");
+            if let Some(bps) = plan.bitrate_bps {
+                let kbps = (bps / 1000).max(32);
+                cmd.arg("-b:a").arg(format!("{kbps}k"));
+            }
+            cmd.arg("-f").arg("mp3");
+        }
+        TranscodeCodec::Pcm => {
+            if let Some(bd) = plan.bit_depth {
+                if bd == 24 {
+                    cmd.arg("-c:a").arg("pcm_s24le");
+                } else {
+                    cmd.arg("-c:a").arg("pcm_s16le");
+                }
+            } else {
+                cmd.arg("-c:a").arg("pcm_s16le");
+            }
+            if let Some(sr) = plan.sample_rate_hz {
+                cmd.arg("-ar").arg(sr.to_string());
+            }
+            cmd.arg("-f").arg("wav");
+        }
+        TranscodeCodec::Ogg => {
+            cmd.arg("-c:a").arg("libvorbis");
+            if let Some(bps) = plan.bitrate_bps {
+                let kbps = (bps / 1000).max(32);
+                cmd.arg("-b:a").arg(format!("{kbps}k"));
+            }
+            cmd.arg("-f").arg("ogg");
+        }
+        TranscodeCodec::Hls => {
+            cmd.arg("-c").arg("copy").arg("-f").arg("hls");
+        }
+    }
+
+    cmd.arg("-")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(StreamError::Io)?;
+        .stderr(std::process::Stdio::null());
+
+    let mut child = cmd.spawn().map_err(StreamError::Io)?;
 
     let stdout = child
         .stdout
@@ -282,6 +440,248 @@ pub async fn transcode_stream(
         .ok_or_else(|| StreamError::Io(io::Error::other("failed to capture ffmpeg stdout")))?;
 
     Ok(ReaderStream::new(stdout).map(|r| r.map(|b| b.to_vec())))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_stream_decision(
+    track_format: &AudioFormat,
+    track_sample_rate: Option<u32>,
+    track_bit_depth: Option<u32>,
+    explicit_format: Option<&str>,
+    stream_profile: StreamProfile,
+    format_policy: michi_core::AudioFormatPolicy,
+    resource_profile: michi_core::ResourceProfile,
+    max_remote_bitrate: u32,
+) -> Result<StreamDecision, String> {
+    // 1. Enforce DirectPlay format policy
+    if format_policy == michi_core::AudioFormatPolicy::DirectPlay {
+        if let Some(req_fmt) = explicit_format {
+            let req_lower = req_fmt.to_lowercase();
+            let is_same = match track_format {
+                AudioFormat::Mp3 => req_lower == "mp3",
+                AudioFormat::Flac => req_lower == "flac",
+                AudioFormat::Ogg | AudioFormat::Opus => req_lower == "ogg" || req_lower == "opus",
+                AudioFormat::Wav => req_lower == "wav",
+                AudioFormat::Aac => req_lower == "aac" || req_lower == "m4a",
+                _ => false,
+            };
+            if !is_same {
+                return Err(
+                    "TRANSCODING_FORBIDDEN_BY_POLICY: DirectPlay format policy forbids transcoding"
+                        .into(),
+                );
+            }
+        }
+        return Ok(StreamDecision {
+            mode: StreamMode::Direct,
+            source_format: *track_format,
+            output_mime_type: track_format.mime_type(),
+            reason: "policy: DirectPlay enforced".into(),
+        });
+    }
+
+    // 2. Resolve requested format or profile
+    let plan_opt: Option<TranscodePlan>;
+
+    if let Some(req_fmt) = explicit_format {
+        let req_lower = req_fmt.to_lowercase();
+        match req_lower.as_str() {
+            "mp3" => {
+                if format_policy == michi_core::AudioFormatPolicy::LosslessOnly {
+                    return Err("TRANSCODING_FORBIDDEN_BY_POLICY: LosslessOnly policy forbids lossy MP3 transcoding".into());
+                }
+                let target_bps = 192000.min(max_remote_bitrate);
+                plan_opt = Some(TranscodePlan {
+                    codec: TranscodeCodec::Mp3,
+                    container: TranscodeContainer::Mp3,
+                    bitrate_bps: Some(target_bps),
+                    sample_rate_hz: track_sample_rate,
+                    bit_depth: None,
+                    channels: Some(2),
+                });
+            }
+            "opus" => {
+                if format_policy == michi_core::AudioFormatPolicy::LosslessOnly {
+                    return Err("TRANSCODING_FORBIDDEN_BY_POLICY: LosslessOnly policy forbids lossy Opus transcoding".into());
+                }
+                let target_bps = 128000.min(max_remote_bitrate);
+                plan_opt = Some(TranscodePlan {
+                    codec: TranscodeCodec::Opus,
+                    container: TranscodeContainer::Ogg,
+                    bitrate_bps: Some(target_bps),
+                    sample_rate_hz: track_sample_rate,
+                    bit_depth: None,
+                    channels: Some(2),
+                });
+            }
+            "ogg" => {
+                if format_policy == michi_core::AudioFormatPolicy::LosslessOnly {
+                    return Err("TRANSCODING_FORBIDDEN_BY_POLICY: LosslessOnly policy forbids lossy Ogg transcoding".into());
+                }
+                let target_bps = 160000.min(max_remote_bitrate);
+                plan_opt = Some(TranscodePlan {
+                    codec: TranscodeCodec::Ogg,
+                    container: TranscodeContainer::Ogg,
+                    bitrate_bps: Some(target_bps),
+                    sample_rate_hz: track_sample_rate,
+                    bit_depth: None,
+                    channels: Some(2),
+                });
+            }
+            "wav" | "pcm" => {
+                plan_opt = Some(TranscodePlan {
+                    codec: TranscodeCodec::Pcm,
+                    container: TranscodeContainer::Wav,
+                    bitrate_bps: None,
+                    sample_rate_hz: track_sample_rate,
+                    bit_depth: track_bit_depth.map(|d| d as u8).or(Some(16)),
+                    channels: Some(2),
+                });
+            }
+            "flac" => {
+                if track_format.is_lossless() {
+                    return Ok(StreamDecision {
+                        mode: StreamMode::Direct,
+                        source_format: *track_format,
+                        output_mime_type: track_format.mime_type(),
+                        reason: "direct lossless play".into(),
+                    });
+                } else {
+                    return Err("UNSUPPORTED_TRANSCODE_PLAN: transcoding lossy source to FLAC is not supported".into());
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "INVALID_STREAM_PROFILE: requested format '{req_fmt}' is not supported"
+                ));
+            }
+        }
+    } else {
+        // Resolve from configured StreamProfile
+        match stream_profile {
+            StreamProfile::Original | StreamProfile::Custom => {
+                return Ok(StreamDecision {
+                    mode: StreamMode::Direct,
+                    source_format: *track_format,
+                    output_mime_type: track_format.mime_type(),
+                    reason: "profile: original".into(),
+                });
+            }
+            StreamProfile::LosslessCompatible => {
+                if track_format.is_lossless() {
+                    return Ok(StreamDecision {
+                        mode: StreamMode::Direct,
+                        source_format: *track_format,
+                        output_mime_type: track_format.mime_type(),
+                        reason: "profile: lossless compatible direct play".into(),
+                    });
+                } else {
+                    return Ok(StreamDecision {
+                        mode: StreamMode::Direct,
+                        source_format: *track_format,
+                        output_mime_type: track_format.mime_type(),
+                        reason: "profile: direct play source".into(),
+                    });
+                }
+            }
+            StreamProfile::OpusMobile96 => {
+                if format_policy == michi_core::AudioFormatPolicy::LosslessOnly {
+                    return Err(
+                        "TRANSCODING_FORBIDDEN_BY_POLICY: LosslessOnly policy forbids OpusMobile96"
+                            .into(),
+                    );
+                }
+                let bps = 96000.min(max_remote_bitrate);
+                plan_opt = Some(TranscodePlan {
+                    codec: TranscodeCodec::Opus,
+                    container: TranscodeContainer::Ogg,
+                    bitrate_bps: Some(bps),
+                    sample_rate_hz: track_sample_rate,
+                    bit_depth: None,
+                    channels: Some(2),
+                });
+            }
+            StreamProfile::OpusMobile160 => {
+                if format_policy == michi_core::AudioFormatPolicy::LosslessOnly {
+                    return Err("TRANSCODING_FORBIDDEN_BY_POLICY: LosslessOnly policy forbids OpusMobile160".into());
+                }
+                let bps = 160000.min(max_remote_bitrate);
+                plan_opt = Some(TranscodePlan {
+                    codec: TranscodeCodec::Opus,
+                    container: TranscodeContainer::Ogg,
+                    bitrate_bps: Some(bps),
+                    sample_rate_hz: track_sample_rate,
+                    bit_depth: None,
+                    channels: Some(2),
+                });
+            }
+            StreamProfile::Mp3Compatibility192 => {
+                if format_policy == michi_core::AudioFormatPolicy::LosslessOnly {
+                    return Err("TRANSCODING_FORBIDDEN_BY_POLICY: LosslessOnly policy forbids Mp3Compatibility192".into());
+                }
+                let bps = 192000.min(max_remote_bitrate);
+                plan_opt = Some(TranscodePlan {
+                    codec: TranscodeCodec::Mp3,
+                    container: TranscodeContainer::Mp3,
+                    bitrate_bps: Some(bps),
+                    sample_rate_hz: track_sample_rate,
+                    bit_depth: None,
+                    channels: Some(2),
+                });
+            }
+            StreamProfile::Mp3Compatibility320 => {
+                if format_policy == michi_core::AudioFormatPolicy::LosslessOnly {
+                    return Err("TRANSCODING_FORBIDDEN_BY_POLICY: LosslessOnly policy forbids Mp3Compatibility320".into());
+                }
+                let bps = 320000.min(max_remote_bitrate);
+                plan_opt = Some(TranscodePlan {
+                    codec: TranscodeCodec::Mp3,
+                    container: TranscodeContainer::Mp3,
+                    bitrate_bps: Some(bps),
+                    sample_rate_hz: track_sample_rate,
+                    bit_depth: None,
+                    channels: Some(2),
+                });
+            }
+            StreamProfile::Downsample2448 => {
+                let target_sr = track_sample_rate.unwrap_or(48000).min(48000);
+                let target_bd = track_bit_depth.unwrap_or(24).min(24) as u8;
+                plan_opt = Some(TranscodePlan {
+                    codec: TranscodeCodec::Pcm,
+                    container: TranscodeContainer::Wav,
+                    bitrate_bps: None,
+                    sample_rate_hz: Some(target_sr),
+                    bit_depth: Some(target_bd),
+                    channels: Some(2),
+                });
+            }
+        }
+    }
+
+    if let Some(plan) = plan_opt {
+        // Check ResourceProfile transcode permissions
+        if resource_profile.max_transcodes() == 0 {
+            return Err(
+                "TRANSCODING_DISABLED: current resource profile (Eco) does not allow transcoding"
+                    .into(),
+            );
+        }
+
+        let mime = plan.mime_type();
+        Ok(StreamDecision {
+            mode: StreamMode::Transcode(plan),
+            source_format: *track_format,
+            output_mime_type: mime,
+            reason: format!("transcode to {stream_profile:?} via profile {stream_profile:?}"),
+        })
+    } else {
+        Ok(StreamDecision {
+            mode: StreamMode::Direct,
+            source_format: *track_format,
+            output_mime_type: track_format.mime_type(),
+            reason: "direct play".into(),
+        })
+    }
 }
 
 pub const HLS_SEGMENT_DURATION: u64 = 10;
@@ -345,23 +745,9 @@ pub fn hls_segment_path(cache_path: &Path, track_id: &str, segment: &str) -> Pat
     hls_output_dir(cache_path, track_id).join(segment)
 }
 
-pub struct StreamDecision {
-    pub transcode: bool,
-    pub codec: &'static str,
-    pub sample_rate: u32,
-    pub bit_depth: u32,
-    pub bitrate: Option<u32>,
-}
-
-impl StreamDecision {
-    pub fn needs_transcode(&self) -> bool {
-        self.transcode
-    }
-}
-
 pub fn select_stream_profile(
     profile: StreamProfile,
-    _track_format: &AudioFormat,
+    track_format: &AudioFormat,
     original_sample_rate: Option<u32>,
     original_bit_depth: Option<u32>,
     max_transcodes: usize,
@@ -369,24 +755,35 @@ pub fn select_stream_profile(
 ) -> StreamDecision {
     if active_transcodes >= max_transcodes && profile.needs_transcode() {
         return StreamDecision {
-            transcode: false,
-            codec: "original",
-            sample_rate: original_sample_rate.unwrap_or(44100),
-            bit_depth: original_bit_depth.unwrap_or(16),
-            bitrate: None,
+            mode: StreamMode::Direct,
+            source_format: *track_format,
+            output_mime_type: track_format.mime_type(),
+            reason: "capacity reached, falling back to direct play".into(),
         };
     }
 
-    let sr = profile.target_sample_rate(original_sample_rate.unwrap_or(44100));
-    let bd = profile.target_bit_depth(original_bit_depth.unwrap_or(16));
+    let resource_profile = if max_transcodes == 0 {
+        michi_core::ResourceProfile::Eco
+    } else {
+        michi_core::ResourceProfile::Balanced
+    };
 
-    StreamDecision {
-        transcode: profile.needs_transcode(),
-        codec: profile.target_codec(),
-        sample_rate: sr,
-        bit_depth: bd,
-        bitrate: profile.bitrate(),
-    }
+    resolve_stream_decision(
+        track_format,
+        original_sample_rate,
+        original_bit_depth,
+        None,
+        profile,
+        michi_core::AudioFormatPolicy::StandardOnly,
+        resource_profile,
+        10_000_000,
+    )
+    .unwrap_or(StreamDecision {
+        mode: StreamMode::Direct,
+        source_format: *track_format,
+        output_mime_type: track_format.mime_type(),
+        reason: "fallback direct play".into(),
+    })
 }
 
 #[cfg(test)]
@@ -636,5 +1033,85 @@ mod tests {
 
         let result = validate_track_path(&[dir1.path().to_path_buf()], &file_path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_stream_decision_matrix() {
+        use michi_core::{AudioFormatPolicy, ResourceProfile};
+
+        // 1. FLAC + Original profile + LosslessOnly -> Direct
+        let dec1 = resolve_stream_decision(
+            &AudioFormat::Flac,
+            Some(44100),
+            Some(16),
+            None,
+            StreamProfile::Original,
+            AudioFormatPolicy::LosslessOnly,
+            ResourceProfile::Balanced,
+            320_000,
+        )
+        .unwrap();
+        assert!(!dec1.needs_transcode());
+        assert_eq!(dec1.output_mime_type, "audio/flac");
+
+        // 2. FLAC + OpusMobile160 profile + StandardOnly -> Transcode
+        let dec2 = resolve_stream_decision(
+            &AudioFormat::Flac,
+            Some(44100),
+            Some(16),
+            None,
+            StreamProfile::OpusMobile160,
+            AudioFormatPolicy::StandardOnly,
+            ResourceProfile::Balanced,
+            320_000,
+        )
+        .unwrap();
+        assert!(dec2.needs_transcode());
+        assert_eq!(dec2.output_mime_type, "audio/ogg");
+
+        // 3. FLAC + Mp3Compatibility320 profile + StandardOnly policy -> Transcode to MP3 320k
+        let dec3 = resolve_stream_decision(
+            &AudioFormat::Flac,
+            Some(44100),
+            Some(16),
+            None,
+            StreamProfile::Mp3Compatibility320,
+            AudioFormatPolicy::StandardOnly,
+            ResourceProfile::Balanced,
+            320_000,
+        )
+        .unwrap();
+        assert!(dec3.needs_transcode());
+        assert_eq!(dec3.output_mime_type, "audio/mpeg");
+
+        // 4. FLAC + Direct policy -> Direct play only
+        let dec4 = resolve_stream_decision(
+            &AudioFormat::Flac,
+            Some(44100),
+            Some(16),
+            None,
+            StreamProfile::Mp3Compatibility320,
+            AudioFormatPolicy::DirectPlay,
+            ResourceProfile::Balanced,
+            320_000,
+        )
+        .unwrap();
+        assert!(!dec4.needs_transcode());
+        assert_eq!(dec4.output_mime_type, "audio/flac");
+
+        // 5. Explicit format query "opus" + StandardOnly -> Transcodes to Opus
+        let dec5 = resolve_stream_decision(
+            &AudioFormat::Flac,
+            Some(44100),
+            Some(16),
+            Some("opus"),
+            StreamProfile::Original,
+            AudioFormatPolicy::StandardOnly,
+            ResourceProfile::Balanced,
+            320_000,
+        )
+        .unwrap();
+        assert!(dec5.needs_transcode());
+        assert_eq!(dec5.output_mime_type, "audio/ogg");
     }
 }

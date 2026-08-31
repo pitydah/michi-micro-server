@@ -17,35 +17,35 @@ fn v1_error(
     )
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BackupPlaylist {
     pub name: String,
     pub description: Option<String>,
     pub tracks: Vec<michi_core::Track>,
 }
 
-#[derive(Serialize)]
-struct BackupPayload {
-    version: i32,
-    exported_at: String,
-    tracks: Vec<michi_core::Track>,
-    playlists: Vec<BackupPlaylist>,
-    starred_tracks: Vec<michi_core::Track>,
-    play_history: Vec<BackupHistoryEntry>,
-    server_id: String,
-    server_name: String,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupPayload {
+    pub version: u32,
+    pub exported_at: String,
+    pub tracks: Vec<michi_core::Track>,
+    pub playlists: Vec<BackupPlaylist>,
+    pub starred_tracks: Vec<michi_core::Track>,
+    pub play_history: Vec<BackupHistoryEntry>,
+    pub server_id: String,
+    pub server_name: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BackupHistoryEntry {
-    track_id: String,
-    played_at: String,
-    timestamp: String,
+    pub track_id: String,
+    pub played_at: String,
+    pub timestamp: String,
 }
 
-pub async fn backup_handler(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+pub async fn build_backup_payload(
+    state: &AppState,
+) -> Result<BackupPayload, (StatusCode, Json<serde_json::Value>)> {
     let tracks = michi_db::list_tracks(&state.db).await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -75,7 +75,7 @@ pub async fn backup_handler(
                     &e.to_string(),
                 )
             })?;
-        let mut tracks = Vec::with_capacity(track_rows.len());
+        let mut playlist_tracks = Vec::with_capacity(track_rows.len());
         for pt in &track_rows {
             let track = michi_db::get_track(&state.db, &pt.0.track_id)
                 .await
@@ -93,12 +93,12 @@ pub async fn backup_handler(
                         &format!("playlist references non-existent track {}", pt.0.track_id),
                     )
                 })?;
-            tracks.push(track);
+            playlist_tracks.push(track);
         }
         playlists.push(BackupPlaylist {
             name: pl.name.clone(),
             description: pl.description.clone(),
-            tracks,
+            tracks: playlist_tracks,
         });
     }
 
@@ -138,7 +138,7 @@ pub async fn backup_handler(
     let server_id = state.server_id().to_string();
     let server_name = state.config.sync_name.clone();
 
-    let backup = BackupPayload {
+    Ok(BackupPayload {
         version: 1,
         exported_at: chrono::Utc::now().to_rfc3339(),
         tracks,
@@ -147,74 +147,20 @@ pub async fn backup_handler(
         play_history,
         server_id,
         server_name,
-    };
+    })
+}
 
+pub async fn backup_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let backup = build_backup_payload(&state).await?;
     Ok(Json(serde_json::to_value(&backup).unwrap()))
 }
 
 pub async fn download_backup_handler(
     State(state): State<AppState>,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
-    let tracks = michi_db::list_tracks(&state.db).await.map_err(|e| {
-        v1_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "DATABASE_ERROR",
-            &e.to_string(),
-        )
-    })?;
-
-    let playlists_raw = michi_db::list_playlists(&state.db, None)
-        .await
-        .map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "DATABASE_ERROR",
-                &e.to_string(),
-            )
-        })?;
-
-    let mut playlists = Vec::new();
-    for pl in playlists_raw {
-        let pl_tracks = michi_db::get_playlist_tracks(&state.db, &pl.id)
-            .await
-            .unwrap_or_default();
-        playlists.push(BackupPlaylist {
-            name: pl.name,
-            description: pl.description,
-            tracks: pl_tracks.into_iter().map(|(_, t)| t).collect(),
-        });
-    }
-
-    let starred_tracks = michi_db::get_starred_tracks(&state.db)
-        .await
-        .unwrap_or_default();
-
-    let history_rows = sqlx::query_as::<_, (String, String)>(
-        "SELECT track_id, played_at FROM play_history ORDER BY played_at DESC",
-    )
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-
-    let play_history = history_rows
-        .into_iter()
-        .map(|(track_id, played_at)| BackupHistoryEntry {
-            timestamp: played_at.clone(),
-            track_id,
-            played_at,
-        })
-        .collect();
-
-    let payload = BackupPayload {
-        version: 1,
-        exported_at: chrono::Utc::now().to_rfc3339(),
-        tracks,
-        playlists,
-        starred_tracks,
-        play_history,
-        server_id: state.server_id().to_string(),
-        server_name: state.config.sync_name.clone(),
-    };
+    let payload = build_backup_payload(&state).await?;
 
     let json_bytes = serde_json::to_vec_pretty(&payload).map_err(|e| {
         v1_error(
@@ -534,72 +480,17 @@ pub async fn run_auto_backup_cycle(state: &AppState) -> Result<String, String> {
         .await
         .map_err(|e| format!("failed to create backup dir: {e}"))?;
 
-    let tracks = michi_db::list_tracks(&state.db)
-        .await
-        .map_err(|e| e.to_string())?;
-    let playlists_raw = michi_db::list_playlists(&state.db, None)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let mut playlists = Vec::with_capacity(playlists_raw.len());
-    for pl in &playlists_raw {
-        let track_rows = michi_db::get_playlist_tracks(&state.db, &pl.id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut pl_tracks = Vec::with_capacity(track_rows.len());
-        for pt in &track_rows {
-            if let Some(track) = michi_db::get_track(&state.db, &pt.0.track_id)
-                .await
-                .map_err(|e| e.to_string())?
-            {
-                pl_tracks.push(track);
-            }
-        }
-        playlists.push(BackupPlaylist {
-            name: pl.name.clone(),
-            description: pl.description.clone(),
-            tracks: pl_tracks,
-        });
-    }
-
-    let starred_tracks = michi_db::get_starred_tracks(&state.db)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let play_history_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT track_id, played_at FROM play_history ORDER BY played_at DESC LIMIT 10000",
-    )
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let play_history: Vec<BackupHistoryEntry> = play_history_rows
-        .into_iter()
-        .map(|(track_id, played_at)| {
-            let timestamp = played_at.clone();
-            BackupHistoryEntry {
-                track_id,
-                played_at,
-                timestamp,
-            }
-        })
-        .collect();
-
-    let backup = BackupPayload {
-        version: 1,
-        exported_at: chrono::Utc::now().to_rfc3339(),
-        tracks,
-        playlists,
-        starred_tracks,
-        play_history,
-        server_id: state.server_id().to_string(),
-        server_name: state.config.sync_name.clone(),
-    };
+    let backup = build_backup_payload(state).await.map_err(|(_, json_val)| {
+        json_val["error"]["message"]
+            .as_str()
+            .unwrap_or("backup failed")
+            .to_string()
+    })?;
 
     let backup_json = serde_json::to_string_pretty(&backup).map_err(|e| e.to_string())?;
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S_%f").to_string();
-    let filename = format!("michi_autobackup_{}.json", timestamp);
-    let tmp_path = backup_dir.join(format!("{}.tmp", filename));
+    let filename = format!("michi_autobackup_{timestamp}.json");
+    let tmp_path = backup_dir.join(format!("{filename}.tmp"));
     let final_path = backup_dir.join(&filename);
 
     tokio::fs::write(&tmp_path, backup_json.as_bytes())
