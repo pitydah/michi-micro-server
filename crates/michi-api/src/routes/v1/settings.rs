@@ -2,6 +2,31 @@ use crate::AppState;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 
+fn v1_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    field: Option<&str>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let mut details = serde_json::Map::new();
+    if let Some(f) = field {
+        details.insert(
+            "field".to_string(),
+            serde_json::Value::String(f.to_string()),
+        );
+    }
+    (
+        status,
+        Json(serde_json::json!({
+            "error": {
+                "code": code,
+                "message": message,
+                "details": details
+            }
+        })),
+    )
+}
+
 #[derive(Serialize)]
 pub struct SettingsResponse {
     pub port: u16,
@@ -32,10 +57,103 @@ pub struct SettingsResponse {
     pub reconnect_delay_max: u32,
     pub max_remote_bitrate: u32,
     pub remote_sync: bool,
+    pub active: serde_json::Value,
+    pub configured: serde_json::Value,
+    pub restart_required: bool,
+    pub pending_restart_fields: Vec<String>,
 }
 
 pub async fn get_settings_handler(State(state): State<AppState>) -> Json<SettingsResponse> {
     let cfg = &state.config;
+    let disk_cfg = cfg.read_file_config();
+
+    let mut pending_restart_fields = Vec::new();
+    if let Some(ref d) = disk_cfg {
+        if d.resource_profile != cfg.resource_profile {
+            pending_restart_fields.push("resource_profile".to_string());
+        }
+        if d.stream_profile != cfg.stream_profile {
+            pending_restart_fields.push("stream_profile".to_string());
+        }
+        if d.format_policy != cfg.format_policy {
+            pending_restart_fields.push("format_policy".to_string());
+        }
+        if d.auto_backup_enabled != cfg.auto_backup_enabled {
+            pending_restart_fields.push("auto_backup_enabled".to_string());
+        }
+        if d.backup_max_keep != cfg.backup_max_keep {
+            pending_restart_fields.push("backup_max_keep".to_string());
+        }
+        if d.job_max_concurrent != cfg.job_max_concurrent {
+            pending_restart_fields.push("job_max_concurrent".to_string());
+        }
+        if d.reconnect_delay_max != cfg.reconnect_delay_max {
+            pending_restart_fields.push("reconnect_delay_max".to_string());
+        }
+        if d.max_remote_bitrate != cfg.max_remote_bitrate {
+            pending_restart_fields.push("max_remote_bitrate".to_string());
+        }
+        if d.remote_sync != cfg.remote_sync {
+            pending_restart_fields.push("remote_sync".to_string());
+        }
+        if d.scrobble_enabled != cfg.scrobble_enabled {
+            pending_restart_fields.push("scrobble_enabled".to_string());
+        }
+        if d.dev_mode != cfg.dev_mode {
+            pending_restart_fields.push("dev_mode".to_string());
+        }
+        if d.sync_name != cfg.sync_name {
+            pending_restart_fields.push("sync_name".to_string());
+        }
+        if d.sync_peers != cfg.sync_peers {
+            pending_restart_fields.push("sync_peers".to_string());
+        }
+    }
+
+    let restart_required = !pending_restart_fields.is_empty();
+
+    let active_val = serde_json::json!({
+        "resource_profile": cfg.resource_profile.to_string(),
+        "stream_profile": cfg.stream_profile.to_string(),
+        "format_policy": cfg.format_policy.to_string(),
+        "effective_scan_workers": cfg.resource_profile.scan_concurrency(),
+        "effective_transcode_workers": cfg.resource_profile.max_transcodes(),
+        "effective_db_pool": cfg.resource_profile.db_pool_size(),
+        "auto_backup_enabled": cfg.auto_backup_enabled,
+        "backup_max_keep": cfg.backup_max_keep,
+        "job_max_concurrent": cfg.job_max_concurrent,
+        "reconnect_delay_max": cfg.reconnect_delay_max,
+        "max_remote_bitrate": cfg.max_remote_bitrate,
+        "remote_sync": cfg.remote_sync,
+        "scrobble_enabled": cfg.scrobble_enabled,
+        "dev_mode": cfg.dev_mode,
+        "sync_name": cfg.sync_name,
+        "sync_peers": cfg.sync_peers,
+    });
+
+    let configured_val = if let Some(ref d) = disk_cfg {
+        serde_json::json!({
+            "resource_profile": d.resource_profile.to_string(),
+            "stream_profile": d.stream_profile.to_string(),
+            "format_policy": d.format_policy.to_string(),
+            "effective_scan_workers": d.resource_profile.scan_concurrency(),
+            "effective_transcode_workers": d.resource_profile.max_transcodes(),
+            "effective_db_pool": d.resource_profile.db_pool_size(),
+            "auto_backup_enabled": d.auto_backup_enabled,
+            "backup_max_keep": d.backup_max_keep,
+            "job_max_concurrent": d.job_max_concurrent,
+            "reconnect_delay_max": d.reconnect_delay_max,
+            "max_remote_bitrate": d.max_remote_bitrate,
+            "remote_sync": d.remote_sync,
+            "scrobble_enabled": d.scrobble_enabled,
+            "dev_mode": d.dev_mode,
+            "sync_name": d.sync_name,
+            "sync_peers": d.sync_peers,
+        })
+    } else {
+        active_val.clone()
+    };
+
     Json(SettingsResponse {
         port: cfg.port(),
         music_paths: cfg
@@ -69,6 +187,10 @@ pub async fn get_settings_handler(State(state): State<AppState>) -> Json<Setting
         reconnect_delay_max: cfg.reconnect_delay_max,
         max_remote_bitrate: cfg.max_remote_bitrate,
         remote_sync: cfg.remote_sync,
+        active: active_val,
+        configured: configured_val,
+        restart_required,
+        pending_restart_fields,
     })
 }
 
@@ -97,72 +219,111 @@ pub async fn update_settings_handler(
     State(state): State<AppState>,
     Json(body): Json<UpdateSettingsBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    // We need a mutable reference to config. Since AppState stores Config immutably,
-    // we persist to disk and log the changes. On next startup they'll take effect.
-    // For runtime, store in a new config JSON file.
+    // 1. Strict Validation of Enums
+    let parsed_resource_profile = if let Some(ref v) = body.resource_profile {
+        Some(
+            michi_core::ResourceProfile::from_config_str_strict(v).map_err(|e| {
+                v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "VALIDATION_ERROR",
+                    e,
+                    Some("resource_profile"),
+                )
+            })?,
+        )
+    } else {
+        None
+    };
 
-    if let Some(ref v) = body.resource_profile {
-        tracing::info!("settings: resource_profile -> {}", v);
-    }
-    if let Some(ref v) = body.stream_profile {
-        tracing::info!("settings: stream_profile -> {}", v);
-    }
-    if let Some(ref v) = body.format_policy {
-        tracing::info!("settings: format_policy -> {}", v);
-    }
-    if let Some(ref v) = body.language {
-        tracing::info!("settings: language -> {}", v);
-    }
-    if let Some(ref v) = body.theme {
-        tracing::info!("settings: theme -> {}", v);
-    }
-    if let Some(v) = body.sidebar_collapsed {
-        tracing::info!("settings: sidebar_collapsed -> {}", v);
-    }
-    if let Some(v) = body.cover_art_enabled {
-        tracing::info!("settings: cover_art_enabled -> {}", v);
-    }
-    if let Some(v) = body.auto_backup_enabled {
-        tracing::info!("settings: auto_backup_enabled -> {}", v);
-    }
-    if let Some(v) = body.backup_max_keep {
-        tracing::info!("settings: backup_max_keep -> {}", v);
-    }
+    let parsed_stream_profile = if let Some(ref v) = body.stream_profile {
+        Some(
+            michi_core::StreamProfile::from_config_str_strict(v).map_err(|e| {
+                v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "VALIDATION_ERROR",
+                    e,
+                    Some("stream_profile"),
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+
+    let parsed_format_policy = if let Some(ref v) = body.format_policy {
+        Some(
+            michi_core::AudioFormatPolicy::from_config_str_strict(v).map_err(|e| {
+                v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "VALIDATION_ERROR",
+                    e,
+                    Some("format_policy"),
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+
+    // 2. Strict Range Validation
     if let Some(v) = body.job_max_concurrent {
-        tracing::info!("settings: job_max_concurrent -> {}", v);
-    }
-    if let Some(v) = body.reconnect_delay_max {
-        tracing::info!("settings: reconnect_delay_max -> {}", v);
-    }
-    if let Some(v) = body.max_remote_bitrate {
-        tracing::info!("settings: max_remote_bitrate -> {}", v);
-    }
-    if let Some(v) = body.remote_sync {
-        tracing::info!("settings: remote_sync -> {}", v);
-    }
-    if let Some(v) = body.scrobble_enabled {
-        tracing::info!("settings: scrobble_enabled -> {}", v);
-    }
-    if let Some(v) = body.dev_mode {
-        tracing::info!("settings: dev_mode -> {}", v);
-    }
-    if let Some(ref v) = body.sync_name {
-        tracing::info!("settings: sync_name -> {}", v);
-    }
-    if let Some(ref v) = body.sync_peers {
-        tracing::info!("settings: sync_peers -> {:?}", v);
+        if !(1..=32).contains(&v) {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "VALIDATION_ERROR",
+                "job_max_concurrent must be between 1 and 32",
+                Some("job_max_concurrent"),
+            ));
+        }
     }
 
-    // Build a fresh config from current state + body overrides, persist
-    let mut cfg = state.config.clone();
-    if let Some(ref v) = body.resource_profile {
-        cfg.resource_profile = michi_core::ResourceProfile::from_config_str(v);
+    if let Some(v) = body.backup_max_keep {
+        if !(1..=100).contains(&v) {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "VALIDATION_ERROR",
+                "backup_max_keep must be between 1 and 100",
+                Some("backup_max_keep"),
+            ));
+        }
     }
-    if let Some(ref v) = body.stream_profile {
-        cfg.stream_profile = michi_core::StreamProfile::from_config_str(v);
+
+    if let Some(v) = body.reconnect_delay_max {
+        if !(5..=3600).contains(&v) {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "VALIDATION_ERROR",
+                "reconnect_delay_max must be between 5 and 3600 seconds",
+                Some("reconnect_delay_max"),
+            ));
+        }
     }
-    if let Some(ref v) = body.format_policy {
-        cfg.format_policy = michi_core::AudioFormatPolicy::from_config_str(v);
+
+    if let Some(v) = body.max_remote_bitrate {
+        if !(32000..=20000000).contains(&v) {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "VALIDATION_ERROR",
+                "max_remote_bitrate must be between 32000 and 20000000 bps",
+                Some("max_remote_bitrate"),
+            ));
+        }
+    }
+
+    // 3. Build a fresh config from current disk or state config + overrides, and persist
+    let mut cfg = state
+        .config
+        .read_file_config()
+        .unwrap_or_else(|| state.config.clone());
+
+    if let Some(rp) = parsed_resource_profile {
+        cfg.resource_profile = rp;
+    }
+    if let Some(sp) = parsed_stream_profile {
+        cfg.stream_profile = sp;
+    }
+    if let Some(fp) = parsed_format_policy {
+        cfg.format_policy = fp;
     }
     if let Some(ref v) = body.language {
         cfg.language = v.clone();
@@ -214,7 +375,7 @@ pub async fn update_settings_handler(
         )
     })?;
 
-    // Restart required for all settings except UI (which take effect on next page load)
+    // Restart required for all settings except UI preferences
     let restart_required = body.resource_profile.is_some()
         || body.stream_profile.is_some()
         || body.format_policy.is_some()

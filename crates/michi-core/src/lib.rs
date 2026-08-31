@@ -667,14 +667,18 @@ pub enum ResourceProfile {
 }
 
 impl ResourceProfile {
-    pub fn from_config_str(s: &str) -> Self {
+    pub fn from_config_str_strict(s: &str) -> Result<Self, &'static str> {
         match s.to_lowercase().as_str() {
-            "eco" => Self::Eco,
-            "performance" => Self::Performance,
-            "balanced" => Self::Balanced,
-            "custom" => Self::Custom,
-            _ => Self::Balanced,
+            "eco" => Ok(Self::Eco),
+            "performance" => Ok(Self::Performance),
+            "balanced" => Ok(Self::Balanced),
+            "custom" => Ok(Self::Custom),
+            _ => Err("invalid resource_profile; allowed: eco, balanced, performance, custom"),
         }
+    }
+
+    pub fn from_config_str(s: &str) -> Self {
+        Self::from_config_str_strict(s).unwrap_or(Self::Balanced)
     }
 
     pub fn scan_concurrency(&self) -> usize {
@@ -756,18 +760,22 @@ pub enum StreamProfile {
     Custom,
 }
 impl StreamProfile {
-    pub fn from_config_str(s: &str) -> Self {
+    pub fn from_config_str_strict(s: &str) -> Result<Self, &'static str> {
         match s.to_lowercase().as_str() {
-            "original" => Self::Original,
-            "lossless" => Self::LosslessCompatible,
-            "opus96" => Self::OpusMobile96,
-            "opus160" => Self::OpusMobile160,
-            "mp3192" => Self::Mp3Compatibility192,
-            "mp3320" => Self::Mp3Compatibility320,
-            "downsample" => Self::Downsample2448,
-            "custom" => Self::Custom,
-            _ => Self::Original,
+            "original" => Ok(Self::Original),
+            "lossless" => Ok(Self::LosslessCompatible),
+            "opus96" => Ok(Self::OpusMobile96),
+            "opus160" => Ok(Self::OpusMobile160),
+            "mp3192" => Ok(Self::Mp3Compatibility192),
+            "mp3320" => Ok(Self::Mp3Compatibility320),
+            "downsample" => Ok(Self::Downsample2448),
+            "custom" => Ok(Self::Custom),
+            _ => Err("invalid stream_profile; allowed: original, lossless, opus96, opus160, mp3192, mp3320, downsample, custom"),
         }
+    }
+
+    pub fn from_config_str(s: &str) -> Self {
+        Self::from_config_str_strict(s).unwrap_or(Self::Original)
     }
     pub fn needs_transcode(&self) -> bool {
         !matches!(self, Self::Original | Self::LosslessCompatible)
@@ -891,12 +899,17 @@ pub enum AudioFormatPolicy {
 }
 
 impl AudioFormatPolicy {
-    pub fn from_config_str(s: &str) -> Self {
+    pub fn from_config_str_strict(s: &str) -> Result<Self, &'static str> {
         match s.to_lowercase().as_str() {
-            "standard" => Self::StandardOnly,
-            "direct" => Self::DirectPlay,
-            _ => Self::LosslessOnly,
+            "lossless" => Ok(Self::LosslessOnly),
+            "standard" => Ok(Self::StandardOnly),
+            "direct" => Ok(Self::DirectPlay),
+            _ => Err("invalid format_policy; allowed: lossless, standard, direct"),
         }
+    }
+
+    pub fn from_config_str(s: &str) -> Self {
+        Self::from_config_str_strict(s).unwrap_or(Self::LosslessOnly)
     }
 
     pub fn requires_transcode(&self, format: &AudioFormat, profile: &ResourceProfile) -> bool {

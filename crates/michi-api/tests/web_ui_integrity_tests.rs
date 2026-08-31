@@ -2010,3 +2010,182 @@ async fn test_webui_webhook_truthfulness_contract() {
     let val: Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(val["error"]["code"], "NO_WEBHOOK_CONFIGURED");
 }
+
+#[tokio::test]
+async fn test_static_ast_html_and_js_symbol_completeness() {
+    let html = include_str!("../static/index.html");
+    let js = include_str!("../static/app.js");
+
+    // 1. Every HTML handler (onclick="...", onchange="...", etc.) must be defined in app.js
+    let mut missing_handlers = Vec::new();
+    let events = ["onclick=\"", "onchange=\"", "oninput=\"", "onsubmit=\"", "onkeydown=\"", "onkeyup=\""];
+
+    for evt in events {
+        let mut rest = html;
+        while let Some(pos) = rest.find(evt) {
+            let after = &rest[pos + evt.len()..];
+            if let Some(end_quote) = after.find('"') {
+                let handler_expr = &after[..end_quote];
+                for stmt in handler_expr.split(';') {
+                    let stmt = stmt.trim();
+                    if stmt.is_empty() {
+                        continue;
+                    }
+                    if let Some(paren_idx) = stmt.find('(') {
+                        let fn_name = stmt[..paren_idx].trim();
+                        if !fn_name.is_empty()
+                            && !fn_name.contains('.')
+                            && !fn_name.starts_with("event")
+                            && !fn_name.starts_with("window")
+                        {
+                            let pat1 = format!("function {}", fn_name);
+                            let pat2 = format!("{} =", fn_name);
+                            let pat3 = format!("{}=", fn_name);
+                            if !js.contains(&pat1) && !js.contains(&pat2) && !js.contains(&pat3) {
+                                missing_handlers.push(fn_name.to_string());
+                            }
+                        }
+                    }
+                }
+                rest = &after[end_quote + 1..];
+            } else {
+                break;
+            }
+        }
+    }
+    missing_handlers.sort();
+    missing_handlers.dedup();
+    assert!(
+        missing_handlers.is_empty(),
+        "Found missing event handlers referenced in index.html: {:?}",
+        missing_handlers
+    );
+
+    // 2. Every MichiAPI.<method>() call in app.js must have a corresponding method in const MichiAPI = { ... }
+    let api_start = js.find("const MichiAPI = {").expect("MichiAPI definition must exist");
+    let api_sub = &js[api_start..];
+    let api_end = api_sub.find("\n};").expect("MichiAPI closing brace must exist");
+    let api_body = &api_sub[..api_end];
+
+    let mut defined_methods = std::collections::HashSet::new();
+    defined_methods.insert("base".to_string());
+    defined_methods.insert("timeout".to_string());
+    defined_methods.insert("request".to_string());
+
+    for line in api_body.lines() {
+        let trimmed = line.trim();
+        if let Some(idx) = trimmed.find('(') {
+            let name = trimmed[..idx].trim();
+            if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                defined_methods.insert(name.to_string());
+            }
+        }
+    }
+
+    let mut missing_api_calls = Vec::new();
+    let mut js_rest = js;
+    while let Some(pos) = js_rest.find("MichiAPI.") {
+        let after = &js_rest[pos + "MichiAPI.".len()..];
+        let ident_len = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .count();
+        if ident_len > 0 {
+            let called = &after[..ident_len];
+            if !defined_methods.contains(called) {
+                missing_api_calls.push(called.to_string());
+            }
+        }
+        js_rest = &after[ident_len.max(1)..];
+    }
+    missing_api_calls.sort();
+    missing_api_calls.dedup();
+    assert!(
+        missing_api_calls.is_empty(),
+        "Found MichiAPI methods invoked in app.js but not defined: {:?}",
+        missing_api_calls
+    );
+}
+
+#[tokio::test]
+async fn test_settings_strict_validation_rejects_invalid_enums_and_ranges() {
+    let (app, _pool, _state) = make_app().await;
+
+    // 1. Invalid resource_profile enum
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/settings")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({
+                    "resource_profile": "turbo_unsupported"
+                }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let val: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(val["error"]["code"], "VALIDATION_ERROR");
+
+    // 2. Out of range job_max_concurrent
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/settings")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({
+                    "job_max_concurrent": 100
+                }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // 3. Valid settings update
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/settings")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({
+                    "resource_profile": "performance",
+                    "job_max_concurrent": 4
+                }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_settings_reports_active_and_configured_state() {
+    let (app, _pool, _state) = make_app().await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/settings")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let val: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert!(val.get("active").is_some());
+    assert!(val.get("configured").is_some());
+    assert!(val.get("restart_required").is_some());
+    assert!(val.get("pending_restart_fields").is_some());
+}

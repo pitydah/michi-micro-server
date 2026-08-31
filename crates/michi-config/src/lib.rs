@@ -272,6 +272,13 @@ impl Config {
         }
     }
 
+    pub fn read_file_config(&self) -> Option<Config> {
+        let path = self.config_path.join("config.json");
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<Config>(&content).ok())
+    }
+
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = env::var("MICHI_PORT") {
             if let Ok(p) = v.parse::<u16>() {

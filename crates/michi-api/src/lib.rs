@@ -93,6 +93,8 @@ pub struct AppState {
     pub playback_output_selection: Arc<RwLock<Option<output::PlaybackOutputSelection>>>,
     /// Encrypted credential store for paired receivers (None if persistent key unavailable).
     pub receiver_credential_store: Arc<Option<michi_receivers::ReceiverCredentialStore>>,
+    /// Resource-bounded transcode semaphore derived from ResourceProfile.max_transcodes.
+    pub transcode_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -358,6 +360,9 @@ impl AppState {
         let projector_handle = playback_projector.clone().spawn(shutdown_token.clone());
         task_handles.lock().unwrap().push(projector_handle);
 
+        let max_transcodes = config.resource_profile.max_transcodes();
+        let transcode_semaphore = Arc::new(tokio::sync::Semaphore::new(max_transcodes));
+
         let state = Self {
             config,
             db,
@@ -387,6 +392,7 @@ impl AppState {
             playback_projection_health,
             playback_output_selection,
             receiver_credential_store,
+            transcode_semaphore,
         };
 
         state.spawn_background_tasks();
@@ -588,10 +594,7 @@ impl AppState {
         let supervisor_shutdown = shutdown.clone();
         let supervisor_dm = dm.clone();
         self.track_task(tokio::spawn(async move {
-            let max_jobs: usize = std::env::var("MICHI_MAX_JOBS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(3);
+            let max_jobs = (supervisor_state.config.job_max_concurrent as usize).max(1);
             let semaphore = Arc::new(tokio::sync::Semaphore::new(max_jobs));
             let mut interval = tokio::time::interval(Duration::from_secs(2));
 
@@ -676,6 +679,30 @@ impl AppState {
             }
             info!("job supervisor stopped");
         }));
+
+        // Auto-Backup Scheduler
+        if self.config.auto_backup_enabled {
+            let backup_state = self.clone();
+            let backup_shutdown = shutdown.clone();
+            let backup_dm = dm.clone();
+            self.track_task(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(3600));
+                loop {
+                    tokio::select! {
+                        _ = backup_shutdown.cancelled() => break,
+                        _ = interval.tick() => {
+                            if backup_dm.read().await.contains("backup") {
+                                continue;
+                            }
+                            if let Err(e) = routes::v1::backup::run_auto_backup_cycle(&backup_state).await {
+                                tracing::warn!("auto-backup cycle encountered error: {}", e);
+                            }
+                        }
+                    }
+                }
+                info!("auto-backup scheduler stopped");
+            }));
+        }
 
         // Start sync peers (solo si sync habilitado)
         // Se hace desde main.rs después de AppState::new()

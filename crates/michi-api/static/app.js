@@ -173,6 +173,11 @@ const MichiAPI = {
 
   // Playback & Queue
   playbackState() { return this.request('/api/v1/playback/state'); },
+  playbackOutput() { return this.request('/api/v1/playback/output'); },
+  setPlaybackOutput(body) { return this.request('/api/v1/playback/output', { method: 'PUT', body }); },
+  getPlaybackOutput() { return this.playbackOutput(); },
+  handoff(body) { return this.request('/api/v1/playback/handoff', { method: 'POST', body }); },
+  seekPlayback(position_ms) { return this.request('/api/v1/playback/seek', { method: 'POST', body: { position_ms } }); },
   playbackControl(body) {
     return this.request('/api/v1/playback/control', {
       method: 'POST',
@@ -242,18 +247,21 @@ const MichiAPI = {
   },
   qrStatus(code) { return this.request('/api/v1/pair/qr/' + code + '/status'); },
   receivers() { return this.request('/api/v1/receivers'); },
+  getReceivers() { return this.receivers(); },
   discoverDevices() { return this.request('/api/v1/devices/discover', { method: 'POST', timeout: 10000 }); },
   startReceiverPair(body) { return this.request('/api/v1/receivers/pair/start', { method: 'POST', body }); },
   confirmReceiverPair(body) { return this.request('/api/v1/receivers/pair/confirm', { method: 'POST', body }); },
 
   // Rooms & Chains
   roomGroups() { return this.request('/api/v1/rooms/groups'); },
+  getRoomGroups() { return this.roomGroups(); },
   createRoomGroup(body) { return this.request('/api/v1/rooms/groups', { method: 'POST', body }); },
   activateRoomGroup(id) { return this.request('/api/v1/rooms/groups/' + id + '/activate', { method: 'POST' }); },
   deactivateRoomGroup(id) { return this.request('/api/v1/rooms/groups/' + id + '/deactivate', { method: 'POST' }); },
   deleteRoomGroup(id) { return this.request('/api/v1/rooms/groups/' + id, { method: 'DELETE' }); },
   playRoom(id, track_id) { return this.request('/api/v1/rooms/' + id + '/play', { method: 'POST', body: { track_id } }); },
   chains() { return this.request('/api/v1/chains'); },
+  getChains() { return this.chains(); },
   chain(id) { return this.request('/api/v1/chains/' + id); },
   createChain(name) { return this.request('/api/v1/chains', { method: 'POST', body: { name } }); },
   addChainLink(chainId, body) { return this.request('/api/v1/chains/' + chainId + '/links', { method: 'POST', body }); },
@@ -269,6 +277,39 @@ const MichiAPI = {
   addSource(url) { return this.request('/api/v1/sources', { method: 'POST', body: { url }, timeout: 15000 }); },
   deleteSource(id) { return this.request('/api/v1/sources/' + id, { method: 'DELETE' }); },
   sourceEpisodes(id) { return this.request('/api/v1/sources/' + id + '/episodes'); },
+  updateEpisode(id, position_ms, played) {
+    return this.request('/api/v1/episodes/' + id, {
+      method: 'PUT',
+      body: { position_ms: position_ms || 0, played: !!played }
+    });
+  },
+
+  // Sync API
+  syncUploadInit(filename, file_size, content_hash) {
+    return this.request('/api/v1/sync/upload/init', {
+      method: 'POST',
+      body: { filename, file_size: file_size || 0, content_hash: content_hash || '' }
+    });
+  },
+  syncUploadChunk(id, chunk_index, total_chunks, dataBase64, chunk_hash) {
+    return this.request('/api/v1/sync/upload/' + id + '/chunk', {
+      method: 'POST',
+      body: { chunk_index, total_chunks, data: dataBase64, chunk_hash: chunk_hash || '' }
+    });
+  },
+  syncUploadStatus(id) { return this.request('/api/v1/sync/upload/' + id + '/status'); },
+  syncUploadFinalize(id, file_size, content_hash) {
+    return this.request('/api/v1/sync/upload/' + id + '/finalize', {
+      method: 'POST',
+      body: { file_size: file_size || 0, content_hash: content_hash || '' }
+    });
+  },
+  syncPlaylist(name, track_ids) {
+    return this.request('/api/v1/playlists', {
+      method: 'POST',
+      body: { name, description: 'Synced playlist', track_ids }
+    });
+  },
 
   // Settings & Webhooks
   settings() { return this.request('/api/v1/settings'); },
@@ -1550,9 +1591,17 @@ async function loadCanonicalPlaybackState() {
 }
 
 function onTrackEnd() {
+  if (State.currentPodcastEpisode && State.currentPodcastEpisode.id) {
+    var epId = State.currentPodcastEpisode.id;
+    var audio = getAudio();
+    var posMs = audio ? Math.floor(audio.currentTime * 1000) : 0;
+    MichiAPI.updateEpisode(epId, posMs, true).catch(function() {});
+    State.currentPodcastEpisode = null;
+  }
   showToast(t('toast.track_ended'));
 }
 
+var _podcastProgressDebounce = null;
 function updatePlaybackProgress() {
   if (ServerPlayback.outputTarget === 'server') {
     if (!ServerPlayback.duration_ms) return;
@@ -1578,6 +1627,21 @@ function updatePlaybackProgress() {
 
   const cur = $('#np-current');
   if (cur) cur.textContent = fmtDur(audio.currentTime * 1000);
+
+  if (State.currentPodcastEpisode && State.currentPodcastEpisode.id) {
+    if (!_podcastProgressDebounce) {
+      _podcastProgressDebounce = setTimeout(function() {
+        _podcastProgressDebounce = null;
+        if (State.currentPodcastEpisode && State.currentPodcastEpisode.id) {
+          MichiAPI.updateEpisode(
+            State.currentPodcastEpisode.id,
+            Math.floor(audio.currentTime * 1000),
+            false
+          ).catch(function() {});
+        }
+      }, 5000);
+    }
+  }
 }
 
 function updatePlayButtons() {
@@ -2187,7 +2251,13 @@ async function addSource() {
     var resp = await MichiAPI.addSource(url);
     $('#source-url-input').value = '';
     var el = $('#source-add-result');
-    if (el) el.innerHTML = '<span style="color:var(--green)">✓ Added: ' + esc(resp.source?.name || resp.source?.stream_type || 'source') + '</span>';
+    var msg = '✓ Added: ' + esc(resp.source?.name || resp.source?.stream_type || 'source');
+    if (resp.feed_status === 'fetch_failed') {
+      msg += ' (Feed fetch failed or unreachable)';
+    } else if (resp.episodes_imported !== undefined) {
+      msg += ' (' + resp.episodes_imported + ' episodes imported' + (resp.episodes_failed > 0 ? ', ' + resp.episodes_failed + ' failed' : '') + ')';
+    }
+    if (el) el.innerHTML = '<span style="color:var(--green)">' + msg + '</span>';
     loadSources();
     showToast(t('toast.created'));
   } catch (e) { showToast(e.message, true); }
@@ -2205,6 +2275,7 @@ function playSource(id) {
   var audio = getAudio();
   audio.src = '/api/v1/stream/proxy/' + id;
   audio.play().then(function() {
+    State.currentPodcastEpisode = null;
     State.currentTrack = { title: 'Radio Stream (This Browser)', artist: 'Broadcast', id: id, duration_ms: 0 };
     updateNowPlaying(State.currentTrack);
     updateMiniPlayer(State.currentTrack);
@@ -2230,27 +2301,191 @@ async function showEpisodes(sourceId, sourceName) {
     }
     container.innerHTML = eps.map(function (ep) {
       var dur = ep.duration_secs ? Math.floor(ep.duration_secs / 60) + 'm' : '--';
+      var pos = ep.position_ms > 0 ? ' · ' + Math.floor(ep.position_ms / 1000) + 's' : '';
       return '<div class="chain-item" style="cursor:default">' +
         '<div style="font-size:1rem">🎙️</div>' +
         '<div class="info"><div class="name">' + esc(ep.title) + '</div>' +
-        '<div class="meta">' + dur + (ep.played ? ' · Played' : '') + '</div></div>' +
-        '<button class="btn btn-sm btn-ghost" title="Play in Browser" onclick="playEpisode(\'' + ep.id + '\')">▶ Browser</button>' +
+        '<div class="meta">' + dur + pos + (ep.played ? ' · Played' : '') + '</div></div>' +
+        '<button class="btn btn-sm btn-ghost" title="Play in Browser" onclick="playEpisode(\'' + ep.id + '\', ' + (ep.position_ms || 0) + ')">▶ Browser</button>' +
         '</div>';
     }).join('');
   } catch (e) { showToast(e.message, true); }
 }
 
-function playEpisode(episodeId) {
+var _episodeProgressTimeout = null;
+function playEpisode(episodeId, resumePositionMs) {
   var audio = getAudio();
   audio.src = '/api/v1/stream/proxy/episode/' + episodeId;
-  audio.play().then(function() {
+  return audio.play().then(function() {
+    State.currentPodcastEpisode = { id: episodeId };
     State.currentTrack = { title: 'Podcast Episode (This Browser)', artist: 'Podcast', id: episodeId, duration_ms: 0 };
+    if (resumePositionMs && resumePositionMs > 0) {
+      audio.currentTime = resumePositionMs / 1000;
+    }
     updateNowPlaying(State.currentTrack);
     updateMiniPlayer(State.currentTrack);
     updatePlayButtons();
   }).catch(function (err) {
     showToast(t('error.could_not_play', {msg: err.message}), true);
+    throw err;
   });
+}
+
+// ── Sync & Handoff Handlers ─────────────────────────────────────
+async function uploadFile() {
+  var fileInput = $('#settings-file-input');
+  var progressWrap = $('#upload-progress-wrap');
+  var progressFill = $('#upload-progress-fill');
+  var progressText = $('#upload-progress-text');
+
+  if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+    showToast('Please select a file to upload', true);
+    return;
+  }
+  var file = fileInput.files[0];
+  if (progressWrap) progressWrap.classList.remove('hidden');
+  if (progressFill) progressFill.style.width = '0%';
+  if (progressText) progressText.textContent = 'Selecting file: ' + file.name;
+
+  try {
+    if (progressText) progressText.textContent = 'Preparing session for ' + file.name + ' (' + file.size + ' bytes)...';
+    var session = await MichiAPI.createImportSession(1, 0);
+    var sessionId = session.session_id;
+
+    if (progressText) progressText.textContent = 'Reading and encoding file...';
+    var buffer = await file.arrayBuffer();
+    var bytes = new Uint8Array(buffer);
+    var binary = '';
+    var len = bytes.byteLength;
+    for (var i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    var base64 = btoa(binary);
+
+    if (progressFill) progressFill.style.width = '50%';
+    if (progressText) progressText.textContent = 'Uploading chunk to server...';
+    await MichiAPI.importUpload(sessionId, file.name, base64, '');
+
+    if (progressFill) progressFill.style.width = '85%';
+    if (progressText) progressText.textContent = 'Finalizing and committing import session...';
+    await MichiAPI.commitImportSession(sessionId);
+
+    if (progressFill) progressFill.style.width = '100%';
+    if (progressText) progressText.textContent = '✓ Upload completed: ' + file.name;
+    showToast('File uploaded successfully: ' + file.name);
+    fileInput.value = '';
+  } catch (e) {
+    if (progressText) progressText.textContent = '✗ Upload failed: ' + e.message;
+    showToast('Upload failed: ' + e.message, true);
+  }
+}
+
+async function syncPlaylist() {
+  var nameInput = $('#sync-playlist-name');
+  var tracksInput = $('#sync-playlist-tracks');
+  var resEl = $('#sync-playlist-result');
+
+  var name = nameInput ? nameInput.value.trim() : '';
+  var tracksText = tracksInput ? tracksInput.value.trim() : '';
+
+  if (!name) {
+    showToast('Please enter a playlist name', true);
+    return;
+  }
+
+  var trackIds = tracksText
+    ? tracksText.split('\n').map(function(s) { return s.trim(); }).filter(function(s) { return s.length > 0; })
+    : [];
+
+  if (resEl) resEl.innerHTML = '<span style="color:var(--text-3)">Syncing playlist ' + esc(name) + ' (' + trackIds.length + ' tracks)...</span>';
+
+  try {
+    var resp = await MichiAPI.createPlaylist(name, 'Synced playlist');
+    var plId = resp.id || resp.playlist?.id;
+    var added = 0;
+    var failed = 0;
+
+    for (var i = 0; i < trackIds.length; i++) {
+      try {
+        await MichiAPI.addPlaylistTrack(plId, trackIds[i]);
+        added++;
+      } catch (_) {
+        failed++;
+      }
+    }
+
+    if (resEl) {
+      resEl.innerHTML = '<span style="color:var(--green)">✓ Playlist synced: ' + esc(name) + ' (' + added + ' tracks added' + (failed > 0 ? ', ' + failed + ' failed' : '') + ')</span>';
+    }
+    showToast('Playlist synced: ' + name);
+    if (nameInput) nameInput.value = '';
+    if (tracksInput) tracksInput.value = '';
+    loadPlaylists();
+  } catch (e) {
+    if (resEl) resEl.innerHTML = '<span style="color:var(--error)">✗ Sync failed: ' + esc(e.message) + '</span>';
+    showToast('Playlist sync failed: ' + e.message, true);
+  }
+}
+
+async function transferHandoff() {
+  var trackInput = $('#handoff-track-id');
+  var posInput = $('#handoff-position');
+  var playingInput = $('#handoff-playing');
+  var resEl = $('#handoff-result');
+  var curStateEl = $('#handoff-current-state');
+
+  var trackId = trackInput ? trackInput.value.trim() : '';
+  var posMs = posInput ? parseInt(posInput.value, 10) || 0 : 0;
+  var playing = playingInput ? playingInput.checked : false;
+
+  if (!trackId) {
+    showToast('Please enter a track ID for handoff', true);
+    return;
+  }
+
+  if (resEl) resEl.innerHTML = '<span style="color:var(--text-3)">Transferring playback state to server...</span>';
+
+  try {
+    await MichiAPI.handoff({
+      track_id: trackId,
+      position_ms: posMs,
+      playing: playing,
+    });
+
+    var readback = await MichiAPI.playbackState();
+    if (curStateEl) {
+      curStateEl.textContent = JSON.stringify(readback, null, 2);
+    }
+    if (resEl) {
+      resEl.innerHTML = '<span style="color:var(--green)">✓ Playback state transferred successfully</span>';
+    }
+    showToast('Playback handoff state transferred');
+  } catch (e) {
+    if (resEl) resEl.innerHTML = '<span style="color:var(--error)">✗ Handoff failed: ' + esc(e.message) + '</span>';
+    showToast('Handoff failed: ' + e.message, true);
+  }
+}
+
+async function discoverDevices() {
+  var resEl = $('#discover-result');
+  if (resEl) resEl.innerHTML = '<span style="color:var(--text-3)">Scanning local network for Michi receivers...</span>';
+  try {
+    var res = await MichiAPI.discoverDevices();
+    var devs = res.devices || [];
+    if (resEl) {
+      if (devs.length === 0) {
+        resEl.innerHTML = '<span style="color:var(--text-3)">No new devices discovered.</span>';
+      } else {
+        resEl.innerHTML = devs.map(function(d) {
+          return '<div style="font-size:0.8rem;padding:4px 0">✓ Found: <strong>' + esc(d.name || d.device_name || d.device_type || 'Device') + '</strong> (' + esc(d.address || d.ip || 'local') + ')</div>';
+        }).join('');
+      }
+    }
+    showToast('Discovery complete');
+  } catch (e) {
+    if (resEl) resEl.innerHTML = '<span style="color:var(--error)">✗ Discovery failed: ' + esc(e.message) + '</span>';
+    showToast('Discovery failed: ' + e.message, true);
+  }
 }
 
 // ── Settings ─────────────────────────────────────────────────────

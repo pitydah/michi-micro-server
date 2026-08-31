@@ -142,7 +142,57 @@ pub async fn stream_handler(
 
     let music_paths = &state.config.music_paths;
 
-    if let Some(ref format_str) = query.format {
+    let format_str_opt = query.format.clone().or_else(|| {
+        if state.config.stream_profile.needs_transcode() {
+            Some(state.config.stream_profile.target_codec().to_string())
+        } else {
+            None
+        }
+    });
+
+    if let Some(ref format_str) = format_str_opt {
+        // Policy check
+        match state.config.format_policy {
+            michi_core::AudioFormatPolicy::DirectPlay => {
+                return Err(v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "TRANSCODING_FORBIDDEN_BY_POLICY",
+                    "transcoding is forbidden under direct play format policy",
+                ));
+            }
+            michi_core::AudioFormatPolicy::LosslessOnly => {
+                if format_str != "flac" && format_str != "wav" {
+                    return Err(v1_error(
+                        StatusCode::BAD_REQUEST,
+                        "TRANSCODING_FORBIDDEN_BY_POLICY",
+                        "lossy transcoding is forbidden under lossless only format policy",
+                    ));
+                }
+            }
+            michi_core::AudioFormatPolicy::StandardOnly => {}
+        }
+
+        // Concurrency limiter check
+        if state.config.resource_profile.max_transcodes() == 0 {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "TRANSCODING_DISABLED",
+                "transcoding is disabled in current resource profile (eco)",
+            ));
+        }
+
+        let permit = state
+            .transcode_semaphore
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                v1_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "MAX_TRANSCODES_REACHED",
+                    "maximum concurrent transcodes reached; please retry later",
+                )
+            })?;
+
         if !michi_streaming::check_ffmpeg() {
             return Err(v1_error(
                 StatusCode::BAD_REQUEST,
@@ -172,9 +222,17 @@ pub async fn stream_handler(
                 )
             })?;
         let mime = tf.mime_type();
+
+        use futures_util::StreamExt;
+        let owned_permit = permit;
+        let monitored_stream = stream.map(move |chunk| {
+            let _keep_permit = &owned_permit;
+            chunk
+        });
+
         return Ok(Response::builder()
             .header(header::CONTENT_TYPE, mime)
-            .body(Body::from_stream(stream))
+            .body(Body::from_stream(monitored_stream))
             .unwrap());
     }
 

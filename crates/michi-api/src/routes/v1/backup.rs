@@ -77,12 +77,23 @@ pub async fn backup_handler(
             })?;
         let mut tracks = Vec::with_capacity(track_rows.len());
         for pt in &track_rows {
-            if let Some(track) = michi_db::get_track(&state.db, &pt.0.track_id)
+            let track = michi_db::get_track(&state.db, &pt.0.track_id)
                 .await
-                .unwrap_or(None)
-            {
-                tracks.push(track);
-            }
+                .map_err(|e| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &format!("failed to fetch track {}: {e}", pt.0.track_id),
+                    )
+                })?
+                .ok_or_else(|| {
+                    v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_CORRUPTION",
+                        &format!("playlist references non-existent track {}", pt.0.track_id),
+                    )
+                })?;
+            tracks.push(track);
         }
         playlists.push(BackupPlaylist {
             name: pl.name.clone(),
@@ -492,7 +503,15 @@ pub async fn snapshot_handler(
         },
     });
 
-    let _ = michi_db::save_snapshot(&state.db, &snapshot.to_string()).await;
+    michi_db::save_snapshot(&state.db, &snapshot.to_string())
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &format!("failed to save snapshot: {e}"),
+            )
+        })?;
 
     Ok(Json(serde_json::json!({
         "status": "snapshot_created",
@@ -507,6 +526,117 @@ pub async fn last_snapshot_handler(State(state): State<AppState>) -> Json<serde_
         ),
         _ => Json(serde_json::json!({ "snapshot": null })),
     }
+}
+
+pub async fn run_auto_backup_cycle(state: &AppState) -> Result<String, String> {
+    let backup_dir = state.config.config_path.join("backups");
+    tokio::fs::create_dir_all(&backup_dir)
+        .await
+        .map_err(|e| format!("failed to create backup dir: {e}"))?;
+
+    let tracks = michi_db::list_tracks(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
+    let playlists_raw = michi_db::list_playlists(&state.db, None)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut playlists = Vec::with_capacity(playlists_raw.len());
+    for pl in &playlists_raw {
+        let track_rows = michi_db::get_playlist_tracks(&state.db, &pl.id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut pl_tracks = Vec::with_capacity(track_rows.len());
+        for pt in &track_rows {
+            if let Some(track) = michi_db::get_track(&state.db, &pt.0.track_id)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                pl_tracks.push(track);
+            }
+        }
+        playlists.push(BackupPlaylist {
+            name: pl.name.clone(),
+            description: pl.description.clone(),
+            tracks: pl_tracks,
+        });
+    }
+
+    let starred_tracks = michi_db::get_starred_tracks(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let play_history_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT track_id, played_at FROM play_history ORDER BY played_at DESC LIMIT 10000",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let play_history: Vec<BackupHistoryEntry> = play_history_rows
+        .into_iter()
+        .map(|(track_id, played_at)| {
+            let timestamp = played_at.clone();
+            BackupHistoryEntry {
+                track_id,
+                played_at,
+                timestamp,
+            }
+        })
+        .collect();
+
+    let backup = BackupPayload {
+        version: 1,
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        tracks,
+        playlists,
+        starred_tracks,
+        play_history,
+        server_id: state.server_id().to_string(),
+        server_name: state.config.sync_name.clone(),
+    };
+
+    let backup_json = serde_json::to_string_pretty(&backup).map_err(|e| e.to_string())?;
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S_%f").to_string();
+    let filename = format!("michi_autobackup_{}.json", timestamp);
+    let tmp_path = backup_dir.join(format!("{}.tmp", filename));
+    let final_path = backup_dir.join(&filename);
+
+    tokio::fs::write(&tmp_path, backup_json.as_bytes())
+        .await
+        .map_err(|e| format!("failed to write temp backup file: {e}"))?;
+    tokio::fs::rename(&tmp_path, &final_path)
+        .await
+        .map_err(|e| format!("failed to commit backup file: {e}"))?;
+
+    // Also update snapshot in DB
+    let _ = snapshot_handler(State(state.clone())).await;
+
+    // Apply retention
+    let max_keep = state.config.backup_max_keep.max(1) as usize;
+    let mut entries = Vec::new();
+    if let Ok(mut dir) = tokio::fs::read_dir(&backup_dir).await {
+        while let Ok(Some(entry)) = dir.next_entry().await {
+            let p = entry.path();
+            if p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.starts_with("michi_autobackup_") && s.ends_with(".json"))
+                    .unwrap_or(false)
+            {
+                entries.push(p);
+            }
+        }
+    }
+    entries.sort(); // lexical sort by timestamp in filename
+    if entries.len() > max_keep {
+        let to_remove = entries.len() - max_keep;
+        for p in entries.iter().take(to_remove) {
+            let _ = tokio::fs::remove_file(p).await;
+        }
+    }
+
+    Ok(filename)
 }
 
 // ── Webhook ─────────────────────────────────────────────────────

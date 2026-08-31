@@ -31,9 +31,12 @@ const jsContent = `
 ;
 window.State            = State;
 window.ServerPlayback   = ServerPlayback;
+window.AuthSession      = AuthSession;
 window.MichiAPI         = MichiAPI;
 window.addToQueue       = addToQueue;
 window.toggleOutputTarget = toggleOutputTarget;
+window.selectServerOutputTarget = selectServerOutputTarget;
+window.selectLocalBrowserOutput = selectLocalBrowserOutput;
 window.saveSetting      = saveSetting;
 window.loadSettings     = loadSettings;
 window.playEpisode      = playEpisode;
@@ -55,7 +58,7 @@ console.log('===================================================================
 class MockElement {
   constructor(tag, id = '', className = '') {
     this.tagName = tag.toUpperCase();
-    this.id = id;
+    this._id = id;
     this.className = className;
     this.innerHTML = '';
     this.textContent = '';
@@ -70,9 +73,18 @@ class MockElement {
     this.offsetHeight = 0;
   }
 
+  get id() { return this._id || ''; }
+  set id(val) { this._id = val; }
+
   getAttribute(name) { return this.attributes[name] || null; }
-  setAttribute(name, val) { this.attributes[name] = String(val); }
-  removeAttribute(name) { delete this.attributes[name]; }
+  setAttribute(name, val) {
+    this.attributes[name] = String(val);
+    if (name === 'id') this._id = String(val);
+  }
+  removeAttribute(name) {
+    delete this.attributes[name];
+    if (name === 'id') this._id = '';
+  }
 
   appendChild(child) {
     child.parentNode = this;
@@ -140,12 +152,15 @@ class MockElement {
         if (found) return found;
       }
     } else {
-      // attribute selector like [data-section="..."]
-      if (sel.includes('[')) {
-        // simple pass-through: return null
+      if (sel.includes(' ')) {
+        const parts = sel.split(' ');
+        const first = this._query(parts[0]);
+        if (first) return first._query(parts.slice(1).join(' '));
         return null;
       }
-      // tag selector
+      if (sel.includes('[')) {
+        return null;
+      }
       if (this.tagName === sel.toUpperCase()) return this;
       for (const c of this.children) {
         const found = c._query(sel);
@@ -159,97 +174,107 @@ class MockElement {
     if (sel.startsWith('.')) {
       const cls = sel.slice(1);
       if (this.className.includes(cls) || this.classList._classes.has(cls)) results.push(this);
+    } else if (sel.startsWith('#')) {
+      const id = sel.slice(1);
+      if (this.id === id) results.push(this);
+    } else {
+      if (this.tagName === sel.toUpperCase()) results.push(this);
     }
     for (const c of this.children) c._queryAll(sel, results);
   }
-}
 
-class MockStorage {
-  constructor() { this.store = {}; }
-  getItem(k) { return this.store[k] !== undefined ? this.store[k] : null; }
-  setItem(k, v) { this.store[k] = String(v); }
-  removeItem(k) { delete this.store[k]; }
-  clear() { this.store = {}; }
+  remove() {
+    if (this.parentNode) {
+      const idx = this.parentNode.children.indexOf(this);
+      if (idx >= 0) this.parentNode.children.splice(idx, 1);
+      this.parentNode = null;
+    }
+  }
 }
 
 function createDOM() {
-  const root = new MockElement('HTML');
-  const body = new MockElement('BODY');
-  root.appendChild(body);
+  function el(tag, id = '', cls = '') {
+    return new MockElement(tag, id, cls);
+  }
 
-  const document = {
-    body: body,
-    documentElement: new MockElement('HTML'),
-    createElement: (tag) => new MockElement(tag),
-    getElementById: (id) => body.querySelector('#' + id),
-    querySelector: (sel) => body.querySelector(sel),
-    querySelectorAll: (sel) => body.querySelectorAll(sel),
+  const doc = {
+    body: el('body'),
+    head: el('head'),
+    createElement: (tag) => el(tag),
+    getElementById: (id) => doc.body.querySelector('#' + id),
+    querySelector: (sel) => {
+      if (sel.startsWith('#')) return doc.body.querySelector(sel);
+      return doc.body.querySelector(sel);
+    },
+    querySelectorAll: (sel) => doc.body.querySelectorAll(sel),
     addEventListener: () => {},
-    activeElement: null,
-    hidden: false,
   };
 
-  const localStorage = new MockStorage();
-  const sessionStorage = new MockStorage();
+  // Seed core DOM nodes expected by app.js
+  const toast = el('div', 'toast');
+  const npTargetBadge = el('span', 'np-target-badge');
+  const pageSettings = el('section', 'page-settings');
+  const settingsHero = el('div', '', 'hero');
+  pageSettings.appendChild(settingsHero);
 
-  const window = {
-    document: document,
-    navigator: { language: 'en-US', serviceWorker: { register: () => Promise.resolve() } },
-    location: { reload: () => {} },
-    matchMedia: () => ({ matches: false, addEventListener: () => {} }),
-    localStorage: localStorage,
-    sessionStorage: sessionStorage,
-    // Native Node timers — critical for showToast and other deferred calls
-    setTimeout:    global.setTimeout,
-    clearTimeout:  global.clearTimeout,
-    setInterval:   global.setInterval,
-    clearInterval: global.clearInterval,
-    requestAnimationFrame: (fn) => global.setTimeout(fn, 0),
-    fetch: null,
+  const settingIds = [
+    'settings-port', 'settings-version', 'settings-ffmpeg', 'settings-ffmpeg-avail',
+    'settings-resource-profile', 'settings-stream-profile', 'settings-format-policy',
+    'settings-music-paths', 'settings-sync-name', 'settings-cors', 'settings-sync-peers',
+    'settings-auth', 'settings-dev-mode', 'settings-scrobble',
+    'settings-scan-concurrency', 'settings-max-transcodes', 'settings-db-pool'
+  ];
+  for (const sid of settingIds) {
+    pageSettings.appendChild(el('div', sid));
+  }
+
+  doc.body.appendChild(toast);
+  doc.body.appendChild(npTargetBadge);
+  doc.body.appendChild(pageSettings);
+
+  const localStorage = {
+    _data: {},
+    getItem(k) { return this._data[k] !== undefined ? this._data[k] : null; },
+    setItem(k, v) { this._data[k] = String(v); },
+    removeItem(k) { delete this._data[k]; },
+    clear() { this._data = {}; },
+  };
+
+  const sessionStorage = {
+    _data: {},
+    getItem(k) { return this._data[k] !== undefined ? this._data[k] : null; },
+    setItem(k, v) { this._data[k] = String(v); },
+    removeItem(k) { delete this._data[k]; },
+  };
+
+  const win = {
+    document: doc,
+    navigator: { language: 'en-US', onLine: true },
+    localStorage,
+    sessionStorage,
+    location: { origin: 'http://localhost:9090' },
     Audio: class {
       constructor() { this.src = ''; this.currentTime = 0; this.duration = 180; }
       play() { return Promise.resolve(); }
       pause() {}
     },
+    fetch: async () => ({ ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) }),
+    addEventListener: () => {},
   };
 
-  // Populate the minimal set of DOM elements that app.js probes at boot
-  const ids = [
-    'app', 'toast', 'toast-container',
-    'np-title', 'np-artist', 'np-target-badge',
-    'queue-content',
-    'view-settings', 'settings-restart-banner',
-    'settings-scan-concurrency', 'settings-max-transcodes',
-    'settings-db-pool', 'settings-scrobble',
-    'settings-theme', 'settings-language', 'settings-profile',
-    'qr-status-badge', 'qr-code-img',
-    'stab-receivers', 'stab-backup',
-    'server-status-dot', 'server-status-label',
-    'status-pill', 'sidebar-server-id',
-    'current-section-title', 'mobile-menu-btn',
-    'lang-select', 'search-input',
-    'modal-overlay', 'modal-title', 'modal-message', 'modal-confirm-btn',
-  ];
-  for (const id of ids) {
-    const el = new MockElement('div', id);
-    body.appendChild(el);
-  }
-
-  return { window, document };
+  return { window: win, document: doc };
 }
 
 // ── Sandbox factory ─────────────────────────────────────────────
-// Every test gets a fresh sandbox with native timers injected at the
-// VM-context level so bare calls to setTimeout() inside app.js resolve
-// to Node's globalThis.setTimeout, not undefined.
-// AbortController, URL, etc. must also be present because MichiAPI.request
-// creates an AbortController on every fetch call.
 function makeSandbox({ window, document, fetchImpl = null, showToastImpl = null } = {}) {
   if (!window || !document) {
     const dom = createDOM();
     window = dom.window;
     document = dom.document;
   }
+  const effectiveFetch = fetchImpl || (async () => ({ ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) }));
+  window.fetch = effectiveFetch;
+
   const sandbox = {
     window,
     document,
@@ -263,15 +288,15 @@ function makeSandbox({ window, document, fetchImpl = null, showToastImpl = null 
     esc:     (s) => s,
     fmtDur:  () => '3:00',
     fmtDate: () => '2024-01-01',
-    // Native timers — must exist as globals in the VM context
     setTimeout:           global.setTimeout,
     clearTimeout:         global.clearTimeout,
     setInterval:          global.setInterval,
     clearInterval:        global.clearInterval,
     requestAnimationFrame: (fn) => global.setTimeout(fn, 0),
-    // Web API globals required by MichiAPI.request and other app code
     AbortController:    globalThis.AbortController,
     AbortSignal:        globalThis.AbortSignal,
+    Headers:            globalThis.Headers,
+    FormData:           globalThis.FormData,
     URL:                globalThis.URL,
     URLSearchParams:    globalThis.URLSearchParams,
     TextEncoder:        globalThis.TextEncoder,
@@ -280,7 +305,7 @@ function makeSandbox({ window, document, fetchImpl = null, showToastImpl = null 
     JSON:               globalThis.JSON,
     Error:              globalThis.Error,
     showToast: showToastImpl || (() => {}),
-    fetch:     fetchImpl     || (async () => ({ ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) })),
+    fetch:     effectiveFetch,
   };
   return { sandbox, window, document };
 }
@@ -304,7 +329,18 @@ async function runE2E() {
 
   // ── Test A: Output Target Truthfulness ──────────────────────
   {
-    const { sandbox, window, document } = makeSandbox();
+    const fetchImpl = async (url, opts) => {
+      if (url.includes('/api/v1/playback/output')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ status: 'output_selected' }),
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
@@ -312,9 +348,13 @@ async function runE2E() {
     assert(badge !== null, 'Now Playing target badge exists in DOM');
     assert(window.ServerPlayback.outputTarget === 'browser', 'Default output target is browser local');
 
-    window.toggleOutputTarget();
-    assert(window.ServerPlayback.outputTarget === 'remote', 'Toggling switches to remote link');
-    assert(badge.textContent.includes('Remote Link'), 'Badge reflects Remote Link truth');
+    await window.selectServerOutputTarget('receiver', 'rec-living-room', 'Living Room');
+    assert(window.ServerPlayback.outputTarget === 'server', 'Selecting server output target switches outputTarget to server');
+    assert(badge.textContent.includes('Living Room'), 'Badge reflects Living Room output truth');
+
+    window.selectLocalBrowserOutput();
+    assert(window.ServerPlayback.outputTarget === 'browser', 'Switching back to browser local restores outputTarget');
+    assert(badge.textContent.includes('This Browser'), 'Badge reflects This Browser truth');
   }
 
   // ── Test B: Queue Add Server Failure ────────────────────────
@@ -338,7 +378,6 @@ async function runE2E() {
     };
 
     const { sandbox, window, document } = makeSandbox({ fetchImpl, showToastImpl });
-    window.fetch = fetchImpl;
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
@@ -349,7 +388,6 @@ async function runE2E() {
 
     const toastEl = document.getElementById('toast');
     assert(window.State.queue.length === 0, 'Queue is NOT mutated locally when backend API rejects');
-    // The toast text is set via the real showToast on the #toast element
     const toastText = toastEl ? toastEl.textContent : '';
     assert(toastText.includes('Failed to add') || toastErrorShown,
       'Explicit error toast displayed upon queue failure');
@@ -382,7 +420,6 @@ async function runE2E() {
     };
 
     const { sandbox, window, document } = makeSandbox({ fetchImpl: settingsFetch });
-    window.fetch = settingsFetch;
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
@@ -393,10 +430,11 @@ async function runE2E() {
     // Simulate F5
     const { sandbox: sandboxR, window: winR, document: docR } = makeSandbox({ fetchImpl: settingsFetch });
     winR.localStorage.setItem('michi_restart_required', 'true');
-    winR.fetch = settingsFetch;
     vm.createContext(sandboxR);
     vm.runInContext(jsContent, sandboxR);
 
+    // Mock authenticated session
+    winR.AuthSession.state = 'authenticated';
     await winR.loadSettings();
     const banner = docR.getElementById('settings-restart-banner');
     assert(banner !== null, 'Restart banner persists in Settings after F5 reload');
@@ -406,7 +444,7 @@ async function runE2E() {
   {
     let playedEndpointCalled = false;
     const fetchImpl = async (url, opts) => {
-      if (url.includes('/api/v1/sources/episodes/')) playedEndpointCalled = true;
+      if (url.includes('/api/v1/episodes/')) playedEndpointCalled = true;
       return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
     };
 
@@ -416,11 +454,10 @@ async function runE2E() {
       play() { return Promise.reject(new Error('Decode error')); }
       pause() {}
     };
-    window.fetch = fetchImpl;
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
-    try { await window.playEpisode('source-123', 'ep-456'); } catch (_) {}
+    try { await window.playEpisode('ep-456'); } catch (_) {}
 
     assert(playedEndpointCalled === false,
       'Failed audio.play does NOT call mark episode as played');
