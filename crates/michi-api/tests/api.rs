@@ -3486,7 +3486,7 @@ async fn test_v1_commit_returns_mapping() {
 
 #[tokio::test]
 async fn test_v1_playback_queue_survives_restart() {
-    let (app, pool) = make_app().await;
+    let (app, pool, state) = make_app_with_state().await;
 
     // Seed a track
     let tid = seed_track(&pool, "/music/survive.flac", "Survivor").await;
@@ -3511,19 +3511,26 @@ async fn test_v1_playback_queue_survives_restart() {
     let _queue_id = queue_resp["queue_id"].as_str().unwrap().to_string();
 
     // Create playback session
-    let resp = app.clone().oneshot(
-        Request::builder().uri("/api/v1/playback/session").method("POST")
-            .header("Content-Type", "application/json")
-            .body(Body::from(format!(r#"{{"queue":["{tid}"],"current_track_id":"{tid}","position_ms":42000,"playing":false,"source":"player","resume_policy":"manual"}}"#)))
-            .unwrap(),
-    ).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/session")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"queue":["{tid}"],"current_track_id":"{tid}","position_ms":42000,"playing":false,"source":"player","resume_policy":"manual"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let sess_resp: Value = serde_json::from_str(&body_text(resp).await).unwrap();
     let session_id = sess_resp["session_id"].as_str().unwrap().to_string();
 
-    // Now simulate restart: create new app state with same DB, verify restore works
-    let config2 = test_config();
-    let state2 = michi_api::AppState::new(config2, pool.clone(), None);
+    // Now simulate restart: create new app state with same DB and config, verify restore works
+    let state2 = michi_api::AppState::new(state.config.clone(), pool.clone(), None);
     let app2 = router_with_test_admin(state2, &pool).await;
 
     // Verify queue is still queryable

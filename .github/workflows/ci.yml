@@ -161,7 +161,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Run Web UI Browser E2E Contract & Invariance Suite
+      - name: Run Web UI Client Contract & Invariance Suite (Node Harness)
         run: node scripts/test_web_ui_e2e.mjs
 
   ci-web-ui-browser-e2e:

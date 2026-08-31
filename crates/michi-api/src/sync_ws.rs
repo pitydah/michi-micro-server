@@ -27,32 +27,66 @@ fn is_local_or_private_ip(ip: IpAddr) -> bool {
 }
 
 pub async fn sync_handler(
-    ws: WebSocketUpgrade,
     headers: HeaderMap,
     connect_info: Option<ConnectInfo<SocketAddr>>,
     State(state): State<AppState>,
+    ws_result: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
-    if !state.config.remote_sync {
-        let client_ip = headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.split(',').next())
-            .and_then(|s| s.trim().parse::<IpAddr>().ok())
-            .or_else(|| connect_info.map(|ci| ci.0.ip()));
+    let client_ip_opt = if let Some(ConnectInfo(addr)) = connect_info {
+        let peer_ip = addr.ip();
+        if state.config.is_trusted_proxy(&peer_ip) {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(',').next())
+                .and_then(|s| s.trim().parse::<IpAddr>().ok())
+                .or_else(|| {
+                    headers
+                        .get("x-real-ip")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.trim().parse::<IpAddr>().ok())
+                })
+                .or(Some(peer_ip))
+        } else {
+            Some(peer_ip)
+        }
+    } else {
+        None
+    };
 
-        if let Some(ip) = client_ip {
-            if !is_local_or_private_ip(ip) {
-                warn!("sync_ws: rejected remote sync connection from {ip} because remote_sync is disabled");
+    if !state.config.remote_sync {
+        match client_ip_opt {
+            Some(ip) => {
+                if !is_local_or_private_ip(ip) {
+                    warn!(
+                        "sync_ws: rejected remote sync connection from {ip} (remote_sync is disabled)"
+                    );
+                    return (
+                        StatusCode::FORBIDDEN,
+                        "Remote sync is disabled on this server",
+                    )
+                        .into_response();
+                }
+            }
+            None => {
+                warn!(
+                    "sync_ws: rejected sync connection due to missing client connection info (remote_sync=false fail-closed)"
+                );
                 return (
                     StatusCode::FORBIDDEN,
-                    "Remote sync is disabled on this server",
+                    "Remote sync is disabled and client IP cannot be verified",
                 )
                     .into_response();
             }
         }
     }
-    ws.on_upgrade(move |socket| handle_sync(socket, state))
-        .into_response()
+
+    match ws_result {
+        Ok(ws) => ws
+            .on_upgrade(move |socket| handle_sync(socket, state))
+            .into_response(),
+        Err(rejection) => rejection.into_response(),
+    }
 }
 
 async fn handle_sync(socket: WebSocket, state: AppState) {
@@ -261,21 +295,54 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                         }
 
                                         if takeover_ok {
-                                            // Validate snapshot convergence
-                                            if let Ok(snap) =
-                                                state_clone.playback_engine.snapshot().await
-                                            {
-                                                let track_matches =
-                                                    snap.track_id == session.track_id;
-                                                let play_matches = if session.track_id.is_none() {
-                                                    !snap.lifecycle.is_playing()
-                                                } else {
-                                                    snap.lifecycle.is_playing() == session.playing
-                                                };
-                                                if !track_matches || !play_matches {
+                                            // Validate snapshot convergence fail-closed
+                                            match state_clone.playback_engine.snapshot().await {
+                                                Ok(snap) => {
+                                                    let track_matches =
+                                                        snap.track_id == session.track_id;
+                                                    let play_matches = if session.track_id.is_none()
+                                                    {
+                                                        !snap.lifecycle.is_playing()
+                                                    } else {
+                                                        snap.lifecycle.is_playing()
+                                                            == session.playing
+                                                    };
+                                                    let vol_matches = ((snap.volume as f64
+                                                        / 100.0)
+                                                        - session.volume)
+                                                        .abs()
+                                                        <= 0.05;
+                                                    let pos_matches = if session.track_id.is_none()
+                                                    {
+                                                        true
+                                                    } else if session.playing {
+                                                        (snap.position_ms as i64
+                                                            - session.position_ms as i64)
+                                                            .abs()
+                                                            <= 3000
+                                                    } else {
+                                                        (snap.position_ms as i64
+                                                            - session.position_ms as i64)
+                                                            .abs()
+                                                            <= 1000
+                                                    };
+
+                                                    if !track_matches
+                                                        || !play_matches
+                                                        || !vol_matches
+                                                        || !pos_matches
+                                                    {
+                                                        warn!(
+                                                            "handoff: snapshot readback mismatch (expected track={:?}, playing={}, vol={:.2}, pos={}; got track={:?}, lifecycle={:?}, vol={}, pos={})",
+                                                            session.track_id, session.playing, session.volume, session.position_ms,
+                                                            snap.track_id, snap.lifecycle, snap.volume, snap.position_ms
+                                                        );
+                                                        takeover_ok = false;
+                                                    }
+                                                }
+                                                Err(e) => {
                                                     warn!(
-                                                        "handoff: snapshot readback mismatch (expected track={:?}, playing={}; got track={:?}, lifecycle={:?})",
-                                                        session.track_id, session.playing, snap.track_id, snap.lifecycle
+                                                        "handoff: failed to obtain engine snapshot on takeover: {e}"
                                                     );
                                                     takeover_ok = false;
                                                 }

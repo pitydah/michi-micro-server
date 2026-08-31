@@ -1131,11 +1131,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let wav_path = tmp.path().join("source.wav");
 
-        // Write a valid 44.1kHz 16-bit Stereo PCM WAV file with 0.1s of audio (4410 frames = 17640 bytes)
+        // Write a valid 44.1kHz 16-bit Stereo PCM WAV file with 1.5s of sine audio
         let sample_rate: u32 = 44100;
         let channels: u16 = 2;
         let bits_per_sample: u16 = 16;
-        let num_samples = 4410; // 0.1s
+        let num_samples = 66150; // 1.5s
         let data_size = num_samples * (channels as u32) * ((bits_per_sample / 8) as u32);
         let file_size = 36 + data_size;
 
@@ -1154,12 +1154,18 @@ mod tests {
         wav_bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
         wav_bytes.extend_from_slice(b"data");
         wav_bytes.extend_from_slice(&data_size.to_le_bytes());
-        wav_bytes.resize(wav_bytes.len() + data_size as usize, 0x80);
+        for i in 0..num_samples {
+            let t = (i as f32) / (sample_rate as f32);
+            let val = ((2.0 * std::f32::consts::PI * 440.0 * t).sin() * 16000.0) as i16;
+            let sample_bytes = val.to_le_bytes();
+            wav_bytes.extend_from_slice(&sample_bytes);
+            wav_bytes.extend_from_slice(&sample_bytes);
+        }
 
         std::fs::write(&wav_path, &wav_bytes).unwrap();
 
-        // 1. Test Opus Transcode Plan
-        let opus_plan = TranscodePlan {
+        // 1. Test Opus 96k Plan
+        let opus96_plan = TranscodePlan {
             codec: TranscodeCodec::Opus,
             container: TranscodeContainer::Ogg,
             bitrate_bps: Some(96000),
@@ -1167,23 +1173,49 @@ mod tests {
             bit_depth: None,
             channels: Some(2),
         };
-        let mut opus_stream = transcode_stream_with_plan(&wav_path, &opus_plan)
+        let mut opus96_stream = transcode_stream_with_plan(&wav_path, &opus96_plan)
             .await
             .unwrap();
-        let mut opus_out = Vec::new();
-        while let Some(res) = opus_stream.next().await {
+        let mut opus96_out = Vec::new();
+        while let Some(res) = opus96_stream.next().await {
             let chunk = res.unwrap();
-            opus_out.extend_from_slice(&chunk);
+            opus96_out.extend_from_slice(&chunk);
         }
-        assert!(!opus_out.is_empty(), "Opus transcode must output bytes");
-        assert_eq!(
-            &opus_out[0..4],
-            b"OggS",
-            "Opus in Ogg container must start with OggS magic bytes"
+        assert!(
+            !opus96_out.is_empty(),
+            "Opus 96k transcode must output bytes"
         );
+        assert_eq!(&opus96_out[0..4], b"OggS", "Opus must start with OggS");
+        let opus96_file = tmp.path().join("out_96k.opus");
+        std::fs::write(&opus96_file, &opus96_out).unwrap();
 
-        // 2. Test MP3 Transcode Plan
-        let mp3_plan = TranscodePlan {
+        // 2. Test Opus 160k Plan
+        let opus160_plan = TranscodePlan {
+            codec: TranscodeCodec::Opus,
+            container: TranscodeContainer::Ogg,
+            bitrate_bps: Some(160000),
+            sample_rate_hz: Some(48000),
+            bit_depth: None,
+            channels: Some(2),
+        };
+        let mut opus160_stream = transcode_stream_with_plan(&wav_path, &opus160_plan)
+            .await
+            .unwrap();
+        let mut opus160_out = Vec::new();
+        while let Some(res) = opus160_stream.next().await {
+            let chunk = res.unwrap();
+            opus160_out.extend_from_slice(&chunk);
+        }
+        assert_eq!(
+            &opus160_out[0..4],
+            b"OggS",
+            "Opus 160k must start with OggS"
+        );
+        let opus160_file = tmp.path().join("out_160k.opus");
+        std::fs::write(&opus160_file, &opus160_out).unwrap();
+
+        // 3. Test MP3 192k Plan
+        let mp3_192_plan = TranscodePlan {
             codec: TranscodeCodec::Mp3,
             container: TranscodeContainer::Mp3,
             bitrate_bps: Some(192000),
@@ -1191,22 +1223,46 @@ mod tests {
             bit_depth: None,
             channels: Some(2),
         };
-        let mut mp3_stream = transcode_stream_with_plan(&wav_path, &mp3_plan)
+        let mut mp3_192_stream = transcode_stream_with_plan(&wav_path, &mp3_192_plan)
             .await
             .unwrap();
-        let mut mp3_out = Vec::new();
-        while let Some(res) = mp3_stream.next().await {
+        let mut mp3_192_out = Vec::new();
+        while let Some(res) = mp3_192_stream.next().await {
             let chunk = res.unwrap();
-            mp3_out.extend_from_slice(&chunk);
+            mp3_192_out.extend_from_slice(&chunk);
         }
-        assert!(!mp3_out.is_empty(), "MP3 transcode must output bytes");
-        let has_mp3_header = &mp3_out[0..3] == b"ID3" || mp3_out[0] == 0xFF;
         assert!(
-            has_mp3_header,
-            "MP3 output must contain ID3 header or sync frame"
+            !mp3_192_out.is_empty(),
+            "MP3 192k transcode must output bytes"
         );
+        let mp3_192_file = tmp.path().join("out_192k.mp3");
+        std::fs::write(&mp3_192_file, &mp3_192_out).unwrap();
 
-        // 3. Test PCM 24/48 Transcode Plan
+        // 4. Test MP3 320k Plan
+        let mp3_320_plan = TranscodePlan {
+            codec: TranscodeCodec::Mp3,
+            container: TranscodeContainer::Mp3,
+            bitrate_bps: Some(320000),
+            sample_rate_hz: Some(44100),
+            bit_depth: None,
+            channels: Some(2),
+        };
+        let mut mp3_320_stream = transcode_stream_with_plan(&wav_path, &mp3_320_plan)
+            .await
+            .unwrap();
+        let mut mp3_320_out = Vec::new();
+        while let Some(res) = mp3_320_stream.next().await {
+            let chunk = res.unwrap();
+            mp3_320_out.extend_from_slice(&chunk);
+        }
+        assert!(
+            !mp3_320_out.is_empty(),
+            "MP3 320k transcode must output bytes"
+        );
+        let mp3_320_file = tmp.path().join("out_320k.mp3");
+        std::fs::write(&mp3_320_file, &mp3_320_out).unwrap();
+
+        // 5. Test PCM 24/48 Transcode Plan
         let pcm_plan = TranscodePlan {
             codec: TranscodeCodec::Pcm,
             container: TranscodeContainer::Wav,
@@ -1243,92 +1299,81 @@ mod tests {
         );
         assert_eq!(pcm_bits, 24, "PCM output must have 24 bits per sample");
 
-        // 4. Test Opus 160k & MP3 320k and verify format/bitrate with ffprobe if available
-        let opus160_plan = TranscodePlan {
-            codec: TranscodeCodec::Opus,
-            container: TranscodeContainer::Ogg,
-            bitrate_bps: Some(160000),
-            sample_rate_hz: Some(48000),
-            bit_depth: None,
-            channels: Some(2),
+        // 6. Fail-closed ffprobe parameter and bitrate certification
+        let probe = |path: &std::path::Path| -> (String, u16, u32, u64) {
+            let output = std::process::Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a:0",
+                    "-show_entries",
+                    "stream=codec_name,channels,sample_rate:format=bit_rate",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=0",
+                    path.to_str().unwrap(),
+                ])
+                .output()
+                .expect("ffprobe execution must succeed");
+            assert!(
+                output.status.success(),
+                "ffprobe must successfully parse {}",
+                path.display()
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut codec = String::new();
+            let mut channels = 0u16;
+            let mut sample_rate = 0u32;
+            let mut bit_rate = 0u64;
+
+            for line in stdout.lines() {
+                if let Some((k, v)) = line.split_once('=') {
+                    match k.trim() {
+                        "codec_name" => codec = v.trim().to_string(),
+                        "channels" => channels = v.trim().parse().unwrap_or(0),
+                        "sample_rate" => sample_rate = v.trim().parse().unwrap_or(0),
+                        "bit_rate" => bit_rate = v.trim().parse().unwrap_or(0),
+                        _ => {}
+                    }
+                }
+            }
+            (codec, channels, sample_rate, bit_rate)
         };
-        let mut opus160_stream = transcode_stream_with_plan(&wav_path, &opus160_plan)
-            .await
-            .unwrap();
-        let mut opus160_out = Vec::new();
-        while let Some(res) = opus160_stream.next().await {
-            let chunk = res.unwrap();
-            opus160_out.extend_from_slice(&chunk);
-        }
-        assert_eq!(
-            &opus160_out[0..4],
-            b"OggS",
-            "Opus 160k must have OggS magic"
+
+        let (c_op96, ch_op96, sr_op96, br_op96) = probe(&opus96_file);
+        assert_eq!(c_op96, "opus", "Opus 96k codec mismatch");
+        assert_eq!(ch_op96, 2, "Opus 96k channels mismatch");
+        assert_eq!(sr_op96, 48000, "Opus 96k sample rate mismatch");
+        assert!(
+            (70_000..=125_000).contains(&br_op96),
+            "Opus 96k bitrate out of bounds: {br_op96} bps"
         );
 
-        let mp3_320_plan = TranscodePlan {
-            codec: TranscodeCodec::Mp3,
-            container: TranscodeContainer::Mp3,
-            bitrate_bps: Some(320000),
-            sample_rate_hz: Some(44100),
-            bit_depth: None,
-            channels: Some(2),
-        };
-        let mut mp3_320_stream = transcode_stream_with_plan(&wav_path, &mp3_320_plan)
-            .await
-            .unwrap();
-        let mut mp3_320_out = Vec::new();
-        while let Some(res) = mp3_320_stream.next().await {
-            let chunk = res.unwrap();
-            mp3_320_out.extend_from_slice(&chunk);
-        }
-        assert!(!mp3_320_out.is_empty(), "MP3 320k must output bytes");
+        let (c_op160, ch_op160, sr_op160, br_op160) = probe(&opus160_file);
+        assert_eq!(c_op160, "opus", "Opus 160k codec mismatch");
+        assert_eq!(ch_op160, 2, "Opus 160k channels mismatch");
+        assert_eq!(sr_op160, 48000, "Opus 160k sample rate mismatch");
+        assert!(
+            (125_000..=195_000).contains(&br_op160),
+            "Opus 160k bitrate out of bounds: {br_op160} bps"
+        );
 
-        // 5. If ffprobe is available, certify stream parameter compliance on Opus & MP3
-        let opus_file = tmp.path().join("out.opus");
-        std::fs::write(&opus_file, &opus_out).unwrap();
-        if let Ok(output) = std::process::Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-show_entries",
-                "stream=channels,sample_rate:format=bit_rate",
-                "-of",
-                "csv=p=0",
-                opus_file.to_str().unwrap(),
-            ])
-            .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                assert!(
-                    stdout.contains("48000"),
-                    "Opus stream analysis should confirm 48000Hz: {stdout}"
-                );
-            }
-        }
+        let (c_mp192, ch_mp192, sr_mp192, br_mp192) = probe(&mp3_192_file);
+        assert_eq!(c_mp192, "mp3", "MP3 192k codec mismatch");
+        assert_eq!(ch_mp192, 2, "MP3 192k channels mismatch");
+        assert_eq!(sr_mp192, 44100, "MP3 192k sample rate mismatch");
+        assert!(
+            (180_000..=205_000).contains(&br_mp192),
+            "MP3 192k bitrate out of bounds: {br_mp192} bps"
+        );
 
-        let mp3_file = tmp.path().join("out.mp3");
-        std::fs::write(&mp3_file, &mp3_320_out).unwrap();
-        if let Ok(output) = std::process::Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-show_entries",
-                "stream=channels,sample_rate",
-                "-of",
-                "csv=p=0",
-                mp3_file.to_str().unwrap(),
-            ])
-            .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                assert!(
-                    stdout.contains("44100") || stdout.contains("2"),
-                    "MP3 stream analysis should confirm parameters: {stdout}"
-                );
-            }
-        }
+        let (c_mp320, ch_mp320, sr_mp320, br_mp320) = probe(&mp3_320_file);
+        assert_eq!(c_mp320, "mp3", "MP3 320k codec mismatch");
+        assert_eq!(ch_mp320, 2, "MP3 320k channels mismatch");
+        assert_eq!(sr_mp320, 44100, "MP3 320k sample rate mismatch");
+        assert!(
+            (300_000..=340_000).contains(&br_mp320),
+            "MP3 320k bitrate out of bounds: {br_mp320} bps"
+        );
     }
 }

@@ -182,7 +182,9 @@ fn entities() -> Vec<HaEntity> {
     ]
 }
 
-async fn publish_discovery(client: &AsyncClient) {
+async fn publish_discovery(client: &AsyncClient) -> Result<(), String> {
+    let mut err_count = 0;
+    let mut last_err = String::new();
     for entity in entities() {
         let topic = format!(
             "{}/{}/michi_{}/config",
@@ -191,7 +193,13 @@ async fn publish_discovery(client: &AsyncClient) {
         let payload = match serde_json::to_string(&entity.config) {
             Ok(p) => p,
             Err(e) => {
-                error!("failed to serialize entity config: {e}");
+                let msg = format!(
+                    "failed to serialize entity config for {}: {e}",
+                    entity.object_id
+                );
+                error!("{msg}");
+                err_count += 1;
+                last_err = msg;
                 continue;
             }
         };
@@ -200,20 +208,37 @@ async fn publish_discovery(client: &AsyncClient) {
             .await
         {
             Ok(_) => info!("published discovery for {}", entity.object_id),
-            Err(e) => warn!(
-                "failed to publish discovery for {}: {}",
-                entity.object_id, e
-            ),
+            Err(e) => {
+                let msg = format!(
+                    "failed to publish discovery for {}: {}",
+                    entity.object_id, e
+                );
+                warn!("{msg}");
+                err_count += 1;
+                last_err = msg;
+            }
         }
+    }
+    if err_count > 0 {
+        Err(format!(
+            "Discovery publication incomplete ({err_count} errors, last: {last_err})"
+        ))
+    } else {
+        Ok(())
     }
 }
 
-async fn publish_states(client: &AsyncClient, engine: &PlaybackEngineHandle, db: &SqlitePool) {
+async fn publish_states(
+    client: &AsyncClient,
+    engine: &PlaybackEngineHandle,
+    db: &SqlitePool,
+) -> Result<(), String> {
     let snap = match engine.snapshot().await {
         Ok(s) => s,
         Err(e) => {
-            warn!("failed to get engine snapshot for HA: {e}");
-            return;
+            let msg = format!("failed to get engine snapshot for HA: {e}");
+            warn!("{msg}");
+            return Err(msg);
         }
     };
 
@@ -246,14 +271,26 @@ async fn publish_states(client: &AsyncClient, engine: &PlaybackEngineHandle, db:
         ("volume_set", volume_pct.to_string()),
     ];
 
+    let mut err_count = 0;
+    let mut last_err = String::new();
     for (object_id, value) in &states {
         let topic = format!("michi/{object_id}/state");
         if let Err(e) = client
             .publish(&topic, QoS::AtLeastOnce, true, value.clone())
             .await
         {
-            warn!("failed to publish state for {}: {}", object_id, e);
+            let msg = format!("failed to publish state for {object_id}: {e}");
+            warn!("{msg}");
+            err_count += 1;
+            last_err = msg;
         }
+    }
+    if err_count > 0 {
+        Err(format!(
+            "State publication incomplete ({err_count} errors, last: {last_err})"
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -360,7 +397,7 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
         .unwrap_or(1883);
     let user = std::env::var("MICHI_MQTT_USER").ok();
     let pass = std::env::var("MICHI_MQTT_PASS").ok();
-    let client_id = format!("michi-{}", config.sync_name);
+    let client_id = format!("michi_micro_{}", &config.server_id.to_string()[..8]);
     let broker_str = format!("{host}:{port}");
 
     update_runtime_status(|s| {
@@ -425,22 +462,33 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                         if topic.starts_with("michi/") {
                             handle_command(&topic, &payload, &engine).await;
                             // Immediately publish updated states after command execution
-                            publish_states(&client, &engine, &db).await;
-                            update_runtime_status(|s| {
-                                s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
-                            });
+                            if publish_states(&client, &engine, &db).await.is_ok() {
+                                update_runtime_status(|s| {
+                                    s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
+                                });
+                            }
                             last_state_publish = tokio::time::Instant::now();
                         }
                     }
                     rumqttc::Event::Incoming(Packet::ConnAck(_)) => {
                         info!("MQTT connected/reconnected");
-                        publish_discovery(&client).await;
-                        publish_states(&client, &engine, &db).await;
+                        let disc_res = publish_discovery(&client).await;
+                        let state_res = publish_states(&client, &engine, &db).await;
                         update_runtime_status(|s| {
                             s.connected = true;
-                            s.discovery_published = true;
-                            s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
-                            s.last_error = None;
+                            match disc_res {
+                                Ok(()) => {
+                                    s.discovery_published = true;
+                                    s.last_error = None;
+                                }
+                                Err(ref e) => {
+                                    s.discovery_published = false;
+                                    s.last_error = Some(e.clone());
+                                }
+                            }
+                            if state_res.is_ok() {
+                                s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
+                            }
                         });
                     }
                     rumqttc::Event::Incoming(Packet::Disconnect) => {
@@ -462,8 +510,9 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                     break;
                 }
                 Err(_) => {
-                    if get_runtime_status().connected {
-                        publish_states(&client, &engine, &db).await;
+                    if get_runtime_status().connected
+                        && publish_states(&client, &engine, &db).await.is_ok()
+                    {
                         update_runtime_status(|s| {
                             s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
                         });
