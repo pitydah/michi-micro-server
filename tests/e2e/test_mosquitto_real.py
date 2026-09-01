@@ -42,8 +42,7 @@ class MiniMqttClient:
         remaining = var_header + payload
         packet = b"\x10" + self._encode_remaining_len(len(remaining)) + remaining
         self.sock.sendall(packet)
-        ack = self._read_packet()
-        assert ack[0] == 0x20, f"Expected CONNACK (0x20), got {ack}"
+        self._wait_for_ack("CONNACK", None, timeout=5.0)
 
     def subscribe(self, topic, pkid=1):
         t_bytes = topic.encode("utf-8")
@@ -52,8 +51,7 @@ class MiniMqttClient:
         remaining = var_header + payload
         packet = b"\x82" + self._encode_remaining_len(len(remaining)) + remaining
         self.sock.sendall(packet)
-        ack = self._read_packet()
-        assert ack[0] == 0x90, f"Expected SUBACK (0x90), got {ack}"
+        self._wait_for_ack("SUBACK", pkid, timeout=5.0)
 
     def publish(self, topic, payload_str, qos=0, pkid=2):
         t_bytes = topic.encode("utf-8")
@@ -68,8 +66,7 @@ class MiniMqttClient:
         packet = bytes([packet_type]) + self._encode_remaining_len(len(remaining)) + remaining
         self.sock.sendall(packet)
         if qos == 1:
-            ack = self._read_packet()
-            assert ack[0] == 0x40, f"Expected PUBACK (0x40), got {ack}"
+            self._wait_for_ack("PUBACK", pkid, timeout=5.0)
 
     def _encode_remaining_len(self, length):
         out = bytearray()
@@ -105,27 +102,58 @@ class MiniMqttClient:
         body = self._read_exact(length) if length > 0 else b""
         return (hdr, body)
 
-    def poll_messages(self, timeout=0.5):
-        self.sock.settimeout(timeout)
-        try:
-            while True:
+    def _handle_packet(self, hdr, body):
+        pkt_type = hdr & 0xF0
+        if pkt_type == 0x30:
+            flags = hdr & 0x0F
+            qos = (flags >> 1) & 0x03
+            t_len = struct.unpack(">H", body[0:2])[0]
+            topic = body[2:2+t_len].decode("utf-8")
+            idx = 2 + t_len
+            if qos > 0:
+                pkid = struct.unpack(">H", body[idx:idx+2])[0]
+                idx += 2
+                puback = bytes([0x40, 0x02]) + struct.pack(">H", pkid)
+                self.sock.sendall(puback)
+            payload = body[idx:].decode("utf-8", errors="replace")
+            self.msg_queue.append((topic, payload))
+            return ("PUBLISH", topic, payload)
+        elif pkt_type == 0x90:
+            pkid = struct.unpack(">H", body[0:2])[0] if len(body) >= 2 else 0
+            return ("SUBACK", pkid)
+        elif pkt_type == 0x40:
+            pkid = struct.unpack(">H", body[0:2])[0] if len(body) >= 2 else 0
+            return ("PUBACK", pkid)
+        elif pkt_type == 0x20:
+            rc = body[1] if len(body) > 1 else 0
+            return ("CONNACK", rc)
+        return ("OTHER", pkt_type)
+
+    def _wait_for_ack(self, expected_type, expected_pkid=None, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            remaining_time = max(0.05, deadline - time.time())
+            self.sock.settimeout(remaining_time)
+            try:
                 hdr, body = self._read_packet()
-                pkt_type = hdr & 0xF0
-                if pkt_type == 0x30:
-                    flags = hdr & 0x0F
-                    qos = (flags >> 1) & 0x03
-                    t_len = struct.unpack(">H", body[0:2])[0]
-                    topic = body[2:2+t_len].decode("utf-8")
-                    idx = 2 + t_len
-                    if qos > 0:
-                        pkid = struct.unpack(">H", body[idx:idx+2])[0]
-                        idx += 2
-                        puback = bytes([0x40, 0x02]) + struct.pack(">H", pkid)
-                        self.sock.sendall(puback)
-                    payload = body[idx:].decode("utf-8", errors="replace")
-                    self.msg_queue.append((topic, payload))
-        except (socket.timeout, TimeoutError):
-            pass
+                res = self._handle_packet(hdr, body)
+                if res[0] == expected_type:
+                    if expected_pkid is None or res[1] == expected_pkid:
+                        return True
+            except (socket.timeout, TimeoutError):
+                break
+        raise TimeoutError(f"Timed out waiting for {expected_type} (expected pkid: {expected_pkid})")
+
+    def poll_messages(self, timeout=0.3):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            remaining_time = max(0.05, deadline - time.time())
+            self.sock.settimeout(remaining_time)
+            try:
+                hdr, body = self._read_packet()
+                self._handle_packet(hdr, body)
+            except (socket.timeout, TimeoutError):
+                break
         return list(self.msg_queue)
 
     def close(self):

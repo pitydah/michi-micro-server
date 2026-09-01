@@ -167,17 +167,7 @@ async fn seed_track(pool: &SqlitePool, path: &str, title: &str) -> Uuid {
         file.set_len(total_file_len).unwrap();
     }
 
-    let format = if path.ends_with(".wav") {
-        AudioFormat::Wav
-    } else if path.ends_with(".flac") {
-        AudioFormat::Flac
-    } else if path.ends_with(".mp3") {
-        AudioFormat::Mp3
-    } else if path.ends_with(".opus") || path.ends_with(".ogg") {
-        AudioFormat::Opus
-    } else {
-        AudioFormat::Wav
-    };
+    let format = AudioFormat::Wav;
 
     let resolved_path = temp_file.to_string_lossy().to_string();
     let id = track_id_from_path(path);
