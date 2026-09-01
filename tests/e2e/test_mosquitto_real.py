@@ -36,7 +36,7 @@ class MiniMqttClient:
 
     def connect(self):
         self.sock.connect((self.host, self.port))
-        var_header = b"\x00\x04MQTT\x04\x02\x00<\n"
+        var_header = b"\x00\x04MQTT\x04\x02\x00\x3c"
         cid_bytes = self.client_id.encode("utf-8")
         payload = struct.pack(">H", len(cid_bytes)) + cid_bytes
         remaining = var_header + payload
@@ -276,11 +276,19 @@ def main():
         assert "michi/volume/state" in state_topics, "michi/volume/state missing"
         print(f"  ✅ 2. Real MQTT states received: server_status={state_topics['michi/server_status/state']}, volume={state_topics['michi/volume/state']}")
 
-        # 3. Send real MQTT command over Mosquitto broker
+        # 3. Send real MQTT command over Mosquitto broker and assert effect on both MQTT state and server
         mqtt_client.publish("michi/volume_set/cmd", "72", qos=1, pkid=10)
-        time.sleep(0.5)
-        mqtt_client.poll_messages(timeout=0.5)
-        print("  ✅ 3. Sent MQTT command 'michi/volume_set/cmd' (payload: '72') to Mosquitto")
+        cmd_deadline = time.time() + 5.0
+        updated_volume = None
+        while time.time() < cmd_deadline:
+            msgs = mqtt_client.poll_messages(timeout=0.2)
+            for top, payload in msgs:
+                if top == "michi/volume/state":
+                    updated_volume = payload
+            if updated_volume == "72":
+                break
+        assert updated_volume == "72", f"Expected michi/volume/state to update to '72', got {updated_volume}"
+        print("  ✅ 3. Sent MQTT command 'michi/volume_set/cmd' ('72') and verified state published as 72")
 
         # 4. Reconnect resilience: kill Mosquitto and restart it
         print("Testing broker restart & reconnect resilience...")
@@ -303,16 +311,27 @@ def main():
         mqtt_client.subscribe("homeassistant/#", pkid=1)
         mqtt_client.subscribe("michi/#", pkid=2)
 
-        # Allow reconnect loop (interval 5s)
-        time.sleep(6.0)
-        msgs_after = mqtt_client.poll_messages(timeout=1.0)
-        reconnect_discovery = {top for top, _ in msgs_after if top.startswith("homeassistant/")}
-        assert reconnect_discovery, "Expected discovery re-announcements after Mosquitto restart"
-        print(f"  ✅ 5. Verified discovery re-announcements delivered after broker reconnect")
+        # Allow reconnect loop (interval 5s) and assert all 15 discovery configs re-announced
+        reconnect_deadline = time.time() + 10.0
+        reconnect_discovery = set()
+        reconnect_states = {}
+        while time.time() < reconnect_deadline:
+            msgs_after = mqtt_client.poll_messages(timeout=0.3)
+            for top, payload in msgs_after:
+                if top.startswith("homeassistant/"):
+                    reconnect_discovery.add(top)
+                elif top.startswith("michi/"):
+                    reconnect_states[top] = payload
+            if EXPECTED_DISCOVERY.issubset(reconnect_discovery) and "michi/server_status/state" in reconnect_states:
+                break
+
+        missing_reconnect = EXPECTED_DISCOVERY - reconnect_discovery
+        assert not missing_reconnect, f"Missing discovery configs after reconnect: {missing_reconnect}"
+        print(f"  ✅ 5. Verified all {len(EXPECTED_DISCOVERY)} discovery configs re-announced after broker reconnect")
 
         status, status_data = http_get(f"http://127.0.0.1:{args.server_port}/api/v1/status")
         assert status == 200, f"Expected 200, got {status}"
-        print("  ✅ 6. Michi Micro Server healthy & online")
+        print("  ✅ 6. Michi Micro Server healthy & online after reconnect")
 
         print("=" * 70)
         print("MOSQUITTO REAL INTEGRATION: ALL 6 STAGES PASSED (100% CERTIFIED)")

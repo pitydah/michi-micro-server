@@ -137,12 +137,14 @@ async fn body_text(response: axum::response::Response) -> String {
 
 async fn seed_track(pool: &SqlitePool, path: &str, title: &str) -> Uuid {
     let temp_file = std::env::temp_dir().join(format!("michi-test-track-{}.wav", Uuid::new_v4()));
+    let sample_rate: u32 = 44100;
+    let channels: u16 = 2;
+    let bits_per_sample: u16 = 16;
+    let data_size: u32 = 44100 * 2 * 2 * 60; // 60s of 44.1k 16-bit stereo PCM
+    let file_size = 36 + data_size;
+    let total_file_len = (44 + data_size) as u64;
+
     if !temp_file.exists() {
-        let sample_rate: u32 = 44100;
-        let channels: u16 = 2;
-        let bits_per_sample: u16 = 16;
-        let data_size: u32 = 44100 * 2 * 2 * 60; // 60s of audio
-        let file_size = 36 + data_size;
         let mut header = Vec::with_capacity(44);
         header.extend_from_slice(b"RIFF");
         header.extend_from_slice(&file_size.to_le_bytes());
@@ -158,8 +160,25 @@ async fn seed_track(pool: &SqlitePool, path: &str, title: &str) -> Uuid {
         header.extend_from_slice(&bits_per_sample.to_le_bytes());
         header.extend_from_slice(b"data");
         header.extend_from_slice(&data_size.to_le_bytes());
-        let _ = std::fs::write(&temp_file, &header);
+
+        let mut file = std::fs::File::create(&temp_file).unwrap();
+        use std::io::Write;
+        file.write_all(&header).unwrap();
+        file.set_len(total_file_len).unwrap();
     }
+
+    let format = if path.ends_with(".wav") {
+        AudioFormat::Wav
+    } else if path.ends_with(".flac") {
+        AudioFormat::Flac
+    } else if path.ends_with(".mp3") {
+        AudioFormat::Mp3
+    } else if path.ends_with(".opus") || path.ends_with(".ogg") {
+        AudioFormat::Opus
+    } else {
+        AudioFormat::Wav
+    };
+
     let resolved_path = temp_file.to_string_lossy().to_string();
     let id = track_id_from_path(path);
     let track = Track {
@@ -168,19 +187,19 @@ async fn seed_track(pool: &SqlitePool, path: &str, title: &str) -> Uuid {
         artist: Some("Test Artist".into()),
         album: Some("Test Album".into()),
         album_artist: None,
-        duration_ms: Some(200000),
+        duration_ms: Some(60000),
         file_path: resolved_path,
-        format: AudioFormat::Flac,
-        sample_rate: Some(44100),
-        bit_depth: Some(16),
-        channels: Some(2),
+        format,
+        sample_rate: Some(sample_rate),
+        bit_depth: Some(bits_per_sample as u8),
+        channels: Some(channels as u8),
         artwork_id: None,
         genre: None,
         year: None,
         track_number: None,
         disc_number: None,
         content_hash: None,
-        file_size: None,
+        file_size: Some(total_file_len),
         file_mtime_ns: None,
         starred: false,
         rating: 0,
