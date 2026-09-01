@@ -138,7 +138,27 @@ async fn body_text(response: axum::response::Response) -> String {
 async fn seed_track(pool: &SqlitePool, path: &str, title: &str) -> Uuid {
     let temp_file = std::env::temp_dir().join(format!("michi-test-track-{}.wav", Uuid::new_v4()));
     if !temp_file.exists() {
-        let _ = std::fs::write(&temp_file, b"RIFF\x24\0\0\0WAVEfmt \x10\0\0\0\x01\0\x02\0\x80\xbb\0\0\0\xee\x02\0\x04\0\x10\0data\0\0\0\0");
+        let sample_rate: u32 = 44100;
+        let channels: u16 = 2;
+        let bits_per_sample: u16 = 16;
+        let data_size: u32 = 44100 * 2 * 2 * 60; // 60s of audio
+        let file_size = 36 + data_size;
+        let mut header = Vec::with_capacity(44);
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&file_size.to_le_bytes());
+        header.extend_from_slice(b"WAVEfmt ");
+        header.extend_from_slice(&16u32.to_le_bytes());
+        header.extend_from_slice(&1u16.to_le_bytes());
+        header.extend_from_slice(&channels.to_le_bytes());
+        header.extend_from_slice(&sample_rate.to_le_bytes());
+        let byte_rate = sample_rate * (channels as u32) * (bits_per_sample as u32 / 8);
+        header.extend_from_slice(&byte_rate.to_le_bytes());
+        let block_align = channels * (bits_per_sample / 8);
+        header.extend_from_slice(&block_align.to_le_bytes());
+        header.extend_from_slice(&bits_per_sample.to_le_bytes());
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&data_size.to_le_bytes());
+        let _ = std::fs::write(&temp_file, &header);
     }
     let resolved_path = temp_file.to_string_lossy().to_string();
     let id = track_id_from_path(path);

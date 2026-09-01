@@ -378,6 +378,89 @@ async fn mqtt_connect(
     Ok((client, eventloop))
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct MqttAckTracker {
+    discovery_pkids: std::collections::HashSet<u16>,
+    state_pkids: std::collections::HashSet<u16>,
+    discovery_in_flight: bool,
+    expected_discovery_count: usize,
+    acked_discovery_count: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AckOutcome {
+    DiscoveryProgress { acked: usize, total: usize },
+    DiscoveryCompleted,
+    StateAcknowledged,
+    Unclassified,
+}
+
+impl MqttAckTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn on_discovery_batch_start(&mut self, expected_count: usize) {
+        self.discovery_pkids.clear();
+        self.state_pkids.clear();
+        self.acked_discovery_count = 0;
+        self.expected_discovery_count = expected_count;
+        self.discovery_in_flight = expected_count > 0;
+    }
+
+    pub fn on_outgoing_publish(&mut self, pkid: u16) {
+        if self.discovery_in_flight
+            && (self.discovery_pkids.len() + self.acked_discovery_count)
+                < self.expected_discovery_count
+        {
+            self.discovery_pkids.insert(pkid);
+        } else {
+            self.state_pkids.insert(pkid);
+        }
+    }
+
+    pub fn on_puback(&mut self, pkid: u16) -> AckOutcome {
+        if self.discovery_pkids.remove(&pkid) {
+            self.acked_discovery_count += 1;
+            if self.acked_discovery_count >= self.expected_discovery_count
+                && self.discovery_pkids.is_empty()
+            {
+                self.discovery_in_flight = false;
+                AckOutcome::DiscoveryCompleted
+            } else {
+                AckOutcome::DiscoveryProgress {
+                    acked: self.acked_discovery_count,
+                    total: self.expected_discovery_count,
+                }
+            }
+        } else if self.state_pkids.remove(&pkid) {
+            AckOutcome::StateAcknowledged
+        } else {
+            AckOutcome::Unclassified
+        }
+    }
+
+    pub fn on_disconnect(&mut self) {
+        self.discovery_pkids.clear();
+        self.state_pkids.clear();
+        self.discovery_in_flight = false;
+        self.acked_discovery_count = 0;
+        self.expected_discovery_count = 0;
+    }
+
+    pub fn is_discovery_in_flight(&self) -> bool {
+        self.discovery_in_flight
+    }
+
+    pub fn acked_discovery_count(&self) -> usize {
+        self.acked_discovery_count
+    }
+
+    pub fn expected_discovery_count(&self) -> usize {
+        self.expected_discovery_count
+    }
+}
+
 pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
     let host = match std::env::var("MICHI_MQTT_HOST") {
         Ok(h) => h,
@@ -409,7 +492,7 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
     });
 
     loop {
-        info!("connecting to MQTT broker at {}:{}", host, port);
+        info!("connecting to MQTT broker at {host}:{port}");
 
         let (client, mut eventloop) =
             match mqtt_connect(&host, port, &user, &pass, &client_id).await {
@@ -420,7 +503,7 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                         s.discovery_published = false;
                         s.last_error = Some(e.to_string());
                     });
-                    error!("failed to create MQTT client: {}", e);
+                    error!("failed to create MQTT client: {e}");
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 }
@@ -437,19 +520,13 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
         ] {
             let topic = format!("michi/{cmd}/cmd");
             if let Err(e) = client.subscribe(&topic, QoS::AtLeastOnce).await {
-                warn!("failed to subscribe to {}: {}", topic, e);
+                warn!("failed to subscribe to {topic}: {e}");
             }
         }
 
-        use std::collections::HashSet;
-
         info!("HA integration client initialized; waiting for broker ConnAck");
         let mut last_state_publish = tokio::time::Instant::now();
-        let mut discovery_pkids = HashSet::<u16>::new();
-        let mut state_pkids = HashSet::<u16>::new();
-        let mut discovery_in_flight = false;
-        let mut expected_discovery_count = 0usize;
-        let mut acked_discovery_count = 0usize;
+        let mut ack_tracker = MqttAckTracker::new();
 
         loop {
             let timeout = Duration::from_secs(STATE_INTERVAL_SECS)
@@ -468,19 +545,17 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                         );
                         if topic.starts_with("michi/") {
                             handle_command(&topic, &payload, &engine).await;
-                            // Immediately publish updated states after command execution
-                            if publish_states(&client, &engine, &db).await.is_err() {
-                                warn!("failed to enqueue updated states after MQTT command");
+                            // Immediately enqueue updated states after command execution
+                            if let Err(e) = publish_states(&client, &engine, &db).await {
+                                warn!("failed to enqueue updated states after MQTT command: {e}");
                             }
                             last_state_publish = tokio::time::Instant::now();
                         }
                     }
                     rumqttc::Event::Incoming(Packet::ConnAck(_)) => {
                         info!("MQTT connected/reconnected");
-                        discovery_pkids.clear();
-                        state_pkids.clear();
-                        acked_discovery_count = 0;
-                        expected_discovery_count = entities().len();
+                        let expected = entities().len();
+                        ack_tracker.on_discovery_batch_start(expected);
 
                         update_runtime_status(|s| {
                             s.connected = true;
@@ -491,46 +566,26 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                         let disc_res = publish_discovery(&client).await;
                         let state_res = publish_states(&client, &engine, &db).await;
 
-                        match disc_res {
-                            Ok(()) => {
-                                discovery_in_flight = true;
-                            }
-                            Err(ref e) => {
-                                discovery_in_flight = false;
-                                update_runtime_status(|s| {
-                                    s.discovery_published = false;
-                                    s.last_error = Some(e.clone());
-                                });
-                            }
+                        if let Err(ref e) = disc_res {
+                            ack_tracker.on_disconnect();
+                            update_runtime_status(|s| {
+                                s.discovery_published = false;
+                                s.last_error = Some(e.clone());
+                            });
                         }
                         if let Err(ref e) = state_res {
                             warn!("failed to enqueue initial state publication: {e}");
                         }
                     }
                     rumqttc::Event::Outgoing(rumqttc::Outgoing::Publish(pkid)) => {
-                        if discovery_in_flight
-                            && (discovery_pkids.len() + acked_discovery_count)
-                                < expected_discovery_count
-                        {
-                            discovery_pkids.insert(pkid);
-                        } else {
-                            state_pkids.insert(pkid);
-                        }
+                        ack_tracker.on_outgoing_publish(pkid);
                     }
                     rumqttc::Event::Incoming(Packet::PubAck(puback)) => {
-                        if discovery_pkids.remove(&puback.pkid) {
-                            acked_discovery_count += 1;
-                            debug!(
-                                "MQTT broker acknowledged discovery packet (pkid: {}, acked: {}/{})",
-                                puback.pkid, acked_discovery_count, expected_discovery_count
-                            );
-                            if acked_discovery_count >= expected_discovery_count
-                                && discovery_pkids.is_empty()
-                            {
-                                discovery_in_flight = false;
+                        match ack_tracker.on_puback(puback.pkid) {
+                            AckOutcome::DiscoveryCompleted => {
                                 info!(
                                     "All {} Home Assistant discovery entities confirmed acknowledged by broker",
-                                    expected_discovery_count
+                                    entities().len()
                                 );
                                 update_runtime_status(|s| {
                                     if s.connected {
@@ -539,29 +594,34 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                                     }
                                 });
                             }
-                        } else if state_pkids.remove(&puback.pkid) {
-                            debug!(
-                                "MQTT broker acknowledged state packet (pkid: {})",
-                                puback.pkid
-                            );
-                            update_runtime_status(|s| {
-                                if s.connected {
-                                    s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
-                                }
-                            });
-                        } else {
-                            debug!(
-                                "MQTT broker acknowledged unclassified packet (pkid: {})",
-                                puback.pkid
-                            );
+                            AckOutcome::DiscoveryProgress { acked, total } => {
+                                debug!(
+                                    "MQTT broker acknowledged discovery packet (pkid: {}, acked: {}/{})",
+                                    puback.pkid, acked, total
+                                );
+                            }
+                            AckOutcome::StateAcknowledged => {
+                                debug!(
+                                    "MQTT broker acknowledged state packet (pkid: {})",
+                                    puback.pkid
+                                );
+                                update_runtime_status(|s| {
+                                    if s.connected {
+                                        s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
+                                    }
+                                });
+                            }
+                            AckOutcome::Unclassified => {
+                                debug!(
+                                    "MQTT broker acknowledged unclassified packet (pkid: {})",
+                                    puback.pkid
+                                );
+                            }
                         }
                     }
                     rumqttc::Event::Incoming(Packet::Disconnect) => {
                         info!("MQTT broker disconnected");
-                        discovery_pkids.clear();
-                        state_pkids.clear();
-                        discovery_in_flight = false;
-                        acked_discovery_count = 0;
+                        ack_tracker.on_disconnect();
                         update_runtime_status(|s| {
                             s.connected = false;
                             s.discovery_published = false;
@@ -570,6 +630,7 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                     _ => {}
                 },
                 Ok(Err(e)) => {
+                    ack_tracker.on_disconnect();
                     update_runtime_status(|s| {
                         s.connected = false;
                         s.discovery_published = false;
@@ -579,12 +640,10 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                     break;
                 }
                 Err(_) => {
-                    if get_runtime_status().connected
-                        && publish_states(&client, &engine, &db).await.is_ok()
-                    {
-                        update_runtime_status(|s| {
-                            s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
-                        });
+                    if get_runtime_status().connected {
+                        if let Err(e) = publish_states(&client, &engine, &db).await {
+                            warn!("failed to enqueue periodic HA state publication: {e}");
+                        }
                     }
                     last_state_publish = tokio::time::Instant::now();
                 }
@@ -603,6 +662,82 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_entity_count_consistency() {
+        let ents = entities();
+        assert_eq!(
+            ents.len(),
+            15,
+            "Expected 15 canonical Home Assistant entities (8 sensors, 6 buttons, 1 number)"
+        );
+    }
+
+    #[test]
+    fn test_mqtt_ack_tracker_discovery_lifecycle() {
+        let mut tracker = MqttAckTracker::new();
+        assert!(!tracker.is_discovery_in_flight());
+
+        // Start discovery batch for 3 entities
+        tracker.on_discovery_batch_start(3);
+        assert!(tracker.is_discovery_in_flight());
+        assert_eq!(tracker.expected_discovery_count(), 3);
+        assert_eq!(tracker.acked_discovery_count(), 0);
+
+        // Outgoing discovery publishes: pkids 1, 2, 3
+        tracker.on_outgoing_publish(1);
+        tracker.on_outgoing_publish(2);
+        tracker.on_outgoing_publish(3);
+
+        // Outgoing state publishes: pkids 4, 5
+        tracker.on_outgoing_publish(4);
+        tracker.on_outgoing_publish(5);
+
+        // State PUBACK arrives first -> must not complete discovery!
+        assert_eq!(tracker.on_puback(4), AckOutcome::StateAcknowledged);
+        assert!(tracker.is_discovery_in_flight());
+        assert_eq!(tracker.acked_discovery_count(), 0);
+
+        // Discovery PUBACK 1 arrives
+        assert_eq!(
+            tracker.on_puback(1),
+            AckOutcome::DiscoveryProgress { acked: 1, total: 3 }
+        );
+        assert!(tracker.is_discovery_in_flight());
+
+        // State PUBACK 5 arrives
+        assert_eq!(tracker.on_puback(5), AckOutcome::StateAcknowledged);
+        assert!(tracker.is_discovery_in_flight());
+
+        // Discovery PUBACK 2 arrives
+        assert_eq!(
+            tracker.on_puback(2),
+            AckOutcome::DiscoveryProgress { acked: 2, total: 3 }
+        );
+        assert!(tracker.is_discovery_in_flight());
+
+        // Discovery PUBACK 3 arrives -> DiscoveryCompleted!
+        assert_eq!(tracker.on_puback(3), AckOutcome::DiscoveryCompleted);
+        assert!(!tracker.is_discovery_in_flight());
+        assert_eq!(tracker.acked_discovery_count(), 3);
+
+        // Subsequent unknown/unclassified packet
+        assert_eq!(tracker.on_puback(99), AckOutcome::Unclassified);
+    }
+
+    #[test]
+    fn test_mqtt_ack_tracker_disconnect_resets_state() {
+        let mut tracker = MqttAckTracker::new();
+        tracker.on_discovery_batch_start(5);
+        tracker.on_outgoing_publish(10);
+        tracker.on_outgoing_publish(11);
+
+        tracker.on_disconnect();
+        assert!(!tracker.is_discovery_in_flight());
+        assert_eq!(tracker.expected_discovery_count(), 0);
+        assert_eq!(tracker.acked_discovery_count(), 0);
+        assert_eq!(tracker.on_puback(10), AckOutcome::Unclassified);
+    }
 
     #[test]
     fn test_entities_count() {

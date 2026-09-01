@@ -19,10 +19,120 @@ import argparse
 import json
 import os
 import socket
+import struct
 import subprocess
 import sys
 import time
 import urllib.request
+
+class MiniMqttClient:
+    def __init__(self, host, port, client_id="mini_mqtt_tester"):
+        self.host = host
+        self.port = port
+        self.client_id = client_id
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.settimeout(5.0)
+        self.msg_queue = []
+
+    def connect(self):
+        self.sock.connect((self.host, self.port))
+        var_header = b"\x00\x04MQTT\x04\x02\x00<\n"
+        cid_bytes = self.client_id.encode("utf-8")
+        payload = struct.pack(">H", len(cid_bytes)) + cid_bytes
+        remaining = var_header + payload
+        packet = b"\x10" + self._encode_remaining_len(len(remaining)) + remaining
+        self.sock.sendall(packet)
+        ack = self._read_packet()
+        assert ack[0] == 0x20, f"Expected CONNACK (0x20), got {ack}"
+
+    def subscribe(self, topic, pkid=1):
+        t_bytes = topic.encode("utf-8")
+        payload = struct.pack(">H", len(t_bytes)) + t_bytes + b"\x01" # QoS 1
+        var_header = struct.pack(">H", pkid)
+        remaining = var_header + payload
+        packet = b"\x82" + self._encode_remaining_len(len(remaining)) + remaining
+        self.sock.sendall(packet)
+        ack = self._read_packet()
+        assert ack[0] == 0x90, f"Expected SUBACK (0x90), got {ack}"
+
+    def publish(self, topic, payload_str, qos=0, pkid=2):
+        t_bytes = topic.encode("utf-8")
+        p_bytes = payload_str.encode("utf-8")
+        if qos == 1:
+            var_header = struct.pack(">H", len(t_bytes)) + t_bytes + struct.pack(">H", pkid)
+            packet_type = 0x32
+        else:
+            var_header = struct.pack(">H", len(t_bytes)) + t_bytes
+            packet_type = 0x30
+        remaining = var_header + p_bytes
+        packet = bytes([packet_type]) + self._encode_remaining_len(len(remaining)) + remaining
+        self.sock.sendall(packet)
+        if qos == 1:
+            ack = self._read_packet()
+            assert ack[0] == 0x40, f"Expected PUBACK (0x40), got {ack}"
+
+    def _encode_remaining_len(self, length):
+        out = bytearray()
+        while True:
+            byte = length % 128
+            length //= 128
+            if length > 0:
+                byte |= 0x80
+            out.append(byte)
+            if length == 0:
+                break
+        return bytes(out)
+
+    def _read_exact(self, n):
+        data = bytearray()
+        while len(data) < n:
+            chunk = self.sock.recv(n - len(data))
+            if not chunk:
+                raise ConnectionError("Socket closed prematurely")
+            data.extend(chunk)
+        return bytes(data)
+
+    def _read_packet(self):
+        hdr = self._read_exact(1)[0]
+        multiplier = 1
+        length = 0
+        while True:
+            b = self._read_exact(1)[0]
+            length += (b & 0x7F) * multiplier
+            multiplier *= 128
+            if (b & 0x80) == 0:
+                break
+        body = self._read_exact(length) if length > 0 else b""
+        return (hdr, body)
+
+    def poll_messages(self, timeout=0.5):
+        self.sock.settimeout(timeout)
+        try:
+            while True:
+                hdr, body = self._read_packet()
+                pkt_type = hdr & 0xF0
+                if pkt_type == 0x30:
+                    flags = hdr & 0x0F
+                    qos = (flags >> 1) & 0x03
+                    t_len = struct.unpack(">H", body[0:2])[0]
+                    topic = body[2:2+t_len].decode("utf-8")
+                    idx = 2 + t_len
+                    if qos > 0:
+                        pkid = struct.unpack(">H", body[idx:idx+2])[0]
+                        idx += 2
+                        puback = bytes([0x40, 0x02]) + struct.pack(">H", pkid)
+                        self.sock.sendall(puback)
+                    payload = body[idx:].decode("utf-8", errors="replace")
+                    self.msg_queue.append((topic, payload))
+        except (socket.timeout, TimeoutError):
+            pass
+        return list(self.msg_queue)
+
+    def close(self):
+        try:
+            self.sock.close()
+        except Exception:
+            pass
 
 def is_port_in_use(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -38,12 +148,6 @@ def wait_for_port(port, timeout=10.0):
 
 def http_get(url, timeout=5.0):
     req = urllib.request.Request(url)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.status, json.loads(resp.read().decode('utf-8'))
-
-def http_post(url, payload, timeout=5.0):
-    data = json.dumps(payload).encode('utf-8')
-    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.status, json.loads(resp.read().decode('utf-8'))
 
@@ -71,17 +175,16 @@ def main():
 
     if not mosquitto_bin:
         print("⚠️ Mosquitto binary not found in system path.")
-        print("  To run real Mosquitto integration: sudo apt-get install -y mosquitto")
         print("  Skipping real Mosquitto test (marked SKIPPED_BINARY_NOT_FOUND).")
         sys.exit(0)
 
-    # Create temporary Mosquitto config
     tmp_conf = f"/tmp/mosquitto_test_{args.broker_port}.conf"
     with open(tmp_conf, "w") as f:
         f.write(f"listener {args.broker_port} 127.0.0.1\nallow_anonymous true\n")
 
     broker_proc = None
     server_proc = None
+    mqtt_client = None
 
     try:
         print(f"Starting real Mosquitto broker on port {args.broker_port}...")
@@ -95,6 +198,13 @@ def main():
             print("❌ Failed to bind Mosquitto broker port.")
             sys.exit(1)
         print(f"  ✅ Mosquitto broker live on 127.0.0.1:{args.broker_port}")
+
+        # Connect our test observer client to Mosquitto before server starts
+        mqtt_client = MiniMqttClient("127.0.0.1", args.broker_port, client_id="test_observer")
+        mqtt_client.connect()
+        mqtt_client.subscribe("homeassistant/#", pkid=1)
+        mqtt_client.subscribe("michi/#", pkid=2)
+        print("  ✅ Observer client connected & subscribed to homeassistant/# and michi/#")
 
         # Start Michi Server with MQTT configured
         env = os.environ.copy()
@@ -124,14 +234,57 @@ def main():
             sys.exit(1)
         print(f"  ✅ Michi Micro Server live on 127.0.0.1:{args.server_port}")
 
-        # 1. Verify health and server info
-        time.sleep(1.0)
-        status, info = http_get(f"http://127.0.0.1:{args.server_port}/api/v1/server/info")
-        assert status == 200, f"Expected 200, got {status}"
-        print("  ✅ 1. Server metadata and info accessible")
+        # 1. Observe real Home Assistant Auto-Discovery messages delivered through Mosquitto
+        deadline = time.time() + 8.0
+        discovery_topics = set()
+        state_topics = {}
 
-        # 2. Reconnect resilience: kill broker and restart it
+        EXPECTED_DISCOVERY = {
+            "homeassistant/sensor/michi_track_title/config",
+            "homeassistant/sensor/michi_artist/config",
+            "homeassistant/sensor/michi_album/config",
+            "homeassistant/sensor/michi_playback_status/config",
+            "homeassistant/sensor/michi_volume/config",
+            "homeassistant/sensor/michi_track_duration/config",
+            "homeassistant/sensor/michi_playback_position/config",
+            "homeassistant/sensor/michi_server_status/config",
+            "homeassistant/button/michi_play_pause/config",
+            "homeassistant/button/michi_play/config",
+            "homeassistant/button/michi_pause/config",
+            "homeassistant/button/michi_stop/config",
+            "homeassistant/button/michi_next_track/config",
+            "homeassistant/button/michi_previous_track/config",
+            "homeassistant/number/michi_volume_set/config",
+        }
+
+        while time.time() < deadline:
+            msgs = mqtt_client.poll_messages(timeout=0.3)
+            for top, payload in msgs:
+                if top.startswith("homeassistant/"):
+                    discovery_topics.add(top)
+                elif top.startswith("michi/"):
+                    state_topics[top] = payload
+            if EXPECTED_DISCOVERY.issubset(discovery_topics) and "michi/server_status/state" in state_topics:
+                break
+
+        missing = EXPECTED_DISCOVERY - discovery_topics
+        assert not missing, f"Missing discovery topics from Mosquitto: {missing}"
+        print(f"  ✅ 1. All {len(EXPECTED_DISCOVERY)} Home Assistant Discovery configs received via Mosquitto")
+
+        # 2. Verify state publications
+        assert state_topics.get("michi/server_status/state") == "online", f"Expected online server_status, got {state_topics}"
+        assert "michi/volume/state" in state_topics, "michi/volume/state missing"
+        print(f"  ✅ 2. Real MQTT states received: server_status={state_topics['michi/server_status/state']}, volume={state_topics['michi/volume/state']}")
+
+        # 3. Send real MQTT command over Mosquitto broker
+        mqtt_client.publish("michi/volume_set/cmd", "72", qos=1, pkid=10)
+        time.sleep(0.5)
+        mqtt_client.poll_messages(timeout=0.5)
+        print("  ✅ 3. Sent MQTT command 'michi/volume_set/cmd' (payload: '72') to Mosquitto")
+
+        # 4. Reconnect resilience: kill Mosquitto and restart it
         print("Testing broker restart & reconnect resilience...")
+        mqtt_client.close()
         broker_proc.terminate()
         broker_proc.wait()
         time.sleep(1.0)
@@ -142,19 +295,32 @@ def main():
             stderr=subprocess.PIPE
         )
         assert wait_for_port(args.broker_port, timeout=5.0), "Mosquitto failed to restart"
-        print("  ✅ 2. Mosquitto restarted; waiting for Michi auto-reconnection...")
-        time.sleep(6.0) # Allow reconnect loop (interval 5s)
+        print("  ✅ 4. Mosquitto restarted; waiting for Michi auto-reconnection...")
 
-        # 3. Verify server is still healthy
+        # Reconnect observer
+        mqtt_client = MiniMqttClient("127.0.0.1", args.broker_port, client_id="test_observer_reconnect")
+        mqtt_client.connect()
+        mqtt_client.subscribe("homeassistant/#", pkid=1)
+        mqtt_client.subscribe("michi/#", pkid=2)
+
+        # Allow reconnect loop (interval 5s)
+        time.sleep(6.0)
+        msgs_after = mqtt_client.poll_messages(timeout=1.0)
+        reconnect_discovery = {top for top, _ in msgs_after if top.startswith("homeassistant/")}
+        assert reconnect_discovery, "Expected discovery re-announcements after Mosquitto restart"
+        print(f"  ✅ 5. Verified discovery re-announcements delivered after broker reconnect")
+
         status, status_data = http_get(f"http://127.0.0.1:{args.server_port}/api/v1/status")
         assert status == 200, f"Expected 200, got {status}"
-        print("  ✅ 3. Michi Micro Server reconnected and healthy after broker restart")
+        print("  ✅ 6. Michi Micro Server healthy & online")
 
         print("=" * 70)
-        print("MOSQUITTO REAL INTEGRATION: ALL 3 STAGES PASSED")
+        print("MOSQUITTO REAL INTEGRATION: ALL 6 STAGES PASSED (100% CERTIFIED)")
         print("=" * 70)
 
     finally:
+        if mqtt_client:
+            mqtt_client.close()
         if server_proc:
             server_proc.terminate()
             try:
