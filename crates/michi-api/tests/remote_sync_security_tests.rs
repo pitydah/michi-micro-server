@@ -251,6 +251,21 @@ async fn test_remote_sync_disabled_trusted_proxy_invalid_xff_fails_closed() {
 }
 
 #[tokio::test]
+async fn test_remote_sync_disabled_trusted_proxy_mixed_malformed_token_fails_closed() {
+    let app = setup_app(false, true, vec!["10.0.0.1"]).await;
+    let peer: SocketAddr = "10.0.0.1:41234".parse().unwrap();
+    // Attacker sends 127.0.0.1, and an invalid token sits at the rightmost position
+    let req = make_ws_request(Some(peer), Some("127.0.0.1, malformed_payload"), None);
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "Trusted proxy with mixed malformed token must fail closed rather than skipping to 127.0.0.1"
+    );
+}
+
+#[tokio::test]
 async fn test_remote_sync_disabled_multihop_trusted_proxies_with_public_client() {
     let app = setup_app(false, true, vec!["10.0.0.1", "10.0.0.2"]).await;
     let peer: SocketAddr = "10.0.0.1:41234".parse().unwrap();

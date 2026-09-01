@@ -1935,12 +1935,21 @@ pub fn resolve_client_ip(
         {
             let mut resolved = None;
             for token in forwarded_header.split(',').map(|s| s.trim()).rev() {
-                if let Ok(ip) = token.parse::<std::net::IpAddr>() {
-                    if config.is_trusted_proxy(&ip) {
-                        continue; // Skip intermediate trusted proxy hop
+                if token.is_empty() {
+                    return None;
+                }
+                match token.parse::<std::net::IpAddr>() {
+                    Ok(ip) => {
+                        if config.is_trusted_proxy(&ip) {
+                            continue; // Skip intermediate trusted proxy hop
+                        }
+                        resolved = Some(ip);
+                        break;
                     }
-                    resolved = Some(ip);
-                    break;
+                    Err(_) => {
+                        // Unparseable token in proxy chain before finding client IP -> fail closed!
+                        return None;
+                    }
                 }
             }
             if let Some(ip) = resolved {
@@ -2083,5 +2092,23 @@ mod tests {
 
         let ip = extract_client_ip(Some(ConnectInfo(addr)), &headers, &cfg);
         assert_eq!(ip, "198.51.100.4");
+    }
+
+    #[test]
+    fn test_resolve_client_ip_trusted_proxy_malformed_token_fails_closed() {
+        let cfg = make_test_config(true, vec!["10.0.0.1"]);
+        let addr: SocketAddr = "10.0.0.1:41234".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        // Malformed token "garbage" precedes 127.0.0.1 from right-to-left
+        headers.insert(
+            "X-Forwarded-For",
+            HeaderValue::from_static("127.0.0.1, garbage"),
+        );
+
+        let resolved = resolve_client_ip(Some(ConnectInfo(addr)), &headers, &cfg);
+        assert!(
+            resolved.is_none(),
+            "Malformed token in XFF must fail closed (return None)"
+        );
     }
 }

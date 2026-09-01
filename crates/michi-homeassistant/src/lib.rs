@@ -441,8 +441,15 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
             }
         }
 
+        use std::collections::HashSet;
+
         info!("HA integration client initialized; waiting for broker ConnAck");
         let mut last_state_publish = tokio::time::Instant::now();
+        let mut discovery_pkids = HashSet::<u16>::new();
+        let mut state_pkids = HashSet::<u16>::new();
+        let mut discovery_in_flight = false;
+        let mut expected_discovery_count = 0usize;
+        let mut acked_discovery_count = 0usize;
 
         loop {
             let timeout = Duration::from_secs(STATE_INTERVAL_SECS)
@@ -462,46 +469,99 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                         if topic.starts_with("michi/") {
                             handle_command(&topic, &payload, &engine).await;
                             // Immediately publish updated states after command execution
-                            if publish_states(&client, &engine, &db).await.is_ok() {
-                                update_runtime_status(|s| {
-                                    s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
-                                });
+                            if publish_states(&client, &engine, &db).await.is_err() {
+                                warn!("failed to enqueue updated states after MQTT command");
                             }
                             last_state_publish = tokio::time::Instant::now();
                         }
                     }
                     rumqttc::Event::Incoming(Packet::ConnAck(_)) => {
                         info!("MQTT connected/reconnected");
-                        let disc_res = publish_discovery(&client).await;
-                        let state_res = publish_states(&client, &engine, &db).await;
+                        discovery_pkids.clear();
+                        state_pkids.clear();
+                        acked_discovery_count = 0;
+                        expected_discovery_count = entities().len();
+
                         update_runtime_status(|s| {
                             s.connected = true;
-                            match disc_res {
-                                Ok(()) => {
-                                    s.discovery_published = true;
-                                    s.last_error = None;
-                                }
-                                Err(ref e) => {
+                            s.discovery_published = false; // Pending broker PUBACK confirmation
+                            s.last_error = None;
+                        });
+
+                        let disc_res = publish_discovery(&client).await;
+                        let state_res = publish_states(&client, &engine, &db).await;
+
+                        match disc_res {
+                            Ok(()) => {
+                                discovery_in_flight = true;
+                            }
+                            Err(ref e) => {
+                                discovery_in_flight = false;
+                                update_runtime_status(|s| {
                                     s.discovery_published = false;
                                     s.last_error = Some(e.clone());
-                                }
+                                });
                             }
-                            if state_res.is_ok() {
-                                s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
-                            }
-                        });
+                        }
+                        if let Err(ref e) = state_res {
+                            warn!("failed to enqueue initial state publication: {e}");
+                        }
+                    }
+                    rumqttc::Event::Outgoing(rumqttc::Outgoing::Publish(pkid)) => {
+                        if discovery_in_flight
+                            && (discovery_pkids.len() + acked_discovery_count)
+                                < expected_discovery_count
+                        {
+                            discovery_pkids.insert(pkid);
+                        } else {
+                            state_pkids.insert(pkid);
+                        }
                     }
                     rumqttc::Event::Incoming(Packet::PubAck(puback)) => {
-                        debug!("MQTT broker acknowledged packet (pkid: {})", puback.pkid);
-                        update_runtime_status(|s| {
-                            if s.connected {
-                                s.discovery_published = true;
-                                s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
+                        if discovery_pkids.remove(&puback.pkid) {
+                            acked_discovery_count += 1;
+                            debug!(
+                                "MQTT broker acknowledged discovery packet (pkid: {}, acked: {}/{})",
+                                puback.pkid, acked_discovery_count, expected_discovery_count
+                            );
+                            if acked_discovery_count >= expected_discovery_count
+                                && discovery_pkids.is_empty()
+                            {
+                                discovery_in_flight = false;
+                                info!(
+                                    "All {} Home Assistant discovery entities confirmed acknowledged by broker",
+                                    expected_discovery_count
+                                );
+                                update_runtime_status(|s| {
+                                    if s.connected {
+                                        s.discovery_published = true;
+                                        s.last_error = None;
+                                    }
+                                });
                             }
-                        });
+                        } else if state_pkids.remove(&puback.pkid) {
+                            debug!(
+                                "MQTT broker acknowledged state packet (pkid: {})",
+                                puback.pkid
+                            );
+                            update_runtime_status(|s| {
+                                if s.connected {
+                                    s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
+                                }
+                            });
+                        } else {
+                            debug!(
+                                "MQTT broker acknowledged unclassified packet (pkid: {})",
+                                puback.pkid
+                            );
+                        }
                     }
                     rumqttc::Event::Incoming(Packet::Disconnect) => {
                         info!("MQTT broker disconnected");
+                        discovery_pkids.clear();
+                        state_pkids.clear();
+                        discovery_in_flight = false;
+                        acked_discovery_count = 0;
                         update_runtime_status(|s| {
                             s.connected = false;
                             s.discovery_published = false;
