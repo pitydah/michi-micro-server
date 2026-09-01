@@ -1921,38 +1921,56 @@ fn cors_layer(state: &AppState) -> CorsLayer {
     }
 }
 
+pub fn resolve_client_ip(
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: &axum::http::HeaderMap,
+    config: &michi_config::Config,
+) -> Option<std::net::IpAddr> {
+    let peer_addr = connect_info.map(|axum::extract::ConnectInfo(addr)| addr);
+    let peer_ip = peer_addr.map(|a| a.ip())?;
+
+    if config.is_trusted_proxy(&peer_ip) {
+        // Parse X-Forwarded-For from right to left (nearest proxy hop to furthest)
+        if let Some(forwarded_header) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok())
+        {
+            let mut resolved = None;
+            for token in forwarded_header.split(',').map(|s| s.trim()).rev() {
+                if let Ok(ip) = token.parse::<std::net::IpAddr>() {
+                    if config.is_trusted_proxy(&ip) {
+                        continue; // Skip intermediate trusted proxy hop
+                    }
+                    resolved = Some(ip);
+                    break;
+                }
+            }
+            if let Some(ip) = resolved {
+                return Some(ip);
+            }
+        }
+
+        // Fallback to X-Real-IP if present and valid
+        if let Some(real_ip_header) = headers.get("X-Real-IP").and_then(|v| v.to_str().ok()) {
+            if let Ok(ip) = real_ip_header.trim().parse::<std::net::IpAddr>() {
+                return Some(ip);
+            }
+        }
+
+        // The TCP peer is a trusted proxy, but no valid client IP could be extracted.
+        // Fail-closed by returning None so we don't accidentally treat the proxy's private IP as the client.
+        None
+    } else {
+        Some(peer_ip)
+    }
+}
+
 pub fn extract_client_ip(
     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: &axum::http::HeaderMap,
     config: &michi_config::Config,
 ) -> String {
-    let peer_addr = connect_info.map(|axum::extract::ConnectInfo(addr)| addr);
-    let peer_ip = peer_addr.map(|a| a.ip());
-
-    if let Some(ref ip) = peer_ip {
-        if config.is_trusted_proxy(ip) {
-            if let Some(forwarded) = headers
-                .get("X-Forwarded-For")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.split(',').next())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-            {
-                return forwarded;
-            }
-            if let Some(real_ip) = headers
-                .get("X-Real-IP")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-            {
-                return real_ip;
-            }
-        }
-        return ip.to_string();
-    }
-
-    "127.0.0.1".to_string()
+    resolve_client_ip(connect_info, headers, config)
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
 #[cfg(test)]
@@ -2039,6 +2057,21 @@ mod tests {
 
         let ip = extract_client_ip(Some(ConnectInfo(addr)), &headers, &cfg);
         assert_eq!(ip, "203.0.113.195");
+    }
+
+    #[test]
+    fn test_extract_client_ip_trusted_proxy_handles_spoofed_prefix_right_to_left() {
+        let cfg = make_test_config(true, vec!["10.0.0.1"]);
+        // Attacker sent XFF: 127.0.0.1, proxy appended actual remote client 203.0.113.195
+        let addr: SocketAddr = "10.0.0.1:41234".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Forwarded-For",
+            HeaderValue::from_static("127.0.0.1, 203.0.113.195"),
+        );
+
+        let ip = extract_client_ip(Some(ConnectInfo(addr)), &headers, &cfg);
+        assert_eq!(ip, "203.0.113.195", "Must resolve to the true client IP (203.0.113.195) rather than the spoofed prefix (127.0.0.1)");
     }
 
     #[test]

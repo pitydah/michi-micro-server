@@ -7,7 +7,7 @@ use rumqttc::{AsyncClient, MqttOptions, Packet, QoS};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HaRuntimeStatus {
@@ -487,6 +487,15 @@ pub async fn run(config: Config, engine: PlaybackEngineHandle, db: SqlitePool) {
                                 }
                             }
                             if state_res.is_ok() {
+                                s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
+                            }
+                        });
+                    }
+                    rumqttc::Event::Incoming(Packet::PubAck(puback)) => {
+                        debug!("MQTT broker acknowledged packet (pkid: {})", puback.pkid);
+                        update_runtime_status(|s| {
+                            if s.connected {
+                                s.discovery_published = true;
                                 s.last_published_at = Some(chrono::Utc::now().to_rfc3339());
                             }
                         });

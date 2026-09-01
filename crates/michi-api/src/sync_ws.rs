@@ -32,27 +32,7 @@ pub async fn sync_handler(
     State(state): State<AppState>,
     ws_result: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
-    let client_ip_opt = if let Some(ConnectInfo(addr)) = connect_info {
-        let peer_ip = addr.ip();
-        if state.config.is_trusted_proxy(&peer_ip) {
-            headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.split(',').next())
-                .and_then(|s| s.trim().parse::<IpAddr>().ok())
-                .or_else(|| {
-                    headers
-                        .get("x-real-ip")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.trim().parse::<IpAddr>().ok())
-                })
-                .or(Some(peer_ip))
-        } else {
-            Some(peer_ip)
-        }
-    } else {
-        None
-    };
+    let client_ip_opt = crate::resolve_client_ip(connect_info, &headers, &state.config);
 
     if !state.config.remote_sync {
         match client_ip_opt {
@@ -70,7 +50,7 @@ pub async fn sync_handler(
             }
             None => {
                 warn!(
-                    "sync_ws: rejected sync connection due to missing client connection info (remote_sync=false fail-closed)"
+                    "sync_ws: rejected sync connection due to missing/unverifiable client connection info (remote_sync=false fail-closed)"
                 );
                 return (
                     StatusCode::FORBIDDEN,

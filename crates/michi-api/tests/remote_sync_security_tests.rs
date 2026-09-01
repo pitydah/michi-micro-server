@@ -207,6 +207,85 @@ async fn test_remote_sync_disabled_missing_connect_info_fails_closed() {
 }
 
 #[tokio::test]
+async fn test_remote_sync_disabled_trusted_proxy_handles_spoofed_prefix_right_to_left() {
+    let app = setup_app(false, true, vec!["10.0.0.1"]).await;
+    let peer: SocketAddr = "10.0.0.1:41234".parse().unwrap();
+    // Attacker sends private XFF prefix, but trusted proxy appends actual remote client 203.0.113.99
+    let req = make_ws_request(Some(peer), Some("127.0.0.1, 203.0.113.99"), None);
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "Spoofed private prefix in XFF behind trusted proxy must be ignored in favor of real public client IP"
+    );
+}
+
+#[tokio::test]
+async fn test_remote_sync_disabled_trusted_proxy_missing_forwarded_headers_fails_closed() {
+    let app = setup_app(false, true, vec!["10.0.0.1"]).await;
+    let peer: SocketAddr = "10.0.0.1:41234".parse().unwrap();
+    // Trusted proxy forwards request without any XFF or X-Real-IP
+    let req = make_ws_request(Some(peer), None, None);
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "Trusted proxy with missing client IP headers must fail closed (cannot substitute proxy IP for client)"
+    );
+}
+
+#[tokio::test]
+async fn test_remote_sync_disabled_trusted_proxy_invalid_xff_fails_closed() {
+    let app = setup_app(false, true, vec!["10.0.0.1"]).await;
+    let peer: SocketAddr = "10.0.0.1:41234".parse().unwrap();
+    let req = make_ws_request(Some(peer), Some("garbage, not_an_ip"), None);
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "Trusted proxy with unparseable XFF must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn test_remote_sync_disabled_multihop_trusted_proxies_with_public_client() {
+    let app = setup_app(false, true, vec!["10.0.0.1", "10.0.0.2"]).await;
+    let peer: SocketAddr = "10.0.0.1:41234".parse().unwrap();
+    // Intermediate trusted proxy 10.0.0.2 skipped, resolving true client 203.0.113.99
+    let req = make_ws_request(Some(peer), Some("203.0.113.99, 10.0.0.2"), None);
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "Multi-hop trusted proxy chain must skip trusted hops and reject public client"
+    );
+}
+
+#[tokio::test]
+async fn test_remote_sync_disabled_multihop_trusted_proxies_with_private_client() {
+    let app = setup_app(false, true, vec!["10.0.0.1", "10.0.0.2"]).await;
+    let peer: SocketAddr = "10.0.0.1:41234".parse().unwrap();
+    // Intermediate trusted proxy 10.0.0.2 skipped, resolving true private client 192.168.1.100
+    let req = make_ws_request(Some(peer), Some("192.168.1.100, 10.0.0.2"), None);
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_ne!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "Multi-hop trusted proxy chain must allow verified private client"
+    );
+    assert_eq!(
+        res.status(),
+        StatusCode::UPGRADE_REQUIRED,
+        "In oneshot mock test, allowed peer proceeds to upgrade handler"
+    );
+}
+
+#[tokio::test]
 async fn test_remote_sync_enabled_public_peer_allowed() {
     let app = setup_app(true, false, vec![]).await;
     let peer: SocketAddr = "203.0.113.50:41234".parse().unwrap();
