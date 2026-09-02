@@ -266,13 +266,12 @@ pub async fn policy_handler(State(state): State<AppState>) -> Json<serde_json::V
 
 pub async fn lan_policy_handler(
     State(state): State<AppState>,
-    Json(query): Json<PolicyQuery>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: axum::http::HeaderMap,
+    Json(_query): Json<PolicyQuery>,
 ) -> Json<serde_json::Value> {
-    let is_lan = query
-        .client_ip
-        .as_ref()
-        .map(|ip| is_lan_ip(ip))
-        .unwrap_or(false);
+    let resolved_ip_str = crate::extract_client_ip(connect_info, &headers, &state.config);
+    let is_lan = is_lan_ip(&resolved_ip_str);
     let profile = if is_lan { "lan" } else { "remote" };
     let max_remote_bitrate: u32 = state.config.max_remote_bitrate;
     let max_bitrate = if is_lan {
@@ -294,7 +293,7 @@ pub async fn lan_policy_handler(
         "max_bitrate": max_bitrate,
         "allow_sync": allow_sync,
         "allow_stream": allow_stream,
-        "client_ip": query.client_ip,
+        "client_ip": resolved_ip_str,
     }))
 }
 

@@ -440,6 +440,20 @@
                             <button type="button" data-theme-option="system" onclick="setTheme('system', true)">System</button>
                         </div>
                     </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Cover Art</span>
+                        <select id="settings-cover-art" class="panel-input" style="max-width:200px" onchange="saveSetting('cover_art_enabled', this.value === 'true')">
+                            <option value="true">Enabled</option>
+                            <option value="false">Disabled</option>
+                        </select>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Sidebar Default</span>
+                        <select id="settings-sidebar-collapsed" class="panel-input" style="max-width:200px" onchange="saveSetting('sidebar_collapsed', this.value === 'true')">
+                            <option value="false">Expanded</option>
+                            <option value="true">Collapsed</option>
+                        </select>
+                    </div>
                 </div>
             </div>
 
@@ -579,9 +593,25 @@
                         </select>
                     </div>
                     <div class="panel-row"><span class="panel-label">CORS Origin</span><span class="panel-mono" id="settings-cors" style="flex:1">--</span></div>
-                    <div class="panel-row"><span class="panel-label">Sync Peers</span><span class="panel-mono" id="settings-sync-peers" style="flex:1">--</span></div>
                     <div class="panel-row"><span class="panel-label">Auth</span><span id="settings-auth" class="badge disabled">Disabled</span></div>
-                    <div class="panel-row"><span class="panel-label">Dev Mode</span><span id="settings-dev-mode" class="badge disabled">Off</span></div>
+                    <div class="panel-row">
+                        <span class="panel-label">Dev Mode</span>
+                        <select id="settings-dev-mode-select" class="panel-input" style="max-width:200px" onchange="saveSetting('dev_mode', this.value === 'true')">
+                            <option value="false">Off (Production Security)</option>
+                            <option value="true">On (Development Bypass)</option>
+                        </select>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Add Peer</span>
+                        <div style="display:flex;gap:6px;flex:1">
+                            <input type="text" id="settings-new-peer" class="panel-input" placeholder="http://192.168.1.50:9090">
+                            <button class="btn btn-primary btn-sm" type="button" onclick="addSyncPeer()">Add Peer</button>
+                        </div>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Active Peers</span>
+                        <div id="settings-peers-list" style="flex:1;display:flex;flex-direction:column;gap:4px"></div>
+                    </div>
                 </div>
             </div>
 
@@ -623,7 +653,7 @@
                         <span class="panel-label">Auto Backup</span>
                         <select id="settings-auto-backup" class="panel-input" style="max-width:200px" onchange="saveSetting('auto_backup_enabled', this.value === 'true')">
                             <option value="false">Disabled</option>
-                            <option value="true">Enabled (Daily 03:00)</option>
+                            <option value="true">Enabled (Automatic)</option>
                         </select>
                     </div>
                     <div class="panel-row">
@@ -689,9 +719,9 @@
                     <div class="panel-row"><span class="panel-label">Prefix</span><span class="panel-mono">homeassistant/ / michi/</span></div>
                 </div>
                 <div class="panel">
-                    <div class="panel-header">Sync Mesh Peers</div>
+                    <div class="panel-header">Sync Mesh Peers & Connectivity</div>
                     <div class="panel-row"><span class="panel-label">Configured Peers</span><span id="integ-sync-peers" class="panel-mono">--</span></div>
-                    <div class="panel-row"><span class="panel-label">Auto-Reconnect Max</span><span id="integ-reconnect-max" class="panel-mono">--</span></div>
+                    <div class="panel-row"><span class="panel-label">Auto-Reconnect Max (s)</span><input type="number" id="settings-reconnect-delay-max" class="panel-input" min="5" max="3600" style="max-width:120px" onchange="saveSetting('reconnect_delay_max', parseInt(this.value, 10))"></div>
                 </div>
             </div>
         </section>

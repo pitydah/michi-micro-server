@@ -98,6 +98,13 @@ pub async fn stream_handler(
     Query(query): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
+    if state.disabled_modules.read().await.contains("stream") {
+        return Err(err_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Streaming module is disabled",
+        ));
+    }
+
     let track = track_from_db(&state, &id).await?;
     let music_paths = &state.config.music_paths;
 

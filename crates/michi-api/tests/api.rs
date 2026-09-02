@@ -5422,7 +5422,7 @@ async fn test_stream_module_toggle_disables_streaming_fail_closed() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Now stream fails closed with 503 MODULE_DISABLED
+    // 1. /api/v1/stream/:id fails closed with 503 MODULE_DISABLED
     let resp = app
         .clone()
         .oneshot(
@@ -5437,7 +5437,22 @@ async fn test_stream_module_toggle_disables_streaming_fail_closed() {
     let text = body_text(resp).await;
     assert!(text.contains("MODULE_DISABLED"));
 
-    // Download also fails closed with 503 MODULE_DISABLED
+    // 2. /api/v1/tracks/:id/stream fails closed with 503 MODULE_DISABLED
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/tracks/{tid}/stream"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let text = body_text(resp).await;
+    assert!(text.contains("MODULE_DISABLED"));
+
+    // 3. /api/v1/download/:id fails closed with 503 MODULE_DISABLED
     let resp = app
         .clone()
         .oneshot(
@@ -5451,16 +5466,74 @@ async fn test_stream_module_toggle_disables_streaming_fail_closed() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     let text = body_text(resp).await;
     assert!(text.contains("MODULE_DISABLED"));
+
+    // 4. /api/v1/tracks/:id/download fails closed with 503 MODULE_DISABLED
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/tracks/{tid}/download"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let text = body_text(resp).await;
+    assert!(text.contains("MODULE_DISABLED"));
+
+    // 5. /api/v1/stream/proxy/:source_id fails closed with 503 MODULE_DISABLED
+    let dummy_source = uuid::Uuid::new_v4();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/stream/proxy/{dummy_source}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let text = body_text(resp).await;
+    assert!(text.contains("MODULE_DISABLED"));
+
+    // 6. /api/v1/stream/proxy/episode/:episode_id fails closed with 503 MODULE_DISABLED
+    let dummy_episode = uuid::Uuid::new_v4();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/stream/proxy/episode/{dummy_episode}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let text = body_text(resp).await;
+    assert!(text.contains("MODULE_DISABLED"));
+
+    // 7. Legacy /api/stream/:id fails closed with 503
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/stream/{tid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
 async fn test_lan_policy_respects_server_config() {
     let (app, _pool, state) = make_app_with_state().await;
 
-    // Remote IP query
-    let body = serde_json::json!({
-        "client_ip": "8.8.8.8"
-    });
+    // Direct local query (without proxy headers) resolves as local
+    let body = serde_json::json!({});
     let resp = app
         .clone()
         .oneshot(
@@ -5475,25 +5548,34 @@ async fn test_lan_policy_respects_server_config() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    assert_eq!(json["profile"], "remote");
-    assert_eq!(json["allow_sync"], state.config.remote_sync);
-    assert_eq!(json["max_bitrate"], state.config.max_remote_bitrate);
+    assert_eq!(json["profile"], "lan");
+    assert_eq!(json["allow_sync"], true);
+    assert_eq!(json["max_bitrate"], Value::Null);
 }
 
 #[tokio::test]
-async fn test_settings_put_all_fields_persists_truthfully() {
+async fn test_settings_put_all_17_fields_matrix_persists_truthfully() {
     let (app, _pool) = make_app().await;
 
+    // Exhaustive 17-field UpdateSettingsBody
     let update_body = serde_json::json!({
-        "job_max_concurrent": 6,
-        "max_remote_bitrate": 192000,
-        "remote_sync": true,
+        "resource_profile": "performance",
+        "stream_profile": "mp3320",
+        "format_policy": "standard",
+        "language": "es",
+        "theme": "light",
+        "sidebar_collapsed": true,
+        "cover_art_enabled": false,
         "auto_backup_enabled": true,
         "backup_max_keep": 14,
+        "job_max_concurrent": 6,
+        "reconnect_delay_max": 120,
+        "max_remote_bitrate": 192000,
+        "remote_sync": true,
         "scrobble_enabled": true,
+        "dev_mode": true,
         "sync_name": "alpha-node",
-        "language": "es",
-        "theme": "light"
+        "sync_peers": ["http://192.168.1.50:9090", "http://10.0.0.5:9090"]
     });
 
     let resp = app
@@ -5511,8 +5593,9 @@ async fn test_settings_put_all_fields_persists_truthfully() {
     assert_eq!(resp.status(), StatusCode::OK);
     let update_res: Value = serde_json::from_str(&body_text(resp).await).unwrap();
     assert_eq!(update_res["status"], "settings_updated");
+    assert_eq!(update_res["restart_required"], true);
 
-    // Fetch settings to verify configured disk state
+    // Fetch settings to verify all 17 fields in configured disk state
     let resp = app
         .clone()
         .oneshot(
@@ -5525,11 +5608,26 @@ async fn test_settings_put_all_fields_persists_truthfully() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let settings: Value = serde_json::from_str(&body_text(resp).await).unwrap();
-    assert_eq!(settings["configured"]["job_max_concurrent"], 6);
-    assert_eq!(settings["configured"]["max_remote_bitrate"], 192000);
-    assert_eq!(settings["configured"]["remote_sync"], true);
-    assert_eq!(settings["configured"]["auto_backup_enabled"], true);
-    assert_eq!(settings["configured"]["backup_max_keep"], 14);
-    assert_eq!(settings["configured"]["scrobble_enabled"], true);
-    assert_eq!(settings["configured"]["sync_name"], "alpha-node");
+
+    let cfg = &settings["configured"];
+    assert_eq!(cfg["resource_profile"], "performance");
+    assert_eq!(cfg["stream_profile"], "mp3320");
+    assert_eq!(cfg["format_policy"], "standard");
+    assert_eq!(cfg["language"], "es");
+    assert_eq!(cfg["theme"], "light");
+    assert_eq!(cfg["sidebar_collapsed"], true);
+    assert_eq!(cfg["cover_art_enabled"], false);
+    assert_eq!(cfg["auto_backup_enabled"], true);
+    assert_eq!(cfg["backup_max_keep"], 14);
+    assert_eq!(cfg["job_max_concurrent"], 6);
+    assert_eq!(cfg["reconnect_delay_max"], 120);
+    assert_eq!(cfg["max_remote_bitrate"], 192000);
+    assert_eq!(cfg["remote_sync"], true);
+    assert_eq!(cfg["scrobble_enabled"], true);
+    assert_eq!(cfg["dev_mode"], true);
+    assert_eq!(cfg["sync_name"], "alpha-node");
+    assert_eq!(
+        cfg["sync_peers"],
+        serde_json::json!(["http://192.168.1.50:9090", "http://10.0.0.5:9090"])
+    );
 }

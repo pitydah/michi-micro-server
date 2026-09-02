@@ -2865,11 +2865,44 @@ async function loadSettings() {
     if ($('#settings-remote-sync')) $('#settings-remote-sync').value = s.remote_sync ? 'true' : 'false';
     if ($('#settings-auto-backup')) $('#settings-auto-backup').value = s.auto_backup_enabled ? 'true' : 'false';
     if ($('#settings-backup-max-keep')) $('#settings-backup-max-keep').value = s.backup_max_keep || 7;
+    if ($('#settings-reconnect-delay-max')) $('#settings-reconnect-delay-max').value = s.reconnect_delay_max || 300;
+    if ($('#settings-dev-mode-select')) $('#settings-dev-mode-select').value = s.dev_mode ? 'true' : 'false';
+    if ($('#settings-cover-art')) $('#settings-cover-art').value = (s.cover_art_enabled !== false) ? 'true' : 'false';
+    if ($('#settings-sidebar-collapsed')) $('#settings-sidebar-collapsed').value = s.sidebar_collapsed ? 'true' : 'false';
+
+    // Synchronize server-to-browser authority for theme and language
+    if (s.theme && s.theme !== localStorage.getItem('michi_theme')) {
+      setTheme(s.theme, false);
+    }
+    if (s.language && s.language !== _currentLang) {
+      loadI18n(s.language);
+      if ($('#lang-select')) $('#lang-select').value = s.language;
+    }
+
+    // Dynamic Watcher Status
+    var watcherEl = $('#settings-watcher-status');
+    if (watcherEl) {
+      try {
+        var modRes = await MichiAPI.modules();
+        var scanMod = (modRes.modules || []).find(function(m) { return m.name === 'scan'; });
+        if (scanMod && !scanMod.enabled) {
+          watcherEl.className = 'badge disabled';
+          watcherEl.textContent = '○ Paused (Scan Module Disabled)';
+        } else {
+          watcherEl.className = 'badge stable';
+          watcherEl.textContent = '● Active (5s Polling)';
+        }
+      } catch (e) {
+        watcherEl.className = 'badge stable';
+        watcherEl.textContent = '● Active (5s Polling)';
+      }
+    }
+
+    renderSyncPeers(s.sync_peers || []);
 
     $('#settings-music-paths').textContent = (s.music_paths || []).join('\n') || 'No paths configured';
     $('#settings-sync-name').textContent = s.sync_name || '--';
     $('#settings-cors').textContent = s.cors_origin || 'Restrictive (default)';
-    $('#settings-sync-peers').textContent = (s.sync_peers || []).join(', ') || 'None';
     $('#settings-auth').innerHTML = s.auth_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
     $('#settings-dev-mode').innerHTML = s.dev_mode ? '<span class="badge stable">On</span>' : '<span class="badge disabled">Off</span>';
     $('#settings-scrobble').innerHTML = s.scrobble_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
@@ -2892,6 +2925,8 @@ async function loadSettings() {
       'remote_sync': '#settings-remote-sync',
       'auto_backup_enabled': '#settings-auto-backup',
       'backup_max_keep': '#settings-backup-max-keep',
+      'reconnect_delay_max': '#settings-reconnect-delay-max',
+      'dev_mode': '#settings-dev-mode-select',
       'scrobble_enabled': '#settings-scrobble-toggle',
       'sync_name': '#settings-sync-name-input'
     };
@@ -2963,6 +2998,42 @@ async function saveSetting(key, value) {
     }
     loadSettings();
   } catch (e) { showToast(e.message, true); }
+}
+
+var _currentPeers = [];
+function renderSyncPeers(peers) {
+  _currentPeers = peers || [];
+  var list = $('#settings-peers-list');
+  if (!list) return;
+  if (_currentPeers.length === 0) {
+    list.innerHTML = '<span style="color:var(--text-dim);font-size:.78rem">No sync peers configured</span>';
+    return;
+  }
+  list.innerHTML = _currentPeers.map(function(peer, idx) {
+    return '<div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg-3);padding:4px 8px;border-radius:4px;font-family:var(--font-mono);font-size:.75rem">' +
+      '<span>' + esc(peer) + '</span>' +
+      '<button class="btn btn-ghost btn-sm" type="button" onclick="removeSyncPeer(' + idx + ')" style="color:var(--error);padding:2px 6px">Remove</button>' +
+      '</div>';
+  }).join('');
+}
+
+async function addSyncPeer() {
+  var input = $('#settings-new-peer');
+  var val = input ? input.value.trim() : '';
+  if (!val) return;
+  if (_currentPeers.includes(val)) {
+    showToast('Peer already configured', true);
+    return;
+  }
+  var updated = _currentPeers.concat([val]);
+  if (input) input.value = '';
+  await saveSetting('sync_peers', updated);
+}
+
+async function removeSyncPeer(idx) {
+  if (idx < 0 || idx >= _currentPeers.len) {}
+  var updated = _currentPeers.filter(function(_, i) { return i !== idx; });
+  await saveSetting('sync_peers', updated);
 }
 
 // ── Webhooks ─────────────────────────────────────────────────────

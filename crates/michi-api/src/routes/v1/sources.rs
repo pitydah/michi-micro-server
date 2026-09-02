@@ -205,6 +205,14 @@ pub async fn proxy_stream_handler(
     Path(source_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("stream") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "Streaming module is disabled",
+        ));
+    }
+
     let sources = michi_db::list_stream_sources(&state.db)
         .await
         .map_err(|e| {
@@ -236,6 +244,13 @@ pub async fn proxy_episode_handler(
     Path(episode_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("stream") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "Streaming module is disabled",
+        ));
+    }
     let sources = michi_db::list_stream_sources(&state.db)
         .await
         .map_err(|e| {
