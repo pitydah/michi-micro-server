@@ -17,37 +17,37 @@ fn builtin_modules() -> Vec<ModuleDescriptor> {
         ModuleDescriptor {
             name: "scan".into(),
             enabled: true,
-            description: "Music library scanning".into(),
+            description: "Music library scanning and filesystem watcher".into(),
         },
         ModuleDescriptor {
             name: "sync".into(),
             enabled: true,
-            description: "Peer synchronization".into(),
+            description: "Peer synchronization and background sync workers".into(),
         },
         ModuleDescriptor {
             name: "stream".into(),
             enabled: true,
-            description: "Audio streaming".into(),
+            description: "Audio streaming and transcode pipeline".into(),
         },
         ModuleDescriptor {
             name: "playback".into(),
             enabled: true,
-            description: "Playback tracking".into(),
+            description: "Server playback engine and tracking".into(),
         },
         ModuleDescriptor {
             name: "backup".into(),
             enabled: true,
-            description: "Backup and restore".into(),
+            description: "Automatic backup scheduler and retention".into(),
         },
         ModuleDescriptor {
             name: "webhook".into(),
             enabled: true,
-            description: "Webhook notifications".into(),
+            description: "Webhook dispatch notifications".into(),
         },
         ModuleDescriptor {
             name: "homeassistant".into(),
             enabled: true,
-            description: "Home Assistant integration".into(),
+            description: "Home Assistant MQTT discovery and entity synchronization".into(),
         },
     ]
 }
@@ -81,7 +81,18 @@ pub async fn toggle_module_handler(
         ));
     }
 
+    let is_currently_disabled = state.disabled_modules.read().await.contains(&body.name);
+
     if body.enabled {
+        // Idempotency: If already enabled (ON -> ON), it is a safe NO-OP (do not replace tokens or duplicate workers)
+        if !is_currently_disabled {
+            tracing::debug!("module '{}' is already enabled (no-op)", body.name);
+            return Ok(Json(
+                serde_json::json!({ "module": body.name, "enabled": true }),
+            ));
+        }
+
+        // Transition OFF -> ON
         state.disabled_modules.write().await.remove(&body.name);
         let mut tokens = state.module_tokens.write().await;
         let new_token = tokio_util::sync::CancellationToken::new();
@@ -116,6 +127,15 @@ pub async fn toggle_module_handler(
         }
         tracing::info!("module '{}' enabled", body.name);
     } else {
+        // Idempotency: If already disabled (OFF -> OFF), it is a safe NO-OP
+        if is_currently_disabled {
+            tracing::debug!("module '{}' is already disabled (no-op)", body.name);
+            return Ok(Json(
+                serde_json::json!({ "module": body.name, "enabled": false }),
+            ));
+        }
+
+        // Transition ON -> OFF
         state
             .disabled_modules
             .write()

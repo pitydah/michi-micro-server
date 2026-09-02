@@ -558,6 +558,13 @@ pub async fn set_webhook_handler(
     State(state): State<AppState>,
     Json(body): Json<SetWebhookBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("webhook") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "webhook module is disabled",
+        ));
+    }
     if body.url.trim().is_empty() {
         return Err(v1_error(
             StatusCode::BAD_REQUEST,
@@ -569,22 +576,47 @@ pub async fn set_webhook_handler(
     Ok(Json(serde_json::json!({ "status": "webhook_set" })))
 }
 
-pub async fn get_webhook_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
+pub async fn get_webhook_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("webhook") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "webhook module is disabled",
+        ));
+    }
     let url = michi_db::get_server_config(&state.db, "webhook_url")
         .await
         .ok()
         .flatten();
-    Json(serde_json::json!({ "webhook_url": url }))
+    Ok(Json(serde_json::json!({ "webhook_url": url })))
 }
 
-pub async fn delete_webhook_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
+pub async fn delete_webhook_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("webhook") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "webhook module is disabled",
+        ));
+    }
     let _ = michi_db::set_server_config(&state.db, "webhook_url", "").await;
-    Json(serde_json::json!({ "status": "webhook_deleted" }))
+    Ok(Json(serde_json::json!({ "status": "webhook_deleted" })))
 }
 
 pub async fn test_webhook_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("webhook") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "webhook module is disabled",
+        ));
+    }
     let url = michi_db::get_server_config(&state.db, "webhook_url")
         .await
         .ok()
@@ -668,6 +700,10 @@ pub async fn test_webhook_handler(
 
 /// Called after sync completes to fire the webhook
 pub async fn fire_sync_webhook(state: &AppState) {
+    if state.disabled_modules.read().await.contains("webhook") {
+        tracing::debug!("webhook module disabled, skipping sync webhook dispatch");
+        return;
+    }
     let url = michi_db::get_server_config(&state.db, "webhook_url")
         .await
         .ok()

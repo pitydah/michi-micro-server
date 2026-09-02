@@ -5819,3 +5819,300 @@ async fn test_module_toggle_off_then_on_restarts_lifecycle_with_fresh_token() {
         .unwrap();
     assert!(!new_token.is_cancelled());
 }
+
+#[tokio::test]
+async fn test_module_toggle_idempotency_on_on_and_off_off() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    // 1. Initial state: enabled
+    let token_init = state
+        .module_tokens
+        .read()
+        .await
+        .get("homeassistant")
+        .cloned()
+        .unwrap();
+
+    // 2. Send ON -> ON (idempotent no-op)
+    let body_on = serde_json::json!({
+        "name": "homeassistant",
+        "enabled": true
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_on).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let token_after_on_on = state
+        .module_tokens
+        .read()
+        .await
+        .get("homeassistant")
+        .cloned()
+        .unwrap();
+    // Token was NOT replaced
+    assert!(!token_after_on_on.is_cancelled());
+
+    // 3. Send ON -> OFF
+    let body_off = serde_json::json!({
+        "name": "homeassistant",
+        "enabled": false
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_off).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(token_after_on_on.is_cancelled());
+
+    // 4. Send OFF -> OFF (idempotent no-op)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_off).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(state
+        .disabled_modules
+        .read()
+        .await
+        .contains("homeassistant"));
+}
+
+#[tokio::test]
+async fn test_webhook_module_toggle_fails_closed_when_disabled() {
+    let (app, _pool) = make_app().await;
+
+    // 1. Initially enabled: can get webhook
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/webhook")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Disable webhook module
+    let body_off = serde_json::json!({
+        "name": "webhook",
+        "enabled": false
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_off).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 3. Webhook endpoints now fail-closed with 503 SERVICE_UNAVAILABLE MODULE_DISABLED
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/webhook")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let text = body_text(resp).await;
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["error"]["code"], "MODULE_DISABLED");
+
+    let set_body = serde_json::json!({ "url": "http://127.0.0.1:9999/hook" });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/webhook")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&set_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 4. Re-enable webhook module
+    let body_on = serde_json::json!({
+        "name": "webhook",
+        "enabled": true
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_on).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 5. Endpoints work again
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/webhook")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_playback_module_toggle_fails_closed_when_disabled() {
+    let (app, _pool) = make_app().await;
+
+    // 1. Initially enabled: can get playback state
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/state")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Disable playback module
+    let body_off = serde_json::json!({
+        "name": "playback",
+        "enabled": false
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_off).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 3. Playback endpoints fail-closed with 503 SERVICE_UNAVAILABLE MODULE_DISABLED
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/state")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let text = body_text(resp).await;
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["error"]["code"], "MODULE_DISABLED");
+
+    let ctrl_body = serde_json::json!({ "command": "play" });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/control")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&ctrl_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let seek_body = serde_json::json!({ "position_ms": 5000 });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/seek")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&seek_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 4. Re-enable playback module
+    let body_on = serde_json::json!({
+        "name": "playback",
+        "enabled": true
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_on).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 5. Playback state works again
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/state")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}

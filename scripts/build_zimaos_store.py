@@ -76,7 +76,8 @@ def build_store():
             for s in services.values()
         )
         if not has_icon_label:
-            print(f"WARNING: {app_name} service labels missing 'icon' label")
+            print(f"ERROR: {app_name} service labels missing required 'icon' label")
+            sys.exit(1)
 
         target_app_dir = os.path.join(APPS_DIST, app_id)
         target_assets_dir = os.path.join(target_app_dir, "assets")

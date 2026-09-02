@@ -57,6 +57,13 @@ fn playback_error_status(e: &michi_playback::PlaybackError) -> StatusCode {
 pub async fn playback_state_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
     let snap = state.playback_engine.snapshot().await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -143,6 +150,13 @@ pub async fn set_playback_output_handler(
     State(state): State<AppState>,
     Json(selection): Json<PlaybackOutputSelection>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
     match resolve_output(&selection, &state).await {
         Ok(plan) => {
             *state.playback_output_selection.write().await = Some(selection.clone());
@@ -199,6 +213,13 @@ pub async fn playback_control_handler(
     State(state): State<AppState>,
     Json(body): Json<PlaybackControlBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
     let cmd = body.command.as_str();
     const VALID_COMMANDS: &[&str] = &[
         "play",
@@ -566,6 +587,13 @@ pub async fn playback_seek_handler(
     State(state): State<AppState>,
     Json(body): Json<PlaybackSeekDirectBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
     state
         .playback_engine
         .seek(body.position_ms)
@@ -605,6 +633,13 @@ pub async fn playback_session_handler(
     State(state): State<AppState>,
     Json(body): Json<PlaybackSessionBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
     // 1. Validate volume strictly
     if let Some(vol) = body.volume {
         if !vol.is_finite() || !(0.0..=1.0).contains(&vol) {
@@ -1009,6 +1044,13 @@ pub fn resolve_restore_index(
 pub async fn restore_playback_state_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
     let latest = michi_db::get_latest_playback_session(&state.db)
         .await
         .map_err(|e| {
@@ -1319,6 +1361,13 @@ pub async fn handoff_handler(
     State(state): State<AppState>,
     Json(body): Json<HandoffBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
     let resolver = michi_playback::SqliteTrackResolver::new(
         state.db.clone(),
         state.config.music_paths.clone(),
