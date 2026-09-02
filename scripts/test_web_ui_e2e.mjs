@@ -684,6 +684,78 @@ async function runE2E() {
       'transferHandoff verifies track, playing state, and position drift');
   }
 
+  // ── Test J: Cover Art Preference DOM Consumer Effect ─────────
+  {
+    const { sandbox, window, document } = makeSandbox();
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.applyCoverArtPreference(false);
+    assert(document.documentElement.getAttribute('data-cover-art') === 'false',
+      'Cover art disabled sets data-cover-art="false" on documentElement');
+    assert(document.body.classList.contains('hide-cover-art'),
+      'Cover art disabled adds hide-cover-art class to body');
+
+    window.applyCoverArtPreference(true);
+    assert(document.documentElement.getAttribute('data-cover-art') === 'true',
+      'Cover art enabled sets data-cover-art="true" on documentElement');
+    assert(!document.body.classList.contains('hide-cover-art'),
+      'Cover art enabled removes hide-cover-art class from body');
+  }
+
+  // ── Test K: Sidebar Collapsed Preference DOM Consumer Effect ──
+  {
+    const { sandbox, window, document } = makeSandbox();
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.applySidebarPreference(true);
+    assert(document.documentElement.getAttribute('data-sidebar-collapsed') === 'true',
+      'Sidebar collapsed sets data-sidebar-collapsed="true" on documentElement');
+    assert(document.body.classList.contains('sidebar-collapsed'),
+      'Sidebar collapsed adds sidebar-collapsed class to body');
+
+    window.applySidebarPreference(false);
+    assert(document.documentElement.getAttribute('data-sidebar-collapsed') === 'false',
+      'Sidebar uncollapsed sets data-sidebar-collapsed="false" on documentElement');
+    assert(!document.body.classList.contains('sidebar-collapsed'),
+      'Sidebar uncollapsed removes sidebar-collapsed class from body');
+  }
+
+  // ── Test L: Clean Browser Session Hydrates Server Canonical Theme and Language ──
+  {
+    const serverSettings = {
+      theme: 'light',
+      language: 'es',
+      cover_art_enabled: false,
+      sidebar_collapsed: true,
+    };
+    const settingsFetch = async (url) => {
+      if (url.includes('/api/v1/settings')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => serverSettings
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+
+    const { sandbox, window, document } = makeSandbox({ fetchImpl: settingsFetch });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.AuthSession.state = 'authenticated';
+    await window.loadSettings();
+
+    assert(document.documentElement.dataset.theme === 'light',
+      'Authoritative server theme="light" hydrates into DOM data-theme on clean session');
+    assert(document.documentElement.getAttribute('data-cover-art') === 'false',
+      'Authoritative server cover_art_enabled=false hydrates into DOM data-cover-art');
+    assert(document.documentElement.getAttribute('data-sidebar-collapsed') === 'true',
+      'Authoritative server sidebar_collapsed=true hydrates into DOM data-sidebar-collapsed');
+  }
+
   console.log('======================================================================');
   console.log(`BROWSER E2E GATE: ${passed} passed, ${failed} failed`);
   console.log('======================================================================');

@@ -541,21 +541,37 @@ tr.playing td { color: var(--primary); }
 }
 
 /* ── Runtime Preferences Consumers ── */
-[data-cover-art="false"] .track-art,
+[data-cover-art="false"] .michi-artwork,
+[data-cover-art="false"] img[src*="/artwork/"],
+[data-cover-art="false"] #np-cover img,
+[data-cover-art="false"] #minibar-cover img,
 [data-cover-art="false"] .np-art,
+[data-cover-art="false"] .track-art,
 [data-cover-art="false"] .album-art,
-[data-cover-art="false"] .hero-track-art,
-.hide-cover-art .track-art,
-.hide-cover-art .np-art,
-.hide-cover-art .album-art {
+.hide-cover-art .michi-artwork,
+.hide-cover-art img[src*="/artwork/"],
+.hide-cover-art #np-cover img,
+.hide-cover-art #minibar-cover img {
   display: none !important;
+}
+
+[data-sidebar-collapsed="true"],
+body.sidebar-collapsed {
+  --sidebar-w: 72px;
 }
 
 [data-sidebar-collapsed="true"] .sidebar,
 .sidebar-collapsed .sidebar {
-  width: 72px;
+  width: calc(var(--sidebar-w) - 12px);
 }
-[data-sidebar-collapsed="true"] .sidebar .nav-label,
-.sidebar-collapsed .sidebar .nav-label {
-  display: none;
+
+[data-sidebar-collapsed="true"] .sidebar .nav-item span,
+[data-sidebar-collapsed="true"] .sidebar .nav-section h3,
+[data-sidebar-collapsed="true"] .sidebar .sidebar-brand span,
+[data-sidebar-collapsed="true"] .sidebar-brand-text,
+.sidebar-collapsed .sidebar .nav-item span,
+.sidebar-collapsed .sidebar .nav-section h3,
+.sidebar-collapsed .sidebar .sidebar-brand span,
+.sidebar-collapsed .sidebar-brand-text {
+  display: none !important;
 }

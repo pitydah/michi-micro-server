@@ -534,6 +534,7 @@ function applyI18n() {
 }
 
 function setLanguage(lang) {
+  localStorage.setItem('michi_lang_manual', 'true');
   loadI18n(lang).then(function () {
     var sel = $('#lang-select');
     if (sel) sel.value = lang;
@@ -744,7 +745,7 @@ function openTrackDetailModal(idx) {
 
   body.innerHTML =
     '<div style="display:flex;gap:16px;align-items:flex-start;margin-bottom:12px">' +
-    (t.artwork_id ? '<img src="/api/v1/artwork/' + t.artwork_id + '" alt="" style="width:80px;height:80px;border-radius:6px;object-fit:cover">' : '<div style="width:80px;height:80px;background:var(--bg-card);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:2rem">🎵</div>') +
+    (t.artwork_id ? '<img class="michi-artwork" src="/api/v1/artwork/' + t.artwork_id + '" alt="" style="width:80px;height:80px;border-radius:6px;object-fit:cover">' : '<div style="width:80px;height:80px;background:var(--bg-card);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:2rem">🎵</div>') +
     '<div><h3 style="margin:0 0 4px 0">' + esc(t.title || 'Unknown Title') + '</h3>' +
     '<p style="color:var(--text-2);margin:0">' + esc(t.artist || 'Unknown Artist') + '</p>' +
     '<p style="color:var(--text-3);font-size:.78rem;margin:2px 0 0 0">' + esc(t.album || 'Unknown Album') + '</p>' +
@@ -798,7 +799,10 @@ function setTheme(theme, persist) {
     button.classList.toggle('active', button.dataset.themeOption === selected);
   });
   localStorage.setItem('michi_theme', selected);
-  if (persist) saveSetting('theme', selected);
+  if (persist) {
+    localStorage.setItem('michi_theme_manual', 'true');
+    saveSetting('theme', selected);
+  }
 }
 
 function toggleTheme() {
@@ -864,7 +868,8 @@ async function bootstrapProtected() {
     loadDashboard(),
     loadTracks(),
     loadCanonicalPlaybackState(),
-    loadCanonicalQueue()
+    loadCanonicalQueue(),
+    loadSettings()
   ]);
 
   if (!State.polling) {
@@ -1187,7 +1192,7 @@ function renderTracks(tracks, tableId) {
   tracks.slice(0, 100).forEach((t, i) => {
     const realIdx = State.tracks.indexOf(t);
     const coverHtml = t.artwork_id
-      ? '<img src="/api/v1/artwork/' + t.artwork_id + '" alt="" style="width:32px;height:32px;border-radius:4px;object-fit:cover">'
+      ? '<img class="michi-artwork" src="/api/v1/artwork/' + t.artwork_id + '" alt="" style="width:32px;height:32px;border-radius:4px;object-fit:cover">'
       : '<span style="font-size:1rem">🎵</span>';
 
     const starIcon = t.starred ? '⭐' : '☆';
@@ -1661,7 +1666,7 @@ function updateNowPlaying(t) {
   const cover = $('#np-cover');
   if (cover) {
     cover.innerHTML = t.artwork_id
-      ? '<img src="/api/v1/artwork/' + t.artwork_id + '" alt="">'
+      ? '<img class="michi-artwork" src="/api/v1/artwork/' + t.artwork_id + '" alt="">'
       : '🎵';
   }
   const title = $('#np-title');
@@ -1696,7 +1701,7 @@ function updateMiniPlayer(t) {
   const cover = $('#minibar-cover');
   if (cover) {
     cover.innerHTML = t.artwork_id
-      ? '<img src="/api/v1/artwork/' + t.artwork_id + '" alt="">'
+      ? '<img class="michi-artwork" src="/api/v1/artwork/' + t.artwork_id + '" alt="">'
       : '🎵';
   }
   const title = $('#minibar-title');
@@ -2874,6 +2879,15 @@ async function loadSettings() {
     applyCoverArtPreference(s.cover_art_enabled !== false);
     applySidebarPreference(!!s.sidebar_collapsed);
 
+    // Apply server canonical theme and language if not overridden manually in this browser
+    if (s.theme && !localStorage.getItem('michi_theme_manual')) {
+      setTheme(s.theme, false);
+    }
+    if (s.language && !localStorage.getItem('michi_lang_manual')) {
+      loadI18n(s.language);
+      if ($('#lang-select')) $('#lang-select').value = s.language;
+    }
+
     // Dynamic Watcher Status with honest fail-closed fallback
     var watcherEl = $('#settings-watcher-status');
     if (watcherEl) {
@@ -2979,6 +2993,9 @@ function applySidebarPreference(collapsed) {
   }
   if (document.body) document.body.classList.toggle('sidebar-collapsed', !!collapsed);
 }
+
+window.applyCoverArtPreference = applyCoverArtPreference;
+window.applySidebarPreference = applySidebarPreference;
 
 function renderRestartBanner(fieldsStr) {
   var banner = $('#settings-restart-banner');

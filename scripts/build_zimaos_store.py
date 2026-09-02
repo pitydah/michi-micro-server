@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-ZimaOS / CasaOS App Store Package Builder
+ZimaOS / CasaOS App Store Package Builder & Validator
 
 Scans zimaos-store/Apps/*, extracts compose configurations and metadata,
-and produces the canonical ZimaOS distribution layout under dist/:
+validates schema integrity, and produces the canonical ZimaOS distribution layout under dist/:
   dist/
   ├── index.json
   └── apps/
@@ -40,21 +40,43 @@ def build_store():
         print(f"ERROR: Apps directory {APPS_SRC} does not exist")
         sys.exit(1)
 
-    for app_name in sorted(os.listdir(APPS_SRC)):
-        app_dir = os.path.join(APPS_SRC, app_name)
-        if not os.path.isdir(app_dir):
-            continue
+    app_dirs = [d for d in sorted(os.listdir(APPS_SRC)) if os.path.isdir(os.path.join(APPS_SRC, d))]
+    if not app_dirs:
+        print(f"ERROR: No applications found in {APPS_SRC}")
+        sys.exit(1)
 
+    for app_name in app_dirs:
+        app_dir = os.path.join(APPS_SRC, app_name)
         compose_file = os.path.join(app_dir, "docker-compose.yml")
         if not os.path.exists(compose_file):
-            print(f"Skipping {app_name}: no docker-compose.yml found")
-            continue
+            print(f"ERROR: {app_name} missing required docker-compose.yml")
+            sys.exit(1)
 
         with open(compose_file, "r", encoding="utf-8") as f:
-            compose_data = yaml.safe_load(f)
+            try:
+                compose_data = yaml.safe_load(f)
+            except Exception as e:
+                print(f"ERROR: Failed to parse YAML in {compose_file}: {e}")
+                sys.exit(1)
 
         x_casaos = compose_data.get("x-casaos", {})
-        app_id = x_casaos.get("id", app_name.lower())
+        app_id = x_casaos.get("id")
+        if not app_id:
+            print(f"ERROR: {app_name} docker-compose.yml missing x-casaos.id")
+            sys.exit(1)
+
+        # Validate services and labels
+        services = compose_data.get("services", {})
+        if not services:
+            print(f"ERROR: {app_name} docker-compose.yml contains no services")
+            sys.exit(1)
+
+        has_icon_label = any(
+            isinstance(s.get("labels"), dict) and "icon" in s.get("labels", {})
+            for s in services.values()
+        )
+        if not has_icon_label:
+            print(f"WARNING: {app_name} service labels missing 'icon' label")
 
         target_app_dir = os.path.join(APPS_DIST, app_id)
         target_assets_dir = os.path.join(target_app_dir, "assets")
@@ -63,11 +85,19 @@ def build_store():
         # Copy compose file
         shutil.copy2(compose_file, os.path.join(target_app_dir, "docker-compose.yml"))
 
-        # Copy assets
-        for asset in ["icon.svg", "thumbnail.png", "icon.png"]:
-            src_asset = os.path.join(app_dir, asset)
-            if os.path.exists(src_asset):
-                shutil.copy2(src_asset, os.path.join(target_assets_dir, asset))
+        # Copy & validate assets
+        icon_svg = os.path.join(app_dir, "icon.svg")
+        thumbnail_png = os.path.join(app_dir, "thumbnail.png")
+
+        if not os.path.exists(icon_svg) or os.path.getsize(icon_svg) == 0:
+            print(f"ERROR: {app_name} missing or empty icon.svg asset")
+            sys.exit(1)
+        shutil.copy2(icon_svg, os.path.join(target_assets_dir, "icon.svg"))
+
+        if not os.path.exists(thumbnail_png) or os.path.getsize(thumbnail_png) == 0:
+            print(f"ERROR: {app_name} missing or empty thumbnail.png asset")
+            sys.exit(1)
+        shutil.copy2(thumbnail_png, os.path.join(target_assets_dir, "thumbnail.png"))
 
         meta = {
             "id": app_id,
@@ -91,7 +121,7 @@ def build_store():
             json.dump(meta, f, indent=2, ensure_ascii=False)
 
         catalog.append(meta)
-        print(f"  ✓ Packaged {app_name} (ID: {app_id})")
+        print(f"  ✓ Packaged and validated {app_name} (ID: {app_id}, Version: {meta['version']})")
 
     index_data = {
         "version": "3.1",
@@ -102,7 +132,7 @@ def build_store():
     with open(os.path.join(DIST_DIR, "index.json"), "w", encoding="utf-8") as f:
         json.dump(index_data, f, indent=2, ensure_ascii=False)
 
-    print(f"Successfully generated ZimaOS store distribution at {DIST_DIR} with {len(catalog)} app(s).")
+    print(f"Successfully generated and validated ZimaOS store distribution at {DIST_DIR} with {len(catalog)} app(s).")
 
 if __name__ == "__main__":
     build_store()

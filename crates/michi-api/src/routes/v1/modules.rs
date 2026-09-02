@@ -84,15 +84,35 @@ pub async fn toggle_module_handler(
     if body.enabled {
         state.disabled_modules.write().await.remove(&body.name);
         let mut tokens = state.module_tokens.write().await;
-        if tokens
-            .get(&body.name)
-            .map(|token| token.is_cancelled())
-            .unwrap_or(true)
-        {
-            tokens.insert(
-                body.name.clone(),
-                tokio_util::sync::CancellationToken::new(),
-            );
+        let new_token = tokio_util::sync::CancellationToken::new();
+        tokens.insert(body.name.clone(), new_token.clone());
+        drop(tokens);
+
+        // Real dynamic worker restart on OFF -> ON
+        if body.name == "homeassistant" && std::env::var("MICHI_MQTT_HOST").is_ok() {
+            let ha_config = state.config.clone();
+            let ha_engine = state.playback_engine.clone();
+            let ha_db = state.db.clone();
+            let ha_dm = state.disabled_modules.clone();
+            let ha_cancel = new_token;
+            let handle = tokio::spawn(async move {
+                tokio::select! {
+                    _ = ha_cancel.cancelled() => {
+                        tracing::info!("homeassistant module cancelled, HA stopped");
+                    }
+                    _ = async {
+                        if ha_dm.read().await.contains("homeassistant") {
+                            return;
+                        }
+                        michi_homeassistant::run(ha_config, ha_engine, ha_db).await;
+                    } => {}
+                }
+            });
+            state.track_task(handle);
+            tracing::info!("homeassistant worker spawned on module enable");
+        } else if body.name == "sync" {
+            crate::start_sync_peers(&state);
+            tracing::info!("sync peers worker started on module enable");
         }
         tracing::info!("module '{}' enabled", body.name);
     } else {

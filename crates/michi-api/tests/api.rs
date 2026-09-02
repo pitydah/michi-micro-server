@@ -5743,3 +5743,79 @@ async fn test_sync_peer_validation_rejects_invalid_urls() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn test_module_toggle_off_then_on_restarts_lifecycle_with_fresh_token() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    // 1. Initial state: homeassistant enabled
+    assert!(!state
+        .disabled_modules
+        .read()
+        .await
+        .contains("homeassistant"));
+
+    // 2. Toggle OFF homeassistant
+    let body_off = serde_json::json!({
+        "name": "homeassistant",
+        "enabled": false
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_off).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(state
+        .disabled_modules
+        .read()
+        .await
+        .contains("homeassistant"));
+    let old_token = state
+        .module_tokens
+        .read()
+        .await
+        .get("homeassistant")
+        .cloned()
+        .unwrap();
+    assert!(old_token.is_cancelled());
+
+    // 3. Toggle ON homeassistant
+    let body_on = serde_json::json!({
+        "name": "homeassistant",
+        "enabled": true
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_on).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(!state
+        .disabled_modules
+        .read()
+        .await
+        .contains("homeassistant"));
+    let new_token = state
+        .module_tokens
+        .read()
+        .await
+        .get("homeassistant")
+        .cloned()
+        .unwrap();
+    assert!(!new_token.is_cancelled());
+}

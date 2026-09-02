@@ -87,7 +87,7 @@ jobs:
             exit 1
           fi
 
-          # Verify that all 14 required certification gates exist and completed with success
+          # Verify that all 15 required certification gates exist and completed with success
           REQUIRED_GATES=(
             "ci-rust"
             "ci-stream-contract"
@@ -103,6 +103,7 @@ jobs:
             "ci-three-way-ecosystem"
             "ci-docker-amd64"
             "ci-arm64-qemu"
+            "ci-zimaos-package"
           )
 
           JOBS_JSON=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs?per_page=100" --jq '.jobs')
@@ -125,7 +126,27 @@ jobs:
             exit 1
           fi
 
-          echo "CI run ${RUN_ID} is 100% green across all 14 required gates for SHA ${SHA}. Proceeding with publish."
+          echo "CI run ${RUN_ID} is 100% green across all 15 required gates for SHA ${SHA}. Proceeding with publish."
+
+      - name: Set up Python for Store Package Builder
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Store Package Dependencies
+        run: pip install -r requirements-zima.txt
+
+      - name: Build and Validate ZimaOS App Store Package Distribution
+        run: |
+          set -euo pipefail
+          python3 scripts/build_zimaos_store.py
+
+      - name: Upload ZimaOS App Store package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zimaos-store-package-${{ steps.source.outputs.sha }}
+          path: dist/
+          retention-days: 90
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -154,7 +175,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Update mutable r3.1-zima alias if still on main HEAD
+      - name: Update mutable r3.1-zima alias if still on main HEAD (LAST STEP)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -172,18 +193,6 @@ jobs:
           else
             echo "Source SHA $SHA is not current main HEAD ($MAIN_HEAD). Skipping mutable alias update to prevent rollback."
           fi
-
-      - name: Build ZimaOS App Store package distribution
-        run: |
-          set -euo pipefail
-          python3 scripts/build_zimaos_store.py
-
-      - name: Upload ZimaOS App Store package artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zimaos-store-package-${{ steps.source.outputs.sha }}
-          path: dist/
-          retention-days: 90
 
       - name: Record certification image digest and packaging summary
         run: |
