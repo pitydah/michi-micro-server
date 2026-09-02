@@ -5384,3 +5384,152 @@ async fn test_falsification_handoff_fails_closed_without_output_when_playing() {
     let text = body_text(resp).await;
     assert!(text.contains("OUTPUT_REQUIRED"));
 }
+
+#[tokio::test]
+async fn test_stream_module_toggle_disables_streaming_fail_closed() {
+    let (app, pool) = make_app().await;
+    let tid = seed_track(&pool, "/music/stream_toggle.wav", "Toggle Song").await;
+
+    // Initially stream works (or returns 200/206/etc)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/stream/{tid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // Disable stream module
+    let toggle_body = serde_json::json!({
+        "name": "stream",
+        "enabled": false
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&toggle_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Now stream fails closed with 503 MODULE_DISABLED
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/stream/{tid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let text = body_text(resp).await;
+    assert!(text.contains("MODULE_DISABLED"));
+
+    // Download also fails closed with 503 MODULE_DISABLED
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/download/{tid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let text = body_text(resp).await;
+    assert!(text.contains("MODULE_DISABLED"));
+}
+
+#[tokio::test]
+async fn test_lan_policy_respects_server_config() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    // Remote IP query
+    let body = serde_json::json!({
+        "client_ip": "8.8.8.8"
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/policy/lan")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(json["profile"], "remote");
+    assert_eq!(json["allow_sync"], state.config.remote_sync);
+    assert_eq!(json["max_bitrate"], state.config.max_remote_bitrate);
+}
+
+#[tokio::test]
+async fn test_settings_put_all_fields_persists_truthfully() {
+    let (app, _pool) = make_app().await;
+
+    let update_body = serde_json::json!({
+        "job_max_concurrent": 6,
+        "max_remote_bitrate": 192000,
+        "remote_sync": true,
+        "auto_backup_enabled": true,
+        "backup_max_keep": 14,
+        "scrobble_enabled": true,
+        "sync_name": "alpha-node",
+        "language": "es",
+        "theme": "light"
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/settings")
+                .method("PUT")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&update_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let update_res: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(update_res["status"], "settings_updated");
+
+    // Fetch settings to verify configured disk state
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let settings: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(settings["configured"]["job_max_concurrent"], 6);
+    assert_eq!(settings["configured"]["max_remote_bitrate"], 192000);
+    assert_eq!(settings["configured"]["remote_sync"], true);
+    assert_eq!(settings["configured"]["auto_backup_enabled"], true);
+    assert_eq!(settings["configured"]["backup_max_keep"], 14);
+    assert_eq!(settings["configured"]["scrobble_enabled"], true);
+    assert_eq!(settings["configured"]["sync_name"], "alpha-node");
+}

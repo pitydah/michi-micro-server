@@ -47,7 +47,16 @@ pub async fn library_scan_handler(
         ));
     }
 
-    let tracks = michi_scanner::scan_directories(music_paths).await;
+    let cancel = state
+        .module_tokens
+        .read()
+        .await
+        .get("scan")
+        .cloned()
+        .unwrap_or_default();
+    let concurrency = state.config.resource_profile.scan_concurrency();
+    let tracks =
+        michi_scanner::scan_directories_cancellable(music_paths, concurrency, cancel).await;
     let scanned = tracks.len();
     let saved = michi_db::upsert_tracks(&state.db, &tracks)
         .await

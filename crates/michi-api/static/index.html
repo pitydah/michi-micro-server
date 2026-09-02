@@ -408,6 +408,10 @@
                         <span class="panel-label">DB Pool</span>
                         <span class="panel-mono" id="settings-db-pool">--</span>
                     </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Job Workers</span>
+                        <input type="number" id="settings-job-max-concurrent" class="panel-input" min="1" max="32" style="max-width:120px" onchange="saveSetting('job_max_concurrent', parseInt(this.value, 10))">
+                    </div>
                 </div>
                 <div class="panel">
                     <div class="panel-header">Language</div>
@@ -447,7 +451,7 @@
                 </div>
                 <div class="panel">
                     <div class="panel-header">Scan</div>
-                    <div class="panel-row"><span class="panel-label">Watcher</span><span id="settings-watcher-status" class="badge disabled">Manual Scan Only</span></div>
+                    <div class="panel-row"><span class="panel-label">Watcher</span><span id="settings-watcher-status" class="badge stable">● Active (5s Polling)</span></div>
                     <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="handleScan()">Start Scan Now</button></div>
                 </div>
                 <div class="panel">
@@ -492,6 +496,17 @@
                         </select>
                     </div>
                     <div class="panel-row">
+                        <span class="panel-label">Remote Bitrate Ceiling</span>
+                        <select id="settings-max-remote-bitrate" class="panel-input" style="max-width:200px" onchange="saveSetting('max_remote_bitrate', parseInt(this.value, 10))">
+                            <option value="64000">64 kbps (Mobile Saver)</option>
+                            <option value="96000">96 kbps (Eco Opus)</option>
+                            <option value="128000">128 kbps (Standard)</option>
+                            <option value="192000">192 kbps (High Quality)</option>
+                            <option value="320000">320 kbps (Maximum MP3)</option>
+                            <option value="20000000">Lossless / Unlimited</option>
+                        </select>
+                    </div>
+                    <div class="panel-row">
                         <span class="panel-label">FFmpeg</span>
                         <span id="settings-ffmpeg-avail" class="badge stable">Available</span>
                     </div>
@@ -502,8 +517,17 @@
             <div class="stab-content hidden" id="stab-audio">
                 <div class="panel">
                     <div class="panel-header">Audio Settings</div>
-                    <div class="panel-row"><span class="panel-label">Scrobbling</span><span id="settings-scrobble" class="badge disabled">Disabled</span></div>
-                    <div class="panel-row"><span class="panel-label">Sync Name</span><span class="panel-mono" id="settings-sync-name" style="flex:1">--</span></div>
+                    <div class="panel-row">
+                        <span class="panel-label">Scrobbling</span>
+                        <select id="settings-scrobble-toggle" class="panel-input" style="max-width:200px" onchange="saveSetting('scrobble_enabled', this.value === 'true')">
+                            <option value="false">Disabled</option>
+                            <option value="true">Enabled</option>
+                        </select>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Sync Node Name</span>
+                        <input type="text" id="settings-sync-name-input" class="panel-input" style="max-width:200px" onchange="saveSetting('sync_name', this.value.trim())">
+                    </div>
                 </div>
             </div>
 
@@ -546,7 +570,14 @@
             <!-- Network -->
             <div class="stab-content hidden" id="stab-network">
                 <div class="panel">
-                    <div class="panel-header">Network</div>
+                    <div class="panel-header">Network Policy</div>
+                    <div class="panel-row">
+                        <span class="panel-label">Remote Sync</span>
+                        <select id="settings-remote-sync" class="panel-input" style="max-width:200px" onchange="saveSetting('remote_sync', this.value === 'true')">
+                            <option value="false">🔒 LAN Only (Strict)</option>
+                            <option value="true">🌐 Allow External Peers</option>
+                        </select>
+                    </div>
                     <div class="panel-row"><span class="panel-label">CORS Origin</span><span class="panel-mono" id="settings-cors" style="flex:1">--</span></div>
                     <div class="panel-row"><span class="panel-label">Sync Peers</span><span class="panel-mono" id="settings-sync-peers" style="flex:1">--</span></div>
                     <div class="panel-row"><span class="panel-label">Auth</span><span id="settings-auth" class="badge disabled">Disabled</span></div>
@@ -586,6 +617,20 @@
 
             <!-- Backup -->
             <div class="stab-content hidden" id="stab-backup">
+                <div class="panel">
+                    <div class="panel-header">Automatic Backup Scheduler</div>
+                    <div class="panel-row">
+                        <span class="panel-label">Auto Backup</span>
+                        <select id="settings-auto-backup" class="panel-input" style="max-width:200px" onchange="saveSetting('auto_backup_enabled', this.value === 'true')">
+                            <option value="false">Disabled</option>
+                            <option value="true">Enabled (Daily 03:00)</option>
+                        </select>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Retention Keep</span>
+                        <input type="number" id="settings-backup-max-keep" class="panel-input" min="1" max="100" style="max-width:120px" onchange="saveSetting('backup_max_keep', parseInt(this.value, 10))">
+                    </div>
+                </div>
                 <div class="panel">
                     <div class="panel-header">Library Snapshot & Export</div>
                     <p style="color:var(--text-3);font-size:.78rem;margin-bottom:8px">Records catalog statistics snapshot or downloads the complete canonical JSON backup payload.</p>

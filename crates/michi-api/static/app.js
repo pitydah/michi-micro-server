@@ -538,6 +538,9 @@ function setLanguage(lang) {
     var sel = $('#lang-select');
     if (sel) sel.value = lang;
     showToast(t('toast.language_set', {lang: lang.toUpperCase()}));
+    if (AuthSession.state === 'authenticated') {
+      saveSetting('language', lang);
+    }
   });
 }
 
@@ -2855,6 +2858,14 @@ async function loadSettings() {
     $('#settings-resource-profile').value = s.resource_profile;
     $('#settings-stream-profile').value = s.stream_profile;
     $('#settings-format-policy').value = s.format_policy;
+    if ($('#settings-job-max-concurrent')) $('#settings-job-max-concurrent').value = s.job_max_concurrent || 3;
+    if ($('#settings-max-remote-bitrate')) $('#settings-max-remote-bitrate').value = s.max_remote_bitrate || 320000;
+    if ($('#settings-scrobble-toggle')) $('#settings-scrobble-toggle').value = s.scrobble_enabled ? 'true' : 'false';
+    if ($('#settings-sync-name-input')) $('#settings-sync-name-input').value = s.sync_name || '';
+    if ($('#settings-remote-sync')) $('#settings-remote-sync').value = s.remote_sync ? 'true' : 'false';
+    if ($('#settings-auto-backup')) $('#settings-auto-backup').value = s.auto_backup_enabled ? 'true' : 'false';
+    if ($('#settings-backup-max-keep')) $('#settings-backup-max-keep').value = s.backup_max_keep || 7;
+
     $('#settings-music-paths').textContent = (s.music_paths || []).join('\n') || 'No paths configured';
     $('#settings-sync-name').textContent = s.sync_name || '--';
     $('#settings-cors').textContent = s.cors_origin || 'Restrictive (default)';
@@ -2870,13 +2881,35 @@ async function loadSettings() {
     if ($('#settings-max-transcodes')) $('#settings-max-transcodes').textContent = maxTc + ' simultaneous';
     if ($('#settings-db-pool')) $('#settings-db-pool').textContent = dbPool + ' connections';
 
-    // Show environment overrides indicators
-    var envs = s.env_overrides || [];
+    // Show environment overrides indicators and lock inputs if overridden
     var src = s.effective_sources || {};
-    ['resource_profile', 'stream_profile', 'format_policy'].forEach(function(field) {
-      var selectEl = $('#settings-' + field.replace('_', '-'));
-      if (selectEl && src[field] === 'environment') {
-        selectEl.title = 'Overridden by MICHI_' + field.toUpperCase() + ' environment variable';
+    var controlMap = {
+      'resource_profile': '#settings-resource-profile',
+      'stream_profile': '#settings-stream-profile',
+      'format_policy': '#settings-format-policy',
+      'job_max_concurrent': '#settings-job-max-concurrent',
+      'max_remote_bitrate': '#settings-max-remote-bitrate',
+      'remote_sync': '#settings-remote-sync',
+      'auto_backup_enabled': '#settings-auto-backup',
+      'backup_max_keep': '#settings-backup-max-keep',
+      'scrobble_enabled': '#settings-scrobble-toggle',
+      'sync_name': '#settings-sync-name-input'
+    };
+
+    Object.keys(controlMap).forEach(function(field) {
+      var el = $(controlMap[field]);
+      if (el) {
+        if (src[field] === 'environment') {
+          el.disabled = true;
+          el.title = '🔒 Controlled by environment variable (MICHI_' + field.toUpperCase() + ')';
+          el.style.opacity = '0.65';
+          el.style.cursor = 'not-allowed';
+        } else {
+          el.disabled = false;
+          el.title = '';
+          el.style.opacity = '1.0';
+          el.style.cursor = 'default';
+        }
       }
     });
 

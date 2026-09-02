@@ -264,6 +264,8 @@ impl Config {
                 self.backup_max_keep = file_cfg.backup_max_keep;
                 self.job_max_concurrent = file_cfg.job_max_concurrent;
                 self.reconnect_delay_max = file_cfg.reconnect_delay_max;
+                self.cors_origin = file_cfg.cors_origin;
+                self.opensubsonic_enabled = file_cfg.opensubsonic_enabled;
                 self.trust_proxy = file_cfg.trust_proxy;
                 if !file_cfg.trusted_proxies.is_empty() {
                     self.trusted_proxies = file_cfg.trusted_proxies;
@@ -300,6 +302,7 @@ impl Config {
             ("MICHI_BACKUP_KEEP", "backup_max_keep"),
             ("MICHI_MAX_JOBS", "job_max_concurrent"),
             ("MICHI_RECONNECT_MAX", "reconnect_delay_max"),
+            ("MICHI_OPENSUBSONIC_ENABLED", "opensubsonic_enabled"),
             ("MICHI_TRUST_PROXY", "trust_proxy"),
             ("MICHI_TRUSTED_PROXIES", "trusted_proxies"),
         ];

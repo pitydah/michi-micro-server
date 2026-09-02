@@ -246,6 +246,7 @@ pub struct PolicyResult {
 pub async fn policy_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let max_remote_bitrate: u32 = state.config.max_remote_bitrate;
     let remote_sync: bool = state.config.remote_sync;
+    let allow_stream = !state.disabled_modules.read().await.contains("stream");
 
     let profile = "remote";
     let max_bitrate = if max_remote_bitrate > 0 {
@@ -254,7 +255,6 @@ pub async fn policy_handler(State(state): State<AppState>) -> Json<serde_json::V
         Some(128_000)
     };
     let allow_sync = remote_sync;
-    let allow_stream = true;
 
     Json(serde_json::json!({
         "profile": profile,
@@ -264,19 +264,36 @@ pub async fn policy_handler(State(state): State<AppState>) -> Json<serde_json::V
     }))
 }
 
-pub async fn lan_policy_handler(Json(query): Json<PolicyQuery>) -> Json<serde_json::Value> {
+pub async fn lan_policy_handler(
+    State(state): State<AppState>,
+    Json(query): Json<PolicyQuery>,
+) -> Json<serde_json::Value> {
     let is_lan = query
         .client_ip
         .as_ref()
         .map(|ip| is_lan_ip(ip))
         .unwrap_or(false);
     let profile = if is_lan { "lan" } else { "remote" };
+    let max_remote_bitrate: u32 = state.config.max_remote_bitrate;
+    let max_bitrate = if is_lan {
+        None
+    } else if max_remote_bitrate > 0 {
+        Some(max_remote_bitrate)
+    } else {
+        Some(128_000)
+    };
+    let allow_sync = if is_lan {
+        true
+    } else {
+        state.config.remote_sync
+    };
+    let allow_stream = !state.disabled_modules.read().await.contains("stream");
 
     Json(serde_json::json!({
         "profile": profile,
-        "max_bitrate": if is_lan { None as Option<u32> } else { Some(128_000u32) },
-        "allow_sync": true,
-        "allow_stream": true,
+        "max_bitrate": max_bitrate,
+        "allow_sync": allow_sync,
+        "allow_stream": allow_stream,
         "client_ip": query.client_ip,
     }))
 }

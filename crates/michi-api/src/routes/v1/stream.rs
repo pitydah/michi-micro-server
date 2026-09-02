@@ -123,6 +123,14 @@ pub async fn stream_handler(
     Query(query): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("stream") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "Streaming module is disabled",
+        ));
+    }
+
     let track = michi_db::get_track(&state.db, &id)
         .await
         .map_err(|e| {
@@ -229,6 +237,14 @@ pub async fn download_handler(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("stream") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "Streaming module is disabled",
+        ));
+    }
+
     let track = michi_db::get_track(&state.db, &id)
         .await
         .map_err(|e| {
