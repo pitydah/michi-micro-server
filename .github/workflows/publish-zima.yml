@@ -87,21 +87,45 @@ jobs:
             exit 1
           fi
 
-          # Verify critical jobs completed with success
-          JOBS_JSON=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" --jq '.jobs')
-          FAILED_OR_SKIPPED=$(echo "${JOBS_JSON}" | jq -r '
-            .[] | select(.name == "ci-rust" or .name == "ci-mosquitto-real" or .name == "ci-docker-amd64" or .name == "ci-arm64-qemu")
-            | select(.conclusion != "success")
-            | "\(.name): \(.conclusion)"
-          ')
+          # Verify that all 14 required certification gates exist and completed with success
+          REQUIRED_GATES=(
+            "ci-rust"
+            "ci-stream-contract"
+            "ci-receiver-contract-simulator"
+            "ci-snapcast-contract-mock"
+            "ci-mqtt-contract-simulator"
+            "ci-mosquitto-real"
+            "ci-generic-linux-appliance"
+            "ci-reliability-short"
+            "ci-web-ui-functional-integrity"
+            "ci-web-ui-browser-e2e"
+            "ci-no-test-api-release"
+            "ci-three-way-ecosystem"
+            "ci-docker-amd64"
+            "ci-arm64-qemu"
+          )
 
-          if [ -n "${FAILED_OR_SKIPPED}" ]; then
-            echo "ERROR: Critical CI jobs did not succeed for run ${RUN_ID}:"
-            echo "${FAILED_OR_SKIPPED}"
+          JOBS_JSON=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs?per_page=100" --jq '.jobs')
+
+          ERRORS=()
+          for GATE in "${REQUIRED_GATES[@]}"; do
+            CONCLUSION=$(echo "${JOBS_JSON}" | jq -r --arg name "$GATE" '
+              [.[] | select(.name == $name)][0] | if . == null then "MISSING" else .conclusion end
+            ')
+            if [ "$CONCLUSION" != "success" ]; then
+              ERRORS+=("${GATE}: ${CONCLUSION}")
+            fi
+          done
+
+          if [ ${#ERRORS[@]} -gt 0 ]; then
+            echo "ERROR: Not all required certification gates succeeded for run ${RUN_ID}:"
+            for ERR in "${ERRORS[@]}"; do
+              echo "  - ${ERR}"
+            done
             exit 1
           fi
 
-          echo "CI run ${RUN_ID} is 100% green (all critical jobs succeeded) for SHA ${SHA}. Proceeding with publish."
+          echo "CI run ${RUN_ID} is 100% green across all 14 required gates for SHA ${SHA}. Proceeding with publish."
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

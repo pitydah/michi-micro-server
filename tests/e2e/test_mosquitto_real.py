@@ -6,10 +6,10 @@ Verifies end-to-end MQTT integration between a real Mosquitto broker
 and Michi Micro Server (`michi-homeassistant` crate):
 1. Starts real Mosquitto broker on an ephemeral port.
 2. Starts Michi Micro Server with MICHI_MQTT_HOST and MICHI_MQTT_PORT.
-3. Verifies Home Assistant Auto-Discovery payload publications (Sensors, Switches, Numbers).
-4. Verifies state updates (status, playback, volume).
-5. Sends MQTT commands (play_pause, volume_set, next, previous) and validates execution on Micro.
-6. Injects broker restart / connection drop and verifies automatic reconnect resilience within 5s.
+3. Verifies Home Assistant Auto-Discovery payload publications (15/15 Sensors, Buttons, Numbers).
+4. Verifies state updates (server_status, volume).
+5. Sends MQTT volume_set command and validates state update on Micro.
+6. Injects broker restart / connection drop and verifies automatic reconnect and discovery re-announcement.
 
 Usage:
   python3 tests/e2e/test_mosquitto_real.py --broker-port 18885 --server-port 9098
@@ -120,12 +120,17 @@ class MiniMqttClient:
             return ("PUBLISH", topic, payload)
         elif pkt_type == 0x90:
             pkid = struct.unpack(">H", body[0:2])[0] if len(body) >= 2 else 0
+            granted_qos = body[2] if len(body) >= 3 else 0
+            if granted_qos == 0x80:
+                raise RuntimeError(f"MQTT subscription rejected for pkid {pkid} (granted QoS 0x80)")
             return ("SUBACK", pkid)
         elif pkt_type == 0x40:
             pkid = struct.unpack(">H", body[0:2])[0] if len(body) >= 2 else 0
             return ("PUBACK", pkid)
         elif pkt_type == 0x20:
             rc = body[1] if len(body) > 1 else 0
+            if rc != 0:
+                raise ConnectionRefusedError(f"MQTT connection refused by broker with return code {rc}")
             return ("CONNACK", rc)
         return ("OTHER", pkt_type)
 
