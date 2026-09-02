@@ -280,6 +280,13 @@ pub async fn hls_segment_handler(
         )
     }
 
+    if state.disabled_modules.read().await.contains("stream") {
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Streaming module is disabled",
+        ));
+    }
+
     let segment_path = michi_streaming::hls_segment_path(&state.config.cache_path, &id, &segment);
     if !segment_path.exists() {
         return Err(err(StatusCode::NOT_FOUND, "HLS segment not found"));

@@ -5630,4 +5630,116 @@ async fn test_settings_put_all_17_fields_matrix_persists_truthfully() {
         cfg["sync_peers"],
         serde_json::json!(["http://192.168.1.50:9090", "http://10.0.0.5:9090"])
     );
+
+    // Verify UI preferences are immediately reflected in top-level fields
+    assert_eq!(settings["language"], "es");
+    assert_eq!(settings["theme"], "light");
+    assert_eq!(settings["sidebar_collapsed"], true);
+    assert_eq!(settings["cover_art_enabled"], false);
+}
+
+#[tokio::test]
+async fn test_hls_segments_fail_closed_when_stream_disabled() {
+    let (app, _pool) = make_app().await;
+
+    // Disable stream module
+    let toggle_body = serde_json::json!({
+        "name": "stream",
+        "enabled": false
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&toggle_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // HLS segment request fails closed with 503
+    let tid = uuid::Uuid::new_v4();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/hls/{tid}/segment_000.ts"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_lan_policy_ignores_spoofed_client_ip_in_body() {
+    let (app, _pool, _state) = make_app_with_state().await;
+
+    // Attacker tries to spoof LAN IP in JSON body
+    let body = serde_json::json!({
+        "client_ip": "192.168.1.100"
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/policy/lan")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    // Default mock connection without proxy header resolves to 127.0.0.1 (local)
+    assert_eq!(json["client_ip"], "127.0.0.1");
+}
+
+#[tokio::test]
+async fn test_sync_peer_validation_rejects_invalid_urls() {
+    let (app, _pool) = make_app().await;
+
+    // 1. Invalid scheme (ftp)
+    let body = serde_json::json!({
+        "sync_peers": ["ftp://peer:9090"]
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/settings")
+                .method("PUT")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // 2. Embedded credentials
+    let body = serde_json::json!({
+        "sync_peers": ["http://user:pass@192.168.1.50:9090"]
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/settings")
+                .method("PUT")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

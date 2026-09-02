@@ -178,10 +178,18 @@ pub async fn v1_hls_segment_handler(
     State(state): State<AppState>,
     Path((id, segment)): Path<(String, String)>,
 ) -> Result<axum::response::Response, (StatusCode, Json<V1Error>)> {
+    if state.disabled_modules.read().await.contains("stream") {
+        return Err(v1_map_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Streaming module is disabled",
+            "MODULE_DISABLED",
+        ));
+    }
     crate::stream::hls_segment_handler(State(state), Path((id, segment)))
         .await
         .map_err(|(status, err)| {
             let code = match status {
+                StatusCode::SERVICE_UNAVAILABLE => "MODULE_DISABLED",
                 StatusCode::NOT_FOUND => "NOT_FOUND",
                 _ => "INTERNAL_ERROR",
             };

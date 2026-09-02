@@ -2852,12 +2852,12 @@ async function loadSettings() {
     var s = await MichiAPI.settings();
     if (!$('#settings-port')) return;
     $('#settings-port').textContent = s.port;
-    $('#settings-version').textContent = s.version || State.serverInfo?.version || '?';
-    $('#settings-ffmpeg').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
-    $('#settings-ffmpeg-avail').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
-    $('#settings-resource-profile').value = s.resource_profile;
-    $('#settings-stream-profile').value = s.stream_profile;
-    $('#settings-format-policy').value = s.format_policy;
+    if ($('#settings-version')) $('#settings-version').textContent = s.version || State.serverInfo?.version || '?';
+    if ($('#settings-ffmpeg')) $('#settings-ffmpeg').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
+    if ($('#settings-ffmpeg-avail')) $('#settings-ffmpeg-avail').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
+    if ($('#settings-resource-profile')) $('#settings-resource-profile').value = s.resource_profile;
+    if ($('#settings-stream-profile')) $('#settings-stream-profile').value = s.stream_profile;
+    if ($('#settings-format-policy')) $('#settings-format-policy').value = s.format_policy;
     if ($('#settings-job-max-concurrent')) $('#settings-job-max-concurrent').value = s.job_max_concurrent || 3;
     if ($('#settings-max-remote-bitrate')) $('#settings-max-remote-bitrate').value = s.max_remote_bitrate || 320000;
     if ($('#settings-scrobble-toggle')) $('#settings-scrobble-toggle').value = s.scrobble_enabled ? 'true' : 'false';
@@ -2870,16 +2870,11 @@ async function loadSettings() {
     if ($('#settings-cover-art')) $('#settings-cover-art').value = (s.cover_art_enabled !== false) ? 'true' : 'false';
     if ($('#settings-sidebar-collapsed')) $('#settings-sidebar-collapsed').value = s.sidebar_collapsed ? 'true' : 'false';
 
-    // Synchronize server-to-browser authority for theme and language
-    if (s.theme && s.theme !== localStorage.getItem('michi_theme')) {
-      setTheme(s.theme, false);
-    }
-    if (s.language && s.language !== _currentLang) {
-      loadI18n(s.language);
-      if ($('#lang-select')) $('#lang-select').value = s.language;
-    }
+    // Apply real consumer effect for cover art and sidebar
+    applyCoverArtPreference(s.cover_art_enabled !== false);
+    applySidebarPreference(!!s.sidebar_collapsed);
 
-    // Dynamic Watcher Status
+    // Dynamic Watcher Status with honest fail-closed fallback
     var watcherEl = $('#settings-watcher-status');
     if (watcherEl) {
       try {
@@ -2893,19 +2888,19 @@ async function loadSettings() {
           watcherEl.textContent = '● Active (5s Polling)';
         }
       } catch (e) {
-        watcherEl.className = 'badge stable';
-        watcherEl.textContent = '● Active (5s Polling)';
+        watcherEl.className = 'badge disabled';
+        watcherEl.textContent = '⚠ Status Unavailable';
       }
     }
 
     renderSyncPeers(s.sync_peers || []);
 
-    $('#settings-music-paths').textContent = (s.music_paths || []).join('\n') || 'No paths configured';
-    $('#settings-sync-name').textContent = s.sync_name || '--';
-    $('#settings-cors').textContent = s.cors_origin || 'Restrictive (default)';
-    $('#settings-auth').innerHTML = s.auth_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
-    $('#settings-dev-mode').innerHTML = s.dev_mode ? '<span class="badge stable">On</span>' : '<span class="badge disabled">Off</span>';
-    $('#settings-scrobble').innerHTML = s.scrobble_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
+    if ($('#settings-music-paths')) $('#settings-music-paths').textContent = (s.music_paths || []).join('\n') || 'No paths configured';
+    if ($('#settings-sync-name')) $('#settings-sync-name').textContent = s.sync_name || '--';
+    if ($('#settings-cors')) $('#settings-cors').textContent = s.cors_origin || 'Restrictive (default)';
+    if ($('#settings-auth')) $('#settings-auth').innerHTML = s.auth_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
+    if ($('#settings-dev-mode')) $('#settings-dev-mode').innerHTML = s.dev_mode ? '<span class="badge stable">On</span>' : '<span class="badge disabled">Off</span>';
+    if ($('#settings-scrobble')) $('#settings-scrobble').innerHTML = s.scrobble_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
 
     var scanWorkers = s.effective_scan_workers !== undefined ? s.effective_scan_workers : (s.resource_profile === 'eco' ? 1 : (s.resource_profile === 'performance' ? 4 : 2));
     var maxTc = s.effective_transcode_workers !== undefined ? s.effective_transcode_workers : (s.resource_profile === 'eco' ? 0 : (s.resource_profile === 'performance' ? 4 : 2));
@@ -2961,6 +2956,30 @@ async function loadSettings() {
   } catch (e) { console.warn('settings:', e.message); }
 }
 
+function applyCoverArtPreference(enabled) {
+  if (document.documentElement) document.documentElement.setAttribute('data-cover-art', enabled ? 'true' : 'false');
+  if (document.body) {
+    if (!enabled) {
+      document.body.classList.add('hide-cover-art');
+    } else {
+      document.body.classList.remove('hide-cover-art');
+    }
+  }
+}
+
+function applySidebarPreference(collapsed) {
+  if (document.documentElement) document.documentElement.setAttribute('data-sidebar-collapsed', collapsed ? 'true' : 'false');
+  var sidebar = $('#sidebar') || $('.sidebar');
+  if (sidebar) {
+    if (collapsed) {
+      sidebar.classList.add('collapsed');
+    } else {
+      sidebar.classList.remove('collapsed');
+    }
+  }
+  if (document.body) document.body.classList.toggle('sidebar-collapsed', !!collapsed);
+}
+
 function renderRestartBanner(fieldsStr) {
   var banner = $('#settings-restart-banner');
   if (!banner) {
@@ -2987,6 +3006,11 @@ async function saveSetting(key, value) {
   body[key] = value;
   try {
     var res = await MichiAPI.updateSettings(body);
+    if (key === 'cover_art_enabled') {
+      applyCoverArtPreference(value);
+    } else if (key === 'sidebar_collapsed') {
+      applySidebarPreference(value);
+    }
     if (res && res.restart_required) {
       var pStr = res.pending_restart_fields && res.pending_restart_fields.length > 0
         ? ' (' + res.pending_restart_fields.join(', ') + ')'
@@ -3031,7 +3055,7 @@ async function addSyncPeer() {
 }
 
 async function removeSyncPeer(idx) {
-  if (idx < 0 || idx >= _currentPeers.len) {}
+  if (idx < 0 || idx >= _currentPeers.length) return;
   var updated = _currentPeers.filter(function(_, i) { return i !== idx; });
   await saveSetting('sync_peers', updated);
 }

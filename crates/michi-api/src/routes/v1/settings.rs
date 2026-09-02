@@ -232,10 +232,22 @@ pub async fn get_settings_handler(State(state): State<AppState>) -> Json<Setting
         dev_mode: cfg.dev_mode,
         scrobble_enabled: cfg.scrobble_enabled,
         ffmpeg_available: michi_streaming::check_ffmpeg(),
-        language: cfg.language.clone(),
-        theme: cfg.ui.theme.clone(),
-        sidebar_collapsed: cfg.ui.sidebar_collapsed,
-        cover_art_enabled: cfg.ui.cover_art_enabled,
+        language: disk_cfg
+            .as_ref()
+            .map(|d| d.language.clone())
+            .unwrap_or_else(|| cfg.language.clone()),
+        theme: disk_cfg
+            .as_ref()
+            .map(|d| d.ui.theme.clone())
+            .unwrap_or_else(|| cfg.ui.theme.clone()),
+        sidebar_collapsed: disk_cfg
+            .as_ref()
+            .map(|d| d.ui.sidebar_collapsed)
+            .unwrap_or(cfg.ui.sidebar_collapsed),
+        cover_art_enabled: disk_cfg
+            .as_ref()
+            .map(|d| d.ui.cover_art_enabled)
+            .unwrap_or(cfg.ui.cover_art_enabled),
         auto_backup_enabled: cfg.auto_backup_enabled,
         backup_max_keep: cfg.backup_max_keep,
         job_max_concurrent: cfg.job_max_concurrent,
@@ -322,7 +334,7 @@ pub async fn update_settings_handler(
         None
     };
 
-    // 2. Strict Range Validation
+    // 2. Strict Range and Format Validation
     if let Some(v) = body.job_max_concurrent {
         if !(1..=32).contains(&v) {
             return Err(v1_error(
@@ -364,6 +376,43 @@ pub async fn update_settings_handler(
                 "max_remote_bitrate must be between 32000 and 20000000 bps",
                 Some("max_remote_bitrate"),
             ));
+        }
+    }
+
+    if let Some(ref peers) = body.sync_peers {
+        for peer in peers {
+            let parsed = reqwest::Url::parse(peer).map_err(|_| {
+                v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "VALIDATION_ERROR",
+                    &format!("invalid sync peer URL: '{peer}'"),
+                    Some("sync_peers"),
+                )
+            })?;
+            if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                return Err(v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "VALIDATION_ERROR",
+                    "sync peer URL must use http or https scheme",
+                    Some("sync_peers"),
+                ));
+            }
+            if parsed.host_str().is_none() {
+                return Err(v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "VALIDATION_ERROR",
+                    "sync peer URL must have a valid host",
+                    Some("sync_peers"),
+                ));
+            }
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                return Err(v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "VALIDATION_ERROR",
+                    "sync peer URL must not contain embedded credentials",
+                    Some("sync_peers"),
+                ));
+            }
         }
     }
 

@@ -160,6 +160,12 @@ class MockElement {
   }
 
   _query(sel) {
+    if (sel.includes(' ')) {
+      const parts = sel.split(' ');
+      const first = this._query(parts[0]);
+      if (first) return first._query(parts.slice(1).join(' '));
+      return null;
+    }
     if (sel.startsWith('#')) {
       const id = sel.slice(1);
       if (this.id === id) return this;
@@ -175,12 +181,6 @@ class MockElement {
         if (found) return found;
       }
     } else {
-      if (sel.includes(' ')) {
-        const parts = sel.split(' ');
-        const first = this._query(parts[0]);
-        if (first) return first._query(parts.slice(1).join(' '));
-        return null;
-      }
       if (sel.includes('[')) {
         return null;
       }
@@ -221,6 +221,7 @@ function createDOM() {
   }
 
   const doc = {
+    documentElement: el('html'),
     body: el('body'),
     head: el('head'),
     createElement: (tag) => el(tag),

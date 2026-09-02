@@ -1155,6 +1155,7 @@ fn v1_link_routes() -> Router<AppState> {
             "/api/v1/stream/:id",
             get(routes::v1::stream::stream_handler),
         )
+        .route("/api/v1/hls/:id/:segment", get(stream::hls_segment_handler))
         .route(
             "/api/v1/download/:id",
             get(routes::v1::stream::download_handler),
@@ -1805,6 +1806,7 @@ pub fn create_router(state: AppState) -> Router {
             get(library::get_playback_state_handler).post(library::set_playback_state_handler),
         )
         .route("/api/stream/:id", get(stream::stream_handler))
+        .route("/api/hls/:id/:segment", get(stream::hls_segment_handler))
         .route("/api/playback/record", post(scrobble::record_play_handler))
         .route("/api/history", get(scrobble::history_handler))
         .layer(middleware::from_fn_with_state(
