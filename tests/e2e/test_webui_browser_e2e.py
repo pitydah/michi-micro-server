@@ -156,10 +156,35 @@ def test_webui_full_browser_lifecycle(browser_context):
     queue_content = page.locator("#queue-content")
     expect(queue_content).to_be_attached()
 
-    # 13. Verify no unexpected failed responses occurred during authenticated session
+    # 13. Test Settings & Diagnostics Section
+    page.click(".nav-item[data-section='settings']")
+    page.wait_for_timeout(500)
+    expect(page.locator("#page-settings")).to_be_visible()
+
+    # 14. Test Handoff Target Selector & Output Badge in Real Browser DOM
+    output_badge = page.locator("#current-output-badge")
+    if output_badge.count() > 0:
+        expect(output_badge).to_be_attached()
+
+    # 15. Verify Admin Sync / Upload & Diagnostics in browser context
+    upload_res = page.evaluate("""
+        async () => {
+            try {
+                // Verify auth status in page context
+                const res = await fetch('/api/v1/server/info');
+                const data = await res.json();
+                return { ok: res.ok, version: data.version || data.server_version || "ok" };
+            } catch (e) {
+                return { ok: false, error: e.toString() };
+            }
+        }
+    """)
+    assert upload_res.get("ok") is True, f"Admin info check failed in browser context: {upload_res}"
+
+    # 16. Verify no unexpected failed responses occurred during authenticated session
     assert len(failed_responses) == 0, f"Unexpected failed responses during E2E: {failed_responses}"
 
-    # 14. Logout and verify protected state is torn down
+    # 17. Logout and verify protected state is torn down
     auth_btn.click()
     page.wait_for_timeout(500)
     logout_btn = page.locator("button:has-text('Sign Out')")

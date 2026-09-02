@@ -1119,6 +1119,81 @@ mod tests {
         assert_eq!(dec5.output_mime_type, "audio/ogg");
     }
 
+    #[test]
+    fn test_max_remote_bitrate_clamping_enforcement() {
+        // 1. MP3 request (normally 192k) with max_remote_bitrate = 96k -> Clamped to 96k
+        let dec_mp3 = resolve_stream_decision(
+            &AudioFormat::Flac,
+            Some(44100),
+            Some(16),
+            Some("mp3"),
+            StreamProfile::Original,
+            michi_core::AudioFormatPolicy::StandardOnly,
+            michi_core::ResourceProfile::Balanced,
+            96_000,
+        )
+        .unwrap();
+        if let StreamMode::Transcode(plan) = dec_mp3.mode {
+            assert_eq!(plan.bitrate_bps, Some(96_000));
+        } else {
+            panic!("Expected transcode plan for MP3");
+        }
+
+        // 2. OpusMobile160 profile with max_remote_bitrate = 64k -> Clamped to 64k
+        let dec_opus = resolve_stream_decision(
+            &AudioFormat::Flac,
+            Some(44100),
+            Some(16),
+            None,
+            StreamProfile::OpusMobile160,
+            michi_core::AudioFormatPolicy::StandardOnly,
+            michi_core::ResourceProfile::Balanced,
+            64_000,
+        )
+        .unwrap();
+        if let StreamMode::Transcode(plan) = dec_opus.mode {
+            assert_eq!(plan.bitrate_bps, Some(64_000));
+        } else {
+            panic!("Expected transcode plan for OpusMobile160");
+        }
+
+        // 3. Mp3Compatibility320 with max_remote_bitrate = 128k -> Clamped to 128k
+        let dec_mp3_320 = resolve_stream_decision(
+            &AudioFormat::Flac,
+            Some(44100),
+            Some(16),
+            None,
+            StreamProfile::Mp3Compatibility320,
+            michi_core::AudioFormatPolicy::StandardOnly,
+            michi_core::ResourceProfile::Balanced,
+            128_000,
+        )
+        .unwrap();
+        if let StreamMode::Transcode(plan) = dec_mp3_320.mode {
+            assert_eq!(plan.bitrate_bps, Some(128_000));
+        } else {
+            panic!("Expected transcode plan for Mp3Compatibility320");
+        }
+
+        // 4. Mp3Compatibility320 with unconstrained max_remote_bitrate (500k) -> Uses 320k
+        let dec_unconstrained = resolve_stream_decision(
+            &AudioFormat::Flac,
+            Some(44100),
+            Some(16),
+            None,
+            StreamProfile::Mp3Compatibility320,
+            michi_core::AudioFormatPolicy::StandardOnly,
+            michi_core::ResourceProfile::Balanced,
+            500_000,
+        )
+        .unwrap();
+        if let StreamMode::Transcode(plan) = dec_unconstrained.mode {
+            assert_eq!(plan.bitrate_bps, Some(320_000));
+        } else {
+            panic!("Expected transcode plan for unconstrained Mp3Compatibility320");
+        }
+    }
+
     #[tokio::test]
     async fn test_real_ffmpeg_transcode_effect_execution() {
         use futures_util::StreamExt;
