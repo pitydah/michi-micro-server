@@ -1431,8 +1431,12 @@ fn v1_link_routes() -> Router<AppState> {
         )
         .route("/api/v1/modules", get(routes::v1::modules::modules_handler))
         .route(
-            "/api/v1/modules/:name",
+            "/api/v1/modules/toggle",
             post(routes::v1::modules::toggle_module_handler),
+        )
+        .route(
+            "/api/v1/modules/:name",
+            post(routes::v1::modules::toggle_module_path_handler),
         )
         .route(
             "/api/v1/changes",

@@ -120,6 +120,13 @@ pub async fn queue_items_handler(
     State(state): State<AppState>,
     Json(body): Json<QueueItemsBody>,
 ) -> Result<Json<serde_json::value::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
     if body.track_ids.is_empty() {
         return Err(v1_error(
             StatusCode::BAD_REQUEST,
@@ -271,6 +278,13 @@ pub async fn queue_jump_handler(
     State(state): State<AppState>,
     Json(body): Json<QueueJumpBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
     let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -458,6 +472,13 @@ pub async fn queue_transfer_handler(
     State(state): State<AppState>,
     Json(body): Json<QueueTransferBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
     if body.track_ids.is_empty() {
         return Err(v1_error(
             StatusCode::BAD_REQUEST,
@@ -617,6 +638,13 @@ pub async fn queue_reorder_handler(
     State(state): State<AppState>,
     Json(body): Json<QueueReorderBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
     let queue_id = if let Some(qid) = body.queue_id {
         qid
     } else {
@@ -805,6 +833,21 @@ pub async fn queue_delete_handler(
     State(state): State<AppState>,
     Path(queue_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
+    let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
     let mut tx = state.db.begin().await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -829,17 +872,9 @@ pub async fn queue_delete_handler(
         return Err(v1_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
-            "queue not found",
+            &format!("queue {queue_id} not found"),
         ));
     }
-
-    let queue_name: Option<String> = sqlx::query_scalar("SELECT name FROM queues WHERE id = ?")
-        .bind(queue_id.to_string())
-        .fetch_optional(&mut *tx)
-        .await
-        .unwrap_or(None);
-
-    let is_active = queue_name.as_deref() == Some("active-queue");
 
     sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
         .bind(queue_id.to_string())
@@ -853,17 +888,20 @@ pub async fn queue_delete_handler(
             )
         })?;
 
-    sqlx::query("DELETE FROM queues WHERE id = ?")
-        .bind(queue_id.to_string())
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "DATABASE_ERROR",
-                &e.to_string(),
-            )
-        })?;
+    // Do not delete active queue row from queues table to preserve singleton invariant
+    if queue_id != active_queue_id {
+        sqlx::query("DELETE FROM queues WHERE id = ?")
+            .bind(queue_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
+    }
 
     tx.commit().await.map_err(|e| {
         v1_error(
@@ -873,7 +911,8 @@ pub async fn queue_delete_handler(
         )
     })?;
 
-    if is_active {
+    // V-P0-04: Only clear engine queue if clearing the canonical active queue
+    if queue_id == active_queue_id {
         state
             .playback_engine
             .set_queue(Vec::new(), 0, None)
@@ -903,6 +942,13 @@ pub async fn queue_save_handler(
     State(state): State<AppState>,
     Json(body): Json<QueueSaveBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
     let session_id = michi_db::save_queue_state(
         &state.db,
         "saved-queue",
@@ -929,6 +975,13 @@ pub async fn queue_save_handler(
 pub async fn queue_saved_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
     let session = michi_db::get_latest_playback_session(&state.db)
         .await
         .map_err(|e| {

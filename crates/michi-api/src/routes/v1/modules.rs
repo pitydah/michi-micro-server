@@ -67,6 +67,28 @@ pub struct ToggleModuleBody {
     pub enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ToggleModulePathBody {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub enabled: bool,
+}
+
+pub async fn toggle_module_path_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Json(body): Json<ToggleModulePathBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    toggle_module_handler(
+        State(state),
+        Json(ToggleModuleBody {
+            name,
+            enabled: body.enabled,
+        }),
+    )
+    .await
+}
+
 pub async fn toggle_module_handler(
     State(state): State<AppState>,
     Json(body): Json<ToggleModuleBody>,
@@ -81,7 +103,9 @@ pub async fn toggle_module_handler(
         ));
     }
 
-    let is_currently_disabled = state.disabled_modules.read().await.contains(&body.name);
+    // Atomic critical section across concurrent requests
+    let mut disabled = state.disabled_modules.write().await;
+    let is_currently_disabled = disabled.contains(&body.name);
 
     if body.enabled {
         // Idempotency: If already enabled (ON -> ON), it is a safe NO-OP (do not replace tokens or duplicate workers)
@@ -93,7 +117,9 @@ pub async fn toggle_module_handler(
         }
 
         // Transition OFF -> ON
-        state.disabled_modules.write().await.remove(&body.name);
+        disabled.remove(&body.name);
+        drop(disabled);
+
         let mut tokens = state.module_tokens.write().await;
         let new_token = tokio_util::sync::CancellationToken::new();
         tokens.insert(body.name.clone(), new_token.clone());
@@ -136,14 +162,20 @@ pub async fn toggle_module_handler(
         }
 
         // Transition ON -> OFF
-        state
-            .disabled_modules
-            .write()
-            .await
-            .insert(body.name.clone());
+        disabled.insert(body.name.clone());
+        drop(disabled);
+
         if let Some(token) = state.module_tokens.read().await.get(&body.name).cloned() {
             token.cancel();
             tracing::info!("module '{}' disabled, tasks cancelled", body.name);
+        }
+
+        // Stop and neutralize PlaybackEngine when Playback module is toggled OFF
+        if body.name == "playback" {
+            let _ = state.playback_engine.stop().await;
+            let _ = state.playback_engine.set_queue(Vec::new(), 0, None).await;
+            *state.playback_output_selection.write().await = None;
+            tracing::info!("playback module disabled: playback engine stopped and neutralized");
         }
     }
 

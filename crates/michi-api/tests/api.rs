@@ -6116,3 +6116,287 @@ async fn test_playback_module_toggle_fails_closed_when_disabled() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_playback_module_off_stops_engine_and_blocks_queue_perimeter() {
+    let (app, pool, state) = make_app_with_state().await;
+
+    // 1. Add track and simulate playback
+    let track_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO tracks (id, title, artist, album, duration_ms, file_path, file_size, format, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
+    .bind(track_id.to_string())
+    .bind("Perimeter Track")
+    .bind("Perimeter Artist")
+    .bind("Perimeter Album")
+    .bind(180000i64)
+    .bind("/music/test.flac")
+    .bind(1024i64)
+    .bind("flac")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 2. Disable playback module
+    let body_off = serde_json::json!({
+        "name": "playback",
+        "enabled": false
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_off).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 3. Active sessions must report 0 streams when playback module is OFF
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sessions/active")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let streams_json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(streams_json["streams"].as_array().unwrap().len(), 0);
+
+    // 4. Test all Queue endpoints fail-closed with 503 SERVICE_UNAVAILABLE
+    // 4a. POST /api/v1/queue/items
+    let q_items_body = serde_json::json!({ "track_ids": [track_id] });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/queue/items")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&q_items_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 4b. POST /api/v1/queue/jump
+    let q_jump_body = serde_json::json!({ "index": 0 });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/queue/jump")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&q_jump_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 4c. POST /api/v1/queue/transfer
+    let q_transfer_body = serde_json::json!({
+        "track_ids": [track_id],
+        "current_index": 0,
+        "position_ms": 1000,
+        "source": "test_device"
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/queue/transfer")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&q_transfer_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 4d. PUT /api/v1/queue/reorder
+    let q_reorder_body = serde_json::json!({ "item_ids": [Uuid::new_v4()] });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/queue/reorder")
+                .method("PUT")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&q_reorder_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 4e. DELETE /api/v1/queue/:id
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/queue/{}", Uuid::new_v4()))
+                .method("DELETE")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 4f. POST /api/v1/queue/save
+    let q_save_body = serde_json::json!({
+        "track_ids": [track_id],
+        "current_index": 0,
+        "position_ms": 1000
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/queue/save")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&q_save_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 4g. GET /api/v1/queue/saved
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/queue/saved")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_concurrent_module_toggles_are_atomic_and_idempotent() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    // 1. Initial token
+    let initial_token = state
+        .module_tokens
+        .read()
+        .await
+        .get("homeassistant")
+        .cloned()
+        .unwrap();
+
+    // 2. Launch 10 concurrent enable requests simultaneously
+    let mut handles = Vec::new();
+    for _ in 0..10 {
+        let app_clone = app.clone();
+        handles.push(tokio::spawn(async move {
+            let body_on = serde_json::json!({
+                "name": "homeassistant",
+                "enabled": true
+            });
+            app_clone
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/modules/toggle")
+                        .method("POST")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(serde_json::to_string(&body_on).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }));
+    }
+
+    for h in handles {
+        let resp = h.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // 3. Verify module is still enabled and token remained intact without corruption
+    assert!(!state
+        .disabled_modules
+        .read()
+        .await
+        .contains("homeassistant"));
+
+    // 4. Toggle OFF and verify initial token is properly cancelled
+    let body_off = serde_json::json!({
+        "name": "homeassistant",
+        "enabled": false
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_off).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(initial_token.is_cancelled());
+}
+
+#[tokio::test]
+async fn test_module_toggle_via_path_param() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    // Toggle via POST /api/v1/modules/:name
+    let body_off = serde_json::json!({
+        "enabled": false
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/stream")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_off).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(state.disabled_modules.read().await.contains("stream"));
+
+    let body_on = serde_json::json!({
+        "enabled": true
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/stream")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_on).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(!state.disabled_modules.read().await.contains("stream"));
+}

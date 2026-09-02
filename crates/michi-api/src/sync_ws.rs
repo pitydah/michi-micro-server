@@ -8,7 +8,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use michi_playback::TrackResolver;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::AppState;
 
@@ -127,54 +127,63 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                 // Dispatch state commands to PlaybackEngine so PlaybackProjectionCoordinator
                                 // remains the single authoritative writer of PlaybackState.
                                 let mut all_applied = true;
-                                if let Some(tid) = track_id {
-                                    let resolver = michi_playback::SqliteTrackResolver::new(
-                                        state_clone.db.clone(),
-                                        state_clone.config.music_paths.clone(),
-                                    );
-                                    match resolver.get_track(*tid).await {
-                                        Ok(track) => {
-                                            if let Err(e) = state_clone
-                                                .playback_engine
-                                                .load_track(track, *position_ms)
-                                                .await
-                                            {
-                                                warn!("sync: failed to load track {tid}: {e}");
+                                if state_clone
+                                    .disabled_modules
+                                    .read()
+                                    .await
+                                    .contains("playback")
+                                {
+                                    debug!("sync: playback module disabled locally, skipping playback state application");
+                                } else {
+                                    if let Some(tid) = track_id {
+                                        let resolver = michi_playback::SqliteTrackResolver::new(
+                                            state_clone.db.clone(),
+                                            state_clone.config.music_paths.clone(),
+                                        );
+                                        match resolver.get_track(*tid).await {
+                                            Ok(track) => {
+                                                if let Err(e) = state_clone
+                                                    .playback_engine
+                                                    .load_track(track, *position_ms)
+                                                    .await
+                                                {
+                                                    warn!("sync: failed to load track {tid}: {e}");
+                                                    all_applied = false;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("sync: track {tid} not found locally: {e}");
                                                 all_applied = false;
                                             }
                                         }
-                                        Err(e) => {
-                                            warn!("sync: track {tid} not found locally: {e}");
+                                    } else if let Err(e) =
+                                        state_clone.playback_engine.seek(*position_ms).await
+                                    {
+                                        warn!("sync: failed to seek to {position_ms}ms: {e}");
+                                        all_applied = false;
+                                    }
+
+                                    if all_applied {
+                                        let play_res = if *playing {
+                                            state_clone.playback_engine.resume().await
+                                        } else {
+                                            state_clone.playback_engine.pause().await
+                                        };
+                                        if let Err(e) = play_res {
+                                            warn!("sync: failed to transition playback state: {e}");
                                             all_applied = false;
                                         }
                                     }
-                                } else if let Err(e) =
-                                    state_clone.playback_engine.seek(*position_ms).await
-                                {
-                                    warn!("sync: failed to seek to {position_ms}ms: {e}");
-                                    all_applied = false;
-                                }
 
-                                if all_applied {
-                                    let play_res = if *playing {
-                                        state_clone.playback_engine.resume().await
-                                    } else {
-                                        state_clone.playback_engine.pause().await
-                                    };
-                                    if let Err(e) = play_res {
-                                        warn!("sync: failed to transition playback state: {e}");
-                                        all_applied = false;
-                                    }
-                                }
-
-                                if all_applied {
-                                    let vol_u8 =
-                                        ((*volume * 100.0).round().clamp(0.0, 100.0)) as u8;
-                                    if let Err(e) =
-                                        state_clone.playback_engine.set_volume(vol_u8).await
-                                    {
-                                        warn!("sync: failed to set volume {vol_u8}: {e}");
-                                        all_applied = false;
+                                    if all_applied {
+                                        let vol_u8 =
+                                            ((*volume * 100.0).round().clamp(0.0, 100.0)) as u8;
+                                        if let Err(e) =
+                                            state_clone.playback_engine.set_volume(vol_u8).await
+                                        {
+                                            warn!("sync: failed to set volume {vol_u8}: {e}");
+                                            all_applied = false;
+                                        }
                                     }
                                 }
 
@@ -216,7 +225,15 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                 {
                                     Ok(session) => {
                                         let mut takeover_ok = true;
-                                        if let Some(tid) = session.track_id {
+                                        if state_clone
+                                            .disabled_modules
+                                            .read()
+                                            .await
+                                            .contains("playback")
+                                        {
+                                            warn!("handoff: takeover rejected because playback module is disabled");
+                                            takeover_ok = false;
+                                        } else if let Some(tid) = session.track_id {
                                             let resolver = michi_playback::SqliteTrackResolver::new(
                                                 state_clone.db.clone(),
                                                 state_clone.config.music_paths.clone(),
