@@ -20,24 +20,32 @@ services:
       - MICHI_AUTH_USERNAME=${MICHI_AUTH_USERNAME:-admin}
       - MICHI_AUTH_PASSWORD=${MICHI_AUTH_PASSWORD:?A strong Michi administrator password is required}
     restart: unless-stopped
+    labels:
+      icon: https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server.svg
 
 x-casaos:
+  id: io.michi.micro-server
+  main: michi-micro-server
+  main_app: michi-micro-server
   architectures:
     - amd64
     - arm64
-  main: michi-micro-server
-  main_app: michi-micro-server
   author: pitydah
-  category: music
-  description:
-    en_us: Lightweight, robust home music server. Stream your local music library over your home network or Tailscale.
+  category: Music
   developer: pitydah
-  icon: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server-512.png"
+  icon: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server.svg"
+  thumbnail: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server-512.png"
   screenshot_link: []
   tagline:
-    en_us: Your music, streamed simply.
-  thumbnail: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server-512.png"
+    en_US: Your music, streamed simply.
+    es_ES: Tu música, transmitida con sencillez.
+  description:
+    en_US: Lightweight, robust home music server. Stream your local music library over your home network or Tailscale.
+    es_ES: Servidor de música doméstico robusto y ligero. Transmite tu biblioteca de música local a través de tu red doméstica o Tailscale.
   title:
-    en_us: Michi Micro Server
+    en_US: Michi Micro Server
+    es_ES: Servidor Michi Micro
   index: /
   port_map: "9090"
+  scheme: http
+  version: "3.1"

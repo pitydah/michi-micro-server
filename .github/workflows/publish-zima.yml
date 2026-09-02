@@ -173,12 +173,25 @@ jobs:
             echo "Source SHA $SHA is not current main HEAD ($MAIN_HEAD). Skipping mutable alias update to prevent rollback."
           fi
 
-      - name: Record certification image digest
+      - name: Build ZimaOS App Store package distribution
         run: |
-          echo "### ZimaOS Release Image Certification" >> $GITHUB_STEP_SUMMARY
+          set -euo pipefail
+          python3 scripts/build_zimaos_store.py
+
+      - name: Upload ZimaOS App Store package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zimaos-store-package-${{ steps.source.outputs.sha }}
+          path: dist/
+          retention-days: 90
+
+      - name: Record certification image digest and packaging summary
+        run: |
+          echo "### ZimaOS Release Image & App Package Certification" >> $GITHUB_STEP_SUMMARY
           echo "- **Source SHA**: \`${{ steps.source.outputs.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Image Digest**: \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Pinned URI**: \`ghcr.io/pitydah/michi-micro-server@${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **App Package**: \`dist/apps/io.michi.micro-server/\` (ID: \`io.michi.micro-server\`, Version: \`3.1\`)" >> $GITHUB_STEP_SUMMARY
           echo "Certified digest: ${{ steps.build.outputs.digest }}"
 
 
