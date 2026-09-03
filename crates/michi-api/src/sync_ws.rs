@@ -82,51 +82,54 @@ pub async fn apply_remote_playback_state(
     playing: bool,
     volume: f64,
 ) -> bool {
-    let mut all_applied = true;
+    let playback_lock = state.get_module_transition_lock("playback").await;
+    let _playback_guard = playback_lock.lock().await;
+
     if state.disabled_modules.read().await.contains("playback") {
         debug!("sync: playback module disabled locally, skipping playback state application");
-        all_applied = false;
-    } else {
-        if let Some(tid) = track_id {
-            let resolver = michi_playback::SqliteTrackResolver::new(
-                state.db.clone(),
-                state.config.music_paths.clone(),
-            );
-            match resolver.get_track(tid).await {
-                Ok(track) => {
-                    if let Err(e) = state.playback_engine.load_track(track, position_ms).await {
-                        warn!("sync: failed to load track {tid}: {e}");
-                        all_applied = false;
-                    }
-                }
-                Err(e) => {
-                    warn!("sync: track {tid} not found locally: {e}");
+        return false;
+    }
+
+    let mut all_applied = true;
+    if let Some(tid) = track_id {
+        let resolver = michi_playback::SqliteTrackResolver::new(
+            state.db.clone(),
+            state.config.music_paths.clone(),
+        );
+        match resolver.get_track(tid).await {
+            Ok(track) => {
+                if let Err(e) = state.playback_engine.load_track(track, position_ms).await {
+                    warn!("sync: failed to load track {tid}: {e}");
                     all_applied = false;
                 }
             }
-        } else if let Err(e) = state.playback_engine.seek(position_ms).await {
-            warn!("sync: failed to seek to {position_ms}ms: {e}");
+            Err(e) => {
+                warn!("sync: track {tid} not found locally: {e}");
+                all_applied = false;
+            }
+        }
+    } else if let Err(e) = state.playback_engine.seek(position_ms).await {
+        warn!("sync: failed to seek to {position_ms}ms: {e}");
+        all_applied = false;
+    }
+
+    if all_applied {
+        let play_res = if playing {
+            state.playback_engine.resume().await
+        } else {
+            state.playback_engine.pause().await
+        };
+        if let Err(e) = play_res {
+            warn!("sync: failed to transition playback state: {e}");
             all_applied = false;
         }
+    }
 
-        if all_applied {
-            let play_res = if playing {
-                state.playback_engine.resume().await
-            } else {
-                state.playback_engine.pause().await
-            };
-            if let Err(e) = play_res {
-                warn!("sync: failed to transition playback state: {e}");
-                all_applied = false;
-            }
-        }
-
-        if all_applied {
-            let vol_u8 = ((volume * 100.0).round().clamp(0.0, 100.0)) as u8;
-            if let Err(e) = state.playback_engine.set_volume(vol_u8).await {
-                warn!("sync: failed to set volume {vol_u8}: {e}");
-                all_applied = false;
-            }
+    if all_applied {
+        let vol_u8 = ((volume * 100.0).round().clamp(0.0, 100.0)) as u8;
+        if let Err(e) = state.playback_engine.set_volume(vol_u8).await {
+            warn!("sync: failed to set volume {vol_u8}: {e}");
+            all_applied = false;
         }
     }
 
@@ -149,14 +152,7 @@ pub async fn apply_remote_playback_state(
 }
 
 async fn handle_sync(socket: WebSocket, state: AppState) {
-    let sync_cancel = state
-        .module_tokens
-        .read()
-        .await
-        .get("sync")
-        .cloned()
-        .unwrap_or_default();
-    let (mut sender, mut receiver) = socket.split();
+    let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // Send identify message
     let identify = michi_sync::SyncMessage::Identify {
@@ -164,245 +160,265 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
         version: env!("CARGO_PKG_VERSION").into(),
         device_type: michi_sync::DeviceType::Server,
     };
-    if let Ok(json) = identify.serialize() {
-        let _ = sender.send(Message::Text(json)).await;
+    if let Ok(json) = serde_json::to_string(&identify) {
+        let _ = ws_sender.send(Message::Text(json)).await;
     }
 
-    // Subscribe to sync_tx for local state changes
-    let mut sync_rx = state.sync_tx.subscribe();
+    let sync_cancel = state
+        .module_tokens
+        .read()
+        .await
+        .get("sync")
+        .cloned()
+        .unwrap_or_default();
 
-    // Send current state on connect
-    {
-        let current = state.playback_state.read().await;
-        let msg: michi_sync::SyncMessage = current.clone().into();
-        if let Ok(json) = msg.serialize() {
-            let _ = sender.send(Message::Text(json)).await;
-        }
-    }
-
+    let mut rx = state.sync_tx.subscribe();
+    let sync_cancel_send = sync_cancel.clone();
+    let shutdown_send = state.shutdown_token.clone();
     let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = sync_rx.recv().await {
-            if let Ok(json) = msg.serialize() {
-                if sender.send(Message::Text(json)).await.is_err() {
-                    break;
+        loop {
+            tokio::select! {
+                _ = sync_cancel_send.cancelled() => break,
+                _ = shutdown_send.cancelled() => break,
+                msg = rx.recv() => {
+                    match msg {
+                        Ok(sync_msg) => {
+                            if let Ok(json) = serde_json::to_string(&sync_msg) {
+                                if ws_sender.send(Message::Text(json)).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("sync: ws sender lagged by {} messages", n);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
                 }
             }
         }
     });
 
     let state_clone = state.clone();
+    let sync_cancel_recv = sync_cancel.clone();
+    let shutdown_recv = state.shutdown_token.clone();
     let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = receiver.next().await {
-            match msg {
-                Message::Text(text) => {
-                    if let Ok(sync_msg) = michi_sync::SyncMessage::deserialize(&text) {
-                        match &sync_msg {
-                            michi_sync::SyncMessage::State {
-                                track_id,
-                                position_ms,
-                                playing,
-                                volume,
-                                updated_at: _,
-                                playlist_id: _,
-                                queue_position: _,
-                            } => {
-                                info!(
-                                    "sync: received state track={:?} pos={} playing={}",
-                                    track_id, position_ms, playing
-                                );
-                                apply_remote_playback_state(
-                                    &state_clone,
-                                    *track_id,
-                                    *position_ms,
-                                    *playing,
-                                    *volume,
-                                )
-                                .await;
-                            }
-                            michi_sync::SyncMessage::Identify { name, .. } => {
-                                info!("sync: connected peer identified as '{}'", name);
-                            }
-                            michi_sync::SyncMessage::Ping => {}
-                            michi_sync::SyncMessage::Pong => {}
-                            michi_sync::SyncMessage::HandoffRequest {
-                                from_device,
-                                to_device,
-                            } => {
-                                info!(
-                                    "sync: handoff request from {} to {}",
-                                    from_device, to_device
-                                );
-
-                                if state_clone
-                                    .disabled_modules
-                                    .read()
-                                    .await
-                                    .contains("playback")
-                                {
-                                    warn!("handoff: playback module disabled; refusing handoff offer for {} -> {}", from_device, to_device);
-                                } else {
-                                    match state_clone
-                                        .sync_manager
-                                        .initiate_handoff(
-                                            from_device.clone(),
-                                            to_device.clone(),
+        loop {
+            tokio::select! {
+                _ = sync_cancel_recv.cancelled() => break,
+                _ = shutdown_recv.cancelled() => break,
+                msg_opt = ws_receiver.next() => {
+                    let Some(msg_res) = msg_opt else { break; };
+                    let Ok(msg) = msg_res else { break; };
+                    match msg {
+                        Message::Text(text) => {
+                            if let Ok(sync_msg) = serde_json::from_str::<michi_sync::SyncMessage>(&text) {
+                                match &sync_msg {
+                                    michi_sync::SyncMessage::State {
+                                        track_id,
+                                        position_ms,
+                                        playing,
+                                        volume,
+                                        ..
+                                    } => {
+                                        apply_remote_playback_state(
+                                            &state_clone,
+                                            *track_id,
+                                            *position_ms,
+                                            *playing,
+                                            *volume,
                                         )
-                                        .await
-                                    {
-                                        Ok(session) => {
-                                            let mut takeover_ok = true;
-                                            if let Some(ref tid) = session.track_id {
-                                                let resolver =
-                                                    michi_playback::SqliteTrackResolver::new(
-                                                        state_clone.db.clone(),
-                                                        state_clone.config.music_paths.clone(),
-                                                    );
-                                                 match resolver.get_track(*tid).await {
-                                                    Ok(track) => {
+                                        .await;
+                                    }
+                                    michi_sync::SyncMessage::Identify { name, .. } => {
+                                        info!("sync: connected peer identified as '{}'", name);
+                                    }
+                                    michi_sync::SyncMessage::Ping => {}
+                                    michi_sync::SyncMessage::Pong => {}
+                                    michi_sync::SyncMessage::HandoffRequest {
+                                        from_device,
+                                        to_device,
+                                    } => {
+                                        info!(
+                                            "sync: handoff request from {} to {}",
+                                            from_device, to_device
+                                        );
+
+                                        let playback_lock = state_clone.get_module_transition_lock("playback").await;
+                                        let _playback_guard = playback_lock.lock().await;
+
+                                        if state_clone
+                                            .disabled_modules
+                                            .read()
+                                            .await
+                                            .contains("playback")
+                                        {
+                                            warn!("handoff: playback module disabled; refusing handoff offer for {} -> {}", from_device, to_device);
+                                        } else {
+                                            match state_clone
+                                                .sync_manager
+                                                .initiate_handoff(
+                                                    from_device.clone(),
+                                                    to_device.clone(),
+                                                )
+                                                .await
+                                            {
+                                                Ok(session) => {
+                                                    let mut takeover_ok = true;
+                                                    if let Some(ref tid) = session.track_id {
+                                                        let resolver =
+                                                            michi_playback::SqliteTrackResolver::new(
+                                                                state_clone.db.clone(),
+                                                                state_clone.config.music_paths.clone(),
+                                                            );
+                                                        match resolver.get_track(*tid).await {
+                                                            Ok(track) => {
+                                                                if let Err(e) = state_clone
+                                                                    .playback_engine
+                                                                    .load_track(
+                                                                        track,
+                                                                        session.position_ms,
+                                                                    )
+                                                                    .await
+                                                                {
+                                                                    warn!("handoff: failed to load track {tid} on takeover: {e}");
+                                                                    takeover_ok = false;
+                                                                } else {
+                                                                    info!(
+                                                                        "handoff: takeover track={} at position={}",
+                                                                        tid, session.position_ms
+                                                                    );
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                warn!("handoff: track {tid} not resolved locally for takeover: {e}");
+                                                                takeover_ok = false;
+                                                            }
+                                                        }
+                                                    } else if let Err(e) =
+                                                        state_clone.playback_engine.stop().await
+                                                    {
+                                                        warn!("handoff: failed to stop playback on empty track takeover: {e}");
+                                                        takeover_ok = false;
+                                                    }
+
+                                                    if takeover_ok && session.track_id.is_some() {
+                                                        let play_res = if session.playing {
+                                                            state_clone.playback_engine.resume().await
+                                                        } else {
+                                                            state_clone.playback_engine.pause().await
+                                                        };
+                                                        if let Err(e) = play_res {
+                                                            warn!("handoff: failed to transition playback state on takeover: {e}");
+                                                            takeover_ok = false;
+                                                        }
+                                                    }
+
+                                                    if takeover_ok {
+                                                        let vol_u8 = ((session.volume * 100.0)
+                                                            .round()
+                                                            .clamp(0.0, 100.0))
+                                                            as u8;
                                                         if let Err(e) = state_clone
                                                             .playback_engine
-                                                            .load_track(
-                                                                track,
-                                                                session.position_ms,
-                                                            )
+                                                            .set_volume(vol_u8)
                                                             .await
                                                         {
-                                                            warn!("handoff: failed to load track {tid} on takeover: {e}");
+                                                            warn!("handoff: failed to set volume on takeover: {e}");
                                                             takeover_ok = false;
-                                                        } else {
-                                                            info!(
-                                                                "handoff: takeover track={} at position={}",
-                                                                tid, session.position_ms
+                                                        }
+                                                    }
+
+                                                    if takeover_ok {
+                                                        // Validate snapshot convergence fail-closed
+                                                        match state_clone.playback_engine.snapshot().await {
+                                                            Ok(snap) => {
+                                                                let track_matches =
+                                                                    snap.track_id == session.track_id;
+                                                                let play_matches =
+                                                                    if session.track_id.is_none() {
+                                                                        !snap.lifecycle.is_playing()
+                                                                    } else {
+                                                                        snap.lifecycle.is_playing()
+                                                                            == session.playing
+                                                                    };
+                                                                let vol_matches = ((snap.volume as f64
+                                                                    / 100.0)
+                                                                    - session.volume)
+                                                                    .abs()
+                                                                    <= 0.05;
+                                                                let pos_matches =
+                                                                    if session.track_id.is_none() {
+                                                                        true
+                                                                    } else if session.playing {
+                                                                        (snap.position_ms as i64
+                                                                            - session.position_ms as i64)
+                                                                            .abs()
+                                                                            <= 3000
+                                                                    } else {
+                                                                        (snap.position_ms as i64
+                                                                            - session.position_ms as i64)
+                                                                            .abs()
+                                                                            <= 1000
+                                                                    };
+
+                                                                if !track_matches
+                                                                    || !play_matches
+                                                                    || !vol_matches
+                                                                    || !pos_matches
+                                                                {
+                                                                    warn!(
+                                                                    "handoff: snapshot readback mismatch (expected track={:?}, playing={}, vol={:.2}, pos={}; got track={:?}, lifecycle={:?}, vol={}, pos={})",
+                                                                    session.track_id, session.playing, session.volume, session.position_ms,
+                                                                    snap.track_id, snap.lifecycle, snap.volume, snap.position_ms
+                                                                );
+                                                                    takeover_ok = false;
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                warn!(
+                                                                "handoff: failed to obtain engine snapshot on takeover: {e}"
                                                             );
+                                                                takeover_ok = false;
+                                                            }
                                                         }
                                                     }
-                                                    Err(e) => {
-                                                        warn!("handoff: track {tid} not resolved locally for takeover: {e}");
-                                                        takeover_ok = false;
-                                                    }
-                                                }
-                                            } else if let Err(e) =
-                                                state_clone.playback_engine.stop().await
-                                            {
-                                                warn!("handoff: failed to stop playback on empty track takeover: {e}");
-                                                takeover_ok = false;
-                                            }
 
-                                            if takeover_ok && session.track_id.is_some() {
-                                                let play_res = if session.playing {
-                                                    state_clone.playback_engine.resume().await
-                                                } else {
-                                                    state_clone.playback_engine.pause().await
-                                                };
-                                                if let Err(e) = play_res {
-                                                    warn!("handoff: failed to transition playback state on takeover: {e}");
-                                                    takeover_ok = false;
-                                                }
-                                            }
-
-                                            if takeover_ok {
-                                                let vol_u8 = ((session.volume * 100.0)
-                                                    .round()
-                                                    .clamp(0.0, 100.0))
-                                                    as u8;
-                                                if let Err(e) = state_clone
-                                                    .playback_engine
-                                                    .set_volume(vol_u8)
-                                                    .await
-                                                {
-                                                    warn!("handoff: failed to set volume on takeover: {e}");
-                                                    takeover_ok = false;
-                                                }
-                                            }
-
-                                            if takeover_ok {
-                                                // Validate snapshot convergence fail-closed
-                                                match state_clone.playback_engine.snapshot().await {
-                                                    Ok(snap) => {
-                                                        let track_matches =
-                                                            snap.track_id == session.track_id;
-                                                        let play_matches =
-                                                            if session.track_id.is_none() {
-                                                                !snap.lifecycle.is_playing()
-                                                            } else {
-                                                                snap.lifecycle.is_playing()
-                                                                    == session.playing
-                                                            };
-                                                        let vol_matches = ((snap.volume as f64
-                                                            / 100.0)
-                                                            - session.volume)
-                                                            .abs()
-                                                            <= 0.05;
-                                                        let pos_matches =
-                                                            if session.track_id.is_none() {
-                                                                true
-                                                            } else if session.playing {
-                                                                (snap.position_ms as i64
-                                                                    - session.position_ms as i64)
-                                                                    .abs()
-                                                                    <= 3000
-                                                            } else {
-                                                                (snap.position_ms as i64
-                                                                    - session.position_ms as i64)
-                                                                    .abs()
-                                                                    <= 1000
-                                                            };
-
-                                                        if !track_matches
-                                                            || !play_matches
-                                                            || !vol_matches
-                                                            || !pos_matches
-                                                        {
-                                                            warn!(
-                                                            "handoff: snapshot readback mismatch (expected track={:?}, playing={}, vol={:.2}, pos={}; got track={:?}, lifecycle={:?}, vol={}, pos={})",
-                                                            session.track_id, session.playing, session.volume, session.position_ms,
-                                                            snap.track_id, snap.lifecycle, snap.volume, snap.position_ms
-                                                        );
-                                                            takeover_ok = false;
-                                                        }
-                                                    }
-                                                    Err(e) => {
+                                                    if takeover_ok {
+                                                        let accept =
+                                                            michi_sync::SyncMessage::handoff_accept(
+                                                                session,
+                                                            );
+                                                        let _ = state_clone.sync_tx.send(accept);
+                                                    } else {
                                                         warn!(
-                                                        "handoff: failed to obtain engine snapshot on takeover: {e}"
-                                                    );
-                                                        takeover_ok = false;
+                                                            "handoff: takeover failed to apply or converge state locally; refusing handoff_accept for {} -> {}",
+                                                            from_device, to_device
+                                                        );
                                                     }
                                                 }
-                                            }
-
-                                            if takeover_ok {
-                                                let accept =
-                                                    michi_sync::SyncMessage::handoff_accept(
-                                                        session,
+                                                Err(e) => {
+                                                    warn!(
+                                                        "handoff: initiate_handoff failed between {} and {}: {}",
+                                                        from_device, to_device, e
                                                     );
-                                                let _ = state_clone.sync_tx.send(accept);
-                                            } else {
-                                                warn!(
-                                                "handoff: takeover failed to apply or converge state locally; refusing handoff_accept for {} -> {}",
-                                                from_device, to_device
-                                            );
+                                                }
                                             }
                                         }
-                                        Err(e) => {
-                                            warn!(
-                                            "handoff: initiate_handoff failed between {} and {}: {}",
-                                            from_device, to_device, e
+                                    }
+                                    michi_sync::SyncMessage::HandoffAccept { session_data } => {
+                                        info!(
+                                            "sync: handoff accepted at position {}",
+                                            session_data.position_ms
                                         );
-                                        }
                                     }
                                 }
                             }
-                            michi_sync::SyncMessage::HandoffAccept { session_data } => {
-                                info!(
-                                    "sync: handoff accepted at position {}",
-                                    session_data.position_ms
-                                );
-                            }
                         }
+                        Message::Close(_) => break,
+                        _ => {}
                     }
                 }
-                Message::Close(_) => break,
-                _ => {}
             }
         }
     });

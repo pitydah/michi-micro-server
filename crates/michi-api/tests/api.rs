@@ -6648,7 +6648,7 @@ async fn test_sync_api_pairing_and_devices_fail_closed_when_sync_disabled() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // 2. Devices list fails closed (503)
+    // 2. Devices list remains accessible to admin (200 OK)
     let resp = app
         .clone()
         .oneshot(
@@ -6660,7 +6660,7 @@ async fn test_sync_api_pairing_and_devices_fail_closed_when_sync_disabled() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     // 3. Pair start fails closed (503)
     let pair_body = serde_json::json!({ "device_name": "Test Peer" });
@@ -6773,6 +6773,43 @@ async fn test_sync_remote_playback_isolation_when_playback_module_disabled() {
 
     // 3. Must be false and playback must NOT have resumed
     assert!(!applied);
+    let snap = state.playback_engine.snapshot().await.unwrap();
+    assert!(!snap.lifecycle.is_playing());
+}
+
+#[tokio::test]
+async fn test_sync_remote_playback_concurrent_module_disable_toctou_prevention() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    // 1. Acquire transition lock simulating in-flight playback disable
+    let playback_lock = state.get_module_transition_lock("playback").await;
+    let guard = playback_lock.lock().await;
+
+    // 2. Spawn concurrent apply_remote_playback_state task
+    let state_clone = state.clone();
+    let apply_handle = tokio::spawn(async move {
+        michi_api::sync_ws::apply_remote_playback_state(&state_clone, None, 5000, true, 0.8).await
+    });
+
+    // Give the spawned task a moment to attempt acquiring the lock
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // 3. Disable playback module and stop playback while holding lock
+    state
+        .disabled_modules
+        .write()
+        .await
+        .insert("playback".to_string());
+    let _ = state.playback_engine.stop().await;
+
+    // 4. Release transition lock
+    drop(guard);
+
+    // 5. Await apply task -> must fail-closed (return false) because lock serializes check
+    let result = apply_handle.await.unwrap();
+    assert!(!result);
+
+    // Engine must strictly remain NOT playing
     let snap = state.playback_engine.snapshot().await.unwrap();
     assert!(!snap.lifecycle.is_playing());
 }

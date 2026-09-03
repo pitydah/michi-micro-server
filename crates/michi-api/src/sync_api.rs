@@ -48,14 +48,6 @@ pub async fn capabilities_handler(
 pub async fn devices_handler(
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<Vec<DeviceInfo>>), (StatusCode, Json<serde_json::Value>)> {
-    if state.disabled_modules.read().await.contains("sync") {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(
-                serde_json::json!({"error": {"code": "MODULE_DISABLED", "message": "sync module is disabled"}}),
-            ),
-        ));
-    }
     let devices = michi_db::list_sync_devices(&state.db).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -80,14 +72,6 @@ pub async fn revoke_device_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
-    if state.disabled_modules.read().await.contains("sync") {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(
-                serde_json::json!({"error": {"code": "MODULE_DISABLED", "message": "sync module is disabled"}}),
-            ),
-        ));
-    }
     michi_db::revoke_sync_device(&state.db, &id)
         .await
         .map_err(|e| {
