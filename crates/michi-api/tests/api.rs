@@ -6813,3 +6813,105 @@ async fn test_sync_remote_playback_concurrent_module_disable_toctou_prevention()
     let snap = state.playback_engine.snapshot().await.unwrap();
     assert!(!snap.lifecycle.is_playing());
 }
+
+async fn run_test_server_with_state() -> (u16, SqlitePool, michi_api::AppState) {
+    let pool = test_db().await;
+    let config = test_config();
+    let state = michi_api::AppState::new(config, pool.clone(), None);
+    let app = router_with_test_admin(state.clone(), &pool).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let port = addr.port();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    (port, pool, state)
+}
+
+#[tokio::test]
+async fn test_sync_websocket_connect_receives_identify_and_initial_state() {
+    let (port, _pool, _state) = run_test_server_with_state().await;
+    use futures_util::StreamExt;
+
+    let url = format!("ws://127.0.0.1:{port}/api/sync");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WebSocket connection to /api/sync should succeed");
+    let (mut _write, mut read) = ws_stream.split();
+
+    // 1. First message must be Identify
+    let msg1 = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
+        .await
+        .expect("Timeout waiting for Identify message")
+        .expect("Stream ended unexpectedly")
+        .expect("WebSocket read error");
+    let text1 = msg1.to_text().unwrap();
+    let v1: serde_json::Value = serde_json::from_str(text1).unwrap();
+    assert_eq!(v1["type"], "identify");
+    assert_eq!(v1["name"], "test");
+
+    // 2. Second message must be initial State
+    let msg2 = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
+        .await
+        .expect("Timeout waiting for State message")
+        .expect("Stream ended unexpectedly")
+        .expect("WebSocket read error");
+    let text2 = msg2.to_text().unwrap();
+    let v2: serde_json::Value = serde_json::from_str(text2).unwrap();
+    assert_eq!(v2["type"], "state");
+    assert!(v2.get("playing").is_some());
+    assert!(v2.get("position_ms").is_some());
+}
+
+#[tokio::test]
+async fn test_sync_websocket_generation_ownership_terminates_on_module_toggle_off() {
+    let (port, _pool, state) = run_test_server_with_state().await;
+    use futures_util::StreamExt;
+
+    let url = format!("ws://127.0.0.1:{port}/api/sync");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WebSocket connection to /api/sync should succeed");
+    let (mut _write, mut read) = ws_stream.split();
+
+    // Read Identify
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    // Read initial State
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    // Toggle sync module OFF via client
+    let toggle_off = serde_json::json!({ "name": "sync", "enabled": false });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/api/v1/modules/toggle"))
+        .json(&toggle_off)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Read next WS event -> must terminate (return None or Close)
+    let next_msg = tokio::time::timeout(std::time::Duration::from_secs(3), read.next()).await;
+    match next_msg {
+        Ok(None) => {} // Connection cleanly closed
+        Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))) => {} // Received close frame
+        Ok(Some(Err(_))) => {} // Connection reset/aborted
+        Ok(Some(Ok(other))) => panic!("Expected termination, but received: {other:?}"),
+        Err(_) => panic!("WebSocket connection remained open and timed out after sync module OFF"),
+    }
+}

@@ -8,6 +8,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use michi_playback::TrackResolver;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -38,14 +39,15 @@ pub async fn sync_handler(
         return (StatusCode::SERVICE_UNAVAILABLE, "sync module is disabled").into_response();
     }
 
-    let client_ip_opt = crate::resolve_client_ip(connect_info, &headers, &state.config);
+    let client_ip = crate::resolve_client_ip(connect_info, &headers, &state.config);
 
     if !state.config.remote_sync {
-        match client_ip_opt {
+        match client_ip {
             Some(ip) => {
                 if !is_local_or_private_ip(ip) {
                     warn!(
-                        "sync_ws: rejected remote sync connection from {ip} (remote_sync is disabled)"
+                        "sync_ws: rejected non-local sync connection from {} (remote_sync=false)",
+                        ip
                     );
                     return (
                         StatusCode::FORBIDDEN,
@@ -67,9 +69,17 @@ pub async fn sync_handler(
         }
     }
 
+    let sync_cancel = state
+        .module_tokens
+        .read()
+        .await
+        .get("sync")
+        .cloned()
+        .unwrap_or_default();
+
     match ws_result {
         Ok(ws) => ws
-            .on_upgrade(move |socket| handle_sync(socket, state))
+            .on_upgrade(move |socket| handle_sync(socket, state, sync_cancel))
             .into_response(),
         Err(rejection) => rejection.into_response(),
     }
@@ -151,7 +161,7 @@ pub async fn apply_remote_playback_state(
     all_applied
 }
 
-async fn handle_sync(socket: WebSocket, state: AppState) {
+async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: CancellationToken) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // Send identify message
@@ -164,13 +174,14 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
         let _ = ws_sender.send(Message::Text(json)).await;
     }
 
-    let sync_cancel = state
-        .module_tokens
-        .read()
-        .await
-        .get("sync")
-        .cloned()
-        .unwrap_or_default();
+    // Send current playback state immediately upon connection
+    {
+        let current = state.playback_state.read().await;
+        let msg: michi_sync::SyncMessage = current.clone().into();
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = ws_sender.send(Message::Text(json)).await;
+        }
+    }
 
     let mut rx = state.sync_tx.subscribe();
     let sync_cancel_send = sync_cancel.clone();
