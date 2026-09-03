@@ -840,14 +840,6 @@ pub async fn queue_delete_handler(
             "playback module is disabled",
         ));
     }
-    let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
-        v1_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "DATABASE_ERROR",
-            &e.to_string(),
-        )
-    })?;
-
     let mut tx = state.db.begin().await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -856,9 +848,9 @@ pub async fn queue_delete_handler(
         )
     })?;
 
-    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM queues WHERE id = ?")
+    let queue_name: Option<String> = sqlx::query_scalar("SELECT name FROM queues WHERE id = ?")
         .bind(queue_id.to_string())
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| {
             v1_error(
@@ -868,13 +860,18 @@ pub async fn queue_delete_handler(
             )
         })?;
 
-    if exists == 0 {
-        return Err(v1_error(
-            StatusCode::NOT_FOUND,
-            "NOT_FOUND",
-            &format!("queue {queue_id} not found"),
-        ));
-    }
+    let q_name = match queue_name {
+        Some(n) => n,
+        None => {
+            return Err(v1_error(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("queue {queue_id} not found"),
+            ));
+        }
+    };
+
+    let is_active = q_name == "active-queue";
 
     sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
         .bind(queue_id.to_string())
@@ -888,20 +885,17 @@ pub async fn queue_delete_handler(
             )
         })?;
 
-    // Do not delete active queue row from queues table to preserve singleton invariant
-    if queue_id != active_queue_id {
-        sqlx::query("DELETE FROM queues WHERE id = ?")
-            .bind(queue_id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| {
-                v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "DATABASE_ERROR",
-                    &e.to_string(),
-                )
-            })?;
-    }
+    sqlx::query("DELETE FROM queues WHERE id = ?")
+        .bind(queue_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
 
     tx.commit().await.map_err(|e| {
         v1_error(
@@ -912,7 +906,7 @@ pub async fn queue_delete_handler(
     })?;
 
     // V-P0-04: Only clear engine queue if clearing the canonical active queue
-    if queue_id == active_queue_id {
+    if is_active {
         state
             .playback_engine
             .set_queue(Vec::new(), 0, None)

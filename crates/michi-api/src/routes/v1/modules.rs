@@ -103,8 +103,9 @@ pub async fn toggle_module_handler(
         ));
     }
 
-    // Atomic critical section across concurrent requests
+    // Atomic critical section across concurrent requests: acquire both disabled_modules and module_tokens locks
     let mut disabled = state.disabled_modules.write().await;
+    let mut tokens = state.module_tokens.write().await;
     let is_currently_disabled = disabled.contains(&body.name);
 
     if body.enabled {
@@ -118,14 +119,10 @@ pub async fn toggle_module_handler(
 
         // Transition OFF -> ON
         disabled.remove(&body.name);
-        drop(disabled);
-
-        let mut tokens = state.module_tokens.write().await;
         let new_token = tokio_util::sync::CancellationToken::new();
         tokens.insert(body.name.clone(), new_token.clone());
-        drop(tokens);
 
-        // Real dynamic worker restart on OFF -> ON
+        // Dynamic worker restart on OFF -> ON
         if body.name == "homeassistant" && std::env::var("MICHI_MQTT_HOST").is_ok() {
             let ha_config = state.config.clone();
             let ha_engine = state.playback_engine.clone();
@@ -163,17 +160,19 @@ pub async fn toggle_module_handler(
 
         // Transition ON -> OFF
         disabled.insert(body.name.clone());
-        drop(disabled);
-
-        if let Some(token) = state.module_tokens.read().await.get(&body.name).cloned() {
+        if let Some(token) = tokens.get(&body.name) {
             token.cancel();
             tracing::info!("module '{}' disabled, tasks cancelled", body.name);
         }
 
         // Stop and neutralize PlaybackEngine when Playback module is toggled OFF
         if body.name == "playback" {
-            let _ = state.playback_engine.stop().await;
-            let _ = state.playback_engine.set_queue(Vec::new(), 0, None).await;
+            if let Err(e) = state.playback_engine.stop().await {
+                tracing::error!("failed to stop playback engine when disabling module: {e}");
+            }
+            if let Err(e) = state.playback_engine.set_queue(Vec::new(), 0, None).await {
+                tracing::error!("failed to clear engine queue when disabling module: {e}");
+            }
             *state.playback_output_selection.write().await = None;
             tracing::info!("playback module disabled: playback engine stopped and neutralized");
         }

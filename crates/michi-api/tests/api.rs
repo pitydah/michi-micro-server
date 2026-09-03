@@ -6400,3 +6400,53 @@ async fn test_module_toggle_via_path_param() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(!state.disabled_modules.read().await.contains("stream"));
 }
+
+#[tokio::test]
+async fn test_concurrent_mixed_on_off_module_toggles_are_safe() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    // Launch 20 concurrent tasks alternating ON and OFF
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let app_clone = app.clone();
+        let enable = i % 2 == 0;
+        handles.push(tokio::spawn(async move {
+            let body = serde_json::json!({
+                "name": "homeassistant",
+                "enabled": enable
+            });
+            app_clone
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/modules/toggle")
+                        .method("POST")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(serde_json::to_string(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }));
+    }
+
+    for h in handles {
+        let resp = h.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Ensure state and token consistency: if disabled, token should be cancelled or match disabled state
+    let is_disabled = state
+        .disabled_modules
+        .read()
+        .await
+        .contains("homeassistant");
+    let tokens = state.module_tokens.read().await;
+    let ha_token = tokens.get("homeassistant");
+    if is_disabled {
+        if let Some(t) = ha_token {
+            assert!(t.is_cancelled());
+        }
+    } else {
+        assert!(ha_token.is_some());
+    }
+}
