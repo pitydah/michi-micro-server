@@ -9,6 +9,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use michi_playback::TrackResolver;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::AppState;
 
@@ -74,7 +75,87 @@ pub async fn sync_handler(
     }
 }
 
+pub async fn apply_remote_playback_state(
+    state: &AppState,
+    track_id: Option<Uuid>,
+    position_ms: u64,
+    playing: bool,
+    volume: f64,
+) -> bool {
+    let mut all_applied = true;
+    if state.disabled_modules.read().await.contains("playback") {
+        debug!("sync: playback module disabled locally, skipping playback state application");
+        all_applied = false;
+    } else {
+        if let Some(tid) = track_id {
+            let resolver = michi_playback::SqliteTrackResolver::new(
+                state.db.clone(),
+                state.config.music_paths.clone(),
+            );
+            match resolver.get_track(tid).await {
+                Ok(track) => {
+                    if let Err(e) = state.playback_engine.load_track(track, position_ms).await {
+                        warn!("sync: failed to load track {tid}: {e}");
+                        all_applied = false;
+                    }
+                }
+                Err(e) => {
+                    warn!("sync: track {tid} not found locally: {e}");
+                    all_applied = false;
+                }
+            }
+        } else if let Err(e) = state.playback_engine.seek(position_ms).await {
+            warn!("sync: failed to seek to {position_ms}ms: {e}");
+            all_applied = false;
+        }
+
+        if all_applied {
+            let play_res = if playing {
+                state.playback_engine.resume().await
+            } else {
+                state.playback_engine.pause().await
+            };
+            if let Err(e) = play_res {
+                warn!("sync: failed to transition playback state: {e}");
+                all_applied = false;
+            }
+        }
+
+        if all_applied {
+            let vol_u8 = ((volume * 100.0).round().clamp(0.0, 100.0)) as u8;
+            if let Err(e) = state.playback_engine.set_volume(vol_u8).await {
+                warn!("sync: failed to set volume {vol_u8}: {e}");
+                all_applied = false;
+            }
+        }
+    }
+
+    if all_applied {
+        // Notify local UI clients only when every single operation succeeded
+        let tid = track_id
+            .map(|id| format!("\"{id}\""))
+            .unwrap_or_else(|| "null".into());
+        let msg = format!(
+            "{{\"type\":\"sync_state\",\
+             \"track_id\":{tid},\
+             \"position_ms\":{position_ms},\
+             \"playing\":{playing},\
+             \"volume\":{volume}}}",
+        );
+        let _ = state.tx.send(msg);
+    }
+
+    all_applied
+}
+
 async fn handle_sync(socket: WebSocket, state: AppState) {
+    let sync_cancel = state
+        .module_tokens
+        .read()
+        .await
+        .get("sync")
+        .cloned()
+        .unwrap_or_default();
     let (mut sender, mut receiver) = socket.split();
 
     // Send identify message
@@ -99,7 +180,7 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
         }
     }
 
-    let send_task = tokio::spawn(async move {
+    let mut send_task = tokio::spawn(async move {
         while let Ok(msg) = sync_rx.recv().await {
             if let Ok(json) = msg.serialize() {
                 if sender.send(Message::Text(json)).await.is_err() {
@@ -110,7 +191,7 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
     });
 
     let state_clone = state.clone();
-    let recv_task = tokio::spawn(async move {
+    let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 Message::Text(text) => {
@@ -129,92 +210,19 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                     "sync: received state track={:?} pos={} playing={}",
                                     track_id, position_ms, playing
                                 );
-                                // Dispatch state commands to PlaybackEngine so PlaybackProjectionCoordinator
-                                // remains the single authoritative writer of PlaybackState.
-                                let mut all_applied = true;
-                                if state_clone
-                                    .disabled_modules
-                                    .read()
-                                    .await
-                                    .contains("playback")
-                                {
-                                    debug!("sync: playback module disabled locally, skipping playback state application");
-                                    all_applied = false;
-                                } else {
-                                    if let Some(tid) = track_id {
-                                        let resolver = michi_playback::SqliteTrackResolver::new(
-                                            state_clone.db.clone(),
-                                            state_clone.config.music_paths.clone(),
-                                        );
-                                        match resolver.get_track(*tid).await {
-                                            Ok(track) => {
-                                                if let Err(e) = state_clone
-                                                    .playback_engine
-                                                    .load_track(track, *position_ms)
-                                                    .await
-                                                {
-                                                    warn!("sync: failed to load track {tid}: {e}");
-                                                    all_applied = false;
-                                                }
-                                            }
-                                            Err(e) => {
-                                                warn!("sync: track {tid} not found locally: {e}");
-                                                all_applied = false;
-                                            }
-                                        }
-                                    } else if let Err(e) =
-                                        state_clone.playback_engine.seek(*position_ms).await
-                                    {
-                                        warn!("sync: failed to seek to {position_ms}ms: {e}");
-                                        all_applied = false;
-                                    }
-
-                                    if all_applied {
-                                        let play_res = if *playing {
-                                            state_clone.playback_engine.resume().await
-                                        } else {
-                                            state_clone.playback_engine.pause().await
-                                        };
-                                        if let Err(e) = play_res {
-                                            warn!("sync: failed to transition playback state: {e}");
-                                            all_applied = false;
-                                        }
-                                    }
-
-                                    if all_applied {
-                                        let vol_u8 =
-                                            ((*volume * 100.0).round().clamp(0.0, 100.0)) as u8;
-                                        if let Err(e) =
-                                            state_clone.playback_engine.set_volume(vol_u8).await
-                                        {
-                                            warn!("sync: failed to set volume {vol_u8}: {e}");
-                                            all_applied = false;
-                                        }
-                                    }
-                                }
-
-                                if all_applied {
-                                    // Notify local UI clients only when every single operation succeeded
-                                    let tid = track_id
-                                        .map(|id| format!("\"{id}\""))
-                                        .unwrap_or_else(|| "null".into());
-                                    let msg = format!(
-                                        "{{\"type\":\"sync_state\",\
-                                         \"track_id\":{tid},\
-                                         \"position_ms\":{position_ms},\
-                                         \"playing\":{playing},\
-                                         \"volume\":{volume}}}",
-                                    );
-                                    let _ = state_clone.tx.send(msg);
-                                }
+                                apply_remote_playback_state(
+                                    &state_clone,
+                                    *track_id,
+                                    *position_ms,
+                                    *playing,
+                                    *volume,
+                                )
+                                .await;
                             }
                             michi_sync::SyncMessage::Identify { name, .. } => {
-                                info!("sync: peer identified as '{}'", name);
+                                info!("sync: connected peer identified as '{}'", name);
                             }
-                            michi_sync::SyncMessage::Ping => {
-                                // Handled automatically by heartbeat task; ignore here
-                                // Peer will detect liveness via TCP keepalive.
-                            }
+                            michi_sync::SyncMessage::Ping => {}
                             michi_sync::SyncMessage::Pong => {}
                             michi_sync::SyncMessage::HandoffRequest {
                                 from_device,
@@ -224,41 +232,48 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
                                     "sync: handoff request from {} to {}",
                                     from_device, to_device
                                 );
+
                                 if state_clone
                                     .disabled_modules
                                     .read()
                                     .await
                                     .contains("playback")
                                 {
-                                    warn!("handoff: takeover rejected because playback module is disabled");
+                                    warn!("handoff: playback module disabled; refusing handoff offer for {} -> {}", from_device, to_device);
                                 } else {
                                     match state_clone
                                         .sync_manager
-                                        .initiate_handoff(from_device.clone(), to_device.clone())
+                                        .initiate_handoff(
+                                            from_device.clone(),
+                                            to_device.clone(),
+                                        )
                                         .await
                                     {
                                         Ok(session) => {
                                             let mut takeover_ok = true;
-                                            if let Some(tid) = session.track_id {
+                                            if let Some(ref tid) = session.track_id {
                                                 let resolver =
                                                     michi_playback::SqliteTrackResolver::new(
                                                         state_clone.db.clone(),
                                                         state_clone.config.music_paths.clone(),
                                                     );
-                                                match resolver.get_track(tid).await {
+                                                 match resolver.get_track(*tid).await {
                                                     Ok(track) => {
                                                         if let Err(e) = state_clone
                                                             .playback_engine
-                                                            .load_track(track, session.position_ms)
+                                                            .load_track(
+                                                                track,
+                                                                session.position_ms,
+                                                            )
                                                             .await
                                                         {
                                                             warn!("handoff: failed to load track {tid} on takeover: {e}");
                                                             takeover_ok = false;
                                                         } else {
                                                             info!(
-                                                            "handoff: takeover track={} at position={}",
-                                                            tid, session.position_ms
-                                                        );
+                                                                "handoff: takeover track={} at position={}",
+                                                                tid, session.position_ms
+                                                            );
                                                         }
                                                     }
                                                     Err(e) => {
@@ -393,7 +408,17 @@ async fn handle_sync(socket: WebSocket, state: AppState) {
     });
 
     tokio::select! {
-        _ = send_task => {},
-        _ = recv_task => {},
+        _ = sync_cancel.cancelled() => {
+            info!("sync_ws: sync module disabled, terminating active inbound connection");
+        }
+        _ = state.shutdown_token.cancelled() => {
+            info!("sync_ws: server shutdown, terminating active inbound connection");
+        }
+        _ = (&mut send_task) => {},
+        _ = (&mut recv_task) => {},
     }
+    send_task.abort();
+    recv_task.abort();
+    let _ = send_task.await;
+    let _ = recv_task.await;
 }

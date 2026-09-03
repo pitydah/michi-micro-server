@@ -6622,6 +6622,157 @@ async fn test_modules_observability_exposes_desired_and_actual_state() {
         assert!(m.get("name").is_some());
         assert!(m.get("enabled").is_some());
         assert_eq!(m["desired_state"], "enabled");
-        assert_eq!(m["actual_state"], "active");
+        assert!(m.get("actual_state").is_some());
+        assert!(m.get("health").is_some());
+        assert!(m.get("generation").is_some());
     }
+}
+
+#[tokio::test]
+async fn test_sync_api_pairing_and_devices_fail_closed_when_sync_disabled() {
+    let (app, _pool, _state) = make_app_with_state().await;
+
+    // 1. Toggle sync OFF
+    let toggle_off = serde_json::json!({ "name": "sync", "enabled": false });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&toggle_off).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Devices list fails closed (503)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sync/devices")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 3. Pair start fails closed (503)
+    let pair_body = serde_json::json!({ "device_name": "Test Peer" });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sync/pair/start")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&pair_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 4. Pair confirm fails closed (503)
+    let confirm_body = serde_json::json!({ "code": "12345678" });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sync/pair/confirm")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&confirm_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_policy_allow_sync_strictly_reflects_sync_module_toggle() {
+    let (app, _pool, _state) = make_app_with_state().await;
+
+    // 1. Initial LAN policy -> allow_sync is true
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/policy/lan")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["allow_sync"], true);
+
+    // 2. Toggle sync OFF
+    let toggle_off = serde_json::json!({ "name": "sync", "enabled": false });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&toggle_off).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 3. LAN policy now returns allow_sync == false
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/policy/lan")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["allow_sync"], false);
+}
+
+#[tokio::test]
+async fn test_sync_remote_playback_isolation_when_playback_module_disabled() {
+    let (_app, _pool, state) = make_app_with_state().await;
+
+    // 1. Toggle playback module OFF
+    state
+        .disabled_modules
+        .write()
+        .await
+        .insert("playback".to_string());
+
+    // 2. Try applying remote playback state
+    let applied =
+        michi_api::sync_ws::apply_remote_playback_state(&state, None, 5000, true, 0.8).await;
+
+    // 3. Must be false and playback must NOT have resumed
+    assert!(!applied);
+    let snap = state.playback_engine.snapshot().await.unwrap();
+    assert!(!snap.lifecycle.is_playing());
 }

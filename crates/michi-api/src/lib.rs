@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,7 +12,6 @@ use axum::{
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use michi_config::Config;
-use michi_playback::TrackResolver;
 use michi_security::SecurityState;
 use michi_sync::PlaybackState;
 use michi_sync::SyncManager;
@@ -39,7 +39,7 @@ mod static_files;
 mod status;
 mod stream;
 mod sync_api;
-mod sync_ws;
+pub mod sync_ws;
 mod transcode;
 mod ws;
 
@@ -99,6 +99,16 @@ pub struct AppState {
     /// Per-module transition mutexes to serialize lifecycle changes without holding global locks during I/O.
     pub module_transition_locks:
         Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Authoritative module runtime observability tracking generation, health, actual state, and last error.
+    pub module_runtime_info: Arc<RwLock<HashMap<String, ModuleRuntimeInfo>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModuleRuntimeInfo {
+    pub generation: u64,
+    pub actual_state: String,
+    pub health: String,
+    pub last_error: Option<String>,
 }
 
 impl AppState {
@@ -378,6 +388,38 @@ impl AppState {
         let max_transcodes = config.resource_profile.max_transcodes();
         let transcode_semaphore = Arc::new(tokio::sync::Semaphore::new(max_transcodes));
 
+        let mut initial_runtime = HashMap::new();
+        for mod_name in &[
+            "scan",
+            "sync",
+            "stream",
+            "playback",
+            "backup",
+            "webhook",
+            "homeassistant",
+        ] {
+            let (actual_state, health, last_error) =
+                if *mod_name == "homeassistant" && std::env::var("MICHI_MQTT_HOST").is_err() {
+                    (
+                        "idle".to_string(),
+                        "disabled".to_string(),
+                        Some("MICHI_MQTT_HOST not set".to_string()),
+                    )
+                } else {
+                    ("active".to_string(), "healthy".to_string(), None)
+                };
+            initial_runtime.insert(
+                mod_name.to_string(),
+                ModuleRuntimeInfo {
+                    generation: 1,
+                    actual_state,
+                    health,
+                    last_error,
+                },
+            );
+        }
+        let module_runtime_info = Arc::new(RwLock::new(initial_runtime));
+
         let state = Self {
             config,
             db,
@@ -409,6 +451,7 @@ impl AppState {
             receiver_credential_store,
             transcode_semaphore,
             module_transition_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            module_runtime_info,
         };
 
         state.spawn_background_tasks();
@@ -962,14 +1005,11 @@ pub fn start_sync_peers(state: &AppState, cancel_token: CancellationToken) {
     let peers = state.config.sync_peers.clone();
     let sync_name = state.config.sync_name.clone();
     let sync_tx = state.sync_tx.clone();
-    let tx = state.tx.clone();
-    let engine = state.playback_engine.clone();
-    let db = state.db.clone();
-    let music_paths = state.config.music_paths.clone();
     let reconnect_max = state.config.reconnect_delay_max as u64;
     let shutdown = state.shutdown_token.clone();
     let dm = state.disabled_modules.clone();
     let sync_cancel = cancel_token;
+    let worker_state = state.clone();
 
     state.track_task(tokio::spawn(async move {
         tokio::select! {
@@ -988,10 +1028,7 @@ pub fn start_sync_peers(state: &AppState, cancel_token: CancellationToken) {
                     let peer = peer.clone();
                     let sync_name = sync_name.clone();
                     let sync_tx = sync_tx.clone();
-                    let tx = tx.clone();
-                    let peer_engine = engine.clone();
-                    let peer_db = db.clone();
-                    let peer_music_paths = music_paths.clone();
+                    let peer_state = worker_state.clone();
                     let peer_shutdown = shutdown.clone();
                     let peer_cancel = sync_cancel.clone();
                     let peer_dm = dm.clone();
@@ -1028,67 +1065,62 @@ pub fn start_sync_peers(state: &AppState, cancel_token: CancellationToken) {
                                                 let _ = sender.send(Message::Text(json)).await;
                                             }
 
-                                            let send_task = tokio::spawn(async move {
-                                                while let Ok(msg) = local_sync_rx.recv().await {
-                                                    if let Ok(json) = msg.serialize() {
-                                                        if sender.send(Message::Text(json)).await.is_err() {
-                                                            break;
+                                            let send_cancel = peer_cancel.clone();
+                                            let send_shutdown = peer_shutdown.clone();
+                                            let mut send_task = tokio::spawn(async move {
+                                                loop {
+                                                    tokio::select! {
+                                                        _ = send_shutdown.cancelled() => break,
+                                                        _ = send_cancel.cancelled() => break,
+                                                        msg = local_sync_rx.recv() => {
+                                                            match msg {
+                                                                Ok(msg) => {
+                                                                    if let Ok(json) = msg.serialize() {
+                                                                        if sender.send(Message::Text(json)).await.is_err() {
+                                                                            break;
+                                                                        }
+                                                                    }
+                                                                }
+                                                                Err(_) => break,
+                                                            }
                                                         }
                                                     }
                                                 }
                                             });
 
-                                            let recv_tx = tx.clone();
-                                            let recv_engine = peer_engine.clone();
-                                            let recv_db = peer_db.clone();
-                                            let recv_paths = peer_music_paths.clone();
-                                            let recv_task = tokio::spawn(async move {
-                                                while let Some(Ok(msg)) = receiver.next().await {
-                                                    match msg {
-                                                        Message::Text(text) => {
-                                                            if let Ok(michi_sync::SyncMessage::State {
-                                                                track_id,
-                                                                position_ms,
-                                                                playing,
-                                                                volume,
-                                                                ..
-                                                            }) = michi_sync::SyncMessage::deserialize(&text)
-                                                            {
-                                                                if let Some(tid) = track_id {
-                                                                    let resolver = michi_playback::SqliteTrackResolver::new(
-                                                                        recv_db.clone(),
-                                                                        recv_paths.clone(),
-                                                                    );
-                                                                    if let Ok(track) = resolver.get_track(tid).await {
-                                                                        let _ = recv_engine.load_track(track, position_ms).await;
+                                            let recv_state = peer_state.clone();
+                                            let recv_cancel = peer_cancel.clone();
+                                            let recv_shutdown = peer_shutdown.clone();
+                                            let mut recv_task = tokio::spawn(async move {
+                                                loop {
+                                                    tokio::select! {
+                                                        _ = recv_shutdown.cancelled() => break,
+                                                        _ = recv_cancel.cancelled() => break,
+                                                        msg = receiver.next() => {
+                                                            match msg {
+                                                                Some(Ok(Message::Text(text))) => {
+                                                                    if let Ok(michi_sync::SyncMessage::State {
+                                                                        track_id,
+                                                                        position_ms,
+                                                                        playing,
+                                                                        volume,
+                                                                        ..
+                                                                    }) = michi_sync::SyncMessage::deserialize(&text)
+                                                                    {
+                                                                        crate::sync_ws::apply_remote_playback_state(
+                                                                            &recv_state,
+                                                                            track_id,
+                                                                            position_ms,
+                                                                            playing,
+                                                                            volume,
+                                                                        )
+                                                                        .await;
                                                                     }
-                                                                } else {
-                                                                    let _ = recv_engine.seek(position_ms).await;
                                                                 }
-
-                                                                if playing {
-                                                                    let _ = recv_engine.resume().await;
-                                                                } else {
-                                                                    let _ = recv_engine.pause().await;
-                                                                }
-                                                                let vol_u8 = ((volume * 100.0).round().clamp(0.0, 100.0)) as u8;
-                                                                let _ = recv_engine.set_volume(vol_u8).await;
-
-                                                                let tid = track_id
-                                                                    .map(|id| format!("\"{id}\""))
-                                                                    .unwrap_or_else(|| "null".into());
-                                                                let msg = format!(
-                                                                    "{{\"type\":\"sync_state\",\
-                                                                     \"track_id\":{tid},\
-                                                                     \"position_ms\":{position_ms},\
-                                                                     \"playing\":{playing},\
-                                                                     \"volume\":{volume}}}",
-                                                                );
-                                                                let _ = recv_tx.send(msg);
+                                                                Some(Ok(Message::Close(_))) | None => break,
+                                                                _ => {}
                                                             }
                                                         }
-                                                        Message::Close(_) => break,
-                                                        _ => {}
                                                     }
                                                 }
                                             });
@@ -1096,9 +1128,13 @@ pub fn start_sync_peers(state: &AppState, cancel_token: CancellationToken) {
                                             tokio::select! {
                                                 _ = peer_shutdown.cancelled() => {},
                                                 _ = peer_cancel.cancelled() => {},
-                                                _ = send_task => {},
-                                                _ = recv_task => {},
+                                                _ = (&mut send_task) => {},
+                                                _ = (&mut recv_task) => {},
                                             }
+                                            send_task.abort();
+                                            recv_task.abort();
+                                            let _ = send_task.await;
+                                            let _ = recv_task.await;
                                         }
                                         Err(e) => {
                                             warn!(

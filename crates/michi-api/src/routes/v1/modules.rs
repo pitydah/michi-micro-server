@@ -12,6 +12,9 @@ pub struct ModuleDescriptor {
     pub description: String,
     pub desired_state: String,
     pub actual_state: String,
+    pub health: String,
+    pub generation: u64,
+    pub last_error: Option<String>,
 }
 
 fn builtin_modules() -> Vec<ModuleDescriptor> {
@@ -22,6 +25,9 @@ fn builtin_modules() -> Vec<ModuleDescriptor> {
             description: "Music library scanning and filesystem watcher".into(),
             desired_state: "enabled".into(),
             actual_state: "active".into(),
+            health: "healthy".into(),
+            generation: 1,
+            last_error: None,
         },
         ModuleDescriptor {
             name: "sync".into(),
@@ -29,6 +35,9 @@ fn builtin_modules() -> Vec<ModuleDescriptor> {
             description: "Peer synchronization and background sync workers".into(),
             desired_state: "enabled".into(),
             actual_state: "active".into(),
+            health: "healthy".into(),
+            generation: 1,
+            last_error: None,
         },
         ModuleDescriptor {
             name: "stream".into(),
@@ -36,6 +45,9 @@ fn builtin_modules() -> Vec<ModuleDescriptor> {
             description: "Audio streaming and transcode pipeline".into(),
             desired_state: "enabled".into(),
             actual_state: "active".into(),
+            health: "healthy".into(),
+            generation: 1,
+            last_error: None,
         },
         ModuleDescriptor {
             name: "playback".into(),
@@ -43,6 +55,9 @@ fn builtin_modules() -> Vec<ModuleDescriptor> {
             description: "Server playback engine and tracking".into(),
             desired_state: "enabled".into(),
             actual_state: "active".into(),
+            health: "healthy".into(),
+            generation: 1,
+            last_error: None,
         },
         ModuleDescriptor {
             name: "backup".into(),
@@ -50,6 +65,9 @@ fn builtin_modules() -> Vec<ModuleDescriptor> {
             description: "Automatic backup scheduler and retention".into(),
             desired_state: "enabled".into(),
             actual_state: "active".into(),
+            health: "healthy".into(),
+            generation: 1,
+            last_error: None,
         },
         ModuleDescriptor {
             name: "webhook".into(),
@@ -57,6 +75,9 @@ fn builtin_modules() -> Vec<ModuleDescriptor> {
             description: "Webhook dispatch notifications".into(),
             desired_state: "enabled".into(),
             actual_state: "active".into(),
+            health: "healthy".into(),
+            generation: 1,
+            last_error: None,
         },
         ModuleDescriptor {
             name: "homeassistant".into(),
@@ -64,18 +85,32 @@ fn builtin_modules() -> Vec<ModuleDescriptor> {
             description: "Home Assistant MQTT discovery and entity synchronization".into(),
             desired_state: "enabled".into(),
             actual_state: "active".into(),
+            health: "healthy".into(),
+            generation: 1,
+            last_error: None,
         },
     ]
 }
 
 pub async fn modules_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let disabled = state.disabled_modules.read().await;
+    let runtime = state.module_runtime_info.read().await;
     let mut modules = builtin_modules();
     for m in &mut modules {
         let is_disabled = disabled.contains(&m.name);
         m.enabled = !is_disabled;
         m.desired_state = if is_disabled { "disabled" } else { "enabled" }.to_string();
-        m.actual_state = if is_disabled { "disabled" } else { "active" }.to_string();
+        if let Some(r) = runtime.get(&m.name) {
+            m.actual_state = r.actual_state.clone();
+            m.health = r.health.clone();
+            m.generation = r.generation;
+            m.last_error = r.last_error.clone();
+        } else {
+            m.actual_state = if is_disabled { "disabled" } else { "active" }.to_string();
+            m.health = if is_disabled { "disabled" } else { "healthy" }.to_string();
+            m.generation = 1;
+            m.last_error = None;
+        }
     }
     Json(serde_json::json!({ "modules": modules }))
 }
@@ -132,9 +167,27 @@ pub async fn toggle_module_handler(
         // Idempotency: If already enabled (ON -> ON), it is a safe NO-OP
         if !is_currently_disabled {
             tracing::debug!("module '{}' is already enabled (no-op)", body.name);
-            return Ok(Json(
-                serde_json::json!({ "module": body.name, "enabled": true, "desired_state": "enabled", "actual_state": "active" }),
-            ));
+            let r = state.module_runtime_info.read().await;
+            let (act, hlth, gen, err) = r
+                .get(&body.name)
+                .map(|info| {
+                    (
+                        info.actual_state.clone(),
+                        info.health.clone(),
+                        info.generation,
+                        info.last_error.clone(),
+                    )
+                })
+                .unwrap_or_else(|| ("active".into(), "healthy".into(), 1, None));
+            return Ok(Json(serde_json::json!({
+                "module": body.name,
+                "enabled": true,
+                "desired_state": "enabled",
+                "actual_state": act,
+                "health": hlth,
+                "generation": gen,
+                "last_error": err,
+            })));
         }
 
         // Transition OFF -> ON: remove from disabled_modules and create fresh token
@@ -145,6 +198,30 @@ pub async fn toggle_module_handler(
             .write()
             .await
             .insert(body.name.clone(), new_token.clone());
+
+        // Update runtime tracking
+        {
+            let mut runtime = state.module_runtime_info.write().await;
+            let entry =
+                runtime
+                    .entry(body.name.clone())
+                    .or_insert_with(|| crate::ModuleRuntimeInfo {
+                        generation: 0,
+                        actual_state: "active".into(),
+                        health: "healthy".into(),
+                        last_error: None,
+                    });
+            entry.generation += 1;
+            if body.name == "homeassistant" && std::env::var("MICHI_MQTT_HOST").is_err() {
+                entry.actual_state = "idle".into();
+                entry.health = "disabled".into();
+                entry.last_error = Some("MICHI_MQTT_HOST not set".into());
+            } else {
+                entry.actual_state = "active".into();
+                entry.health = "healthy".into();
+                entry.last_error = None;
+            }
+        }
 
         // Dynamic worker restart on OFF -> ON
         if body.name == "homeassistant" && std::env::var("MICHI_MQTT_HOST").is_ok() {
@@ -177,9 +254,27 @@ pub async fn toggle_module_handler(
         // Idempotency: If already disabled (OFF -> OFF), it is a safe NO-OP
         if is_currently_disabled {
             tracing::debug!("module '{}' is already disabled (no-op)", body.name);
-            return Ok(Json(
-                serde_json::json!({ "module": body.name, "enabled": false, "desired_state": "disabled", "actual_state": "disabled" }),
-            ));
+            let r = state.module_runtime_info.read().await;
+            let (act, hlth, gen, err) = r
+                .get(&body.name)
+                .map(|info| {
+                    (
+                        info.actual_state.clone(),
+                        info.health.clone(),
+                        info.generation,
+                        info.last_error.clone(),
+                    )
+                })
+                .unwrap_or_else(|| ("disabled".into(), "disabled".into(), 1, None));
+            return Ok(Json(serde_json::json!({
+                "module": body.name,
+                "enabled": false,
+                "desired_state": "disabled",
+                "actual_state": act,
+                "health": hlth,
+                "generation": gen,
+                "last_error": err,
+            })));
         }
 
         // Transition ON -> OFF: add to disabled_modules and cancel existing token
@@ -193,24 +288,84 @@ pub async fn toggle_module_handler(
             tracing::info!("module '{}' disabled, tasks cancelled", body.name);
         }
 
+        // Update runtime tracking on OFF
+        {
+            let mut runtime = state.module_runtime_info.write().await;
+            let entry =
+                runtime
+                    .entry(body.name.clone())
+                    .or_insert_with(|| crate::ModuleRuntimeInfo {
+                        generation: 1,
+                        actual_state: "disabled".into(),
+                        health: "disabled".into(),
+                        last_error: None,
+                    });
+            entry.actual_state = "disabled".into();
+            entry.health = "disabled".into();
+            entry.last_error = None;
+        }
+
         // Stop and neutralize PlaybackEngine when Playback module is toggled OFF
         if body.name == "playback" {
+            let mut stop_err = None;
             if let Err(e) = state.playback_engine.stop().await {
                 tracing::error!("failed to stop playback engine when disabling module: {e}");
+                stop_err = Some(e.to_string());
             }
             if let Err(e) = state.playback_engine.set_queue(Vec::new(), 0, None).await {
                 tracing::error!("failed to clear engine queue when disabling module: {e}");
+                if stop_err.is_none() {
+                    stop_err = Some(e.to_string());
+                }
             }
             *state.playback_output_selection.write().await = None;
+            if let Some(err) = stop_err {
+                let mut runtime = state.module_runtime_info.write().await;
+                if let Some(entry) = runtime.get_mut("playback") {
+                    entry.actual_state = "degraded".into();
+                    entry.health = "degraded".into();
+                    entry.last_error = Some(err);
+                }
+            }
             tracing::info!("playback module disabled: playback engine stopped and neutralized");
         }
     }
+
+    let (actual_state, health, generation, last_error) = {
+        let r = state.module_runtime_info.read().await;
+        if let Some(info) = r.get(&body.name) {
+            (
+                info.actual_state.clone(),
+                info.health.clone(),
+                info.generation,
+                info.last_error.clone(),
+            )
+        } else {
+            (
+                if body.enabled {
+                    "active".into()
+                } else {
+                    "disabled".into()
+                },
+                if body.enabled {
+                    "healthy".into()
+                } else {
+                    "disabled".into()
+                },
+                1,
+                None,
+            )
+        }
+    };
 
     Ok(Json(serde_json::json!({
         "module": body.name,
         "enabled": body.enabled,
         "desired_state": if body.enabled { "enabled" } else { "disabled" },
-        "actual_state": if body.enabled { "active" } else { "disabled" },
+        "actual_state": actual_state,
+        "health": health,
+        "generation": generation,
+        "last_error": last_error,
     })))
 }
 
@@ -348,6 +503,7 @@ pub struct PolicyResult {
 pub async fn policy_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let max_remote_bitrate: u32 = state.config.max_remote_bitrate;
     let remote_sync: bool = state.config.remote_sync;
+    let sync_module_enabled = !state.disabled_modules.read().await.contains("sync");
     let allow_stream = !state.disabled_modules.read().await.contains("stream");
 
     let profile = "remote";
@@ -356,7 +512,7 @@ pub async fn policy_handler(State(state): State<AppState>) -> Json<serde_json::V
     } else {
         Some(128_000)
     };
-    let allow_sync = remote_sync;
+    let allow_sync = sync_module_enabled && remote_sync;
 
     Json(serde_json::json!({
         "profile": profile,
@@ -383,11 +539,8 @@ pub async fn lan_policy_handler(
     } else {
         Some(128_000)
     };
-    let allow_sync = if is_lan {
-        true
-    } else {
-        state.config.remote_sync
-    };
+    let sync_module_enabled = !state.disabled_modules.read().await.contains("sync");
+    let allow_sync = sync_module_enabled && (is_lan || state.config.remote_sync);
     let allow_stream = !state.disabled_modules.read().await.contains("stream");
 
     Json(serde_json::json!({

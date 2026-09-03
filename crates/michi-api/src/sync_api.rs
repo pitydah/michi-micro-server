@@ -48,6 +48,14 @@ pub async fn capabilities_handler(
 pub async fn devices_handler(
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<Vec<DeviceInfo>>), (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("sync") {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                serde_json::json!({"error": {"code": "MODULE_DISABLED", "message": "sync module is disabled"}}),
+            ),
+        ));
+    }
     let devices = michi_db::list_sync_devices(&state.db).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -72,6 +80,14 @@ pub async fn revoke_device_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("sync") {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                serde_json::json!({"error": {"code": "MODULE_DISABLED", "message": "sync module is disabled"}}),
+            ),
+        ));
+    }
     michi_db::revoke_sync_device(&state.db, &id)
         .await
         .map_err(|e| {
@@ -114,6 +130,14 @@ pub async fn pair_start_handler(
     State(state): State<AppState>,
     Json(body): Json<LegacyPairStart>,
 ) -> Result<(StatusCode, Json<LegacyPairStartResp>), (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("sync") {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                serde_json::json!({"error": {"code": "MODULE_DISABLED", "message": "sync module is disabled"}}),
+            ),
+        ));
+    }
     let code = Uuid::new_v4().to_string()[..8].to_string();
     let token_id = Uuid::new_v4();
     let expires_at = (chrono::Utc::now() + chrono::Duration::seconds(300)).to_rfc3339();
@@ -134,6 +158,14 @@ pub async fn pair_confirm_handler(
     State(state): State<AppState>,
     Json(body): Json<LegacyPairConfirm>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("sync") {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                serde_json::json!({"error": {"code": "MODULE_DISABLED", "message": "sync module is disabled"}}),
+            ),
+        ));
+    }
     let result = michi_db::consume_pairing_token(&state.db, &body.code)
         .await
         .map_err(|e| {
