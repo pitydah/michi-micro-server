@@ -36,6 +36,13 @@ pub async fn sync_upload_init_handler(
     State(state): State<AppState>,
     Json(body): Json<UploadInitBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("sync") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "sync module is disabled",
+        ));
+    }
     // Check if file already exists by hash
     match state
         .sync_manager
@@ -98,6 +105,13 @@ pub async fn sync_upload_chunk_handler(
     Path(file_id): Path<Uuid>,
     Json(chunk): Json<michi_sync::UploadChunk>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("sync") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "sync module is disabled",
+        ));
+    }
     if chunk.file_id != file_id {
         return Err(v1_error(
             StatusCode::BAD_REQUEST,
@@ -151,6 +165,13 @@ pub async fn sync_upload_status_handler(
     State(state): State<AppState>,
     Path(file_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("sync") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "sync module is disabled",
+        ));
+    }
     let progress = state
         .sync_manager
         .get_upload_progress(&file_id)
@@ -188,6 +209,13 @@ pub async fn sync_upload_file_handler(
     State(state): State<AppState>,
     Json(body): Json<UploadFileBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("sync") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "sync module is disabled",
+        ));
+    }
     use base64::Engine;
 
     let data = base64::engine::general_purpose::STANDARD
@@ -305,6 +333,13 @@ pub async fn sync_playlist_handler(
     State(state): State<AppState>,
     Json(body): Json<SyncPlaylistBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("sync") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "sync module is disabled",
+        ));
+    }
     if body.name.trim().is_empty() {
         return Err(v1_error(
             StatusCode::BAD_REQUEST,
@@ -383,6 +418,13 @@ pub async fn sync_playlist_handler(
 pub async fn sync_manifest_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("sync") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "sync module is disabled",
+        ));
+    }
     let tracks = michi_db::get_all_tracks_manifest(&state.db)
         .await
         .map_err(|e| {
@@ -439,6 +481,13 @@ pub async fn sync_manifest_delta_handler(
     State(state): State<AppState>,
     Query(query): Query<DeltaQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("sync") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "sync module is disabled",
+        ));
+    }
     let all = michi_db::get_all_tracks_manifest(&state.db)
         .await
         .map_err(|e| {
@@ -521,6 +570,13 @@ pub async fn sync_state_handler(
     State(state): State<AppState>,
     Json(body): Json<SyncStateBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("sync") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "sync module is disabled",
+        ));
+    }
     // Functional truth: /sync/state conveys remote peer playback state.
     // It broadcasts to peers/WebSockets without spoofing local server PlaybackEngine authority.
     let peer_state = michi_sync::PlaybackState {

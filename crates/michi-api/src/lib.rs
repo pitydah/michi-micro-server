@@ -96,9 +96,23 @@ pub struct AppState {
     pub receiver_credential_store: Arc<Option<michi_receivers::ReceiverCredentialStore>>,
     /// Resource-bounded transcode semaphore derived from ResourceProfile.max_transcodes.
     pub transcode_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Per-module transition mutexes to serialize lifecycle changes without holding global locks during I/O.
+    pub module_transition_locks:
+        Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl AppState {
+    pub async fn get_module_transition_lock(
+        &self,
+        module_name: &str,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.module_transition_locks.lock().await;
+        locks
+            .entry(module_name.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
     pub fn track_task(&self, handle: tokio::task::JoinHandle<()>) {
         self.task_handles.lock().unwrap().push(handle);
     }
@@ -394,6 +408,7 @@ impl AppState {
             playback_output_selection,
             receiver_credential_store,
             transcode_semaphore,
+            module_transition_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
 
         state.spawn_background_tasks();
@@ -943,7 +958,7 @@ pub async fn init_admin_user(config: &Config, db: &SqlitePool) -> Option<Uuid> {
     }
 }
 
-pub fn start_sync_peers(state: &AppState) {
+pub fn start_sync_peers(state: &AppState, cancel_token: CancellationToken) {
     let peers = state.config.sync_peers.clone();
     let sync_name = state.config.sync_name.clone();
     let sync_tx = state.sync_tx.clone();
@@ -954,22 +969,20 @@ pub fn start_sync_peers(state: &AppState) {
     let reconnect_max = state.config.reconnect_delay_max as u64;
     let shutdown = state.shutdown_token.clone();
     let dm = state.disabled_modules.clone();
-    let sync_cancel = state
-        .module_tokens
-        .try_read()
-        .ok()
-        .and_then(|m| m.get("sync").cloned())
-        .unwrap_or_default();
+    let sync_cancel = cancel_token;
 
     state.track_task(tokio::spawn(async move {
         tokio::select! {
             _ = sync_cancel.cancelled() => {
-                info!("sync module cancelled at startup, sync peers not started");
+                info!("sync module cancelled, sync peers stopped");
+            }
+            _ = shutdown.cancelled() => {
+                info!("shutdown received, sync peers stopped");
             }
             _ = async {
                 if dm.read().await.contains("sync") {
                     info!("sync module disabled, sync peers not started");
-                    futures_util::future::pending::<()>().await;
+                    return;
                 }
                 for peer in &peers {
                     let peer = peer.clone();
@@ -980,6 +993,7 @@ pub fn start_sync_peers(state: &AppState) {
                     let peer_db = db.clone();
                     let peer_music_paths = music_paths.clone();
                     let peer_shutdown = shutdown.clone();
+                    let peer_cancel = sync_cancel.clone();
                     let peer_dm = dm.clone();
 
                     tokio::spawn(async move {
@@ -989,9 +1003,12 @@ pub fn start_sync_peers(state: &AppState) {
                         loop {
                             tokio::select! {
                                 _ = peer_shutdown.cancelled() => break,
+                                _ = peer_cancel.cancelled() => {
+                                    info!("sync peer worker for {peer} cancelled");
+                                    break;
+                                }
                                 _ = async {
                                     if peer_dm.read().await.contains("sync") {
-                                        tokio::time::sleep(Duration::from_secs(5)).await;
                                         return;
                                     }
                                     info!("connecting to sync peer: {} (attempt {})", url, attempt + 1);
@@ -1077,6 +1094,8 @@ pub fn start_sync_peers(state: &AppState) {
                                             });
 
                                             tokio::select! {
+                                                _ = peer_shutdown.cancelled() => {},
+                                                _ = peer_cancel.cancelled() => {},
                                                 _ = send_task => {},
                                                 _ = recv_task => {},
                                             }
@@ -1094,7 +1113,11 @@ pub fn start_sync_peers(state: &AppState) {
                                     attempt += 1;
                                     let delay = michi_config::Config::compute_reconnect_backoff(attempt, reconnect_max);
                                     info!("sync peer {}: reconnecting in {}s", peer, delay.as_secs());
-                                    tokio::time::sleep(delay).await;
+                                    tokio::select! {
+                                        _ = peer_shutdown.cancelled() => {},
+                                        _ = peer_cancel.cancelled() => {},
+                                        _ = tokio::time::sleep(delay) => {},
+                                    }
                                 } => {}
                             }
                         }

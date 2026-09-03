@@ -206,7 +206,14 @@ async fn main() -> Result<()> {
     };
 
     // Start sync peer connections (respeta módulo sync)
-    michi_api::start_sync_peers(&state);
+    let sync_token = state
+        .module_tokens
+        .read()
+        .await
+        .get("sync")
+        .cloned()
+        .unwrap_or_default();
+    michi_api::start_sync_peers(&state, sync_token);
 
     // Start Home Assistant MQTT integration (respeta módulo homeassistant)
     if std::env::var("MICHI_MQTT_HOST").is_ok() {
@@ -218,9 +225,10 @@ async fn main() -> Result<()> {
             let _ha_shutdown = state.shutdown_token.clone();
             let ha_cancel = state
                 .module_tokens
-                .try_read()
-                .ok()
-                .and_then(|m| m.get("homeassistant").cloned())
+                .read()
+                .await
+                .get("homeassistant")
+                .cloned()
                 .unwrap_or_default();
             tokio::spawn(async move {
                 tokio::select! {

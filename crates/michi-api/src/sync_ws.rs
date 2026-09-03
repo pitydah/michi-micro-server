@@ -32,6 +32,11 @@ pub async fn sync_handler(
     State(state): State<AppState>,
     ws_result: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
+    if state.disabled_modules.read().await.contains("sync") {
+        warn!("sync_ws: rejected sync connection because sync module is disabled");
+        return (StatusCode::SERVICE_UNAVAILABLE, "sync module is disabled").into_response();
+    }
+
     let client_ip_opt = crate::resolve_client_ip(connect_info, &headers, &state.config);
 
     if !state.config.remote_sync {

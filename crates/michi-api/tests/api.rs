@@ -6450,3 +6450,178 @@ async fn test_concurrent_mixed_on_off_module_toggles_are_safe() {
         assert!(ha_token.is_some());
     }
 }
+
+#[tokio::test]
+async fn test_sync_module_toggle_fails_closed_across_all_sync_endpoints() {
+    let (app, _pool, _state) = make_app_with_state().await;
+
+    // 1. Toggle sync module to OFF
+    let toggle_body = serde_json::json!({
+        "name": "sync",
+        "enabled": false
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&toggle_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Test GET /api/sync WebSocket endpoint fails closed (503)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/sync")
+                .method("GET")
+                .header("Upgrade", "websocket")
+                .header("Connection", "Upgrade")
+                .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .header("Sec-WebSocket-Version", "13")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 3. Test POST /api/v1/sync/upload/init fails closed (503)
+    let init_body = serde_json::json!({
+        "filename": "test.flac",
+        "original_path": "/test.flac",
+        "file_size": 1024,
+        "expected_hash": "abcdef123456",
+        "uploaded_by": "peer"
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sync/upload/init")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&init_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 4. Test GET /api/v1/sync/manifest fails closed (503)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sync/manifest")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 5. Test GET /api/v1/sync/manifest/delta fails closed (503)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sync/manifest/delta")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 6. Test POST /api/v1/sync/state fails closed (503)
+    let state_body = serde_json::json!({
+        "track_id": null,
+        "position_ms": 1000,
+        "playing": false,
+        "volume": 0.8
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sync/state")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&state_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 7. Toggle sync back ON
+    let toggle_on = serde_json::json!({
+        "name": "sync",
+        "enabled": true
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules/toggle")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&toggle_on).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 8. Manifest is accessible again (200 OK)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sync/manifest")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_modules_observability_exposes_desired_and_actual_state() {
+    let (app, _pool, _state) = make_app_with_state().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/modules")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let modules = json["modules"].as_array().unwrap();
+    for m in modules {
+        assert!(m.get("name").is_some());
+        assert!(m.get("enabled").is_some());
+        assert_eq!(m["desired_state"], "enabled");
+        assert_eq!(m["actual_state"], "active");
+    }
+}

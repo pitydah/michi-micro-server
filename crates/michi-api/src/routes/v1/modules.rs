@@ -10,6 +10,8 @@ pub struct ModuleDescriptor {
     pub name: String,
     pub enabled: bool,
     pub description: String,
+    pub desired_state: String,
+    pub actual_state: String,
 }
 
 fn builtin_modules() -> Vec<ModuleDescriptor> {
@@ -18,36 +20,50 @@ fn builtin_modules() -> Vec<ModuleDescriptor> {
             name: "scan".into(),
             enabled: true,
             description: "Music library scanning and filesystem watcher".into(),
+            desired_state: "enabled".into(),
+            actual_state: "active".into(),
         },
         ModuleDescriptor {
             name: "sync".into(),
             enabled: true,
             description: "Peer synchronization and background sync workers".into(),
+            desired_state: "enabled".into(),
+            actual_state: "active".into(),
         },
         ModuleDescriptor {
             name: "stream".into(),
             enabled: true,
             description: "Audio streaming and transcode pipeline".into(),
+            desired_state: "enabled".into(),
+            actual_state: "active".into(),
         },
         ModuleDescriptor {
             name: "playback".into(),
             enabled: true,
             description: "Server playback engine and tracking".into(),
+            desired_state: "enabled".into(),
+            actual_state: "active".into(),
         },
         ModuleDescriptor {
             name: "backup".into(),
             enabled: true,
             description: "Automatic backup scheduler and retention".into(),
+            desired_state: "enabled".into(),
+            actual_state: "active".into(),
         },
         ModuleDescriptor {
             name: "webhook".into(),
             enabled: true,
             description: "Webhook dispatch notifications".into(),
+            desired_state: "enabled".into(),
+            actual_state: "active".into(),
         },
         ModuleDescriptor {
             name: "homeassistant".into(),
             enabled: true,
             description: "Home Assistant MQTT discovery and entity synchronization".into(),
+            desired_state: "enabled".into(),
+            actual_state: "active".into(),
         },
     ]
 }
@@ -56,7 +72,10 @@ pub async fn modules_handler(State(state): State<AppState>) -> Json<serde_json::
     let disabled = state.disabled_modules.read().await;
     let mut modules = builtin_modules();
     for m in &mut modules {
-        m.enabled = !disabled.contains(&m.name);
+        let is_disabled = disabled.contains(&m.name);
+        m.enabled = !is_disabled;
+        m.desired_state = if is_disabled { "disabled" } else { "enabled" }.to_string();
+        m.actual_state = if is_disabled { "disabled" } else { "active" }.to_string();
     }
     Json(serde_json::json!({ "modules": modules }))
 }
@@ -103,24 +122,29 @@ pub async fn toggle_module_handler(
         ));
     }
 
-    // Atomic critical section across concurrent requests: acquire both disabled_modules and module_tokens locks
-    let mut disabled = state.disabled_modules.write().await;
-    let mut tokens = state.module_tokens.write().await;
-    let is_currently_disabled = disabled.contains(&body.name);
+    // Per-module transition lock: serializes transitions for this module without blocking unrelated modules or holding global locks during I/O
+    let module_lock = state.get_module_transition_lock(&body.name).await;
+    let _guard = module_lock.lock().await;
+
+    let is_currently_disabled = state.disabled_modules.read().await.contains(&body.name);
 
     if body.enabled {
-        // Idempotency: If already enabled (ON -> ON), it is a safe NO-OP (do not replace tokens or duplicate workers)
+        // Idempotency: If already enabled (ON -> ON), it is a safe NO-OP
         if !is_currently_disabled {
             tracing::debug!("module '{}' is already enabled (no-op)", body.name);
             return Ok(Json(
-                serde_json::json!({ "module": body.name, "enabled": true }),
+                serde_json::json!({ "module": body.name, "enabled": true, "desired_state": "enabled", "actual_state": "active" }),
             ));
         }
 
-        // Transition OFF -> ON
-        disabled.remove(&body.name);
+        // Transition OFF -> ON: remove from disabled_modules and create fresh token
+        state.disabled_modules.write().await.remove(&body.name);
         let new_token = tokio_util::sync::CancellationToken::new();
-        tokens.insert(body.name.clone(), new_token.clone());
+        state
+            .module_tokens
+            .write()
+            .await
+            .insert(body.name.clone(), new_token.clone());
 
         // Dynamic worker restart on OFF -> ON
         if body.name == "homeassistant" && std::env::var("MICHI_MQTT_HOST").is_ok() {
@@ -145,7 +169,7 @@ pub async fn toggle_module_handler(
             state.track_task(handle);
             tracing::info!("homeassistant worker spawned on module enable");
         } else if body.name == "sync" {
-            crate::start_sync_peers(&state);
+            crate::start_sync_peers(&state, new_token.clone());
             tracing::info!("sync peers worker started on module enable");
         }
         tracing::info!("module '{}' enabled", body.name);
@@ -154,13 +178,17 @@ pub async fn toggle_module_handler(
         if is_currently_disabled {
             tracing::debug!("module '{}' is already disabled (no-op)", body.name);
             return Ok(Json(
-                serde_json::json!({ "module": body.name, "enabled": false }),
+                serde_json::json!({ "module": body.name, "enabled": false, "desired_state": "disabled", "actual_state": "disabled" }),
             ));
         }
 
-        // Transition ON -> OFF
-        disabled.insert(body.name.clone());
-        if let Some(token) = tokens.get(&body.name) {
+        // Transition ON -> OFF: add to disabled_modules and cancel existing token
+        state
+            .disabled_modules
+            .write()
+            .await
+            .insert(body.name.clone());
+        if let Some(token) = state.module_tokens.read().await.get(&body.name) {
             token.cancel();
             tracing::info!("module '{}' disabled, tasks cancelled", body.name);
         }
@@ -178,9 +206,12 @@ pub async fn toggle_module_handler(
         }
     }
 
-    Ok(Json(
-        serde_json::json!({ "module": body.name, "enabled": body.enabled }),
-    ))
+    Ok(Json(serde_json::json!({
+        "module": body.name,
+        "enabled": body.enabled,
+        "desired_state": if body.enabled { "enabled" } else { "disabled" },
+        "actual_state": if body.enabled { "active" } else { "disabled" },
+    })))
 }
 
 // ── Self-Test ──────────────────────────────────────────────────
