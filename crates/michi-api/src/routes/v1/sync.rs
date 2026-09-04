@@ -565,6 +565,8 @@ pub struct SyncStateBody {
     pub playing: bool,
     pub volume: f64,
     #[serde(default)]
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
     pub device_id: Option<String>,
     #[serde(default)]
     pub event_id: Option<Uuid>,
@@ -574,6 +576,8 @@ pub struct SyncStateBody {
     pub epoch: Option<u64>,
     #[serde(default)]
     pub boot_id: Option<Uuid>,
+    #[serde(default)]
+    pub lamport: Option<u64>,
 }
 
 pub async fn sync_state_handler(
@@ -588,20 +592,27 @@ pub async fn sync_state_handler(
         ));
     }
 
-    let (device_id, event_id, sequence, epoch, boot_id) = match body.device_id {
-        Some(dev) => (
-            Some(dev),
-            Some(body.event_id.unwrap_or_else(Uuid::new_v4)),
-            body.sequence,
-            body.epoch,
-            body.boot_id,
-        ),
+    let (device_id, event_id, sequence, epoch, boot_id, lamport) = match body.device_id {
+        Some(dev) => {
+            if let Some(remote_lamp) = body.lamport {
+                state.playback_projection.observe_lamport(remote_lamp);
+            }
+            (
+                Some(dev),
+                Some(body.event_id.unwrap_or_else(Uuid::new_v4)),
+                body.sequence,
+                body.epoch,
+                body.boot_id,
+                body.lamport,
+            )
+        }
         None => (
             Some(state.server_id().to_string()),
             Some(body.event_id.unwrap_or_else(Uuid::new_v4)),
             Some(state.playback_projection.next_local_sequence()),
             Some(state.playback_projection.server_epoch()),
             Some(state.playback_projection.boot_id()),
+            Some(state.playback_projection.next_lamport()),
         ),
     };
 
@@ -610,7 +621,7 @@ pub async fn sync_state_handler(
         position_ms: body.position_ms,
         playing: body.playing,
         volume: body.volume,
-        updated_at: chrono::Utc::now(),
+        updated_at: body.updated_at.unwrap_or_else(chrono::Utc::now),
         playlist_id: None,
         queue_position: None,
         device_id,
@@ -620,6 +631,7 @@ pub async fn sync_state_handler(
         sequence,
         epoch,
         boot_id,
+        lamport,
     };
 
     let _ = state.sync_tx.send(peer_state.into());

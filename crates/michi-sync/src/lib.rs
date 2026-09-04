@@ -41,6 +41,8 @@ pub enum SyncMessage {
         epoch: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         boot_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lamport: Option<u64>,
     },
     #[serde(rename = "handoff_request")]
     HandoffRequest {
@@ -181,6 +183,8 @@ pub struct PlaybackState {
     pub epoch: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lamport: Option<u64>,
 }
 
 fn default_repeat_mode() -> String {
@@ -203,11 +207,29 @@ impl PlaybackState {
     /// Returns true if `self` has deterministic causal precedence over `other`.
     ///
     /// Establishes a strict total order for conflict resolution between concurrent states:
-    /// 1. `epoch` (higher epoch / reboot generation wins)
-    /// 2. `updated_at` timestamp (newer timestamp wins)
-    /// 3. `sequence` (higher sequence breaks tie if same timestamp)
-    /// 4. `device_id` lexicographical comparison (deterministic tie-breaker across nodes)
+    /// 1. `lamport` (higher logical timestamp wins)
+    ///    - If either state has a non-zero lamport clock, compare lamport.
+    ///    - If lamport clocks are equal and non-zero, tie-break deterministically via
+    ///      `device_id` lexicographical comparison (`self_dev > other_dev`).
+    /// 2. If neither state has a lamport clock: fallback to legacy total order:
+    ///    - `epoch` (higher epoch / reboot generation wins)
+    ///    - `updated_at` timestamp (newer timestamp wins)
+    ///    - `sequence` (higher sequence breaks tie if same timestamp)
+    ///    - `device_id` lexicographical comparison (deterministic tie-breaker across nodes)
     pub fn has_precedence_over(&self, other: &PlaybackState) -> bool {
+        let self_lamport = self.lamport.unwrap_or(0);
+        let other_lamport = other.lamport.unwrap_or(0);
+        if self_lamport > 0 || other_lamport > 0 {
+            if self_lamport != other_lamport {
+                return self_lamport > other_lamport;
+            }
+            let self_dev = self.device_id.as_deref().unwrap_or("");
+            let other_dev = other.device_id.as_deref().unwrap_or("");
+            if self_dev != other_dev {
+                return self_dev > other_dev;
+            }
+        }
+
         let self_epoch = self.epoch.unwrap_or(0);
         let other_epoch = other.epoch.unwrap_or(0);
         if self_epoch != other_epoch {
@@ -247,6 +269,7 @@ impl Default for PlaybackState {
             sequence: None,
             epoch: None,
             boot_id: None,
+            lamport: None,
         }
     }
 }
@@ -266,6 +289,7 @@ impl From<PlaybackState> for SyncMessage {
             sequence: state.sequence,
             epoch: state.epoch,
             boot_id: state.boot_id,
+            lamport: state.lamport,
         }
     }
 }
@@ -1794,6 +1818,7 @@ impl SyncManager {
                     sequence: None,
                     epoch: None,
                     boot_id: None,
+                    lamport: None,
                 })
             }
             None => Ok(PlaybackState::default()),
@@ -1943,6 +1968,7 @@ mod tests {
             sequence: Some(1),
             epoch: Some(1700000000),
             boot_id: Some(Uuid::nil()),
+            lamport: Some(42),
         };
         let json = msg.serialize().unwrap();
         let deserialized = SyncMessage::deserialize(&json).unwrap();
@@ -1951,11 +1977,13 @@ mod tests {
                 epoch,
                 sequence,
                 boot_id,
+                lamport,
                 ..
             } => {
                 assert_eq!(epoch, Some(1700000000));
                 assert_eq!(sequence, Some(1));
                 assert_eq!(boot_id, Some(Uuid::nil()));
+                assert_eq!(lamport, Some(42));
             }
             _ => panic!("Expected SyncMessage::State"),
         }
@@ -2015,6 +2043,55 @@ mod tests {
         };
         assert!(s_tie1.has_precedence_over(&s_tie2));
         assert!(!s_tie2.has_precedence_over(&s_tie1));
+    }
+
+    #[test]
+    fn test_playback_state_lamport_precedence_total_order() {
+        let now = Utc::now();
+        let past = now - chrono::Duration::seconds(100);
+
+        // Higher lamport wins even if updated_at is older
+        let s_lamport_high = PlaybackState {
+            lamport: Some(10),
+            updated_at: past,
+            device_id: Some("server-a".to_string()),
+            ..Default::default()
+        };
+        let s_lamport_low = PlaybackState {
+            lamport: Some(5),
+            updated_at: now,
+            device_id: Some("server-b".to_string()),
+            ..Default::default()
+        };
+        assert!(s_lamport_high.has_precedence_over(&s_lamport_low));
+        assert!(!s_lamport_low.has_precedence_over(&s_lamport_high));
+
+        // Equal lamport broken by device_id lexicographically
+        let s_lamport_equal_a = PlaybackState {
+            lamport: Some(10),
+            updated_at: now,
+            device_id: Some("server-a".to_string()),
+            ..Default::default()
+        };
+        let s_lamport_equal_z = PlaybackState {
+            lamport: Some(10),
+            updated_at: past,
+            device_id: Some("server-z".to_string()),
+            ..Default::default()
+        };
+        assert!(s_lamport_equal_z.has_precedence_over(&s_lamport_equal_a));
+        assert!(!s_lamport_equal_a.has_precedence_over(&s_lamport_equal_z));
+
+        // State with lamport wins over legacy state with no lamport
+        let s_legacy = PlaybackState {
+            lamport: None,
+            epoch: Some(999),
+            updated_at: now + chrono::Duration::seconds(50),
+            device_id: Some("server-legacy".to_string()),
+            ..Default::default()
+        };
+        assert!(s_lamport_low.has_precedence_over(&s_legacy));
+        assert!(!s_legacy.has_precedence_over(&s_lamport_low));
     }
 
     #[test]

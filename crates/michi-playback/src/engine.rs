@@ -205,6 +205,7 @@ impl PlaybackEngine {
             output_health: self.output_health.clone(),
             last_error: self.last_error.clone(),
             updated_at: Utc::now(),
+            timeline_origin: self.current_timeline_origin.clone(),
         }
     }
 
@@ -1605,6 +1606,7 @@ mod tests {
             sequence: Some(42),
             epoch: Some(100),
             boot_id: Some(Uuid::nil()),
+            lamport: Some(7),
         };
         let cmd = EngineCommand::LoadTrack {
             track: Box::new(track),

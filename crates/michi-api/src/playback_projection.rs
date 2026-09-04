@@ -113,6 +113,7 @@ pub struct PlaybackProjectionCoordinator {
     server_epoch: Arc<AtomicU64>,
     boot_id: Uuid,
     local_sequence: Arc<AtomicU64>,
+    local_lamport: Arc<AtomicU64>,
     peer_vectors: Arc<RwLock<HashMap<String, PeerCursor>>>,
     processed_events: Arc<RwLock<HashSet<Uuid>>>,
     health: Arc<RwLock<PlaybackProjectionHealth>>,
@@ -252,6 +253,7 @@ impl PlaybackProjectionCoordinator {
             server_epoch: Arc::new(AtomicU64::new(server_epoch)),
             boot_id,
             local_sequence: Arc::new(AtomicU64::new(0)),
+            local_lamport: Arc::new(AtomicU64::new(0)),
             peer_vectors: Arc::new(RwLock::new(HashMap::new())),
             processed_events: Arc::new(RwLock::new(HashSet::new())),
             health: health.clone(),
@@ -270,6 +272,30 @@ impl PlaybackProjectionCoordinator {
 
     pub fn next_local_sequence(&self) -> u64 {
         self.local_sequence.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn next_lamport(&self) -> u64 {
+        self.local_lamport.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn observe_lamport(&self, remote: u64) -> u64 {
+        let mut current = self.local_lamport.load(Ordering::SeqCst);
+        loop {
+            let target = current.max(remote) + 1;
+            match self.local_lamport.compare_exchange_weak(
+                current,
+                target,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return target,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    pub fn current_lamport(&self) -> u64 {
+        self.local_lamport.load(Ordering::SeqCst)
     }
 
     pub async fn is_stale_peer_state(
@@ -431,30 +457,35 @@ impl PlaybackProjectionCoordinator {
         };
 
         // Determine provenance directly attached to event without timing fallbacks
-        let (device_id, event_id, sequence, epoch, boot_id, is_local) = match &event.origin {
+        let (device_id, event_id, sequence, epoch, boot_id, lamport, is_local) = match &event.origin
+        {
             CommandOrigin::Remote {
                 origin_device_id,
                 event_id,
                 sequence,
                 epoch,
                 boot_id,
+                lamport,
             } => (
                 Some(origin_device_id.clone()),
                 Some(*event_id),
                 *sequence,
                 *epoch,
                 *boot_id,
+                *lamport,
                 false,
             ),
             CommandOrigin::Local => {
                 let seq = self.next_local_sequence();
                 let eid = Uuid::new_v4();
+                let lamp = self.next_lamport();
                 (
                     Some(self.server_id.clone()),
                     Some(eid),
                     Some(seq),
                     Some(self.server_epoch()),
                     Some(self.boot_id),
+                    Some(lamp),
                     true,
                 )
             }
@@ -475,6 +506,7 @@ impl PlaybackProjectionCoordinator {
             ps.sequence = sequence;
             ps.epoch = epoch;
             ps.boot_id = boot_id;
+            ps.lamport = lamport;
             ps.clone()
         };
 
@@ -589,14 +621,39 @@ impl PlaybackProjectionCoordinator {
             snap.position_ms
         };
 
-        let seq = self.next_local_sequence();
-        let eid = Uuid::new_v4();
-        let device_id = Some(self.server_id.clone());
-        let event_id = Some(eid);
-        let sequence = Some(seq);
-        let epoch = Some(self.server_epoch());
-        let boot_id = Some(self.boot_id);
-        let is_local = true;
+        let (device_id, event_id, sequence, epoch, boot_id, lamport, is_local) =
+            match &snap.timeline_origin {
+                CommandOrigin::Remote {
+                    origin_device_id,
+                    event_id,
+                    sequence,
+                    epoch,
+                    boot_id,
+                    lamport,
+                } => (
+                    Some(origin_device_id.clone()),
+                    Some(*event_id),
+                    *sequence,
+                    *epoch,
+                    *boot_id,
+                    *lamport,
+                    false,
+                ),
+                CommandOrigin::Local => {
+                    let seq = self.next_local_sequence();
+                    let eid = Uuid::new_v4();
+                    let lamp = self.next_lamport();
+                    (
+                        Some(self.server_id.clone()),
+                        Some(eid),
+                        Some(seq),
+                        Some(self.server_epoch()),
+                        Some(self.boot_id),
+                        Some(lamp),
+                        true,
+                    )
+                }
+            };
 
         let out_state = {
             let mut ps = self.legacy_playback_state.write().await;
@@ -606,12 +663,13 @@ impl PlaybackProjectionCoordinator {
             ps.volume = (snap.volume as f64) / 100.0;
             ps.shuffle = snap.shuffle;
             ps.repeat = snap.repeat.as_str().to_string();
-            ps.updated_at = Utc::now();
+            ps.updated_at = snap.updated_at;
             ps.device_id = device_id;
             ps.event_id = event_id;
             ps.sequence = sequence;
             ps.epoch = epoch;
             ps.boot_id = boot_id;
+            ps.lamport = lamport;
             ps.clone()
         };
         if is_local {

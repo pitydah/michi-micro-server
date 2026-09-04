@@ -170,6 +170,8 @@ pub struct EngineSnapshot {
     pub output_health: String,
     pub last_error: Option<String>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub timeline_origin: CommandOrigin,
 }
 
 impl Default for EngineSnapshot {
@@ -195,6 +197,7 @@ impl Default for EngineSnapshot {
             output_health: "none".to_string(),
             last_error: None,
             updated_at: Utc::now(),
+            timeline_origin: CommandOrigin::Local,
         }
     }
 }
@@ -262,6 +265,8 @@ pub enum CommandOrigin {
         epoch: Option<u64>,
         #[serde(default)]
         boot_id: Option<Uuid>,
+        #[serde(default)]
+        lamport: Option<u64>,
     },
 }
 

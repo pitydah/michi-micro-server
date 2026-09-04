@@ -6769,7 +6769,18 @@ async fn test_sync_remote_playback_isolation_when_playback_module_disabled() {
 
     // 2. Try applying remote playback state
     let applied = michi_api::sync_ws::apply_remote_playback_state(
-        &state, None, 5000, true, 0.8, None, None, None, None, None,
+        &state,
+        None,
+        5000,
+        true,
+        0.8,
+        chrono::Utc::now(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .await;
 
@@ -6796,6 +6807,8 @@ async fn test_sync_remote_playback_concurrent_module_disable_toctou_prevention()
             5000,
             true,
             0.8,
+            chrono::Utc::now(),
+            None,
             None,
             None,
             None,
@@ -7091,9 +7104,11 @@ async fn test_sync_echo_suppression_drops_self_originating_state() {
         5000,
         true,
         0.8,
+        chrono::Utc::now(),
         Some(self_id),
         Some(event_id),
         Some(1),
+        None,
         None,
         None,
     )
@@ -7125,9 +7140,11 @@ async fn test_sync_deduplication_drops_duplicate_event_id() {
         2000,
         false,
         0.5,
+        chrono::Utc::now(),
         Some(remote_origin.clone()),
         Some(event_id),
         Some(1),
+        None,
         None,
         None,
     )
@@ -7141,9 +7158,11 @@ async fn test_sync_deduplication_drops_duplicate_event_id() {
         2000,
         false,
         0.5,
+        chrono::Utc::now(),
         Some(remote_origin),
         Some(event_id),
         Some(1),
+        None,
         None,
         None,
     )
@@ -7166,9 +7185,11 @@ async fn test_sync_remote_application_suppresses_local_echo() {
         1500,
         false,
         0.6,
+        chrono::Utc::now(),
         Some(remote_origin),
         Some(event_id),
         Some(42),
+        None,
         None,
         None,
     )
@@ -7242,10 +7263,12 @@ async fn test_sync_reordered_and_stale_packets_rejected() {
         1000,
         false,
         0.5,
+        chrono::Utc::now(),
         Some(peer_origin.clone()),
         Some(uuid::Uuid::new_v4()),
         Some(5),
         Some(100),
+        None,
         None,
     )
     .await;
@@ -7258,10 +7281,12 @@ async fn test_sync_reordered_and_stale_packets_rejected() {
         2000,
         false,
         0.5,
+        chrono::Utc::now(),
         Some(peer_origin.clone()),
         Some(uuid::Uuid::new_v4()),
         Some(3),
         Some(100),
+        None,
         None,
     )
     .await;
@@ -7277,10 +7302,12 @@ async fn test_sync_reordered_and_stale_packets_rejected() {
         1000,
         false,
         0.5,
+        chrono::Utc::now(),
         Some(peer_origin.clone()),
         Some(uuid::Uuid::new_v4()),
         Some(5),
         Some(100),
+        None,
         None,
     )
     .await;
@@ -7296,10 +7323,12 @@ async fn test_sync_reordered_and_stale_packets_rejected() {
         3000,
         false,
         0.5,
+        chrono::Utc::now(),
         Some(peer_origin.clone()),
         Some(uuid::Uuid::new_v4()),
         Some(6),
         Some(100),
+        None,
         None,
     )
     .await;
@@ -7318,10 +7347,12 @@ async fn test_sync_epoch_rollover_reboot_handled() {
         1000,
         false,
         0.5,
+        chrono::Utc::now(),
         Some(peer_origin.clone()),
         Some(uuid::Uuid::new_v4()),
         Some(50),
         Some(10),
+        None,
         None,
     )
     .await;
@@ -7334,10 +7365,12 @@ async fn test_sync_epoch_rollover_reboot_handled() {
         2000,
         false,
         0.5,
+        chrono::Utc::now(),
         Some(peer_origin.clone()),
         Some(uuid::Uuid::new_v4()),
         Some(1),
         Some(11),
+        None,
         None,
     )
     .await;
@@ -7353,10 +7386,12 @@ async fn test_sync_epoch_rollover_reboot_handled() {
         3000,
         false,
         0.5,
+        chrono::Utc::now(),
         Some(peer_origin.clone()),
         Some(uuid::Uuid::new_v4()),
         Some(999),
         Some(10),
+        None,
         None,
     )
     .await;
@@ -7380,10 +7415,12 @@ async fn test_sync_retry_succeeds_after_transient_failure() {
         5000,
         false,
         0.5,
+        chrono::Utc::now(),
         Some(peer_origin.clone()),
         Some(event_id),
         Some(10),
         Some(1),
+        None,
         None,
     )
     .await;
@@ -7396,10 +7433,12 @@ async fn test_sync_retry_succeeds_after_transient_failure() {
         5000,
         false,
         0.5,
+        chrono::Utc::now(),
         Some(peer_origin.clone()),
         Some(event_id),
         Some(10),
         Some(1),
+        None,
         None,
     )
     .await;
@@ -7422,10 +7461,12 @@ async fn test_sync_no_remote_context_leak_on_local_events() {
         1000,
         false,
         0.5,
+        chrono::Utc::now(),
         Some(peer_origin),
         Some(uuid::Uuid::new_v4()),
         Some(1),
         Some(1),
+        None,
         None,
     )
     .await;
@@ -7510,11 +7551,13 @@ async fn test_sync_bidirectional_concurrent_conflict_resolution() {
         state_b_snap.position_ms,
         state_b_snap.playing,
         state_b_snap.volume,
+        state_b_snap.updated_at,
         Some(id_b.clone()),
         state_b_snap.event_id,
         state_b_snap.sequence,
         state_b_snap.epoch,
         state_b_snap.boot_id,
+        state_b_snap.lamport,
     )
     .await;
 
@@ -7524,11 +7567,13 @@ async fn test_sync_bidirectional_concurrent_conflict_resolution() {
         state_a_snap.position_ms,
         state_a_snap.playing,
         state_a_snap.volume,
+        state_a_snap.updated_at,
         Some(id_a.clone()),
         state_a_snap.event_id,
         state_a_snap.sequence,
         state_a_snap.epoch,
         state_a_snap.boot_id,
+        state_a_snap.lamport,
     )
     .await;
 
@@ -7588,4 +7633,208 @@ async fn test_sync_rapid_reboot_monotonic_epoch() {
         coord2.boot_id(),
         "Boot IDs must be unique per reboot"
     );
+}
+
+#[tokio::test]
+async fn test_sync_three_node_permutation_convergence() {
+    // 3 replicas with independent AppStates
+    let (_app_a, _pool_a, state_1) = make_app_with_state().await;
+    let (_app_b, _pool_b, state_2) = make_app_with_state().await;
+    let (_app_c, _pool_c, state_3) = make_app_with_state().await;
+
+    let now = chrono::Utc::now();
+    // Node A state: lamport 10, volume 0.2
+    let msg_a = michi_sync::PlaybackState {
+        volume: 0.2,
+        lamport: Some(10),
+        device_id: Some("server-a".to_string()),
+        sequence: Some(1),
+        updated_at: now,
+        ..Default::default()
+    };
+    // Node B state: lamport 20, volume 0.5
+    let msg_b = michi_sync::PlaybackState {
+        volume: 0.5,
+        lamport: Some(20),
+        device_id: Some("server-b".to_string()),
+        sequence: Some(1),
+        updated_at: now,
+        ..Default::default()
+    };
+    // Node C state: lamport 30, volume 0.8 (Deterministic Winner)
+    let msg_c = michi_sync::PlaybackState {
+        volume: 0.8,
+        lamport: Some(30),
+        device_id: Some("server-c".to_string()),
+        sequence: Some(1),
+        updated_at: now,
+        ..Default::default()
+    };
+
+    async fn apply_msg(st: &michi_api::AppState, s: &michi_sync::PlaybackState) -> bool {
+        michi_api::sync_ws::apply_remote_playback_state(
+            st,
+            s.track_id,
+            s.position_ms,
+            s.playing,
+            s.volume,
+            s.updated_at,
+            s.device_id.clone(),
+            s.event_id,
+            s.sequence,
+            s.epoch,
+            s.boot_id,
+            s.lamport,
+        )
+        .await
+    }
+
+    // Permutation 1: A -> B -> C
+    apply_msg(&state_1, &msg_a).await;
+    apply_msg(&state_1, &msg_b).await;
+    apply_msg(&state_1, &msg_c).await;
+
+    // Permutation 2: C -> A -> B
+    apply_msg(&state_2, &msg_c).await;
+    apply_msg(&state_2, &msg_a).await;
+    apply_msg(&state_2, &msg_b).await;
+
+    // Permutation 3: B -> C -> A
+    apply_msg(&state_3, &msg_b).await;
+    apply_msg(&state_3, &msg_c).await;
+    apply_msg(&state_3, &msg_a).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let v1 = (state_1.playback_engine.snapshot().await.unwrap().volume as f64) / 100.0;
+    let v2 = (state_2.playback_engine.snapshot().await.unwrap().volume as f64) / 100.0;
+    let v3 = (state_3.playback_engine.snapshot().await.unwrap().volume as f64) / 100.0;
+
+    assert_eq!(
+        (v1 * 100.0).round() as u32,
+        80,
+        "Cluster 1 must converge to C (0.8)"
+    );
+    assert_eq!(
+        (v2 * 100.0).round() as u32,
+        80,
+        "Cluster 2 must converge to C (0.8)"
+    );
+    assert_eq!(
+        (v3 * 100.0).round() as u32,
+        80,
+        "Cluster 3 must converge to C (0.8)"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_reconcile_lag_preserves_remote_timeline_provenance() {
+    let (_app, _pool, state) = make_app_with_state().await;
+    let mut sync_rx = state.sync_tx.subscribe();
+
+    // 1. Apply a remote state so engine has remote timeline origin
+    let remote_origin = "remote-node-lag".to_string();
+    let remote_event_id = uuid::Uuid::new_v4();
+    let applied = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        2500,
+        false,
+        0.65,
+        chrono::Utc::now(),
+        Some(remote_origin.clone()),
+        Some(remote_event_id),
+        Some(7),
+        Some(100),
+        None,
+        Some(42),
+    )
+    .await;
+    assert!(applied);
+
+    // Drain initial engine events
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    while sync_rx.try_recv().is_ok() {}
+
+    // 2. Fetch engine snapshot which now holds CommandOrigin::Remote
+    let snap = state.playback_engine.snapshot().await.unwrap();
+    assert!(matches!(
+        snap.timeline_origin,
+        michi_playback::CommandOrigin::Remote { .. }
+    ));
+
+    // 3. Trigger lag reconciliation directly
+    let outcome = state
+        .playback_projection
+        .reconcile_from_snapshot(&snap)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        michi_api::playback_projection::ReconcileOutcome::NoPersistentSessionNeeded
+    );
+
+    // 4. Must NOT have broadcasted to sync_tx because timeline_origin is Remote (no echo loop!)
+    let timeout_res =
+        tokio::time::timeout(std::time::Duration::from_millis(100), sync_rx.recv()).await;
+    assert!(
+        timeout_res.is_err(),
+        "Lag reconciliation of a remote timeline MUST NOT broadcast to sync_tx"
+    );
+
+    // 5. In-memory legacy playback state must preserve remote device_id and lamport
+    let ps = state.playback_state.read().await;
+    assert_eq!(ps.device_id.as_deref(), Some("remote-node-lag"));
+    assert_eq!(ps.lamport, Some(42));
+    assert_eq!(ps.sequence, Some(7));
+}
+
+#[tokio::test]
+async fn test_sync_real_websocket_bidirectional_e2e() {
+    use futures_util::{SinkExt, StreamExt};
+
+    let (port_a, _pool_a, state_a) = run_test_server_with_state().await;
+    let url_a = format!("ws://127.0.0.1:{port_a}/api/sync");
+
+    // Client connects to Server A via real WebSocket
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url_a)
+        .await
+        .expect("WebSocket connection to Server A should succeed");
+    let (mut ws_write, mut ws_read) = ws_stream.split();
+
+    // Consume Server A's Identify & initial State
+    let _id_msg = ws_read.next().await.unwrap().unwrap();
+    let _initial_state = ws_read.next().await.unwrap().unwrap();
+
+    // Client sends State update with higher Lamport clock (volume 85)
+    let client_event_id = uuid::Uuid::new_v4();
+    let client_state = michi_sync::SyncMessage::State {
+        track_id: None,
+        position_ms: 0,
+        playing: false,
+        volume: 0.85,
+        updated_at: chrono::Utc::now(),
+        playlist_id: None,
+        queue_position: None,
+        origin_device_id: Some("client-peer-node".to_string()),
+        event_id: Some(client_event_id),
+        sequence: Some(1),
+        epoch: Some(1),
+        boot_id: Some(uuid::Uuid::new_v4()),
+        lamport: Some(100),
+    };
+
+    let json = serde_json::to_string(&client_state).unwrap();
+    ws_write
+        .send(tokio_tungstenite::tungstenite::Message::Text(json))
+        .await
+        .unwrap();
+
+    // Verify Server A received and applied it
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let snap_a = state_a.playback_engine.snapshot().await.unwrap();
+    assert_eq!(snap_a.volume, 85);
+
+    // Verify Server A observed the higher lamport
+    assert!(state_a.playback_projection.current_lamport() >= 100);
 }

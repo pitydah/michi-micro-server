@@ -98,11 +98,13 @@ pub async fn apply_remote_playback_state(
     position_ms: u64,
     playing: bool,
     volume: f64,
+    updated_at: chrono::DateTime<chrono::Utc>,
     origin_device_id: Option<String>,
     event_id: Option<Uuid>,
     sequence: Option<u64>,
     epoch: Option<u64>,
     boot_id: Option<Uuid>,
+    lamport: Option<u64>,
 ) -> bool {
     let playback_lock = state.get_module_transition_lock("playback").await;
     let _playback_guard = playback_lock.lock().await;
@@ -121,7 +123,12 @@ pub async fn apply_remote_playback_state(
         }
     }
 
-    // 2. Deduplication check: drop if already processed, but do NOT record until applied
+    // 2. Observe remote lamport clock to advance local causal time
+    if let Some(remote_lamp) = lamport {
+        state.playback_projection.observe_lamport(remote_lamp);
+    }
+
+    // 3. Deduplication check: drop if already processed, but do NOT record until applied
     if let Some(eid) = event_id {
         if state.playback_projection.is_event_processed(&eid).await {
             debug!(event_id = %eid, "sync: dropped duplicate state event");
@@ -129,7 +136,7 @@ pub async fn apply_remote_playback_state(
         }
     }
 
-    // 3. Sequence / Epoch / Boot_id check: drop if stale or out-of-order, but do NOT record until applied
+    // 4. Sequence / Epoch / Boot_id check: drop if stale or out-of-order, but do NOT record until applied
     if let (Some(ref origin), Some(seq)) = (&origin_device_id, sequence) {
         if state
             .playback_projection
@@ -141,13 +148,13 @@ pub async fn apply_remote_playback_state(
         }
     }
 
-    // 4. Cross-origin conflict resolution: if our current state was originated locally and has precedence, drop and re-broadcast
+    // 5. Cross-origin conflict resolution: compare total order against current state
     let incoming_state = michi_sync::PlaybackState {
         track_id,
         position_ms,
         playing,
         volume,
-        updated_at: chrono::Utc::now(),
+        updated_at,
         playlist_id: None,
         queue_position: None,
         device_id: origin_device_id.clone(),
@@ -157,18 +164,24 @@ pub async fn apply_remote_playback_state(
         sequence,
         epoch,
         boot_id,
+        lamport,
     };
 
     let current_state = state.playback_state.read().await.clone();
-    if current_state.device_id.as_deref() == Some(&local_server_id)
-        && current_state.has_precedence_over(&incoming_state)
-    {
+    if current_state.has_precedence_over(&incoming_state) {
         debug!(
-            local_seq = ?current_state.sequence,
-            remote_seq = ?sequence,
-            "sync: local state has precedence over concurrent remote state; retaining local authority"
+            current_dev = ?current_state.device_id,
+            current_seq = ?current_state.sequence,
+            current_lamp = ?current_state.lamport,
+            incoming_dev = ?origin_device_id,
+            incoming_seq = ?sequence,
+            incoming_lamp = ?lamport,
+            "sync: current state has precedence over incoming state; retaining current authority"
         );
-        let _ = state.sync_tx.send(current_state.into());
+        // If our winning state was originated locally, re-broadcast to help peers converge
+        if current_state.device_id.as_deref() == Some(&local_server_id) {
+            let _ = state.sync_tx.send(current_state.into());
+        }
         return false;
     }
 
@@ -183,6 +196,7 @@ pub async fn apply_remote_playback_state(
         sequence,
         epoch,
         boot_id,
+        lamport,
     };
 
     let mut all_applied = true;
@@ -352,11 +366,13 @@ async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: Cancellati
                                         position_ms,
                                         playing,
                                         volume,
+                                        updated_at,
                                         origin_device_id,
                                         event_id,
                                         sequence,
                                         epoch,
                                         boot_id,
+                                        lamport,
                                         ..
                                     } => {
                                         apply_remote_playback_state(
@@ -365,11 +381,13 @@ async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: Cancellati
                                             *position_ms,
                                             *playing,
                                             *volume,
+                                            *updated_at,
                                             origin_device_id.clone(),
                                             *event_id,
                                             *sequence,
                                             *epoch,
                                             *boot_id,
+                                            *lamport,
                                         )
                                         .await;
                                     }

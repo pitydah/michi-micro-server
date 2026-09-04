@@ -1106,11 +1106,13 @@ pub fn start_sync_peers(state: &AppState, cancel_token: CancellationToken) {
                                                                         position_ms,
                                                                         playing,
                                                                         volume,
+                                                                        updated_at,
                                                                         origin_device_id,
                                                                         event_id,
                                                                         sequence,
                                                                         epoch,
                                                                         boot_id,
+                                                                        lamport,
                                                                         ..
                                                                     }) = michi_sync::SyncMessage::deserialize(&text)
                                                                     {
@@ -1120,11 +1122,13 @@ pub fn start_sync_peers(state: &AppState, cancel_token: CancellationToken) {
                                                                             position_ms,
                                                                             playing,
                                                                             volume,
+                                                                            updated_at,
                                                                             origin_device_id,
                                                                             event_id,
                                                                             sequence,
                                                                             epoch,
                                                                             boot_id,
+                                                                            lamport,
                                                                         )
                                                                         .await;
                                                                     }
