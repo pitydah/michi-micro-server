@@ -382,6 +382,7 @@ impl AppState {
                 playback_state.clone(),
                 playback_engine.clone(),
                 sync_tx.clone(),
+                config.server_id.to_string(),
             );
         let projector_handle = playback_projector.clone().spawn(shutdown_token.clone());
         task_handles.lock().unwrap().push(projector_handle);
@@ -1105,6 +1106,9 @@ pub fn start_sync_peers(state: &AppState, cancel_token: CancellationToken) {
                                                                         position_ms,
                                                                         playing,
                                                                         volume,
+                                                                        origin_device_id,
+                                                                        event_id,
+                                                                        sequence,
                                                                         ..
                                                                     }) = michi_sync::SyncMessage::deserialize(&text)
                                                                     {
@@ -1114,6 +1118,9 @@ pub fn start_sync_peers(state: &AppState, cancel_token: CancellationToken) {
                                                                             position_ms,
                                                                             playing,
                                                                             volume,
+                                                                            origin_device_id,
+                                                                            event_id,
+                                                                            sequence,
                                                                         )
                                                                         .await;
                                                                     }

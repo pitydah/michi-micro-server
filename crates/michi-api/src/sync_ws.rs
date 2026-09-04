@@ -91,12 +91,16 @@ pub async fn sync_handler(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_remote_playback_state(
     state: &AppState,
     track_id: Option<Uuid>,
     position_ms: u64,
     playing: bool,
     volume: f64,
+    origin_device_id: Option<String>,
+    event_id: Option<Uuid>,
+    sequence: Option<u64>,
 ) -> bool {
     let playback_lock = state.get_module_transition_lock("playback").await;
     let _playback_guard = playback_lock.lock().await;
@@ -105,6 +109,38 @@ pub async fn apply_remote_playback_state(
         debug!("sync: playback module disabled locally, skipping playback state application");
         return false;
     }
+
+    // 1. Echo suppression: if origin is this server, drop immediately
+    let local_server_id = state.server_id().to_string();
+    if let Some(ref origin) = origin_device_id {
+        if origin == &local_server_id {
+            debug!(origin = %origin, "sync: dropped echoed state originating from self");
+            return false;
+        }
+    }
+
+    // 2. Deduplication: if event_id was already processed, drop immediately
+    if let Some(eid) = event_id {
+        if state.playback_projection.is_event_processed(&eid).await {
+            debug!(event_id = %eid, "sync: dropped duplicate state event");
+            return false;
+        }
+        state.playback_projection.record_processed_event(eid).await;
+    }
+
+    let resolved_event_id = event_id.unwrap_or_else(Uuid::new_v4);
+    let resolved_origin = origin_device_id.unwrap_or_else(|| "remote_peer".into());
+
+    // 3. Set remote provenance context on projection coordinator so resulting engine events are NOT re-broadcast to sync_tx
+    state
+        .playback_projection
+        .set_remote_context(
+            resolved_origin,
+            resolved_event_id,
+            sequence,
+            std::time::Duration::from_millis(500),
+        )
+        .await;
 
     let mut all_applied = true;
     if let Some(tid) = track_id {
@@ -244,6 +280,9 @@ async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: Cancellati
                                         position_ms,
                                         playing,
                                         volume,
+                                        origin_device_id,
+                                        event_id,
+                                        sequence,
                                         ..
                                     } => {
                                         apply_remote_playback_state(
@@ -252,6 +291,9 @@ async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: Cancellati
                                             *position_ms,
                                             *playing,
                                             *volume,
+                                            origin_device_id.clone(),
+                                            *event_id,
+                                            *sequence,
                                         )
                                         .await;
                                     }

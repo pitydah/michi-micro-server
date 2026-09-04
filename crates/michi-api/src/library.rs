@@ -928,9 +928,11 @@ pub async fn set_playback_state_handler(
         updated_at: Utc::now(),
         playlist_id: None,
         queue_position: None,
-        device_id: Some("server".into()),
+        device_id: Some(state.server_id().to_string()),
         shuffle: snap.shuffle,
         repeat: snap.repeat.as_str().into(),
+        event_id: Some(Uuid::new_v4()),
+        sequence: None,
     };
 
     let _ = state.sync_tx.send(out_state.clone().into());

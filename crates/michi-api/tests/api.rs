@@ -6769,7 +6769,7 @@ async fn test_sync_remote_playback_isolation_when_playback_module_disabled() {
 
     // 2. Try applying remote playback state
     let applied =
-        michi_api::sync_ws::apply_remote_playback_state(&state, None, 5000, true, 0.8).await;
+        michi_api::sync_ws::apply_remote_playback_state(&state, None, 5000, true, 0.8, None, None, None).await;
 
     // 3. Must be false and playback must NOT have resumed
     assert!(!applied);
@@ -6788,7 +6788,7 @@ async fn test_sync_remote_playback_concurrent_module_disable_toctou_prevention()
     // 2. Spawn concurrent apply_remote_playback_state task
     let state_clone = state.clone();
     let apply_handle = tokio::spawn(async move {
-        michi_api::sync_ws::apply_remote_playback_state(&state_clone, None, 5000, true, 0.8).await
+        michi_api::sync_ws::apply_remote_playback_state(&state_clone, None, 5000, true, 0.8, None, None, None).await
     });
 
     // Give the spawned task a moment to attempt acquiring the lock
@@ -7061,3 +7061,130 @@ async fn test_sync_websocket_generation_a_not_adopted_by_generation_b() {
         Err(_) => panic!("Socket from Gen A was incorrectly kept alive / adopted across toggle"),
     }
 }
+
+#[tokio::test]
+async fn test_sync_echo_suppression_drops_self_originating_state() {
+    let (_app, _pool, state) = make_app_with_state().await;
+    let mut sync_rx = state.sync_tx.subscribe();
+
+    // 1. Try applying remote state that carries this server's own server_id as origin
+    let self_id = state.server_id().to_string();
+    let event_id = uuid::Uuid::new_v4();
+
+    let applied = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        5000,
+        true,
+        0.8,
+        Some(self_id),
+        Some(event_id),
+        Some(1),
+    )
+    .await;
+
+    // Must be dropped (echo suppression)
+    assert!(!applied);
+
+    // Sync bus must NOT have received any broadcast
+    let timeout_res = tokio::time::timeout(std::time::Duration::from_millis(100), sync_rx.recv()).await;
+    assert!(timeout_res.is_err(), "Expected no sync broadcast for echoed self message");
+}
+
+#[tokio::test]
+async fn test_sync_deduplication_drops_duplicate_event_id() {
+    let (_app, _pool, state) = make_app_with_state().await;
+
+    let remote_origin = "remote-peer-abc".to_string();
+    let event_id = uuid::Uuid::new_v4();
+
+    // 1. First arrival of this event_id
+    let applied1 = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        2000,
+        false,
+        0.5,
+        Some(remote_origin.clone()),
+        Some(event_id),
+        Some(1),
+    )
+    .await;
+    assert!(applied1, "First event arrival must be applied");
+
+    // 2. Duplicate arrival of the exact same event_id
+    let applied2 = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        2000,
+        false,
+        0.5,
+        Some(remote_origin),
+        Some(event_id),
+        Some(1),
+    )
+    .await;
+    assert!(!applied2, "Duplicate event_id must be dropped immediately");
+}
+
+#[tokio::test]
+async fn test_sync_remote_application_suppresses_local_echo() {
+    let (_app, _pool, state) = make_app_with_state().await;
+    let mut sync_rx = state.sync_tx.subscribe();
+
+    let remote_origin = "remote-peer-xyz".to_string();
+    let event_id = uuid::Uuid::new_v4();
+
+    // Applying a remote state triggers internal playback engine events (e.g. seek, volume)
+    let applied = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        1500,
+        false,
+        0.6,
+        Some(remote_origin),
+        Some(event_id),
+        Some(42),
+    )
+    .await;
+    assert!(applied);
+
+    // Wait a moment for projection coordinator to process internal engine events
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Verify that NO event was re-broadcast on sync_tx (echo suppression)
+    let timeout_res = tokio::time::timeout(std::time::Duration::from_millis(100), sync_rx.recv()).await;
+    assert!(timeout_res.is_err(), "Internal engine events from remote state must NOT be re-broadcast");
+}
+
+#[tokio::test]
+async fn test_sync_local_engine_event_stamps_provenance() {
+    let (_app, _pool, state) = make_app_with_state().await;
+    let mut sync_rx = state.sync_tx.subscribe();
+
+    // Trigger local engine event
+    state.playback_engine.seek(3500).await.unwrap();
+
+    // Wait for broadcast from projection coordinator
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(2), sync_rx.recv())
+        .await
+        .expect("Timeout waiting for local event broadcast")
+        .expect("sync_rx error");
+
+    match msg {
+        michi_sync::SyncMessage::State {
+            origin_device_id,
+            event_id,
+            sequence,
+            position_ms,
+            ..
+        } => {
+            assert_eq!(position_ms, 3500);
+            assert_eq!(origin_device_id, Some(state.server_id().to_string()));
+            assert!(event_id.is_some(), "event_id must be stamped for local events");
+            assert!(sequence.is_some(), "sequence must be stamped for local events");
+        }
+        other => panic!("Expected SyncMessage::State, got: {other:?}"),
+    }
+}
+

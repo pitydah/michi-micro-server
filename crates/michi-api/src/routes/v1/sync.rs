@@ -590,6 +590,8 @@ pub async fn sync_state_handler(
         device_id: None,
         shuffle: false,
         repeat: "off".into(),
+        event_id: Some(Uuid::new_v4()),
+        sequence: None,
     };
 
     let _ = state.sync_tx.send(peer_state.into());

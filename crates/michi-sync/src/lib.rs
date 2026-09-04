@@ -31,6 +31,12 @@ pub enum SyncMessage {
         updated_at: DateTime<Utc>,
         playlist_id: Option<Uuid>,
         queue_position: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_device_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sequence: Option<u64>,
     },
     #[serde(rename = "handoff_request")]
     HandoffRequest {
@@ -163,6 +169,10 @@ pub struct PlaybackState {
         deserialize_with = "deserialize_repeat_mode"
     )]
     pub repeat: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
 }
 
 fn default_repeat_mode() -> String {
@@ -194,6 +204,8 @@ impl Default for PlaybackState {
             device_id: None,
             shuffle: false,
             repeat: "off".into(),
+            event_id: None,
+            sequence: None,
         }
     }
 }
@@ -208,6 +220,9 @@ impl From<PlaybackState> for SyncMessage {
             updated_at: state.updated_at,
             playlist_id: state.playlist_id,
             queue_position: state.queue_position,
+            origin_device_id: state.device_id,
+            event_id: state.event_id,
+            sequence: state.sequence,
         }
     }
 }
@@ -1732,6 +1747,8 @@ impl SyncManager {
                     device_id: Some("server".into()),
                     shuffle: false,
                     repeat: "none".into(),
+                    event_id: None,
+                    sequence: None,
                 })
             }
             None => Ok(PlaybackState::default()),
@@ -1876,10 +1893,42 @@ mod tests {
             updated_at: Utc::now(),
             playlist_id: None,
             queue_position: None,
+            origin_device_id: Some("test-server".into()),
+            event_id: Some(Uuid::new_v4()),
+            sequence: Some(1),
         };
         let json = msg.serialize().unwrap();
         let deserialized = SyncMessage::deserialize(&json).unwrap();
         assert!(matches!(deserialized, SyncMessage::State { .. }));
+    }
+
+    #[test]
+    fn test_serialize_deserialize_legacy_state_compatibility() {
+        let legacy_json = serde_json::json!({
+            "type": "state",
+            "track_id": null,
+            "position_ms": 5000,
+            "playing": false,
+            "volume": 0.5,
+            "updated_at": "2026-09-03T12:00:00Z"
+        }).to_string();
+
+        let deserialized = SyncMessage::deserialize(&legacy_json).unwrap();
+        match deserialized {
+            SyncMessage::State {
+                origin_device_id,
+                event_id,
+                sequence,
+                position_ms,
+                ..
+            } => {
+                assert_eq!(position_ms, 5000);
+                assert_eq!(origin_device_id, None);
+                assert_eq!(event_id, None);
+                assert_eq!(sequence, None);
+            }
+            _ => panic!("Expected SyncMessage::State"),
+        }
     }
 
     #[test]

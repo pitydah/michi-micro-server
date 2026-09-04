@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -88,6 +90,15 @@ impl std::fmt::Display for ProjectionError {
 
 impl std::error::Error for ProjectionError {}
 
+/// Remote provenance context tracking when an engine event was caused by applying a remote state.
+#[derive(Debug, Clone)]
+pub struct RemoteProvenanceContext {
+    pub origin_device_id: String,
+    pub event_id: Uuid,
+    pub sequence: Option<u64>,
+    pub expires_at: tokio::time::Instant,
+}
+
 /// Cohesive coordinator responsible for projecting PlaybackEngine runtime events
 /// into authoritative in-memory state and persistent SQLite PlaybackSession.
 #[derive(Debug, Clone)]
@@ -96,6 +107,10 @@ pub struct PlaybackProjectionCoordinator {
     legacy_playback_state: Arc<RwLock<michi_sync::PlaybackState>>,
     engine: PlaybackEngineHandle,
     sync_tx: tokio::sync::broadcast::Sender<michi_sync::SyncMessage>,
+    server_id: String,
+    local_sequence: Arc<AtomicU64>,
+    active_remote_context: Arc<RwLock<Option<RemoteProvenanceContext>>>,
+    processed_events: Arc<RwLock<HashSet<Uuid>>>,
     health: Arc<RwLock<PlaybackProjectionHealth>>,
     last_projection: Arc<RwLock<Option<PersistentPlaybackProjection>>>,
 }
@@ -106,6 +121,7 @@ impl PlaybackProjectionCoordinator {
         legacy_playback_state: Arc<RwLock<michi_sync::PlaybackState>>,
         engine: PlaybackEngineHandle,
         sync_tx: tokio::sync::broadcast::Sender<michi_sync::SyncMessage>,
+        server_id: String,
     ) -> (Self, Arc<RwLock<PlaybackProjectionHealth>>) {
         let health = Arc::new(RwLock::new(PlaybackProjectionHealth::default()));
         let coordinator = Self {
@@ -113,10 +129,61 @@ impl PlaybackProjectionCoordinator {
             legacy_playback_state,
             engine,
             sync_tx,
+            server_id,
+            local_sequence: Arc::new(AtomicU64::new(0)),
+            active_remote_context: Arc::new(RwLock::new(None)),
+            processed_events: Arc::new(RwLock::new(HashSet::new())),
             health: health.clone(),
             last_projection: Arc::new(RwLock::new(None)),
         };
         (coordinator, health)
+    }
+
+    /// Sets the active remote provenance context during remote state application for a duration.
+    pub async fn set_remote_context(
+        &self,
+        origin_device_id: String,
+        event_id: Uuid,
+        sequence: Option<u64>,
+        duration: std::time::Duration,
+    ) {
+        let mut ctx = self.active_remote_context.write().await;
+        *ctx = Some(RemoteProvenanceContext {
+            origin_device_id,
+            event_id,
+            sequence,
+            expires_at: tokio::time::Instant::now() + duration,
+        });
+    }
+
+    /// Clears the active remote provenance context immediately.
+    pub async fn clear_remote_context(&self) {
+        let mut ctx = self.active_remote_context.write().await;
+        *ctx = None;
+    }
+
+    /// Returns the active remote provenance context if not expired.
+    pub async fn get_active_remote_context(&self) -> Option<RemoteProvenanceContext> {
+        let ctx = self.active_remote_context.read().await;
+        match &*ctx {
+            Some(c) if tokio::time::Instant::now() <= c.expires_at => Some(c.clone()),
+            _ => None,
+        }
+    }
+
+    /// Checks whether an event_id was already processed (deduplication).
+    pub async fn is_event_processed(&self, event_id: &Uuid) -> bool {
+        let events = self.processed_events.read().await;
+        events.contains(event_id)
+    }
+
+    /// Records an event_id as processed in bounded memory.
+    pub async fn record_processed_event(&self, event_id: Uuid) {
+        let mut events = self.processed_events.write().await;
+        if events.len() > 10000 {
+            events.clear();
+        }
+        events.insert(event_id);
     }
 
     async fn record_success(&self) {
@@ -216,7 +283,23 @@ impl PlaybackProjectionCoordinator {
             snap.position_ms
         };
 
-        // 1. Sync legacy PlaybackState projection (RAM only) and broadcast to sync bus
+        // Determine provenance: local origin vs remote application
+        let remote_ctx = self.get_active_remote_context().await;
+        let (device_id, event_id, sequence, is_local) = match remote_ctx {
+            Some(ctx) => (
+                Some(ctx.origin_device_id),
+                Some(ctx.event_id),
+                ctx.sequence,
+                false,
+            ),
+            None => {
+                let seq = self.local_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                let eid = Uuid::new_v4();
+                (Some(self.server_id.clone()), Some(eid), Some(seq), true)
+            }
+        };
+
+        // 1. Sync legacy PlaybackState projection (RAM only)
         let out_state = {
             let mut ps = self.legacy_playback_state.write().await;
             ps.track_id = snap.track_id;
@@ -226,9 +309,17 @@ impl PlaybackProjectionCoordinator {
             ps.shuffle = snap.shuffle;
             ps.repeat = snap.repeat.as_str().to_string();
             ps.updated_at = Utc::now();
+            ps.device_id = device_id;
+            ps.event_id = event_id;
+            ps.sequence = sequence;
             ps.clone()
         };
-        let _ = self.sync_tx.send(out_state.into());
+
+        // Echo Suppression: ONLY broadcast to sync bus if this event was originated LOCALLY on this server.
+        // If it was applied from a remote peer, do NOT re-broadcast back to sync_tx to prevent feedback loops.
+        if is_local {
+            let _ = self.sync_tx.send(out_state.into());
+        }
 
         // 2. Fetch existing or default session from SQLite
         let mut sess = match michi_db::get_or_create_latest_playback_session(&self.db).await {
@@ -335,6 +426,21 @@ impl PlaybackProjectionCoordinator {
             snap.position_ms
         };
 
+        let remote_ctx = self.get_active_remote_context().await;
+        let (device_id, event_id, sequence, is_local) = match remote_ctx {
+            Some(ctx) => (
+                Some(ctx.origin_device_id),
+                Some(ctx.event_id),
+                ctx.sequence,
+                false,
+            ),
+            None => {
+                let seq = self.local_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                let eid = Uuid::new_v4();
+                (Some(self.server_id.clone()), Some(eid), Some(seq), true)
+            }
+        };
+
         let out_state = {
             let mut ps = self.legacy_playback_state.write().await;
             ps.track_id = snap.track_id;
@@ -344,9 +450,14 @@ impl PlaybackProjectionCoordinator {
             ps.shuffle = snap.shuffle;
             ps.repeat = snap.repeat.as_str().to_string();
             ps.updated_at = Utc::now();
+            ps.device_id = device_id;
+            ps.event_id = event_id;
+            ps.sequence = sequence;
             ps.clone()
         };
-        let _ = self.sync_tx.send(out_state.into());
+        if is_local {
+            let _ = self.sync_tx.send(out_state.into());
+        }
 
         // If the engine has no track and is stopped, do not overwrite a persisted session
         if snap.track_id.is_none() && !is_playing {
