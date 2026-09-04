@@ -1,9 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use michi_playback::{EngineEvent, EngineSnapshot, PlaybackEngineHandle, PlaybackLifecycle};
+use michi_playback::{
+    CommandOrigin, EngineEvent, EngineSnapshot, PlaybackEngineHandle, PlaybackLifecycle,
+    TrackedEngineEvent,
+};
 use serde::Serialize;
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
@@ -108,7 +111,9 @@ pub struct PlaybackProjectionCoordinator {
     engine: PlaybackEngineHandle,
     sync_tx: tokio::sync::broadcast::Sender<michi_sync::SyncMessage>,
     server_id: String,
+    server_epoch: u64,
     local_sequence: Arc<AtomicU64>,
+    peer_vectors: Arc<RwLock<HashMap<String, (u64, u64)>>>,
     active_remote_context: Arc<RwLock<Option<RemoteProvenanceContext>>>,
     processed_events: Arc<RwLock<HashSet<Uuid>>>,
     health: Arc<RwLock<PlaybackProjectionHealth>>,
@@ -123,6 +128,21 @@ impl PlaybackProjectionCoordinator {
         sync_tx: tokio::sync::broadcast::Sender<michi_sync::SyncMessage>,
         server_id: String,
     ) -> (Self, Arc<RwLock<PlaybackProjectionHealth>>) {
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Self::new_with_epoch(db, legacy_playback_state, engine, sync_tx, server_id, epoch)
+    }
+
+    pub fn new_with_epoch(
+        db: SqlitePool,
+        legacy_playback_state: Arc<RwLock<michi_sync::PlaybackState>>,
+        engine: PlaybackEngineHandle,
+        sync_tx: tokio::sync::broadcast::Sender<michi_sync::SyncMessage>,
+        server_id: String,
+        server_epoch: u64,
+    ) -> (Self, Arc<RwLock<PlaybackProjectionHealth>>) {
         let health = Arc::new(RwLock::new(PlaybackProjectionHealth::default()));
         let coordinator = Self {
             db,
@@ -130,13 +150,44 @@ impl PlaybackProjectionCoordinator {
             engine,
             sync_tx,
             server_id,
+            server_epoch,
             local_sequence: Arc::new(AtomicU64::new(0)),
+            peer_vectors: Arc::new(RwLock::new(HashMap::new())),
             active_remote_context: Arc::new(RwLock::new(None)),
             processed_events: Arc::new(RwLock::new(HashSet::new())),
             health: health.clone(),
             last_projection: Arc::new(RwLock::new(None)),
         };
         (coordinator, health)
+    }
+
+    pub fn server_epoch(&self) -> u64 {
+        self.server_epoch
+    }
+
+    pub async fn is_stale_peer_state(
+        &self,
+        peer_id: &str,
+        epoch: Option<u64>,
+        sequence: u64,
+    ) -> bool {
+        let ep = epoch.unwrap_or(0);
+        let vectors = self.peer_vectors.read().await;
+        if let Some(&(latest_ep, latest_seq)) = vectors.get(peer_id) {
+            if ep < latest_ep {
+                return true;
+            }
+            if ep == latest_ep && sequence <= latest_seq {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub async fn record_peer_state(&self, peer_id: &str, epoch: Option<u64>, sequence: u64) {
+        let ep = epoch.unwrap_or(0);
+        let mut vectors = self.peer_vectors.write().await;
+        vectors.insert(peer_id.to_string(), (ep, sequence));
     }
 
     /// Sets the active remote provenance context during remote state application for a duration.
@@ -268,8 +319,8 @@ impl PlaybackProjectionCoordinator {
         })
     }
 
-    /// Handles a single EngineEvent paired with a fresh EngineSnapshot.
-    pub async fn handle_event(&self, event: &EngineEvent, snap: &EngineSnapshot) {
+    /// Handles a single TrackedEngineEvent paired with a fresh EngineSnapshot.
+    pub async fn handle_event(&self, event: &TrackedEngineEvent, snap: &EngineSnapshot) {
         let is_playing = matches!(
             snap.lifecycle,
             PlaybackLifecycle::AudioFlowing | PlaybackLifecycle::Playing
@@ -283,19 +334,40 @@ impl PlaybackProjectionCoordinator {
             snap.position_ms
         };
 
-        // Determine provenance: local origin vs remote application
-        let remote_ctx = self.get_active_remote_context().await;
-        let (device_id, event_id, sequence, is_local) = match remote_ctx {
-            Some(ctx) => (
-                Some(ctx.origin_device_id),
-                Some(ctx.event_id),
-                ctx.sequence,
+        // Determine provenance: causal origin directly attached to event, fallback to remote_ctx
+        let (device_id, event_id, sequence, epoch, is_local) = match &event.origin {
+            CommandOrigin::Remote {
+                origin_device_id,
+                event_id,
+                sequence,
+                epoch,
+            } => (
+                Some(origin_device_id.clone()),
+                Some(*event_id),
+                *sequence,
+                *epoch,
                 false,
             ),
-            None => {
-                let seq = self.local_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-                let eid = Uuid::new_v4();
-                (Some(self.server_id.clone()), Some(eid), Some(seq), true)
+            CommandOrigin::Local => {
+                if let Some(ctx) = self.get_active_remote_context().await {
+                    (
+                        Some(ctx.origin_device_id),
+                        Some(ctx.event_id),
+                        ctx.sequence,
+                        None,
+                        false,
+                    )
+                } else {
+                    let seq = self.local_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                    let eid = Uuid::new_v4();
+                    (
+                        Some(self.server_id.clone()),
+                        Some(eid),
+                        Some(seq),
+                        Some(self.server_epoch),
+                        true,
+                    )
+                }
             }
         };
 
@@ -312,6 +384,7 @@ impl PlaybackProjectionCoordinator {
             ps.device_id = device_id;
             ps.event_id = event_id;
             ps.sequence = sequence;
+            ps.epoch = epoch;
             ps.clone()
         };
 
@@ -335,7 +408,7 @@ impl PlaybackProjectionCoordinator {
         };
 
         // 3. Derive updated persistent state according to event semantics
-        match event {
+        match &event.event {
             EngineEvent::LifecycleChanged {
                 lifecycle,
                 track_id,

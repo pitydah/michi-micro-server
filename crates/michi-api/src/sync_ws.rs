@@ -101,6 +101,7 @@ pub async fn apply_remote_playback_state(
     origin_device_id: Option<String>,
     event_id: Option<Uuid>,
     sequence: Option<u64>,
+    epoch: Option<u64>,
 ) -> bool {
     let playback_lock = state.get_module_transition_lock("playback").await;
     let _playback_guard = playback_lock.lock().await;
@@ -128,10 +129,33 @@ pub async fn apply_remote_playback_state(
         state.playback_projection.record_processed_event(eid).await;
     }
 
+    // 3. Sequence / Epoch vector check: reject stale or reordered updates from the same peer
+    if let (Some(ref origin), Some(seq)) = (&origin_device_id, sequence) {
+        if state
+            .playback_projection
+            .is_stale_peer_state(origin, epoch, seq)
+            .await
+        {
+            debug!(origin = %origin, seq = seq, epoch = ?epoch, "sync: dropped stale or out-of-order state update");
+            return false;
+        }
+        state
+            .playback_projection
+            .record_peer_state(origin, epoch, seq)
+            .await;
+    }
+
     let resolved_event_id = event_id.unwrap_or_else(Uuid::new_v4);
     let resolved_origin = origin_device_id.unwrap_or_else(|| "remote_peer".into());
 
-    // 3. Set remote provenance context on projection coordinator so resulting engine events are NOT re-broadcast to sync_tx
+    let command_origin = michi_playback::CommandOrigin::Remote {
+        origin_device_id: resolved_origin.clone(),
+        event_id: resolved_event_id,
+        sequence,
+        epoch,
+    };
+
+    // 4. Set remote provenance context on projection coordinator as fallback
     state
         .playback_projection
         .set_remote_context(
@@ -150,7 +174,11 @@ pub async fn apply_remote_playback_state(
         );
         match resolver.get_track(tid).await {
             Ok(track) => {
-                if let Err(e) = state.playback_engine.load_track(track, position_ms).await {
+                if let Err(e) = state
+                    .playback_engine
+                    .load_track_with_origin(track, position_ms, command_origin.clone())
+                    .await
+                {
                     warn!("sync: failed to load track {tid}: {e}");
                     all_applied = false;
                 }
@@ -160,16 +188,26 @@ pub async fn apply_remote_playback_state(
                 all_applied = false;
             }
         }
-    } else if let Err(e) = state.playback_engine.seek(position_ms).await {
+    } else if let Err(e) = state
+        .playback_engine
+        .seek_with_origin(position_ms, command_origin.clone())
+        .await
+    {
         warn!("sync: failed to seek to {position_ms}ms: {e}");
         all_applied = false;
     }
 
     if all_applied {
         let play_res = if playing {
-            state.playback_engine.resume().await
+            state
+                .playback_engine
+                .resume_with_origin(command_origin.clone())
+                .await
         } else {
-            state.playback_engine.pause().await
+            state
+                .playback_engine
+                .pause_with_origin(command_origin.clone())
+                .await
         };
         if let Err(e) = play_res {
             warn!("sync: failed to transition playback state: {e}");
@@ -179,7 +217,11 @@ pub async fn apply_remote_playback_state(
 
     if all_applied {
         let vol_u8 = ((volume * 100.0).round().clamp(0.0, 100.0)) as u8;
-        if let Err(e) = state.playback_engine.set_volume(vol_u8).await {
+        if let Err(e) = state
+            .playback_engine
+            .set_volume_with_origin(vol_u8, command_origin)
+            .await
+        {
             warn!("sync: failed to set volume {vol_u8}: {e}");
             all_applied = false;
         }
@@ -283,6 +325,7 @@ async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: Cancellati
                                         origin_device_id,
                                         event_id,
                                         sequence,
+                                        epoch,
                                         ..
                                     } => {
                                         apply_remote_playback_state(
@@ -294,6 +337,7 @@ async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: Cancellati
                                             origin_device_id.clone(),
                                             *event_id,
                                             *sequence,
+                                            *epoch,
                                         )
                                         .await;
                                     }

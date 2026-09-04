@@ -252,58 +252,107 @@ pub enum EngineEvent {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CommandOrigin {
+    Local,
+    Remote {
+        origin_device_id: String,
+        event_id: Uuid,
+        sequence: Option<u64>,
+        epoch: Option<u64>,
+    },
+}
+
+impl Default for CommandOrigin {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
+impl CommandOrigin {
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrackedEngineEvent {
+    pub event: EngineEvent,
+    pub origin: CommandOrigin,
+}
+
+impl std::ops::Deref for TrackedEngineEvent {
+    type Target = EngineEvent;
+    fn deref(&self) -> &Self::Target {
+        &self.event
+    }
+}
+
 pub enum EngineCommand {
     Play {
         track: Box<Track>,
         sinks: Vec<Box<dyn AudioSink>>,
         output_desc: PlaybackOutputDescription,
         position_ms: u64,
+        origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     LoadTrack {
         track: Box<Track>,
         position_ms: u64,
+        origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     JumpToIndex {
         index: usize,
+        origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     Pause {
+        origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     Resume {
+        origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     Seek {
         position_ms: u64,
+        origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     Next {
+        origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     Previous {
+        origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     Stop {
+        origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     SetVolume {
         volume: u8,
+        origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     SetShuffle {
         shuffle: bool,
+        origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     SetRepeat {
         repeat: RepeatMode,
+        origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     SetQueue {
         tracks: Vec<Track>,
         current_index: usize,
         current_track_id: Option<Uuid>,
+        origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
     GetSnapshot {
@@ -312,4 +361,27 @@ pub enum EngineCommand {
     Shutdown {
         respond_to: oneshot::Sender<()>,
     },
+}
+
+impl EngineCommand {
+    pub fn origin(&self) -> CommandOrigin {
+        match self {
+            EngineCommand::Play { origin, .. }
+            | EngineCommand::LoadTrack { origin, .. }
+            | EngineCommand::JumpToIndex { origin, .. }
+            | EngineCommand::Pause { origin, .. }
+            | EngineCommand::Resume { origin, .. }
+            | EngineCommand::Seek { origin, .. }
+            | EngineCommand::Next { origin, .. }
+            | EngineCommand::Previous { origin, .. }
+            | EngineCommand::Stop { origin, .. }
+            | EngineCommand::SetVolume { origin, .. }
+            | EngineCommand::SetShuffle { origin, .. }
+            | EngineCommand::SetRepeat { origin, .. }
+            | EngineCommand::SetQueue { origin, .. } => origin.clone(),
+            EngineCommand::GetSnapshot { .. } | EngineCommand::Shutdown { .. } => {
+                CommandOrigin::Local
+            }
+        }
+    }
 }

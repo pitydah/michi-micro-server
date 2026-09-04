@@ -37,6 +37,8 @@ pub enum SyncMessage {
         event_id: Option<Uuid>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sequence: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
     },
     #[serde(rename = "handoff_request")]
     HandoffRequest {
@@ -173,6 +175,8 @@ pub struct PlaybackState {
     pub event_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u64>,
 }
 
 fn default_repeat_mode() -> String {
@@ -206,6 +210,7 @@ impl Default for PlaybackState {
             repeat: "off".into(),
             event_id: None,
             sequence: None,
+            epoch: None,
         }
     }
 }
@@ -223,6 +228,7 @@ impl From<PlaybackState> for SyncMessage {
             origin_device_id: state.device_id,
             event_id: state.event_id,
             sequence: state.sequence,
+            epoch: state.epoch,
         }
     }
 }
@@ -1749,6 +1755,7 @@ impl SyncManager {
                     repeat: "none".into(),
                     event_id: None,
                     sequence: None,
+                    epoch: None,
                 })
             }
             None => Ok(PlaybackState::default()),
@@ -1896,10 +1903,19 @@ mod tests {
             origin_device_id: Some("test-server".into()),
             event_id: Some(Uuid::new_v4()),
             sequence: Some(1),
+            epoch: Some(1700000000),
         };
         let json = msg.serialize().unwrap();
         let deserialized = SyncMessage::deserialize(&json).unwrap();
-        assert!(matches!(deserialized, SyncMessage::State { .. }));
+        match deserialized {
+            SyncMessage::State {
+                epoch, sequence, ..
+            } => {
+                assert_eq!(epoch, Some(1700000000));
+                assert_eq!(sequence, Some(1));
+            }
+            _ => panic!("Expected SyncMessage::State"),
+        }
     }
 
     #[test]
@@ -1911,7 +1927,8 @@ mod tests {
             "playing": false,
             "volume": 0.5,
             "updated_at": "2026-09-03T12:00:00Z"
-        }).to_string();
+        })
+        .to_string();
 
         let deserialized = SyncMessage::deserialize(&legacy_json).unwrap();
         match deserialized {
@@ -1919,6 +1936,7 @@ mod tests {
                 origin_device_id,
                 event_id,
                 sequence,
+                epoch,
                 position_ms,
                 ..
             } => {
@@ -1926,6 +1944,7 @@ mod tests {
                 assert_eq!(origin_device_id, None);
                 assert_eq!(event_id, None);
                 assert_eq!(sequence, None);
+                assert_eq!(epoch, None);
             }
             _ => panic!("Expected SyncMessage::State"),
         }

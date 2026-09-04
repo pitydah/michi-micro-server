@@ -6768,8 +6768,10 @@ async fn test_sync_remote_playback_isolation_when_playback_module_disabled() {
         .insert("playback".to_string());
 
     // 2. Try applying remote playback state
-    let applied =
-        michi_api::sync_ws::apply_remote_playback_state(&state, None, 5000, true, 0.8, None, None, None).await;
+    let applied = michi_api::sync_ws::apply_remote_playback_state(
+        &state, None, 5000, true, 0.8, None, None, None, None,
+    )
+    .await;
 
     // 3. Must be false and playback must NOT have resumed
     assert!(!applied);
@@ -6788,7 +6790,18 @@ async fn test_sync_remote_playback_concurrent_module_disable_toctou_prevention()
     // 2. Spawn concurrent apply_remote_playback_state task
     let state_clone = state.clone();
     let apply_handle = tokio::spawn(async move {
-        michi_api::sync_ws::apply_remote_playback_state(&state_clone, None, 5000, true, 0.8, None, None, None).await
+        michi_api::sync_ws::apply_remote_playback_state(
+            &state_clone,
+            None,
+            5000,
+            true,
+            0.8,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
     });
 
     // Give the spawned task a moment to attempt acquiring the lock
@@ -7080,6 +7093,7 @@ async fn test_sync_echo_suppression_drops_self_originating_state() {
         Some(self_id),
         Some(event_id),
         Some(1),
+        None,
     )
     .await;
 
@@ -7087,8 +7101,12 @@ async fn test_sync_echo_suppression_drops_self_originating_state() {
     assert!(!applied);
 
     // Sync bus must NOT have received any broadcast
-    let timeout_res = tokio::time::timeout(std::time::Duration::from_millis(100), sync_rx.recv()).await;
-    assert!(timeout_res.is_err(), "Expected no sync broadcast for echoed self message");
+    let timeout_res =
+        tokio::time::timeout(std::time::Duration::from_millis(100), sync_rx.recv()).await;
+    assert!(
+        timeout_res.is_err(),
+        "Expected no sync broadcast for echoed self message"
+    );
 }
 
 #[tokio::test]
@@ -7108,6 +7126,7 @@ async fn test_sync_deduplication_drops_duplicate_event_id() {
         Some(remote_origin.clone()),
         Some(event_id),
         Some(1),
+        None,
     )
     .await;
     assert!(applied1, "First event arrival must be applied");
@@ -7122,6 +7141,7 @@ async fn test_sync_deduplication_drops_duplicate_event_id() {
         Some(remote_origin),
         Some(event_id),
         Some(1),
+        None,
     )
     .await;
     assert!(!applied2, "Duplicate event_id must be dropped immediately");
@@ -7145,6 +7165,7 @@ async fn test_sync_remote_application_suppresses_local_echo() {
         Some(remote_origin),
         Some(event_id),
         Some(42),
+        None,
     )
     .await;
     assert!(applied);
@@ -7153,8 +7174,12 @@ async fn test_sync_remote_application_suppresses_local_echo() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Verify that NO event was re-broadcast on sync_tx (echo suppression)
-    let timeout_res = tokio::time::timeout(std::time::Duration::from_millis(100), sync_rx.recv()).await;
-    assert!(timeout_res.is_err(), "Internal engine events from remote state must NOT be re-broadcast");
+    let timeout_res =
+        tokio::time::timeout(std::time::Duration::from_millis(100), sync_rx.recv()).await;
+    assert!(
+        timeout_res.is_err(),
+        "Internal engine events from remote state must NOT be re-broadcast"
+    );
 }
 
 #[tokio::test]
@@ -7176,15 +7201,155 @@ async fn test_sync_local_engine_event_stamps_provenance() {
             origin_device_id,
             event_id,
             sequence,
+            epoch,
             position_ms,
             ..
         } => {
             assert_eq!(position_ms, 3500);
             assert_eq!(origin_device_id, Some(state.server_id().to_string()));
-            assert!(event_id.is_some(), "event_id must be stamped for local events");
-            assert!(sequence.is_some(), "sequence must be stamped for local events");
+            assert!(
+                event_id.is_some(),
+                "event_id must be stamped for local events"
+            );
+            assert!(
+                sequence.is_some(),
+                "sequence must be stamped for local events"
+            );
+            assert_eq!(
+                epoch,
+                Some(state.playback_projection.server_epoch()),
+                "epoch must be stamped for local events"
+            );
         }
         other => panic!("Expected SyncMessage::State, got: {other:?}"),
     }
 }
 
+#[tokio::test]
+async fn test_sync_reordered_and_stale_packets_rejected() {
+    let (_app, _pool, state) = make_app_with_state().await;
+    let peer_origin = "peer-alpha".to_string();
+
+    // 1. Initial state at seq 5
+    let applied1 = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        1000,
+        false,
+        0.5,
+        Some(peer_origin.clone()),
+        Some(uuid::Uuid::new_v4()),
+        Some(5),
+        Some(100),
+    )
+    .await;
+    assert!(applied1, "Initial packet at seq 5 should apply");
+
+    // 2. Out-of-order stale packet at seq 3 (same epoch) -> should be rejected!
+    let applied_stale = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        2000,
+        false,
+        0.5,
+        Some(peer_origin.clone()),
+        Some(uuid::Uuid::new_v4()),
+        Some(3),
+        Some(100),
+    )
+    .await;
+    assert!(
+        !applied_stale,
+        "Out-of-order packet seq 3 must be dropped when peer is at seq 5"
+    );
+
+    // 3. Duplicate packet at seq 5 (with different event_id) -> should be rejected as stale!
+    let applied_duplicate = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        1000,
+        false,
+        0.5,
+        Some(peer_origin.clone()),
+        Some(uuid::Uuid::new_v4()),
+        Some(5),
+        Some(100),
+    )
+    .await;
+    assert!(
+        !applied_duplicate,
+        "Packet with duplicate seq 5 must be dropped"
+    );
+
+    // 4. In-order packet at seq 6 -> should succeed!
+    let applied_in_order = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        3000,
+        false,
+        0.5,
+        Some(peer_origin.clone()),
+        Some(uuid::Uuid::new_v4()),
+        Some(6),
+        Some(100),
+    )
+    .await;
+    assert!(applied_in_order, "In-order packet seq 6 must be applied");
+}
+
+#[tokio::test]
+async fn test_sync_epoch_rollover_reboot_handled() {
+    let (_app, _pool, state) = make_app_with_state().await;
+    let peer_origin = "peer-beta".to_string();
+
+    // 1. Peer running at epoch 10, seq 50
+    let applied1 = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        1000,
+        false,
+        0.5,
+        Some(peer_origin.clone()),
+        Some(uuid::Uuid::new_v4()),
+        Some(50),
+        Some(10),
+    )
+    .await;
+    assert!(applied1);
+
+    // 2. Peer rebooted! New epoch 11, sequence reset to 1
+    let applied_reboot = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        2000,
+        false,
+        0.5,
+        Some(peer_origin.clone()),
+        Some(uuid::Uuid::new_v4()),
+        Some(1),
+        Some(11),
+    )
+    .await;
+    assert!(
+        applied_reboot,
+        "Peer reboot with higher epoch must be accepted even if sequence reset"
+    );
+
+    // 3. Delayed packet from old epoch 10 arriving now -> should be rejected!
+    let applied_old_epoch = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        3000,
+        false,
+        0.5,
+        Some(peer_origin.clone()),
+        Some(uuid::Uuid::new_v4()),
+        Some(999),
+        Some(10),
+    )
+    .await;
+    assert!(
+        !applied_old_epoch,
+        "Delayed packet from older epoch must be rejected"
+    );
+}

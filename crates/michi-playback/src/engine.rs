@@ -46,8 +46,9 @@ pub struct PlaybackEngine {
     network_bytes_sent_total: u64,
     output_health: String,
     last_error: Option<String>,
-    event_tx: tokio::sync::broadcast::Sender<crate::model::EngineEvent>,
+    event_tx: tokio::sync::broadcast::Sender<crate::model::TrackedEngineEvent>,
     last_checkpoint: Instant,
+    current_command_origin: crate::model::CommandOrigin,
 }
 
 impl PlaybackEngine {
@@ -64,7 +65,7 @@ impl PlaybackEngine {
         receiver: mpsc::Receiver<EngineCommand>,
         resolver: Arc<dyn TrackResolver>,
         format: PcmFormat,
-        event_tx: tokio::sync::broadcast::Sender<crate::model::EngineEvent>,
+        event_tx: tokio::sync::broadcast::Sender<crate::model::TrackedEngineEvent>,
     ) -> Self {
         Self {
             receiver,
@@ -93,15 +94,21 @@ impl PlaybackEngine {
             last_error: None,
             event_tx,
             last_checkpoint: Instant::now(),
+            current_command_origin: crate::model::CommandOrigin::Local,
         }
     }
 
-    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<crate::model::EngineEvent> {
+    pub fn subscribe_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::model::TrackedEngineEvent> {
         self.event_tx.subscribe()
     }
 
     fn emit_event(&self, event: crate::model::EngineEvent) {
-        let _ = self.event_tx.send(event);
+        let _ = self.event_tx.send(crate::model::TrackedEngineEvent {
+            event,
+            origin: self.current_command_origin.clone(),
+        });
     }
 
     pub fn resolver(&self) -> &Arc<dyn TrackResolver> {
@@ -628,12 +635,20 @@ impl PlaybackEngine {
     }
 
     async fn handle_command(&mut self, cmd: EngineCommand) -> bool {
+        self.current_command_origin = cmd.origin();
+        let res = self.handle_command_inner(cmd).await;
+        self.current_command_origin = crate::model::CommandOrigin::Local;
+        res
+    }
+
+    async fn handle_command_inner(&mut self, cmd: EngineCommand) -> bool {
         match cmd {
             EngineCommand::Play {
                 track,
                 sinks,
                 output_desc,
                 position_ms,
+                origin: _,
                 respond_to,
             } => {
                 if sinks.is_empty() {
@@ -653,6 +668,7 @@ impl PlaybackEngine {
             EngineCommand::LoadTrack {
                 track,
                 position_ms,
+                origin: _,
                 respond_to,
             } => {
                 let _ = self.cleanup_playback().await;
@@ -674,7 +690,11 @@ impl PlaybackEngine {
                 let _ = respond_to.send(Ok(()));
                 true
             }
-            EngineCommand::JumpToIndex { index, respond_to } => {
+            EngineCommand::JumpToIndex {
+                index,
+                origin: _,
+                respond_to,
+            } => {
                 if self.queue.is_empty() || index >= self.queue.len() {
                     let _ = respond_to.send(Err(PlaybackError::QueueIndexInvalid(index)));
                     return true;
@@ -707,7 +727,10 @@ impl PlaybackEngine {
                 }
                 true
             }
-            EngineCommand::Pause { respond_to } => {
+            EngineCommand::Pause {
+                origin: _,
+                respond_to,
+            } => {
                 let pos = self.calculate_current_position_ms();
                 if let Some(ref mut d) = self.decoder {
                     let _ = d.stop().await;
@@ -737,7 +760,10 @@ impl PlaybackEngine {
                 let _ = respond_to.send(Ok(()));
                 true
             }
-            EngineCommand::Resume { respond_to } => {
+            EngineCommand::Resume {
+                origin: _,
+                respond_to,
+            } => {
                 if self.sinks.is_empty() {
                     let _ = respond_to.send(Err(PlaybackError::NoOutputSelected));
                     return true;
@@ -784,6 +810,7 @@ impl PlaybackEngine {
             }
             EngineCommand::Seek {
                 position_ms,
+                origin: _,
                 respond_to,
             } => {
                 if self.state.is_playing() {
@@ -841,7 +868,10 @@ impl PlaybackEngine {
                 }
                 true
             }
-            EngineCommand::Next { respond_to } => {
+            EngineCommand::Next {
+                origin: _,
+                respond_to,
+            } => {
                 if !self.queue.is_empty() && self.play_order_pos + 1 < self.play_order.len() {
                     self.play_order_pos += 1;
                     self.queue_index = self.play_order[self.play_order_pos];
@@ -900,7 +930,10 @@ impl PlaybackEngine {
                 }
                 true
             }
-            EngineCommand::Previous { respond_to } => {
+            EngineCommand::Previous {
+                origin: _,
+                respond_to,
+            } => {
                 if self.base_position_ms > 3000
                     || self
                         .playing_started_at
@@ -953,7 +986,10 @@ impl PlaybackEngine {
                 }
                 true
             }
-            EngineCommand::Stop { respond_to } => {
+            EngineCommand::Stop {
+                origin: _,
+                respond_to,
+            } => {
                 let res = self.cleanup_playback().await;
                 self.base_position_ms = 0;
                 self.state = PlaybackLifecycle::Stopped;
@@ -965,7 +1001,11 @@ impl PlaybackEngine {
                 let _ = respond_to.send(res);
                 true
             }
-            EngineCommand::SetVolume { volume, respond_to } => {
+            EngineCommand::SetVolume {
+                volume,
+                origin: _,
+                respond_to,
+            } => {
                 self.volume = volume.min(100);
                 self.emit_event(crate::model::EngineEvent::VolumeChanged {
                     volume: self.volume,
@@ -995,6 +1035,7 @@ impl PlaybackEngine {
             }
             EngineCommand::SetShuffle {
                 shuffle,
+                origin: _,
                 respond_to,
             } => {
                 self.shuffle = shuffle;
@@ -1005,7 +1046,11 @@ impl PlaybackEngine {
                 let _ = respond_to.send(Ok(()));
                 true
             }
-            EngineCommand::SetRepeat { repeat, respond_to } => {
+            EngineCommand::SetRepeat {
+                repeat,
+                origin: _,
+                respond_to,
+            } => {
                 self.repeat = repeat;
                 self.emit_event(crate::model::EngineEvent::RepeatChanged {
                     repeat: self.repeat,
@@ -1017,6 +1062,7 @@ impl PlaybackEngine {
                 tracks,
                 current_index,
                 current_track_id,
+                origin: _,
                 respond_to,
             } => {
                 let resolved_index = if let Some(target_id) = current_track_id {
@@ -1099,7 +1145,7 @@ impl PlaybackEngine {
 #[derive(Debug, Clone)]
 pub struct PlaybackEngineHandle {
     sender: mpsc::Sender<EngineCommand>,
-    event_tx: tokio::sync::broadcast::Sender<crate::model::EngineEvent>,
+    event_tx: tokio::sync::broadcast::Sender<crate::model::TrackedEngineEvent>,
 }
 
 impl PlaybackEngineHandle {
@@ -1110,12 +1156,14 @@ impl PlaybackEngineHandle {
 
     pub fn new_with_events(
         sender: mpsc::Sender<EngineCommand>,
-        event_tx: tokio::sync::broadcast::Sender<crate::model::EngineEvent>,
+        event_tx: tokio::sync::broadcast::Sender<crate::model::TrackedEngineEvent>,
     ) -> Self {
         Self { sender, event_tx }
     }
 
-    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<crate::model::EngineEvent> {
+    pub fn subscribe_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::model::TrackedEngineEvent> {
         self.event_tx.subscribe()
     }
 
@@ -1126,6 +1174,24 @@ impl PlaybackEngineHandle {
         output_desc: PlaybackOutputDescription,
         position_ms: u64,
     ) -> Result<(), PlaybackError> {
+        self.play_with_origin(
+            track,
+            sinks,
+            output_desc,
+            position_ms,
+            crate::model::CommandOrigin::Local,
+        )
+        .await
+    }
+
+    pub async fn play_with_origin(
+        &self,
+        track: Track,
+        sinks: Vec<Box<dyn AudioSink>>,
+        output_desc: PlaybackOutputDescription,
+        position_ms: u64,
+        origin: crate::model::CommandOrigin,
+    ) -> Result<(), PlaybackError> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(EngineCommand::Play {
@@ -1133,6 +1199,7 @@ impl PlaybackEngineHandle {
                 sinks,
                 output_desc,
                 position_ms,
+                origin,
                 respond_to: tx,
             })
             .await
@@ -1141,11 +1208,22 @@ impl PlaybackEngineHandle {
     }
 
     pub async fn load_track(&self, track: Track, position_ms: u64) -> Result<(), PlaybackError> {
+        self.load_track_with_origin(track, position_ms, crate::model::CommandOrigin::Local)
+            .await
+    }
+
+    pub async fn load_track_with_origin(
+        &self,
+        track: Track,
+        position_ms: u64,
+        origin: crate::model::CommandOrigin,
+    ) -> Result<(), PlaybackError> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(EngineCommand::LoadTrack {
                 track: Box::new(track),
                 position_ms,
+                origin,
                 respond_to: tx,
             })
             .await
@@ -1158,6 +1236,7 @@ impl PlaybackEngineHandle {
         self.sender
             .send(EngineCommand::JumpToIndex {
                 index,
+                origin: crate::model::CommandOrigin::Local,
                 respond_to: tx,
             })
             .await
@@ -1166,28 +1245,60 @@ impl PlaybackEngineHandle {
     }
 
     pub async fn pause(&self) -> Result<(), PlaybackError> {
+        self.pause_with_origin(crate::model::CommandOrigin::Local)
+            .await
+    }
+
+    pub async fn pause_with_origin(
+        &self,
+        origin: crate::model::CommandOrigin,
+    ) -> Result<(), PlaybackError> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(EngineCommand::Pause { respond_to: tx })
+            .send(EngineCommand::Pause {
+                origin,
+                respond_to: tx,
+            })
             .await
             .map_err(|_| PlaybackError::ChannelClosed)?;
         rx.await.map_err(|_| PlaybackError::ChannelClosed)?
     }
 
     pub async fn resume(&self) -> Result<(), PlaybackError> {
+        self.resume_with_origin(crate::model::CommandOrigin::Local)
+            .await
+    }
+
+    pub async fn resume_with_origin(
+        &self,
+        origin: crate::model::CommandOrigin,
+    ) -> Result<(), PlaybackError> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(EngineCommand::Resume { respond_to: tx })
+            .send(EngineCommand::Resume {
+                origin,
+                respond_to: tx,
+            })
             .await
             .map_err(|_| PlaybackError::ChannelClosed)?;
         rx.await.map_err(|_| PlaybackError::ChannelClosed)?
     }
 
     pub async fn seek(&self, position_ms: u64) -> Result<(), PlaybackError> {
+        self.seek_with_origin(position_ms, crate::model::CommandOrigin::Local)
+            .await
+    }
+
+    pub async fn seek_with_origin(
+        &self,
+        position_ms: u64,
+        origin: crate::model::CommandOrigin,
+    ) -> Result<(), PlaybackError> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(EngineCommand::Seek {
                 position_ms,
+                origin,
                 respond_to: tx,
             })
             .await
@@ -1198,7 +1309,10 @@ impl PlaybackEngineHandle {
     pub async fn next(&self) -> Result<(), PlaybackError> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(EngineCommand::Next { respond_to: tx })
+            .send(EngineCommand::Next {
+                origin: crate::model::CommandOrigin::Local,
+                respond_to: tx,
+            })
             .await
             .map_err(|_| PlaybackError::ChannelClosed)?;
         rx.await.map_err(|_| PlaybackError::ChannelClosed)?
@@ -1207,26 +1321,50 @@ impl PlaybackEngineHandle {
     pub async fn previous(&self) -> Result<(), PlaybackError> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(EngineCommand::Previous { respond_to: tx })
+            .send(EngineCommand::Previous {
+                origin: crate::model::CommandOrigin::Local,
+                respond_to: tx,
+            })
             .await
             .map_err(|_| PlaybackError::ChannelClosed)?;
         rx.await.map_err(|_| PlaybackError::ChannelClosed)?
     }
 
     pub async fn stop(&self) -> Result<(), PlaybackError> {
+        self.stop_with_origin(crate::model::CommandOrigin::Local)
+            .await
+    }
+
+    pub async fn stop_with_origin(
+        &self,
+        origin: crate::model::CommandOrigin,
+    ) -> Result<(), PlaybackError> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(EngineCommand::Stop { respond_to: tx })
+            .send(EngineCommand::Stop {
+                origin,
+                respond_to: tx,
+            })
             .await
             .map_err(|_| PlaybackError::ChannelClosed)?;
         rx.await.map_err(|_| PlaybackError::ChannelClosed)?
     }
 
     pub async fn set_volume(&self, volume: u8) -> Result<(), PlaybackError> {
+        self.set_volume_with_origin(volume, crate::model::CommandOrigin::Local)
+            .await
+    }
+
+    pub async fn set_volume_with_origin(
+        &self,
+        volume: u8,
+        origin: crate::model::CommandOrigin,
+    ) -> Result<(), PlaybackError> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(EngineCommand::SetVolume {
                 volume,
+                origin,
                 respond_to: tx,
             })
             .await
@@ -1239,6 +1377,7 @@ impl PlaybackEngineHandle {
         self.sender
             .send(EngineCommand::SetShuffle {
                 shuffle,
+                origin: crate::model::CommandOrigin::Local,
                 respond_to: tx,
             })
             .await
@@ -1251,6 +1390,7 @@ impl PlaybackEngineHandle {
         self.sender
             .send(EngineCommand::SetRepeat {
                 repeat,
+                origin: crate::model::CommandOrigin::Local,
                 respond_to: tx,
             })
             .await
@@ -1270,6 +1410,7 @@ impl PlaybackEngineHandle {
                 tracks,
                 current_index,
                 current_track_id,
+                origin: crate::model::CommandOrigin::Local,
                 respond_to: tx,
             })
             .await

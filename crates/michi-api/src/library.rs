@@ -933,6 +933,7 @@ pub async fn set_playback_state_handler(
         repeat: snap.repeat.as_str().into(),
         event_id: Some(Uuid::new_v4()),
         sequence: None,
+        epoch: Some(state.playback_projection.server_epoch()),
     };
 
     let _ = state.sync_tx.send(out_state.clone().into());
