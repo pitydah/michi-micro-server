@@ -39,6 +39,8 @@ pub enum SyncMessage {
         sequence: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         epoch: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        boot_id: Option<Uuid>,
     },
     #[serde(rename = "handoff_request")]
     HandoffRequest {
@@ -177,6 +179,8 @@ pub struct PlaybackState {
     pub sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_id: Option<Uuid>,
 }
 
 fn default_repeat_mode() -> String {
@@ -192,6 +196,37 @@ where
         Ok("off".to_string())
     } else {
         Ok(s)
+    }
+}
+
+impl PlaybackState {
+    /// Returns true if `self` has deterministic causal precedence over `other`.
+    ///
+    /// Establishes a strict total order for conflict resolution between concurrent states:
+    /// 1. `epoch` (higher epoch / reboot generation wins)
+    /// 2. `updated_at` timestamp (newer timestamp wins)
+    /// 3. `sequence` (higher sequence breaks tie if same timestamp)
+    /// 4. `device_id` lexicographical comparison (deterministic tie-breaker across nodes)
+    pub fn has_precedence_over(&self, other: &PlaybackState) -> bool {
+        let self_epoch = self.epoch.unwrap_or(0);
+        let other_epoch = other.epoch.unwrap_or(0);
+        if self_epoch != other_epoch {
+            return self_epoch > other_epoch;
+        }
+
+        if self.updated_at != other.updated_at {
+            return self.updated_at > other.updated_at;
+        }
+
+        let self_seq = self.sequence.unwrap_or(0);
+        let other_seq = other.sequence.unwrap_or(0);
+        if self_seq != other_seq {
+            return self_seq > other_seq;
+        }
+
+        let self_dev = self.device_id.as_deref().unwrap_or("");
+        let other_dev = other.device_id.as_deref().unwrap_or("");
+        self_dev > other_dev
     }
 }
 
@@ -211,6 +246,7 @@ impl Default for PlaybackState {
             event_id: None,
             sequence: None,
             epoch: None,
+            boot_id: None,
         }
     }
 }
@@ -229,6 +265,7 @@ impl From<PlaybackState> for SyncMessage {
             event_id: state.event_id,
             sequence: state.sequence,
             epoch: state.epoch,
+            boot_id: state.boot_id,
         }
     }
 }
@@ -1756,6 +1793,7 @@ impl SyncManager {
                     event_id: None,
                     sequence: None,
                     epoch: None,
+                    boot_id: None,
                 })
             }
             None => Ok(PlaybackState::default()),
@@ -1904,18 +1942,79 @@ mod tests {
             event_id: Some(Uuid::new_v4()),
             sequence: Some(1),
             epoch: Some(1700000000),
+            boot_id: Some(Uuid::nil()),
         };
         let json = msg.serialize().unwrap();
         let deserialized = SyncMessage::deserialize(&json).unwrap();
         match deserialized {
             SyncMessage::State {
-                epoch, sequence, ..
+                epoch,
+                sequence,
+                boot_id,
+                ..
             } => {
                 assert_eq!(epoch, Some(1700000000));
                 assert_eq!(sequence, Some(1));
+                assert_eq!(boot_id, Some(Uuid::nil()));
             }
             _ => panic!("Expected SyncMessage::State"),
         }
+    }
+
+    #[test]
+    fn test_playback_state_precedence_total_order() {
+        let now = Utc::now();
+        let s_a = PlaybackState {
+            epoch: Some(1),
+            sequence: Some(10),
+            updated_at: now,
+            device_id: Some("server-a".to_string()),
+            volume: 0.3,
+            ..Default::default()
+        };
+
+        // Same epoch, same timestamp, higher sequence wins
+        let s_b = PlaybackState {
+            epoch: Some(1),
+            sequence: Some(20),
+            updated_at: now,
+            device_id: Some("server-b".to_string()),
+            volume: 0.7,
+            ..Default::default()
+        };
+        assert!(s_b.has_precedence_over(&s_a));
+        assert!(!s_a.has_precedence_over(&s_b));
+
+        // Newer timestamp wins regardless of sequence
+        let later = now + chrono::Duration::milliseconds(50);
+        let s_c = PlaybackState {
+            epoch: Some(1),
+            sequence: Some(5),
+            updated_at: later,
+            device_id: Some("server-c".to_string()),
+            volume: 0.5,
+            ..Default::default()
+        };
+        assert!(s_c.has_precedence_over(&s_b));
+        assert!(!s_b.has_precedence_over(&s_c));
+
+        // Exact tie broken deterministically by device_id
+        let s_tie1 = PlaybackState {
+            epoch: Some(1),
+            sequence: Some(10),
+            updated_at: now,
+            device_id: Some("server-z".to_string()),
+            ..Default::default()
+        };
+        let s_tie2 = PlaybackState {
+            epoch: Some(1),
+            sequence: Some(10),
+            updated_at: now,
+            device_id: Some("server-a".to_string()),
+            ..Default::default()
+        };
+        assert!(s_tie1.has_precedence_over(&s_tie2));
+        assert!(!s_tie2.has_precedence_over(&s_tie1));
     }
 
     #[test]

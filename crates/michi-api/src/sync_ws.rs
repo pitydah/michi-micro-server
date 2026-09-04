@@ -102,6 +102,7 @@ pub async fn apply_remote_playback_state(
     event_id: Option<Uuid>,
     sequence: Option<u64>,
     epoch: Option<u64>,
+    boot_id: Option<Uuid>,
 ) -> bool {
     let playback_lock = state.get_module_transition_lock("playback").await;
     let _playback_guard = playback_lock.lock().await;
@@ -120,51 +121,69 @@ pub async fn apply_remote_playback_state(
         }
     }
 
-    // 2. Deduplication: if event_id was already processed, drop immediately
+    // 2. Deduplication check: drop if already processed, but do NOT record until applied
     if let Some(eid) = event_id {
         if state.playback_projection.is_event_processed(&eid).await {
             debug!(event_id = %eid, "sync: dropped duplicate state event");
             return false;
         }
-        state.playback_projection.record_processed_event(eid).await;
     }
 
-    // 3. Sequence / Epoch vector check: reject stale or reordered updates from the same peer
+    // 3. Sequence / Epoch / Boot_id check: drop if stale or out-of-order, but do NOT record until applied
     if let (Some(ref origin), Some(seq)) = (&origin_device_id, sequence) {
         if state
             .playback_projection
-            .is_stale_peer_state(origin, epoch, seq)
+            .is_stale_peer_state(origin, epoch, boot_id, seq)
             .await
         {
-            debug!(origin = %origin, seq = seq, epoch = ?epoch, "sync: dropped stale or out-of-order state update");
+            debug!(origin = %origin, seq = seq, epoch = ?epoch, boot_id = ?boot_id, "sync: dropped stale or out-of-order state update");
             return false;
         }
-        state
-            .playback_projection
-            .record_peer_state(origin, epoch, seq)
-            .await;
+    }
+
+    // 4. Cross-origin conflict resolution: if our current state was originated locally and has precedence, drop and re-broadcast
+    let incoming_state = michi_sync::PlaybackState {
+        track_id,
+        position_ms,
+        playing,
+        volume,
+        updated_at: chrono::Utc::now(),
+        playlist_id: None,
+        queue_position: None,
+        device_id: origin_device_id.clone(),
+        shuffle: false,
+        repeat: "off".into(),
+        event_id,
+        sequence,
+        epoch,
+        boot_id,
+    };
+
+    let current_state = state.playback_state.read().await.clone();
+    if current_state.device_id.as_deref() == Some(&local_server_id)
+        && current_state.has_precedence_over(&incoming_state)
+    {
+        debug!(
+            local_seq = ?current_state.sequence,
+            remote_seq = ?sequence,
+            "sync: local state has precedence over concurrent remote state; retaining local authority"
+        );
+        let _ = state.sync_tx.send(current_state.into());
+        return false;
     }
 
     let resolved_event_id = event_id.unwrap_or_else(Uuid::new_v4);
-    let resolved_origin = origin_device_id.unwrap_or_else(|| "remote_peer".into());
+    let resolved_origin = origin_device_id
+        .clone()
+        .unwrap_or_else(|| "remote_peer".into());
 
     let command_origin = michi_playback::CommandOrigin::Remote {
-        origin_device_id: resolved_origin.clone(),
+        origin_device_id: resolved_origin,
         event_id: resolved_event_id,
         sequence,
         epoch,
+        boot_id,
     };
-
-    // 4. Set remote provenance context on projection coordinator as fallback
-    state
-        .playback_projection
-        .set_remote_context(
-            resolved_origin,
-            resolved_event_id,
-            sequence,
-            std::time::Duration::from_millis(500),
-        )
-        .await;
 
     let mut all_applied = true;
     if let Some(tid) = track_id {
@@ -228,6 +247,17 @@ pub async fn apply_remote_playback_state(
     }
 
     if all_applied {
+        // Effect verification succeeded: commit deduplication and peer vector cursor
+        if let Some(eid) = event_id {
+            state.playback_projection.record_processed_event(eid).await;
+        }
+        if let (Some(ref origin), Some(seq)) = (&origin_device_id, sequence) {
+            state
+                .playback_projection
+                .record_peer_state(origin, epoch, boot_id, seq)
+                .await;
+        }
+
         // Notify local UI clients only when every single operation succeeded
         let tid = track_id
             .map(|id| format!("\"{id}\""))
@@ -326,6 +356,7 @@ async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: Cancellati
                                         event_id,
                                         sequence,
                                         epoch,
+                                        boot_id,
                                         ..
                                     } => {
                                         apply_remote_playback_state(
@@ -338,6 +369,7 @@ async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: Cancellati
                                             *event_id,
                                             *sequence,
                                             *epoch,
+                                            *boot_id,
                                         )
                                         .await;
                                     }

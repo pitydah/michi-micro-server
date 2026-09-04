@@ -564,6 +564,16 @@ pub struct SyncStateBody {
     pub position_ms: u64,
     pub playing: bool,
     pub volume: f64,
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub event_id: Option<Uuid>,
+    #[serde(default)]
+    pub sequence: Option<u64>,
+    #[serde(default)]
+    pub epoch: Option<u64>,
+    #[serde(default)]
+    pub boot_id: Option<Uuid>,
 }
 
 pub async fn sync_state_handler(
@@ -577,8 +587,24 @@ pub async fn sync_state_handler(
             "sync module is disabled",
         ));
     }
-    // Functional truth: /sync/state conveys remote peer playback state.
-    // It broadcasts to peers/WebSockets without spoofing local server PlaybackEngine authority.
+
+    let (device_id, event_id, sequence, epoch, boot_id) = match body.device_id {
+        Some(dev) => (
+            Some(dev),
+            Some(body.event_id.unwrap_or_else(Uuid::new_v4)),
+            body.sequence,
+            body.epoch,
+            body.boot_id,
+        ),
+        None => (
+            Some(state.server_id().to_string()),
+            Some(body.event_id.unwrap_or_else(Uuid::new_v4)),
+            Some(state.playback_projection.next_local_sequence()),
+            Some(state.playback_projection.server_epoch()),
+            Some(state.playback_projection.boot_id()),
+        ),
+    };
+
     let peer_state = michi_sync::PlaybackState {
         track_id: body.track_id,
         position_ms: body.position_ms,
@@ -587,12 +613,13 @@ pub async fn sync_state_handler(
         updated_at: chrono::Utc::now(),
         playlist_id: None,
         queue_position: None,
-        device_id: None,
+        device_id,
         shuffle: false,
         repeat: "off".into(),
-        event_id: Some(Uuid::new_v4()),
-        sequence: None,
-        epoch: None,
+        event_id,
+        sequence,
+        epoch,
+        boot_id,
     };
 
     let _ = state.sync_tx.send(peer_state.into());

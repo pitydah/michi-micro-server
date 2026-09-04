@@ -6769,7 +6769,7 @@ async fn test_sync_remote_playback_isolation_when_playback_module_disabled() {
 
     // 2. Try applying remote playback state
     let applied = michi_api::sync_ws::apply_remote_playback_state(
-        &state, None, 5000, true, 0.8, None, None, None, None,
+        &state, None, 5000, true, 0.8, None, None, None, None, None,
     )
     .await;
 
@@ -6796,6 +6796,7 @@ async fn test_sync_remote_playback_concurrent_module_disable_toctou_prevention()
             5000,
             true,
             0.8,
+            None,
             None,
             None,
             None,
@@ -7094,6 +7095,7 @@ async fn test_sync_echo_suppression_drops_self_originating_state() {
         Some(event_id),
         Some(1),
         None,
+        None,
     )
     .await;
 
@@ -7127,6 +7129,7 @@ async fn test_sync_deduplication_drops_duplicate_event_id() {
         Some(event_id),
         Some(1),
         None,
+        None,
     )
     .await;
     assert!(applied1, "First event arrival must be applied");
@@ -7141,6 +7144,7 @@ async fn test_sync_deduplication_drops_duplicate_event_id() {
         Some(remote_origin),
         Some(event_id),
         Some(1),
+        None,
         None,
     )
     .await;
@@ -7165,6 +7169,7 @@ async fn test_sync_remote_application_suppresses_local_echo() {
         Some(remote_origin),
         Some(event_id),
         Some(42),
+        None,
         None,
     )
     .await;
@@ -7241,6 +7246,7 @@ async fn test_sync_reordered_and_stale_packets_rejected() {
         Some(uuid::Uuid::new_v4()),
         Some(5),
         Some(100),
+        None,
     )
     .await;
     assert!(applied1, "Initial packet at seq 5 should apply");
@@ -7256,6 +7262,7 @@ async fn test_sync_reordered_and_stale_packets_rejected() {
         Some(uuid::Uuid::new_v4()),
         Some(3),
         Some(100),
+        None,
     )
     .await;
     assert!(
@@ -7274,6 +7281,7 @@ async fn test_sync_reordered_and_stale_packets_rejected() {
         Some(uuid::Uuid::new_v4()),
         Some(5),
         Some(100),
+        None,
     )
     .await;
     assert!(
@@ -7292,6 +7300,7 @@ async fn test_sync_reordered_and_stale_packets_rejected() {
         Some(uuid::Uuid::new_v4()),
         Some(6),
         Some(100),
+        None,
     )
     .await;
     assert!(applied_in_order, "In-order packet seq 6 must be applied");
@@ -7313,6 +7322,7 @@ async fn test_sync_epoch_rollover_reboot_handled() {
         Some(uuid::Uuid::new_v4()),
         Some(50),
         Some(10),
+        None,
     )
     .await;
     assert!(applied1);
@@ -7328,6 +7338,7 @@ async fn test_sync_epoch_rollover_reboot_handled() {
         Some(uuid::Uuid::new_v4()),
         Some(1),
         Some(11),
+        None,
     )
     .await;
     assert!(
@@ -7346,10 +7357,235 @@ async fn test_sync_epoch_rollover_reboot_handled() {
         Some(uuid::Uuid::new_v4()),
         Some(999),
         Some(10),
+        None,
     )
     .await;
     assert!(
         !applied_old_epoch,
         "Delayed packet from older epoch must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_retry_succeeds_after_transient_failure() {
+    let (_app, _pool, state) = make_app_with_state().await;
+    let peer_origin = "peer-retry".to_string();
+    let event_id = uuid::Uuid::new_v4();
+    let non_existent_track = uuid::Uuid::new_v4();
+
+    // 1. First attempt fails because track does not exist locally
+    let applied_fail = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        Some(non_existent_track),
+        5000,
+        false,
+        0.5,
+        Some(peer_origin.clone()),
+        Some(event_id),
+        Some(10),
+        Some(1),
+        None,
+    )
+    .await;
+    assert!(!applied_fail, "Application should fail for missing track");
+
+    // 2. Retry of the EXACT same event_id and sequence (e.g. peer recovered or fallback to position seek)
+    let applied_retry = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        5000,
+        false,
+        0.5,
+        Some(peer_origin.clone()),
+        Some(event_id),
+        Some(10),
+        Some(1),
+        None,
+    )
+    .await;
+    assert!(
+        applied_retry,
+        "Retry with same event_id and sequence MUST succeed and not be dropped as duplicate/stale"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_no_remote_context_leak_on_local_events() {
+    let (_app, _pool, state) = make_app_with_state().await;
+    let mut sync_rx = state.sync_tx.subscribe();
+    let peer_origin = "peer-remote-ctx".to_string();
+
+    // 1. Apply a remote state
+    let applied = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        1000,
+        false,
+        0.5,
+        Some(peer_origin),
+        Some(uuid::Uuid::new_v4()),
+        Some(1),
+        Some(1),
+        None,
+    )
+    .await;
+    assert!(applied);
+
+    // Give a brief moment for remote application to finish
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    // 2. Immediately execute local command
+    state.playback_engine.set_volume(90).await.unwrap();
+
+    // 3. Local volume change must be broadcasted on sync_tx immediately
+    let recvd = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            if let Ok(michi_sync::SyncMessage::State {
+                volume,
+                origin_device_id,
+                ..
+            }) = sync_rx.recv().await
+            {
+                if (volume - 0.9).abs() < 0.05 {
+                    return (volume, origin_device_id);
+                }
+            }
+        }
+    })
+    .await
+    .expect("Local volume event must be broadcasted without 500ms remote context suppression");
+
+    let (_vol, origin) = recvd;
+    let sid = state.server_id().to_string();
+    assert_eq!(origin.as_deref(), Some(sid.as_str()));
+}
+
+#[tokio::test]
+async fn test_sync_reconcile_preserves_epoch_and_boot_id() {
+    let (_app, _pool, state) = make_app_with_state().await;
+    let snap = state.playback_engine.snapshot().await.unwrap();
+
+    let res = state
+        .playback_projection
+        .reconcile_from_snapshot(&snap)
+        .await;
+    assert!(res.is_ok());
+
+    let ps = state.playback_state.read().await;
+    assert_eq!(ps.epoch, Some(state.playback_projection.server_epoch()));
+    assert_eq!(ps.boot_id, Some(state.playback_projection.boot_id()));
+}
+
+#[tokio::test]
+async fn test_sync_bidirectional_concurrent_conflict_resolution() {
+    let (_app1, _pool1, state_a) = make_app_with_state().await;
+    let (_app2, _pool2, state_b) = make_app_with_state().await;
+
+    let id_a = state_a.server_id().to_string();
+    let id_b = state_b.server_id().to_string();
+
+    // Set both initially at volume 0.5
+    state_a.playback_engine.set_volume(50).await.unwrap();
+    state_b.playback_engine.set_volume(50).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    // Simulate simultaneous conflicting updates:
+    // A sets volume 30
+    state_a.playback_engine.set_volume(30).await.unwrap();
+    // B sets volume 70
+    state_b.playback_engine.set_volume(70).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    let state_a_snap = state_a.playback_state.read().await.clone();
+    let state_b_snap = state_b.playback_state.read().await.clone();
+
+    // Determine deterministic winner
+    let a_wins = state_a_snap.has_precedence_over(&state_b_snap);
+    let expected_volume = if a_wins { 0.3 } else { 0.7 };
+
+    // Cross the network: A receives B's state, B receives A's state
+    michi_api::sync_ws::apply_remote_playback_state(
+        &state_a,
+        state_b_snap.track_id,
+        state_b_snap.position_ms,
+        state_b_snap.playing,
+        state_b_snap.volume,
+        Some(id_b.clone()),
+        state_b_snap.event_id,
+        state_b_snap.sequence,
+        state_b_snap.epoch,
+        state_b_snap.boot_id,
+    )
+    .await;
+
+    michi_api::sync_ws::apply_remote_playback_state(
+        &state_b,
+        state_a_snap.track_id,
+        state_a_snap.position_ms,
+        state_a_snap.playing,
+        state_a_snap.volume,
+        Some(id_a.clone()),
+        state_a_snap.event_id,
+        state_a_snap.sequence,
+        state_a_snap.epoch,
+        state_a_snap.boot_id,
+    )
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    let vol_a = (state_a.playback_engine.snapshot().await.unwrap().volume as f64) / 100.0;
+    let vol_b = (state_b.playback_engine.snapshot().await.unwrap().volume as f64) / 100.0;
+
+    assert!(
+        (vol_a - expected_volume).abs() < 0.05,
+        "Server A must converge to expected winner volume {expected_volume}, got {vol_a}"
+    );
+    assert!(
+        (vol_b - expected_volume).abs() < 0.05,
+        "Server B must converge to expected winner volume {expected_volume}, got {vol_b}"
+    );
+    assert!(
+        (vol_a - vol_b).abs() < 0.01,
+        "Server A and Server B must deterministically converge to the exact same state"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_rapid_reboot_monotonic_epoch() {
+    let (_app, pool, state) = make_app_with_state().await;
+
+    // First boot with DB persistence
+    let (coord1, _health1) =
+        michi_api::playback_projection::PlaybackProjectionCoordinator::new_with_db_epoch(
+            pool.clone(),
+            state.playback_state.clone(),
+            state.playback_engine.clone(),
+            state.sync_tx.clone(),
+            state.server_id().to_string(),
+        )
+        .await;
+    let ep1 = coord1.server_epoch();
+
+    // Instant rapid reboot with same DB pool
+    let (coord2, _health2) =
+        michi_api::playback_projection::PlaybackProjectionCoordinator::new_with_db_epoch(
+            pool.clone(),
+            state.playback_state.clone(),
+            state.playback_engine.clone(),
+            state.sync_tx.clone(),
+            state.server_id().to_string(),
+        )
+        .await;
+    let ep2 = coord2.server_epoch();
+
+    assert!(
+        ep2 > ep1,
+        "Epoch on rapid reboot must strictly increment (ep1={ep1}, ep2={ep2})"
+    );
+    assert_ne!(
+        coord1.boot_id(),
+        coord2.boot_id(),
+        "Boot IDs must be unique per reboot"
     );
 }

@@ -934,6 +934,7 @@ pub async fn set_playback_state_handler(
         event_id: Some(Uuid::new_v4()),
         sequence: None,
         epoch: Some(state.playback_projection.server_epoch()),
+        boot_id: Some(state.playback_projection.boot_id()),
     };
 
     let _ = state.sync_tx.send(out_state.clone().into());

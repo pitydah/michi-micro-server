@@ -48,7 +48,8 @@ pub struct PlaybackEngine {
     last_error: Option<String>,
     event_tx: tokio::sync::broadcast::Sender<crate::model::TrackedEngineEvent>,
     last_checkpoint: Instant,
-    current_command_origin: crate::model::CommandOrigin,
+    current_command_origin: Option<crate::model::CommandOrigin>,
+    current_timeline_origin: crate::model::CommandOrigin,
 }
 
 impl PlaybackEngine {
@@ -94,7 +95,8 @@ impl PlaybackEngine {
             last_error: None,
             event_tx,
             last_checkpoint: Instant::now(),
-            current_command_origin: crate::model::CommandOrigin::Local,
+            current_command_origin: None,
+            current_timeline_origin: crate::model::CommandOrigin::Local,
         }
     }
 
@@ -105,10 +107,13 @@ impl PlaybackEngine {
     }
 
     fn emit_event(&self, event: crate::model::EngineEvent) {
-        let _ = self.event_tx.send(crate::model::TrackedEngineEvent {
-            event,
-            origin: self.current_command_origin.clone(),
-        });
+        let origin = match &self.current_command_origin {
+            Some(o) => o.clone(),
+            None => self.current_timeline_origin.clone(),
+        };
+        let _ = self
+            .event_tx
+            .send(crate::model::TrackedEngineEvent { event, origin });
     }
 
     pub fn resolver(&self) -> &Arc<dyn TrackResolver> {
@@ -635,9 +640,9 @@ impl PlaybackEngine {
     }
 
     async fn handle_command(&mut self, cmd: EngineCommand) -> bool {
-        self.current_command_origin = cmd.origin();
+        self.current_command_origin = Some(cmd.origin());
         let res = self.handle_command_inner(cmd).await;
-        self.current_command_origin = crate::model::CommandOrigin::Local;
+        self.current_command_origin = None;
         res
     }
 
@@ -651,6 +656,11 @@ impl PlaybackEngine {
                 origin: _,
                 respond_to,
             } => {
+                self.current_timeline_origin = self
+                    .current_command_origin
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or(crate::model::CommandOrigin::Local);
                 if sinks.is_empty() {
                     let _ = respond_to.send(Err(PlaybackError::NoOutputSelected));
                     return true;
@@ -671,6 +681,11 @@ impl PlaybackEngine {
                 origin: _,
                 respond_to,
             } => {
+                self.current_timeline_origin = self
+                    .current_command_origin
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or(crate::model::CommandOrigin::Local);
                 let _ = self.cleanup_playback().await;
                 self.current_track = Some(*track);
                 self.base_position_ms = position_ms;
@@ -695,6 +710,11 @@ impl PlaybackEngine {
                 origin: _,
                 respond_to,
             } => {
+                self.current_timeline_origin = self
+                    .current_command_origin
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or(crate::model::CommandOrigin::Local);
                 if self.queue.is_empty() || index >= self.queue.len() {
                     let _ = respond_to.send(Err(PlaybackError::QueueIndexInvalid(index)));
                     return true;
@@ -731,6 +751,11 @@ impl PlaybackEngine {
                 origin: _,
                 respond_to,
             } => {
+                self.current_timeline_origin = self
+                    .current_command_origin
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or(crate::model::CommandOrigin::Local);
                 let pos = self.calculate_current_position_ms();
                 if let Some(ref mut d) = self.decoder {
                     let _ = d.stop().await;
@@ -764,6 +789,11 @@ impl PlaybackEngine {
                 origin: _,
                 respond_to,
             } => {
+                self.current_timeline_origin = self
+                    .current_command_origin
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or(crate::model::CommandOrigin::Local);
                 if self.sinks.is_empty() {
                     let _ = respond_to.send(Err(PlaybackError::NoOutputSelected));
                     return true;
@@ -813,6 +843,11 @@ impl PlaybackEngine {
                 origin: _,
                 respond_to,
             } => {
+                self.current_timeline_origin = self
+                    .current_command_origin
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or(crate::model::CommandOrigin::Local);
                 if self.state.is_playing() {
                     if let Some(track) = self.current_track.clone() {
                         if let Some(mut d) = self.decoder.take() {
@@ -990,6 +1025,7 @@ impl PlaybackEngine {
                 origin: _,
                 respond_to,
             } => {
+                self.current_timeline_origin = crate::model::CommandOrigin::Local;
                 let res = self.cleanup_playback().await;
                 self.base_position_ms = 0;
                 self.state = PlaybackLifecycle::Stopped;
@@ -1553,5 +1589,69 @@ mod tests {
         engine.recompute_play_order_new_cycle(0);
         assert_eq!(engine.play_order, vec![0]);
         assert_eq!(engine.play_order_pos, 0);
+    }
+
+    #[tokio::test]
+    async fn test_tracked_origin_preservation_and_timeline_origin() {
+        let (_tx, rx) = mpsc::channel(16);
+        let mut engine = PlaybackEngine::new(rx, Arc::new(DummyResolver), PcmFormat::default());
+        let mut event_rx = engine.subscribe_events();
+
+        let track = make_dummy_track("TestTrack");
+        let (resp_tx, _resp_rx) = tokio::sync::oneshot::channel();
+        let remote_origin = crate::model::CommandOrigin::Remote {
+            origin_device_id: "remote-peer".to_string(),
+            event_id: Uuid::new_v4(),
+            sequence: Some(42),
+            epoch: Some(100),
+            boot_id: Some(Uuid::nil()),
+        };
+        let cmd = EngineCommand::LoadTrack {
+            track: Box::new(track),
+            position_ms: 5000,
+            origin: remote_origin.clone(),
+            respond_to: resp_tx,
+        };
+
+        engine.handle_command(cmd).await;
+
+        // Drain events from LoadTrack, all should have origin Remote
+        let mut loaded_events = Vec::new();
+        while let Ok(te) = event_rx.try_recv() {
+            assert_eq!(te.origin, remote_origin);
+            loaded_events.push(te.event);
+        }
+        assert!(!loaded_events.is_empty());
+
+        // An autonomous event emitted outside any command should inherit current_timeline_origin (Remote)
+        engine.emit_event(crate::model::EngineEvent::PositionCheckpoint {
+            track_id: None,
+            position_ms: 6000,
+        });
+        let te = event_rx
+            .try_recv()
+            .expect("should receive autonomous event");
+        assert_eq!(te.origin, remote_origin);
+
+        // A local command (e.g. SetVolume) should emit with CommandOrigin::Local without overwriting timeline origin
+        let (resp_tx, _resp_rx) = tokio::sync::oneshot::channel();
+        let vol_cmd = EngineCommand::SetVolume {
+            volume: 95,
+            origin: crate::model::CommandOrigin::Local,
+            respond_to: resp_tx,
+        };
+        engine.handle_command(vol_cmd).await;
+        let te = event_rx.try_recv().expect("should receive volume event");
+        assert_eq!(te.origin, crate::model::CommandOrigin::Local);
+
+        // Next autonomous event still preserves Remote
+        engine.emit_event(crate::model::EngineEvent::PositionCheckpoint {
+            track_id: None,
+            position_ms: 7000,
+        });
+        let te = event_rx
+            .try_recv()
+            .expect("should receive autonomous event");
+        assert_eq!(te.origin, remote_origin);
     }
 }

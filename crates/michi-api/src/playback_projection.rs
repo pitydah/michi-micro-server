@@ -93,13 +93,12 @@ impl std::fmt::Display for ProjectionError {
 
 impl std::error::Error for ProjectionError {}
 
-/// Remote provenance context tracking when an engine event was caused by applying a remote state.
-#[derive(Debug, Clone)]
-pub struct RemoteProvenanceContext {
-    pub origin_device_id: String,
-    pub event_id: Uuid,
-    pub sequence: Option<u64>,
-    pub expires_at: tokio::time::Instant,
+/// Cursor tracking latest known epoch, boot_id, and sequence for a remote peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCursor {
+    pub epoch: u64,
+    pub boot_id: Option<Uuid>,
+    pub sequence: u64,
 }
 
 /// Cohesive coordinator responsible for projecting PlaybackEngine runtime events
@@ -111,16 +110,56 @@ pub struct PlaybackProjectionCoordinator {
     engine: PlaybackEngineHandle,
     sync_tx: tokio::sync::broadcast::Sender<michi_sync::SyncMessage>,
     server_id: String,
-    server_epoch: u64,
+    server_epoch: Arc<AtomicU64>,
+    boot_id: Uuid,
     local_sequence: Arc<AtomicU64>,
-    peer_vectors: Arc<RwLock<HashMap<String, (u64, u64)>>>,
-    active_remote_context: Arc<RwLock<Option<RemoteProvenanceContext>>>,
+    peer_vectors: Arc<RwLock<HashMap<String, PeerCursor>>>,
     processed_events: Arc<RwLock<HashSet<Uuid>>>,
     health: Arc<RwLock<PlaybackProjectionHealth>>,
     last_projection: Arc<RwLock<Option<PersistentPlaybackProjection>>>,
 }
 
 impl PlaybackProjectionCoordinator {
+    pub async fn new_with_db_epoch(
+        db: SqlitePool,
+        legacy_playback_state: Arc<RwLock<michi_sync::PlaybackState>>,
+        engine: PlaybackEngineHandle,
+        sync_tx: tokio::sync::broadcast::Sender<michi_sync::SyncMessage>,
+        server_id: String,
+    ) -> (Self, Arc<RwLock<PlaybackProjectionHealth>>) {
+        let boot_id = Uuid::new_v4();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let epoch = match michi_db::get_server_config(&db, "sync_server_epoch").await {
+            Ok(Some(val)) => {
+                let last_ep = val.parse::<u64>().unwrap_or(0);
+                let next_ep = last_ep.saturating_add(1).max(now_secs);
+                let _ = michi_db::set_server_config(&db, "sync_server_epoch", &next_ep.to_string())
+                    .await;
+                next_ep
+            }
+            _ => {
+                let _ =
+                    michi_db::set_server_config(&db, "sync_server_epoch", &now_secs.to_string())
+                        .await;
+                now_secs
+            }
+        };
+
+        Self::new_with_epoch_and_boot(
+            db,
+            legacy_playback_state,
+            engine,
+            sync_tx,
+            server_id,
+            epoch,
+            boot_id,
+        )
+    }
+
     pub fn new(
         db: SqlitePool,
         legacy_playback_state: Arc<RwLock<michi_sync::PlaybackState>>,
@@ -128,11 +167,50 @@ impl PlaybackProjectionCoordinator {
         sync_tx: tokio::sync::broadcast::Sender<michi_sync::SyncMessage>,
         server_id: String,
     ) -> (Self, Arc<RwLock<PlaybackProjectionHealth>>) {
-        let epoch = std::time::SystemTime::now()
+        let boot_id = Uuid::new_v4();
+        let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        Self::new_with_epoch(db, legacy_playback_state, engine, sync_tx, server_id, epoch)
+
+        let (coord, health) = Self::new_with_epoch_and_boot(
+            db.clone(),
+            legacy_playback_state,
+            engine,
+            sync_tx,
+            server_id,
+            now_secs,
+            boot_id,
+        );
+
+        let epoch_atomic = coord.server_epoch.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                match michi_db::get_server_config(&db, "sync_server_epoch").await {
+                    Ok(Some(val)) => {
+                        let last_ep = val.parse::<u64>().unwrap_or(0);
+                        let next_ep = last_ep.saturating_add(1).max(now_secs);
+                        let _ = michi_db::set_server_config(
+                            &db,
+                            "sync_server_epoch",
+                            &next_ep.to_string(),
+                        )
+                        .await;
+                        epoch_atomic.store(next_ep, Ordering::SeqCst);
+                    }
+                    _ => {
+                        let _ = michi_db::set_server_config(
+                            &db,
+                            "sync_server_epoch",
+                            &now_secs.to_string(),
+                        )
+                        .await;
+                    }
+                }
+            });
+        }
+
+        (coord, health)
     }
 
     pub fn new_with_epoch(
@@ -143,6 +221,27 @@ impl PlaybackProjectionCoordinator {
         server_id: String,
         server_epoch: u64,
     ) -> (Self, Arc<RwLock<PlaybackProjectionHealth>>) {
+        let boot_id = Uuid::new_v4();
+        Self::new_with_epoch_and_boot(
+            db,
+            legacy_playback_state,
+            engine,
+            sync_tx,
+            server_id,
+            server_epoch,
+            boot_id,
+        )
+    }
+
+    pub fn new_with_epoch_and_boot(
+        db: SqlitePool,
+        legacy_playback_state: Arc<RwLock<michi_sync::PlaybackState>>,
+        engine: PlaybackEngineHandle,
+        sync_tx: tokio::sync::broadcast::Sender<michi_sync::SyncMessage>,
+        server_id: String,
+        server_epoch: u64,
+        boot_id: Uuid,
+    ) -> (Self, Arc<RwLock<PlaybackProjectionHealth>>) {
         let health = Arc::new(RwLock::new(PlaybackProjectionHealth::default()));
         let coordinator = Self {
             db,
@@ -150,10 +249,10 @@ impl PlaybackProjectionCoordinator {
             engine,
             sync_tx,
             server_id,
-            server_epoch,
+            server_epoch: Arc::new(AtomicU64::new(server_epoch)),
+            boot_id,
             local_sequence: Arc::new(AtomicU64::new(0)),
             peer_vectors: Arc::new(RwLock::new(HashMap::new())),
-            active_remote_context: Arc::new(RwLock::new(None)),
             processed_events: Arc::new(RwLock::new(HashSet::new())),
             health: health.clone(),
             last_projection: Arc::new(RwLock::new(None)),
@@ -162,64 +261,61 @@ impl PlaybackProjectionCoordinator {
     }
 
     pub fn server_epoch(&self) -> u64 {
-        self.server_epoch
+        self.server_epoch.load(Ordering::SeqCst)
+    }
+
+    pub fn boot_id(&self) -> Uuid {
+        self.boot_id
+    }
+
+    pub fn next_local_sequence(&self) -> u64 {
+        self.local_sequence.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     pub async fn is_stale_peer_state(
         &self,
         peer_id: &str,
         epoch: Option<u64>,
+        boot_id: Option<Uuid>,
         sequence: u64,
     ) -> bool {
         let ep = epoch.unwrap_or(0);
         let vectors = self.peer_vectors.read().await;
-        if let Some(&(latest_ep, latest_seq)) = vectors.get(peer_id) {
-            if ep < latest_ep {
+        if let Some(cursor) = vectors.get(peer_id) {
+            if ep < cursor.epoch {
                 return true;
             }
-            if ep == latest_ep && sequence <= latest_seq {
+            if ep > cursor.epoch {
+                return false;
+            }
+            // Same epoch: check if boot_id indicates a new instance reboot
+            if boot_id.is_some() && cursor.boot_id.is_some() && boot_id != cursor.boot_id {
+                return false;
+            }
+            if sequence <= cursor.sequence {
                 return true;
             }
         }
         false
     }
 
-    pub async fn record_peer_state(&self, peer_id: &str, epoch: Option<u64>, sequence: u64) {
+    pub async fn record_peer_state(
+        &self,
+        peer_id: &str,
+        epoch: Option<u64>,
+        boot_id: Option<Uuid>,
+        sequence: u64,
+    ) {
         let ep = epoch.unwrap_or(0);
         let mut vectors = self.peer_vectors.write().await;
-        vectors.insert(peer_id.to_string(), (ep, sequence));
-    }
-
-    /// Sets the active remote provenance context during remote state application for a duration.
-    pub async fn set_remote_context(
-        &self,
-        origin_device_id: String,
-        event_id: Uuid,
-        sequence: Option<u64>,
-        duration: std::time::Duration,
-    ) {
-        let mut ctx = self.active_remote_context.write().await;
-        *ctx = Some(RemoteProvenanceContext {
-            origin_device_id,
-            event_id,
-            sequence,
-            expires_at: tokio::time::Instant::now() + duration,
-        });
-    }
-
-    /// Clears the active remote provenance context immediately.
-    pub async fn clear_remote_context(&self) {
-        let mut ctx = self.active_remote_context.write().await;
-        *ctx = None;
-    }
-
-    /// Returns the active remote provenance context if not expired.
-    pub async fn get_active_remote_context(&self) -> Option<RemoteProvenanceContext> {
-        let ctx = self.active_remote_context.read().await;
-        match &*ctx {
-            Some(c) if tokio::time::Instant::now() <= c.expires_at => Some(c.clone()),
-            _ => None,
-        }
+        vectors.insert(
+            peer_id.to_string(),
+            PeerCursor {
+                epoch: ep,
+                boot_id,
+                sequence,
+            },
+        );
     }
 
     /// Checks whether an event_id was already processed (deduplication).
@@ -334,40 +430,33 @@ impl PlaybackProjectionCoordinator {
             snap.position_ms
         };
 
-        // Determine provenance: causal origin directly attached to event, fallback to remote_ctx
-        let (device_id, event_id, sequence, epoch, is_local) = match &event.origin {
+        // Determine provenance directly attached to event without timing fallbacks
+        let (device_id, event_id, sequence, epoch, boot_id, is_local) = match &event.origin {
             CommandOrigin::Remote {
                 origin_device_id,
                 event_id,
                 sequence,
                 epoch,
+                boot_id,
             } => (
                 Some(origin_device_id.clone()),
                 Some(*event_id),
                 *sequence,
                 *epoch,
+                *boot_id,
                 false,
             ),
             CommandOrigin::Local => {
-                if let Some(ctx) = self.get_active_remote_context().await {
-                    (
-                        Some(ctx.origin_device_id),
-                        Some(ctx.event_id),
-                        ctx.sequence,
-                        None,
-                        false,
-                    )
-                } else {
-                    let seq = self.local_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-                    let eid = Uuid::new_v4();
-                    (
-                        Some(self.server_id.clone()),
-                        Some(eid),
-                        Some(seq),
-                        Some(self.server_epoch),
-                        true,
-                    )
-                }
+                let seq = self.next_local_sequence();
+                let eid = Uuid::new_v4();
+                (
+                    Some(self.server_id.clone()),
+                    Some(eid),
+                    Some(seq),
+                    Some(self.server_epoch()),
+                    Some(self.boot_id),
+                    true,
+                )
             }
         };
 
@@ -385,6 +474,7 @@ impl PlaybackProjectionCoordinator {
             ps.event_id = event_id;
             ps.sequence = sequence;
             ps.epoch = epoch;
+            ps.boot_id = boot_id;
             ps.clone()
         };
 
@@ -499,20 +589,14 @@ impl PlaybackProjectionCoordinator {
             snap.position_ms
         };
 
-        let remote_ctx = self.get_active_remote_context().await;
-        let (device_id, event_id, sequence, is_local) = match remote_ctx {
-            Some(ctx) => (
-                Some(ctx.origin_device_id),
-                Some(ctx.event_id),
-                ctx.sequence,
-                false,
-            ),
-            None => {
-                let seq = self.local_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-                let eid = Uuid::new_v4();
-                (Some(self.server_id.clone()), Some(eid), Some(seq), true)
-            }
-        };
+        let seq = self.next_local_sequence();
+        let eid = Uuid::new_v4();
+        let device_id = Some(self.server_id.clone());
+        let event_id = Some(eid);
+        let sequence = Some(seq);
+        let epoch = Some(self.server_epoch());
+        let boot_id = Some(self.boot_id);
+        let is_local = true;
 
         let out_state = {
             let mut ps = self.legacy_playback_state.write().await;
@@ -526,6 +610,8 @@ impl PlaybackProjectionCoordinator {
             ps.device_id = device_id;
             ps.event_id = event_id;
             ps.sequence = sequence;
+            ps.epoch = epoch;
+            ps.boot_id = boot_id;
             ps.clone()
         };
         if is_local {

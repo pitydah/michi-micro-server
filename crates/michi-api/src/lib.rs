@@ -1110,6 +1110,7 @@ pub fn start_sync_peers(state: &AppState, cancel_token: CancellationToken) {
                                                                         event_id,
                                                                         sequence,
                                                                         epoch,
+                                                                        boot_id,
                                                                         ..
                                                                     }) = michi_sync::SyncMessage::deserialize(&text)
                                                                     {
@@ -1123,6 +1124,7 @@ pub fn start_sync_peers(state: &AppState, cancel_token: CancellationToken) {
                                                                             event_id,
                                                                             sequence,
                                                                             epoch,
+                                                                            boot_id,
                                                                         )
                                                                         .await;
                                                                     }

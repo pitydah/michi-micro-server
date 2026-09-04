@@ -260,6 +260,8 @@ pub enum CommandOrigin {
         event_id: Uuid,
         sequence: Option<u64>,
         epoch: Option<u64>,
+        #[serde(default)]
+        boot_id: Option<Uuid>,
     },
 }
 
