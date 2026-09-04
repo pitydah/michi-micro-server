@@ -34,10 +34,24 @@ pub async fn sync_handler(
     State(state): State<AppState>,
     ws_result: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
+    let sync_lock = state.get_module_transition_lock("sync").await;
+    let _sync_guard = sync_lock.lock().await;
+
     if state.disabled_modules.read().await.contains("sync") {
         warn!("sync_ws: rejected sync connection because sync module is disabled");
         return (StatusCode::SERVICE_UNAVAILABLE, "sync module is disabled").into_response();
     }
+
+    let Some(sync_cancel) = state.module_tokens.read().await.get("sync").cloned() else {
+        warn!("sync_ws: rejected sync connection because canonical sync token is missing");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sync module runtime unavailable",
+        )
+            .into_response();
+    };
+
+    drop(_sync_guard);
 
     let client_ip = crate::resolve_client_ip(connect_info, &headers, &state.config);
 
@@ -68,14 +82,6 @@ pub async fn sync_handler(
             }
         }
     }
-
-    let sync_cancel = state
-        .module_tokens
-        .read()
-        .await
-        .get("sync")
-        .cloned()
-        .unwrap_or_default();
 
     match ws_result {
         Ok(ws) => ws
@@ -150,10 +156,10 @@ pub async fn apply_remote_playback_state(
             .unwrap_or_else(|| "null".into());
         let msg = format!(
             "{{\"type\":\"sync_state\",\
-             \"track_id\":{tid},\
-             \"position_ms\":{position_ms},\
-             \"playing\":{playing},\
-             \"volume\":{volume}}}",
+              \"track_id\":{tid},\
+              \"position_ms\":{position_ms},\
+              \"playing\":{playing},\
+              \"volume\":{volume}}}",
         );
         let _ = state.tx.send(msg);
     }
@@ -164,7 +170,10 @@ pub async fn apply_remote_playback_state(
 async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: CancellationToken) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
-    // Send identify message
+    // 1. Subscribe to broadcast channel first so we never miss events emitted concurrently with snapshot
+    let mut rx = state.sync_tx.subscribe();
+
+    // 2. Send identify message
     let identify = michi_sync::SyncMessage::Identify {
         name: state.config.sync_name.clone(),
         version: env!("CARGO_PKG_VERSION").into(),
@@ -174,16 +183,14 @@ async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: Cancellati
         let _ = ws_sender.send(Message::Text(json)).await;
     }
 
-    // Send current playback state immediately upon connection
-    {
-        let current = state.playback_state.read().await;
-        let msg: michi_sync::SyncMessage = current.clone().into();
-        if let Ok(json) = serde_json::to_string(&msg) {
-            let _ = ws_sender.send(Message::Text(json)).await;
-        }
+    // 3. Send current playback snapshot immediately upon connection and initialize monotonic tracker
+    let initial_playback_state = state.playback_state.read().await.clone();
+    let mut last_sent_updated_at = initial_playback_state.updated_at;
+    let initial_msg: michi_sync::SyncMessage = initial_playback_state.into();
+    if let Ok(json) = serde_json::to_string(&initial_msg) {
+        let _ = ws_sender.send(Message::Text(json)).await;
     }
 
-    let mut rx = state.sync_tx.subscribe();
     let sync_cancel_send = sync_cancel.clone();
     let shutdown_send = state.shutdown_token.clone();
     let mut send_task = tokio::spawn(async move {
@@ -194,6 +201,13 @@ async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: Cancellati
                 msg = rx.recv() => {
                     match msg {
                         Ok(sync_msg) => {
+                            if let michi_sync::SyncMessage::State { updated_at, .. } = &sync_msg {
+                                if *updated_at <= last_sent_updated_at {
+                                    // Skip stale or duplicate state captured by snapshot
+                                    continue;
+                                }
+                                last_sent_updated_at = *updated_at;
+                            }
                             if let Ok(json) = serde_json::to_string(&sync_msg) {
                                 if ws_sender.send(Message::Text(json)).await.is_err() {
                                     break;

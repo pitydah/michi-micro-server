@@ -6915,3 +6915,113 @@ async fn test_sync_websocket_generation_ownership_terminates_on_module_toggle_of
         Err(_) => panic!("WebSocket connection remained open and timed out after sync module OFF"),
     }
 }
+
+#[tokio::test]
+async fn test_sync_websocket_state_change_during_handshake_converges_to_latest() {
+    let (port, _pool, state) = run_test_server_with_state().await;
+    use futures_util::StreamExt;
+
+    let url = format!("ws://127.0.0.1:{port}/api/sync");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WebSocket connection to /api/sync should succeed");
+    let (mut _write, mut read) = ws_stream.split();
+
+    // 1. Identify
+    let msg1 = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let text1 = msg1.to_text().unwrap();
+    let v1: serde_json::Value = serde_json::from_str(text1).unwrap();
+    assert_eq!(v1["type"], "identify");
+
+    // 2. Initial state
+    let msg2 = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let text2 = msg2.to_text().unwrap();
+    let v2: serde_json::Value = serde_json::from_str(text2).unwrap();
+    assert_eq!(v2["type"], "state");
+
+    // Emit concurrent updated state with updated_at > snapshot
+    let updated_state = michi_sync::SyncMessage::State {
+        track_id: None,
+        position_ms: 99999,
+        playing: true,
+        volume: 0.75,
+        updated_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        playlist_id: None,
+        queue_position: None,
+    };
+    let _ = state.sync_tx.send(updated_state);
+
+    // 3. Must receive the updated state monotonically without dropping
+    let msg3 = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
+        .await
+        .expect("Timeout waiting for updated state")
+        .expect("Stream ended unexpectedly")
+        .expect("WebSocket read error");
+    let text3 = msg3.to_text().unwrap();
+    let v3: serde_json::Value = serde_json::from_str(text3).unwrap();
+    assert_eq!(v3["type"], "state");
+    assert_eq!(v3["position_ms"], 99999);
+    assert_eq!(v3["playing"], true);
+}
+
+#[tokio::test]
+async fn test_sync_websocket_generation_a_not_adopted_by_generation_b() {
+    let (port, _pool, _state) = run_test_server_with_state().await;
+    use futures_util::StreamExt;
+
+    let url = format!("ws://127.0.0.1:{port}/api/sync");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WebSocket connection to /api/sync should succeed");
+    let (mut _write, mut read) = ws_stream.split();
+
+    // Read Identify & State under Gen A
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    // Rapidly toggle OFF then ON (Generation A -> B)
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/api/v1/modules/toggle"))
+        .json(&serde_json::json!({ "name": "sync", "enabled": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/api/v1/modules/toggle"))
+        .json(&serde_json::json!({ "name": "sync", "enabled": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Gen A socket must be terminated and NOT adopted by Gen B
+    let next_msg = tokio::time::timeout(std::time::Duration::from_secs(3), read.next()).await;
+    match next_msg {
+        Ok(None) => {}                                                        // Clean close
+        Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))) => {} // Close frame
+        Ok(Some(Err(_))) => {}                                                // Connection reset
+        Ok(Some(Ok(other))) => {
+            panic!("Expected termination of Gen A socket, but received: {other:?}")
+        }
+        Err(_) => panic!("Socket from Gen A was incorrectly kept alive / adopted across toggle"),
+    }
+}
