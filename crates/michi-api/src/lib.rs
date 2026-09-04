@@ -381,6 +381,7 @@ impl AppState {
                 db.clone(),
                 playback_state.clone(),
                 playback_engine.clone(),
+                sync_tx.clone(),
             );
         let projector_handle = playback_projector.clone().spawn(shutdown_token.clone());
         task_handles.lock().unwrap().push(projector_handle);

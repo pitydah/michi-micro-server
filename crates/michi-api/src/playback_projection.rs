@@ -95,6 +95,7 @@ pub struct PlaybackProjectionCoordinator {
     db: SqlitePool,
     legacy_playback_state: Arc<RwLock<michi_sync::PlaybackState>>,
     engine: PlaybackEngineHandle,
+    sync_tx: tokio::sync::broadcast::Sender<michi_sync::SyncMessage>,
     health: Arc<RwLock<PlaybackProjectionHealth>>,
     last_projection: Arc<RwLock<Option<PersistentPlaybackProjection>>>,
 }
@@ -104,12 +105,14 @@ impl PlaybackProjectionCoordinator {
         db: SqlitePool,
         legacy_playback_state: Arc<RwLock<michi_sync::PlaybackState>>,
         engine: PlaybackEngineHandle,
+        sync_tx: tokio::sync::broadcast::Sender<michi_sync::SyncMessage>,
     ) -> (Self, Arc<RwLock<PlaybackProjectionHealth>>) {
         let health = Arc::new(RwLock::new(PlaybackProjectionHealth::default()));
         let coordinator = Self {
             db,
             legacy_playback_state,
             engine,
+            sync_tx,
             health: health.clone(),
             last_projection: Arc::new(RwLock::new(None)),
         };
@@ -213,8 +216,8 @@ impl PlaybackProjectionCoordinator {
             snap.position_ms
         };
 
-        // 1. Sync legacy PlaybackState projection (RAM only)
-        {
+        // 1. Sync legacy PlaybackState projection (RAM only) and broadcast to sync bus
+        let out_state = {
             let mut ps = self.legacy_playback_state.write().await;
             ps.track_id = snap.track_id;
             ps.position_ms = position_ms;
@@ -223,7 +226,9 @@ impl PlaybackProjectionCoordinator {
             ps.shuffle = snap.shuffle;
             ps.repeat = snap.repeat.as_str().to_string();
             ps.updated_at = Utc::now();
-        }
+            ps.clone()
+        };
+        let _ = self.sync_tx.send(out_state.into());
 
         // 2. Fetch existing or default session from SQLite
         let mut sess = match michi_db::get_or_create_latest_playback_session(&self.db).await {
@@ -330,7 +335,7 @@ impl PlaybackProjectionCoordinator {
             snap.position_ms
         };
 
-        {
+        let out_state = {
             let mut ps = self.legacy_playback_state.write().await;
             ps.track_id = snap.track_id;
             ps.position_ms = position_ms;
@@ -339,7 +344,9 @@ impl PlaybackProjectionCoordinator {
             ps.shuffle = snap.shuffle;
             ps.repeat = snap.repeat.as_str().to_string();
             ps.updated_at = Utc::now();
-        }
+            ps.clone()
+        };
+        let _ = self.sync_tx.send(out_state.into());
 
         // If the engine has no track and is stopped, do not overwrite a persisted session
         if snap.track_id.is_none() && !is_playing {
