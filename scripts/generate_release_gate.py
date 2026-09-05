@@ -6,7 +6,7 @@ Reads requirement definitions from release/gates.json and evidence artifacts fro
 Computes actual gate statuses without hardcoding, verifies commit provenance and evidence taxonomy.
 
 Usage:
-  python3 scripts/generate_release_gate.py [--mode rc|ga] [--requirements release/gates.json] [--evidence-dir target/release-evidence] [--report docs/V1_RELEASE_GATE.md] [--check]
+  python3 scripts/generate_release_gate.py [--mode rc|ga] [--requirements release/gates.json] [--evidence-dir target/release-evidence] [--report target/V1_RELEASE_GATE.md] [--check]
 """
 
 import argparse
@@ -51,7 +51,6 @@ def aggregate_gates(reqs_data, artifacts, current_sha, mode):
         gid = g["id"]
         required_for = g.get("required_for", [])
         is_required = mode in required_for
-        accepted_classes = g.get("accepted_evidence_classes", [])
         
         art = artifacts.get(gid)
         if not art:
@@ -60,7 +59,7 @@ def aggregate_gates(reqs_data, artifacts, current_sha, mode):
             detail = "No evidence artifact submitted for this gate"
         else:
             ev_class = art.get("evidence_class", "UNKNOWN")
-            status, detail = validate_evidence_artifact(art, current_sha, accepted_classes)
+            status, detail = validate_evidence_artifact(art, current_sha, g)
 
         # Failure classification
         if is_required and status in {"FAIL", "INVALID_EVIDENCE", "STALE", "NOT_RUN"}:
@@ -136,7 +135,7 @@ def main():
     p.add_argument("--mode", choices=["rc", "ga"], default="rc", help="Target release milestone (rc or ga)")
     p.add_argument("--requirements", default=os.path.join(ROOT_DIR, "release", "gates.json"))
     p.add_argument("--evidence-dir", default=os.path.join(ROOT_DIR, "target", "release-evidence"))
-    p.add_argument("--report", default=os.path.join(ROOT_DIR, "docs", "V1_RELEASE_GATE.md"))
+    p.add_argument("--report", default=os.path.join(ROOT_DIR, "target", "V1_RELEASE_GATE.md"))
     p.add_argument("--check", action="store_true", help="Fail with non-zero exit code if required gates are blocked/failing")
     args = p.parse_args()
 

@@ -5,7 +5,7 @@
 | Resource | Target | Notes |
 |----------|--------|-------|
 | Memory (idle) | < 50 MB | Target for Core profile |
-| Threads | 8-12 | Tokio runtime + scanner + sync + receivers |
+| Threads | 8-12 | Tokio runtime + scanner + sync + receivers (Release hard max: <= 16) |
 | SQLite pool | 4 (Eco), 8 (Balanced), 16 (Performance) | Configurable via profile |
 | Scanner workers | 1 (Eco), 2 (Balanced), 4 (Performance) | |
 | Max transcodes | 0 (Eco), 2 (Balanced), 4 (Performance) | 0 = no FFmpeg |
@@ -17,10 +17,14 @@
 
 ## Measured Values (to be filled)
 
-| Resource | Target | Measured | Environment |
-|----------|--------|----------|-------------|
-| Memory (idle) | < 50 MB | **24.0 MB** (median 24.0 MB) | Linux x86_64 (2026-09-05, commit 04b46110) |
-| Docker image size | < 100 MB (Core) | -- | -- |
+<!-- BEGIN GENERATED RESOURCE MEASUREMENTS -->
+| Resource | Release Limit | Measured | Environment |
+|----------|---------------|----------|-------------|
+| Idle RSS p95 | < 50.0 MB | -- | Pending execution |
+| Threads p95 | <= 16 | -- | Pending execution |
+| FDs p95 | <= 128 | -- | Pending execution |
+| Startup | <= 5000 ms | -- | Pending execution |
+<!-- END GENERATED RESOURCE MEASUREMENTS -->
 
 ## Resource Profiles
 

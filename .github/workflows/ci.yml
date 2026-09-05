@@ -38,6 +38,22 @@ jobs:
         run: cargo test --workspace
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate rust-quality \
+            --class STATIC_ANALYSIS \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/rust-quality.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-rust-quality
+          path: target/release-evidence/rust-quality.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-stream-contract:
     runs-on: ubuntu-latest
@@ -48,6 +64,22 @@ jobs:
           submodules: recursive
       - name: Validate Michi Link v1-lite Stream Contract Drift & Full OpenAPI (Pinned Submodule)
         run: python3 scripts/test_stream_contract_drift.py --contract-dir vendor/michi-music-stream/contracts/michi-link
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate stream-contract \
+            --class STATIC_ANALYSIS \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/stream-contract.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-stream-contract
+          path: target/release-evidence/stream-contract.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-receiver-contract-simulator:
     runs-on: ubuntu-latest
@@ -64,6 +96,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config ffmpeg
       - name: Run Receiver Simulator E2E Integration Tests (Matrix, PIN & Fault Injection)
         run: bash scripts/test_receiver_e2e.sh 8080 8081
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate receiver-contract-simulator \
+            --class CONTRACT_SIMULATOR \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/receiver-contract-simulator.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-receiver-contract-simulator
+          path: target/release-evidence/receiver-contract-simulator.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-snapcast-contract-mock:
     runs-on: ubuntu-latest
@@ -74,6 +122,53 @@ jobs:
           submodules: recursive
       - name: Run Snapcast Multi-Client Contract Mock Tests
         run: bash scripts/test_snapcast_e2e.sh 1780
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate snapcast-contract-mock \
+            --class CONTRACT_MOCK \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/snapcast-contract-mock.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-snapcast-contract-mock
+          path: target/release-evidence/snapcast-contract-mock.json
+          if-no-files-found: error
+          retention-days: 30
+
+  ci-snapserver-real:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Snapserver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y snapserver
+      - name: Execute real Snapserver integration
+        run: |
+          bash scripts/test_snapserver_real_e2e.sh
+      - name: Record Snapserver evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate snapserver-real \
+            --class INTEGRATION_REAL \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/snapserver-real.json
+      - name: Upload Snapserver evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-snapserver-real
+          path: target/release-evidence/snapserver-real.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-mqtt-contract-simulator:
     runs-on: ubuntu-latest
@@ -90,6 +185,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
       - name: Run Home Assistant & MQTT Contract Simulator Tests
         run: bash scripts/test_homeassistant_e2e.sh 18883 18884 9098
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate mqtt-contract-simulator \
+            --class CONTRACT_SIMULATOR \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/mqtt-contract-simulator.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-mqtt-contract-simulator
+          path: target/release-evidence/mqtt-contract-simulator.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-mosquitto-real:
     runs-on: ubuntu-latest
@@ -108,6 +219,22 @@ jobs:
         run: cargo build --bin michi-server
       - name: Run Mosquitto Real Integration Tests
         run: bash scripts/test_mosquitto_real_e2e.sh 18885 9098
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate mosquitto-real \
+            --class INTEGRATION_REAL \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/mosquitto-real.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-mosquitto-real
+          path: target/release-evidence/mosquitto-real.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-generic-linux-appliance:
     runs-on: ubuntu-latest
@@ -124,6 +251,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config sqlite3
       - name: Run Appliance Qualification on Generic Linux Runner
         run: bash scripts/test_appliance_e2e.sh 9092
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate generic-linux-appliance \
+            --class INTEGRATION_REAL \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/generic-linux-appliance.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-generic-linux-appliance
+          path: target/release-evidence/generic-linux-appliance.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-reliability-short:
     runs-on: ubuntu-latest
@@ -140,6 +283,124 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config sqlite3
       - name: Run Master Reliability & Short Stability Smoke Suite
         run: bash scripts/test_reliability_qualification.sh 9089
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate reliability-stress \
+            --class INTEGRATION_REAL \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/reliability-stress.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-reliability-stress
+          path: target/release-evidence/reliability-stress.json
+          if-no-files-found: error
+          retention-days: 30
+
+  ci-short-stability-smoke:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev pkg-config ffmpeg
+      - name: Build release server
+        run: cargo build --release --bin michi-server
+      - name: Run short stability soak
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="${RUNNER_TEMP}/michi-short-soak"
+          rm -rf "$ROOT"
+          mkdir -p "$ROOT/config" "$ROOT/cache" "$ROOT/music"
+
+          export MICHI_PORT=9101
+          export MICHI_CONFIG_PATH="$ROOT/config"
+          export MICHI_CACHE_PATH="$ROOT/cache"
+          export MICHI_MUSIC_PATH="$ROOT/music"
+          export MICHI_DATABASE="sqlite://$ROOT/config/michi.db"
+          export MICHI_AUTH_USERNAME=admin
+          export MICHI_AUTH_PASSWORD=admin12345
+
+          ./target/release/michi-server &
+          PID=$!
+
+          cleanup() {
+            kill "$PID" 2>/dev/null || true
+            wait "$PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:9101/health/live >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.25
+          done
+
+          curl -fsS http://127.0.0.1:9101/health/live >/dev/null
+
+          python3 scripts/soak_test.py \
+            --url http://127.0.0.1:9101 \
+            --pid "$PID" \
+            --config-dir "$ROOT/config" \
+            --duration-seconds 90 \
+            --sample-interval 2 \
+            --username admin \
+            --password admin12345 \
+            --gate-id short-stability-smoke \
+            --evidence-class INTEGRATION_REAL \
+            --report target/release-evidence/short-stability-smoke.json
+      - name: Upload short stability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-short-stability-smoke
+          path: target/release-evidence/short-stability-smoke.json
+          if-no-files-found: error
+          retention-days: 30
+
+  ci-resource-budget:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev pkg-config ffmpeg
+      - name: Build release server
+        run: cargo build --release --bin michi-server
+      - name: Measure resource budget
+        run: |
+          python3 scripts/measure_resource_budget.py \
+            --port 9102 \
+            --report target/release-evidence/resource-budget.json
+      - name: Upload resource evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-resource-budget
+          path: target/release-evidence/resource-budget.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-web-ui-functional-integrity:
     runs-on: ubuntu-latest
@@ -151,7 +412,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
-        # Rust toolchain setup
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config ffmpeg
@@ -163,6 +423,22 @@ jobs:
           node-version: '20'
       - name: Run Web UI Client Contract & Invariance Suite (Node Harness)
         run: node scripts/test_web_ui_e2e.mjs
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate web-ui-functional-integrity \
+            --class UNIT \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/web-ui-functional-integrity.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-web-ui-functional-integrity
+          path: target/release-evidence/web-ui-functional-integrity.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-web-ui-browser-e2e:
     runs-on: ubuntu-latest
@@ -241,6 +517,22 @@ jobs:
           MICHI_ADMIN_USERNAME=admin \
           MICHI_ADMIN_PASSWORD=admin12345 \
           pytest tests/e2e/test_webui_functional_conformance.py -v
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate web-ui-browser-e2e \
+            --class INTEGRATION_REAL \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/web-ui-browser-e2e.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-web-ui-browser-e2e
+          path: target/release-evidence/web-ui-browser-e2e.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-no-test-api-release:
     runs-on: ubuntu-latest
@@ -323,7 +615,6 @@ jobs:
             exit 1
           fi
 
-
   ci-three-way-ecosystem:
     runs-on: ubuntu-latest
     needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-no-test-api-release]
@@ -341,6 +632,22 @@ jobs:
         run: cargo build --bin michi-server
       - name: Run Three-Way Ecosystem E2E Integration Suite (Mobile -> Micro -> Stream)
         run: bash scripts/test_three_way_ecosystem.sh 9099 55438 55439
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate three-way-ecosystem \
+            --class CONTRACT_SIMULATOR \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/three-way-ecosystem.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-three-way-ecosystem
+          path: target/release-evidence/three-way-ecosystem.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-docker-amd64:
     runs-on: ubuntu-latest
@@ -402,7 +709,22 @@ jobs:
             --url http://127.0.0.1:9090 \
             --username admin \
             --password admin123
-
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate docker-amd64 \
+            --class CONTAINER_NATIVE \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/docker-amd64.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-docker-amd64
+          path: target/release-evidence/docker-amd64.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-arm64-qemu:
     runs-on: ubuntu-latest
@@ -487,6 +809,22 @@ jobs:
             --url http://127.0.0.1:9091 \
             --username admin \
             --password admin123
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate arm64-qemu \
+            --class EMULATED_ARCH \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/arm64-qemu.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-arm64-qemu
+          path: target/release-evidence/arm64-qemu.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-zimaos-package:
     runs-on: ubuntu-latest
@@ -509,15 +847,40 @@ jobs:
           test -f dist/apps/io.michi.micro-server/meta.json
           test -s dist/apps/io.michi.micro-server/assets/icon.svg
           test -s dist/apps/io.michi.micro-server/assets/thumbnail.png
-          python3 -c '
+          python3 - <<'PY'
           import json
+          import tomllib
+
+          with open("Cargo.toml", "rb") as f:
+              cargo = tomllib.load(f)
+
+          expected_version = cargo["workspace"]["package"]["version"]
+
           with open("dist/index.json") as f:
               data = json.load(f)
-              assert data["apps"][0]["id"] == "io.michi.micro-server"
-              assert data["apps"][0]["scheme"] == "http"
-              assert data["version"] == "3.1"
-              assert data["apps"][0]["version"] == "1.0.0-rc.1"
-          '
+
+          app = data["apps"][0]
+          assert app["id"] == "io.michi.micro-server"
+          assert app["scheme"] == "http"
+          assert data["version"] == "3.1"
+          assert app["version"] == expected_version, (app["version"], expected_version)
+          PY
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate zimaos-package \
+            --class STATIC_ANALYSIS \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/zimaos-package.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-zimaos-package
+          path: target/release-evidence/zimaos-package.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-upgrade-backup-restore:
     runs-on: ubuntu-latest
@@ -531,15 +894,86 @@ jobs:
           toolchain: 1.88.0
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config sqlite3
       - name: Build release binary
         run: cargo build --release --bin michi-server
       - name: Run Upgrade, Migration and Backup/Restore Disaster Recovery Gate
         run: bash scripts/test_upgrade_and_backup_restore.sh 9097
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate upgrade-backup-restore \
+            --class INTEGRATION_REAL \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/upgrade-backup-restore.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-upgrade-backup-restore
+          path: target/release-evidence/upgrade-backup-restore.json
+          if-no-files-found: error
+          retention-days: 30
+
+  ci-hls-vod-real:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libsqlite3-dev pkg-config
+      - name: Run real HLS VOD test
+        run: |
+          cargo test -p michi-streaming --test hls_real -- --nocapture
+      - name: Record HLS evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate hls-vod-real \
+            --class INTEGRATION_REAL \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/hls-vod-real.json
+      - name: Upload HLS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-hls-vod-real
+          path: target/release-evidence/hls-vod-real.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-release-gate:
     runs-on: ubuntu-latest
-    needs: [ci-rust, ci-stream-contract, ci-receiver-contract-simulator, ci-snapcast-contract-mock, ci-mqtt-contract-simulator, ci-mosquitto-real, ci-generic-linux-appliance, ci-reliability-short, ci-web-ui-functional-integrity, ci-web-ui-browser-e2e, ci-three-way-ecosystem, ci-docker-amd64, ci-arm64-qemu, ci-zimaos-package, ci-upgrade-backup-restore]
+    if: always()
+    needs:
+      - ci-rust
+      - ci-stream-contract
+      - ci-receiver-contract-simulator
+      - ci-snapcast-contract-mock
+      - ci-snapserver-real
+      - ci-mqtt-contract-simulator
+      - ci-mosquitto-real
+      - ci-generic-linux-appliance
+      - ci-reliability-short
+      - ci-short-stability-smoke
+      - ci-resource-budget
+      - ci-web-ui-functional-integrity
+      - ci-web-ui-browser-e2e
+      - ci-three-way-ecosystem
+      - ci-docker-amd64
+      - ci-arm64-qemu
+      - ci-zimaos-package
+      - ci-upgrade-backup-restore
+      - ci-hls-vod-real
     steps:
       - uses: actions/checkout@v4
         with:
@@ -547,12 +981,56 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install test dependencies
+        run: pip install pytest pyyaml
+      - name: Run release gate aggregator unit tests
+        run: pytest scripts/tests/test_release_gate.py -v
       - name: Verify Version and Packaging Consistency
         run: python3 scripts/check_version_consistency.py
       - name: Verify Product Truth Synchronization
         run: python3 scripts/generate_product_truth.py --check
+      - name: Download release evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-evidence-*
+          merge-multiple: true
+          path: target/release-evidence
+      - name: Show evidence inventory
+        run: |
+          find target/release-evidence -maxdepth 1 -type f -name '*.json' -print | sort
+      - name: Resolve release qualification mode
+        id: mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]] && [[ "${GITHUB_REF_NAME:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "mode=ga" >> "$GITHUB_OUTPUT"
+            echo "Mode: GA qualification"
+          else
+            echo "mode=rc" >> "$GITHUB_OUTPUT"
+            echo "Mode: RC qualification"
+          fi
       - name: Assert Evidence-Based Release Gates
-        run: python3 scripts/generate_release_gate.py --mode rc --check
+        run: |
+          python3 scripts/generate_release_gate.py \
+            --mode "${{ steps.mode.outputs.mode }}" \
+            --evidence-dir target/release-evidence \
+            --report target/V1_RELEASE_GATE.md \
+            --check
+      - name: Publish calculated release report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-report-${{ github.sha }}
+          path: target/V1_RELEASE_GATE.md
+          if-no-files-found: error
+          retention-days: 90
+      - name: Add release report to workflow summary
+        if: always()
+        run: |
+          if test -f target/V1_RELEASE_GATE.md; then
+            cat target/V1_RELEASE_GATE.md >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   release-ghcr:
     needs: [ci-release-gate]

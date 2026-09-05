@@ -3,18 +3,30 @@
 Version and Packaging Consistency Validator for Michi Micro Server.
 
 Verifies that:
-1. Workspace Cargo.toml package version is valid SemVer (e.g. 1.0.0-rc.1).
+1. Workspace Cargo.toml package version is valid strict SemVer (e.g. 1.0.0-rc.1).
 2. README.md badges/version match Cargo.toml.
 3. CHANGELOG.md contains an entry for current version.
-4. ZimaOS store manifests use the product version for the app while separating store schema version.
+4. Compose files use exact container image tag matching product version via safe YAML parsing.
 """
 
 import os
 import re
 import sys
 import tomllib
+import yaml
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+SEMVER_RE = re.compile(
+    r"^(0|[1-9]\d*)\."
+    r"(0|[1-9]\d*)\."
+    r"(0|[1-9]\d*)"
+    r"(?:-"
+    r"(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*"
+    r")?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 
 def main():
     print("Checking version and packaging consistency across repository...")
@@ -26,6 +38,10 @@ def main():
     print(f"Canonical Cargo product version: {product_version}")
 
     errors = []
+
+    # 0. Strict SemVer check
+    if not SEMVER_RE.fullmatch(product_version):
+        errors.append(f"Workspace version is not valid SemVer: {product_version}")
 
     # 1. README badge
     readme_path = os.path.join(ROOT_DIR, "README.md")
@@ -43,13 +59,24 @@ def main():
     if f"## [{product_version}]" not in changelog:
         errors.append(f"CHANGELOG.md does not contain entry for ## [{product_version}]")
 
-    # 3. ZimaOS / CasaOS compose
-    zima_compose_path = os.path.join(ROOT_DIR, "zimaos-store", "Apps", "MichiMicroServer", "docker-compose.yml")
-    with open(zima_compose_path, "r", encoding="utf-8") as f:
-        zima_compose = f.read()
-    expected_image = f"image: ghcr.io/pitydah/michi-micro-server:{product_version}"
-    if expected_image not in zima_compose and "r3.1-zima" in zima_compose:
-        errors.append(f"zimaos-store docker-compose.yml still uses legacy tag instead of {expected_image}")
+    # 3. Safe YAML compose check
+    expected_image = f"ghcr.io/pitydah/michi-micro-server:{product_version}"
+    compose_targets = [
+        os.path.join(ROOT_DIR, "zimaos-store", "Apps", "MichiMicroServer", "docker-compose.yml"),
+        os.path.join(ROOT_DIR, "casaos", "docker-compose.zimaos.yml"),
+        os.path.join(ROOT_DIR, "casaos", "docker-compose.casaos.yml"),
+    ]
+
+    for comp_path in compose_targets:
+        if os.path.exists(comp_path):
+            with open(comp_path, "r", encoding="utf-8") as f:
+                compose = yaml.safe_load(f)
+            services = compose.get("services", {})
+            svc = services.get("michi-micro-server") or services.get("michi-server") or services.get("michi")
+            if svc:
+                image = svc.get("image")
+                if image != expected_image:
+                    errors.append(f"Image mismatch in {os.path.relpath(comp_path, ROOT_DIR)}: {image!r} != {expected_image!r}")
 
     if errors:
         print("\n❌ Version Consistency Errors:", file=sys.stderr)

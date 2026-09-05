@@ -2,14 +2,14 @@
 """
 Release Evidence Taxonomy and Validation Helpers for Michi Micro Server.
 
-Validates evidence payload schemas, evidence classes, and SHA provenance.
+Validates evidence payload schemas, evidence classes, SHA provenance, and authorized producers.
 """
 
 import datetime
 import json
 import os
 import subprocess
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, Union
 
 VALID_EVIDENCE_CLASSES = {
     "STATIC_ANALYSIS",
@@ -34,9 +34,13 @@ def get_head_sha() -> str:
     except Exception:
         return "UNKNOWN_SHA"
 
-def validate_evidence_artifact(data: Dict[str, Any], current_sha: str, accepted_classes: list) -> Tuple[str, str]:
+def validate_evidence_artifact(
+    data: Dict[str, Any],
+    current_sha: str,
+    requirement: Union[Dict[str, Any], list],
+) -> Tuple[str, str]:
     """
-    Evaluates an evidence artifact against current commit SHA and accepted classes.
+    Evaluates an evidence artifact against current commit SHA, accepted classes, and authorized producers.
     Returns (status, reason_detail).
     """
     if not isinstance(data, dict):
@@ -53,12 +57,34 @@ def validate_evidence_artifact(data: Dict[str, Any], current_sha: str, accepted_
     if artifact_sha != current_sha and current_sha != "UNKNOWN_SHA":
         return "STALE", f"Artifact SHA ({artifact_sha[:8]}) differs from HEAD ({current_sha[:8]})"
 
+    if isinstance(requirement, dict):
+        accepted_classes = requirement.get("accepted_evidence_classes", [])
+        allowed_producers = requirement.get("allowed_producers", [])
+    else:
+        accepted_classes = requirement
+        allowed_producers = []
+
     ev_class = data.get("evidence_class")
     if ev_class not in VALID_EVIDENCE_CLASSES:
         return "INVALID_EVIDENCE", f"Invalid evidence_class: {ev_class}"
 
     if ev_class not in accepted_classes:
         return "INVALID_EVIDENCE", f"Evidence class {ev_class} not accepted (requires one of {accepted_classes})"
+
+    if allowed_producers:
+        producer = data.get("producer", {})
+        producer_ok = False
+        for allowed in allowed_producers:
+            expected_job = allowed.get("github_job")
+            if expected_job is not None and producer.get("github_job") != expected_job:
+                continue
+            producer_ok = True
+            break
+        if not producer_ok:
+            return (
+                "INVALID_EVIDENCE",
+                "artifact producer is not authorized for this gate",
+            )
 
     raw_status = data.get("status")
     if raw_status not in {"PASS", "FAIL", "BLOCKED_EXTERNAL"}:

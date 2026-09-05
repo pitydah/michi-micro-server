@@ -105,10 +105,27 @@
       "accepted_evidence_classes": ["STATIC_ANALYSIS"]
     },
     {
+      "id": "upgrade-backup-restore",
+      "description": "Upgrade real desde v0.2.0 y disaster recovery backup/restore",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["INTEGRATION_REAL"]
+    },
+    {
+      "id": "hls-vod-real",
+      "description": "Generación HLS VOD real mediante FFmpeg y validación de AAC 48k stereo",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["INTEGRATION_REAL"]
+    },
+    {
       "id": "raspberry-pi-physical",
       "description": "Cualificación física en placa de hardware Raspberry Pi 4/5",
       "required_for": ["ga"],
-      "accepted_evidence_classes": ["PHYSICAL_HARDWARE"]
+      "accepted_evidence_classes": ["PHYSICAL_HARDWARE"],
+      "allowed_producers": [
+        {
+          "github_job": "rpi-physical"
+        }
+      ]
     },
     {
       "id": "casaos-zimaos-real",
@@ -120,7 +137,12 @@
       "id": "soak-24h",
       "description": "Prueba continua de estabilidad y carga de 24 horas ininterrumpidas",
       "required_for": ["ga"],
-      "accepted_evidence_classes": ["LONG_SOAK"]
+      "accepted_evidence_classes": ["LONG_SOAK"],
+      "allowed_producers": [
+        {
+          "github_job": "soak-24h"
+        }
+      ]
     }
   ]
 }

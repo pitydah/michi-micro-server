@@ -44,8 +44,8 @@ The claim a neighboring product could not truthfully copy: a complete open music
 - Single-file SQLite persistence; per-machine Ed25519 identity.
 - Formats: mp3, flac, ogg, opus, aac, m4a, wav. AIFF/DSF/DFF are explicitly excluded — "use Michi Big Server for those formats."
 
-**Undecided / beta**
-- Receivers and rooms are feature-gated off (`features.receivers=false`, `features.rooms=false`) pending the "Michi Music Stream" hardware; the UI must render them gracefully as future/unavailable.
+**Undecided / beta (Historical Note)**
+- Receivers and rooms are feature-gated off (`features.receivers (runtime enabled as beta)`, `features.rooms (runtime enabled as beta)`) pending the "Michi Music Stream" hardware; the UI must render them gracefully as future/unavailable.
 - Offline sync is not implemented; Michi Mobile is planned but does not exist yet.
 
 ## Brand Commitments
@@ -59,7 +59,7 @@ The claim a neighboring product could not truthfully copy: a complete open music
 ## Evidence on Hand
 
 - 20 repository docs (architecture, API, Michi Link v1 spec, client integration spec, OpenSubsonic compatibility, CasaOS/ZimaOS, receiver integration plan, implementation evidence, master checklist); 168+ passing tests; Docker multi-arch images published on ghcr.io; systemd unit and Debian packaging.
-- **Documented absences — do not fabricate:** no UI screenshots anywhere, no marketing landing page (the root serves the control SPA), no brand guide, no measured resource numbers (RESOURCE_BUDGET targets are unverified), and no evidence about Michi Big Server beyond the format-exclusion note.
+- **Documented absences — do not fabricate:** no UI screenshots anywhere, no marketing landing page (the root serves the control SPA), no brand guide, resource numbers measured in CI (see docs/RESOURCE_BUDGET.md), and no evidence about Michi Big Server beyond the format-exclusion note.
 
 ## Product Principles
 
@@ -73,3 +73,28 @@ The claim a neighboring product could not truthfully copy: a complete open music
 
 - The incumbent UI already honors `prefers-reduced-motion`, visible focus rings, a skip link, and keyboard-operable navigation; the redesign must keep this baseline.
 - 9-language i18n is a maintained product requirement, not a stretch goal.
+
+
+## Canonical Product Truth
+
+<!-- BEGIN GENERATED V1 FEATURE MATRIX -->
+| Feature | Release Scope | Maturity | Description |
+| :--- | :---: | :---: | :--- |
+| **adaptive_hls** | `post-v1` | ⚪ `unavailable` | Multi-bitrate adaptive ABR / DASH streaming |
+| **autonomous_playback** | `v1-beta` | 🟡 `beta` | Server-side autonomous playback projection |
+| **backup** | `core` | 🟢 `stable` | Database backup, export and restoration |
+| **gapless** | `post-v1` | ⚪ `unavailable` | Sample-perfect gapless audio playback |
+| **handoff** | `v1-beta` | 🟡 `beta` | Direct stream handoff between peers |
+| **hls_vod** | `core` | 🟢 `stable` | Single-rendition HLS VOD audio streaming |
+| **library** | `core` | 🟢 `stable` | Library scanning, indexing and browsing with watcher |
+| **opensubsonic** | `subset` | 🟡 `beta` | OpenSubsonic compatible subset layer (JSON-only) |
+| **playback_history** | `core` | 🟢 `stable` | Play history tracking, stats and scrobbling |
+| **playlists** | `core` | 🟢 `stable` | CRUD playlists, smart playlists and M3U import/export |
+| **receivers** | `v1-beta` | 🟡 `beta` | Michi Link v1-lite receiver playback plane |
+| **rooms** | `v1-beta` | 🟡 `beta` | Multi-room group playback routing |
+| **search** | `core` | 🟢 `stable` | Full-text library search with field filters |
+| **security** | `core` | 🟢 `stable` | Argon2 auth, bearer tokens, rate limiting and security headers |
+| **stream** | `core` | 🟢 `stable` | HTTP Range streaming (200/206/416) and direct play |
+| **sync** | `core` | 🟢 `stable` | State sync with Lamport logical clocks and epoch precedence |
+| **transcode** | `core` | 🟢 `stable` | On-demand transcoding to MP3/Ogg/Opus via FFmpeg |
+<!-- END GENERATED V1 FEATURE MATRIX -->

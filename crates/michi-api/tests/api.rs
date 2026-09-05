@@ -3559,7 +3559,11 @@ async fn test_v1_playback_queue_survives_restart() {
     let session_id = sess_resp["session_id"].as_str().unwrap().to_string();
 
     // Now simulate restart: create new app state with same DB and config, verify restore works
-    let state2 = michi_api::AppState::new(state.config.clone(), pool.clone(), None);
+    let config = state.config.clone();
+    drop(app);
+    drop(state);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let state2 = michi_api::AppState::new(config, pool.clone(), None);
     let app2 = router_with_test_admin(state2, &pool).await;
 
     // Verify queue is still queryable

@@ -1,4 +1,5 @@
-//! Single source of truth for server capabilities with truthful maturity and evidence levels.
+//! Runtime projection of canonical product truth.
+//! Product maturity is governed by spec/v1/product-truth.json.
 
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +54,35 @@ pub struct ServerCapabilities {
     pub features: Vec<ServerFeature>,
     pub protocols: Vec<ServerProtocol>,
     pub runtime: ServerRuntime,
+}
+
+// BEGIN GENERATED PRODUCT MATURITY
+const CANONICAL_MATURITY: &[(&str, FeatureMaturity)] = &[
+    ("adaptive_hls", FeatureMaturity::Unavailable),
+    ("autonomous_playback", FeatureMaturity::Beta),
+    ("backup", FeatureMaturity::Stable),
+    ("gapless", FeatureMaturity::Unavailable),
+    ("handoff", FeatureMaturity::Beta),
+    ("hls_vod", FeatureMaturity::Stable),
+    ("library", FeatureMaturity::Stable),
+    ("opensubsonic", FeatureMaturity::Beta),
+    ("playback_history", FeatureMaturity::Stable),
+    ("playlists", FeatureMaturity::Stable),
+    ("receivers", FeatureMaturity::Beta),
+    ("rooms", FeatureMaturity::Beta),
+    ("search", FeatureMaturity::Stable),
+    ("security", FeatureMaturity::Stable),
+    ("stream", FeatureMaturity::Stable),
+    ("sync", FeatureMaturity::Stable),
+    ("transcode", FeatureMaturity::Stable),
+];
+// END GENERATED PRODUCT MATURITY
+
+fn canonical_maturity(name: &str, fallback: FeatureMaturity) -> FeatureMaturity {
+    CANONICAL_MATURITY
+        .iter()
+        .find_map(|(feature, maturity)| (*feature == name).then_some(*maturity))
+        .unwrap_or(fallback)
 }
 
 const MODULE_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] = &[
@@ -252,7 +282,7 @@ impl ServerCapabilities {
                     version,
                     description,
                     enabled: !disabled.contains(*name),
-                    maturity: *maturity,
+                    maturity: canonical_maturity(name, *maturity),
                     evidence: *evidence,
                 },
             )
@@ -271,7 +301,7 @@ impl ServerCapabilities {
                     version,
                     description,
                     enabled,
-                    maturity: *maturity,
+                    maturity: canonical_maturity(name, *maturity),
                     evidence: *evidence,
                 }
             },
@@ -283,7 +313,7 @@ impl ServerCapabilities {
                 version,
                 description,
                 enabled: false,
-                maturity: *maturity,
+                maturity: canonical_maturity(name, *maturity),
                 evidence: *evidence,
             },
         ));

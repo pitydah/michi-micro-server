@@ -1,0 +1,41 @@
+name: Michi Micro Server 24h Soak Qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  soak-24h:
+    runs-on:
+      - self-hosted
+      - linux
+      - michi-soak
+
+    timeout-minutes: 1500
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+
+      - name: Build release
+        run: cargo build --release --bin michi-server
+
+      - name: Execute 24h soak
+        run: |
+          bash scripts/run_soak_test.sh 24 9103
+
+      - name: Upload soak evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-soak-24h-${{ github.sha }}
+          path: target/release-evidence/soak-24h.json
+          if-no-files-found: error
+          retention-days: 90
