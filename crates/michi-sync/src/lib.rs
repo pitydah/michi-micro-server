@@ -158,7 +158,7 @@ pub struct UploadProgress {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct PlaybackState {
     pub track_id: Option<Uuid>,
     pub position_ms: u64,
@@ -217,19 +217,53 @@ impl PlaybackState {
     ///    - `sequence` (higher sequence breaks tie if same timestamp)
     ///    - `device_id` lexicographical comparison (deterministic tie-breaker across nodes)
     pub fn has_precedence_over(&self, other: &PlaybackState) -> bool {
+        let self_dev = self.device_id.as_deref().unwrap_or("");
+        let other_dev = other.device_id.as_deref().unwrap_or("");
+
+        // 1. Same-device comparison:
+        // When comparing two states from the SAME node, a newer incarnation (epoch)
+        // strictly invalidates and supersedes all states from an older incarnation,
+        // regardless of logical clock counters accumulated in the previous lifetime.
+        if !self_dev.is_empty() && self_dev == other_dev {
+            let self_epoch = self.epoch.unwrap_or(0);
+            let other_epoch = other.epoch.unwrap_or(0);
+            if self_epoch != other_epoch {
+                return self_epoch > other_epoch;
+            }
+
+            let self_seq = self.sequence.unwrap_or(0);
+            let other_seq = other.sequence.unwrap_or(0);
+            if self_seq != other_seq {
+                return self_seq > other_seq;
+            }
+
+            let self_lamport = self.lamport.unwrap_or(0);
+            let other_lamport = other.lamport.unwrap_or(0);
+            if self_lamport != other_lamport {
+                return self_lamport > other_lamport;
+            }
+
+            if self.updated_at != other.updated_at {
+                return self.updated_at > other.updated_at;
+            }
+
+            return false;
+        }
+
+        // 2. Cross-device comparison:
+        // Establish strict total order using Lamport Logical Clock.
         let self_lamport = self.lamport.unwrap_or(0);
         let other_lamport = other.lamport.unwrap_or(0);
         if self_lamport > 0 || other_lamport > 0 {
             if self_lamport != other_lamport {
                 return self_lamport > other_lamport;
             }
-            let self_dev = self.device_id.as_deref().unwrap_or("");
-            let other_dev = other.device_id.as_deref().unwrap_or("");
             if self_dev != other_dev {
                 return self_dev > other_dev;
             }
         }
 
+        // 3. Fallback for legacy peers without Lamport clocks:
         let self_epoch = self.epoch.unwrap_or(0);
         let other_epoch = other.epoch.unwrap_or(0);
         if self_epoch != other_epoch {
@@ -246,8 +280,6 @@ impl PlaybackState {
             return self_seq > other_seq;
         }
 
-        let self_dev = self.device_id.as_deref().unwrap_or("");
-        let other_dev = other.device_id.as_deref().unwrap_or("");
         self_dev > other_dev
     }
 }
@@ -2092,6 +2124,37 @@ mod tests {
         };
         assert!(s_lamport_low.has_precedence_over(&s_legacy));
         assert!(!s_legacy.has_precedence_over(&s_lamport_low));
+    }
+
+    #[test]
+    fn test_playback_state_reboot_epoch_dominates_stale_lamport_same_origin() {
+        let now = Utc::now();
+
+        // Node A rebooted: epoch 11, sequence 1, lamport 1
+        let s_a_rebooted = PlaybackState {
+            epoch: Some(11),
+            sequence: Some(1),
+            lamport: Some(1),
+            device_id: Some("server-a".to_string()),
+            volume: 0.3,
+            updated_at: now,
+            ..Default::default()
+        };
+
+        // Node A's previous incarnation: epoch 10, sequence 50, lamport 100
+        let s_a_old_boot = PlaybackState {
+            epoch: Some(10),
+            sequence: Some(50),
+            lamport: Some(100),
+            device_id: Some("server-a".to_string()),
+            volume: 0.9,
+            updated_at: now - chrono::Duration::seconds(10),
+            ..Default::default()
+        };
+
+        // For same origin, newer epoch MUST strictly win over older epoch, even if older had higher lamport
+        assert!(s_a_rebooted.has_precedence_over(&s_a_old_boot));
+        assert!(!s_a_old_boot.has_precedence_over(&s_a_rebooted));
     }
 
     #[test]

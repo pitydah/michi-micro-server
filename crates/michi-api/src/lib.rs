@@ -273,6 +273,9 @@ impl AppState {
             }
         }));
 
+        tracing::info!("initializing playback projection db epoch and lamport state");
+        self.playback_projection.initialize_db_state().await;
+
         Ok(())
     }
 }

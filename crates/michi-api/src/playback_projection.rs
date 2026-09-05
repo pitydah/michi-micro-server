@@ -150,7 +150,22 @@ impl PlaybackProjectionCoordinator {
             }
         };
 
-        Self::new_with_epoch_and_boot(
+        let lamport = match michi_db::get_server_config(&db, "sync_server_lamport").await {
+            Ok(Some(val)) => {
+                let last_lamp = val.parse::<u64>().unwrap_or(0);
+                let next_lamp = last_lamp.saturating_add(10_000);
+                let _ =
+                    michi_db::set_server_config(&db, "sync_server_lamport", &next_lamp.to_string())
+                        .await;
+                next_lamp
+            }
+            _ => {
+                let _ = michi_db::set_server_config(&db, "sync_server_lamport", "10000").await;
+                10_000
+            }
+        };
+
+        Self::new_with_epoch_boot_and_lamport(
             db,
             legacy_playback_state,
             engine,
@@ -158,6 +173,7 @@ impl PlaybackProjectionCoordinator {
             server_id,
             epoch,
             boot_id,
+            lamport,
         )
     }
 
@@ -184,34 +200,50 @@ impl PlaybackProjectionCoordinator {
             boot_id,
         );
 
-        let epoch_atomic = coord.server_epoch.clone();
+        let coord_clone = coord.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                match michi_db::get_server_config(&db, "sync_server_epoch").await {
-                    Ok(Some(val)) => {
-                        let last_ep = val.parse::<u64>().unwrap_or(0);
-                        let next_ep = last_ep.saturating_add(1).max(now_secs);
-                        let _ = michi_db::set_server_config(
-                            &db,
-                            "sync_server_epoch",
-                            &next_ep.to_string(),
-                        )
-                        .await;
-                        epoch_atomic.store(next_ep, Ordering::SeqCst);
-                    }
-                    _ => {
-                        let _ = michi_db::set_server_config(
-                            &db,
-                            "sync_server_epoch",
-                            &now_secs.to_string(),
-                        )
-                        .await;
-                    }
-                }
+                coord_clone.initialize_db_state().await;
             });
         }
 
         (coord, health)
+    }
+
+    pub async fn initialize_db_state(&self) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        // 1. Monotonically advance and persist server_epoch
+        if let Ok(val_opt) = michi_db::get_server_config(&self.db, "sync_server_epoch").await {
+            let next_ep = match val_opt {
+                Some(val) => {
+                    let last_ep = val.parse::<u64>().unwrap_or(0);
+                    last_ep.saturating_add(1).max(now_secs)
+                }
+                None => now_secs,
+            };
+            let _ =
+                michi_db::set_server_config(&self.db, "sync_server_epoch", &next_ep.to_string())
+                    .await;
+            self.server_epoch.store(next_ep, Ordering::SeqCst);
+        }
+
+        // 2. Monotonically reserve block and persist sync_server_lamport
+        let current_lamp = self.local_lamport.load(Ordering::SeqCst);
+        let next_lamp = match michi_db::get_server_config(&self.db, "sync_server_lamport").await {
+            Ok(Some(val)) => {
+                let last_lamp = val.parse::<u64>().unwrap_or(0);
+                last_lamp.max(current_lamp).saturating_add(10_000)
+            }
+            _ => current_lamp.saturating_add(10_000),
+        };
+        let _ =
+            michi_db::set_server_config(&self.db, "sync_server_lamport", &next_lamp.to_string())
+                .await;
+        self.local_lamport.store(next_lamp, Ordering::SeqCst);
     }
 
     pub fn new_with_epoch(
@@ -243,6 +275,29 @@ impl PlaybackProjectionCoordinator {
         server_epoch: u64,
         boot_id: Uuid,
     ) -> (Self, Arc<RwLock<PlaybackProjectionHealth>>) {
+        Self::new_with_epoch_boot_and_lamport(
+            db,
+            legacy_playback_state,
+            engine,
+            sync_tx,
+            server_id,
+            server_epoch,
+            boot_id,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_epoch_boot_and_lamport(
+        db: SqlitePool,
+        legacy_playback_state: Arc<RwLock<michi_sync::PlaybackState>>,
+        engine: PlaybackEngineHandle,
+        sync_tx: tokio::sync::broadcast::Sender<michi_sync::SyncMessage>,
+        server_id: String,
+        server_epoch: u64,
+        boot_id: Uuid,
+        initial_lamport: u64,
+    ) -> (Self, Arc<RwLock<PlaybackProjectionHealth>>) {
         let health = Arc::new(RwLock::new(PlaybackProjectionHealth::default()));
         let coordinator = Self {
             db,
@@ -253,7 +308,7 @@ impl PlaybackProjectionCoordinator {
             server_epoch: Arc::new(AtomicU64::new(server_epoch)),
             boot_id,
             local_sequence: Arc::new(AtomicU64::new(0)),
-            local_lamport: Arc::new(AtomicU64::new(0)),
+            local_lamport: Arc::new(AtomicU64::new(initial_lamport)),
             peer_vectors: Arc::new(RwLock::new(HashMap::new())),
             processed_events: Arc::new(RwLock::new(HashSet::new())),
             health: health.clone(),
@@ -275,13 +330,33 @@ impl PlaybackProjectionCoordinator {
     }
 
     pub fn next_lamport(&self) -> u64 {
-        self.local_lamport.fetch_add(1, Ordering::SeqCst) + 1
+        let mut current = self.local_lamport.load(Ordering::SeqCst);
+        loop {
+            let target = current.saturating_add(1);
+            match self.local_lamport.compare_exchange_weak(
+                current,
+                target,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return target,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     pub fn observe_lamport(&self, remote: u64) -> u64 {
+        // Prevent integer overflow or wrapping from malicious or corrupted peer input
+        if remote >= u64::MAX - 100_000 {
+            warn!(
+                remote,
+                "sync: rejecting near-overflow or corrupt lamport clock"
+            );
+            return self.local_lamport.load(Ordering::SeqCst);
+        }
         let mut current = self.local_lamport.load(Ordering::SeqCst);
         loop {
-            let target = current.max(remote) + 1;
+            let target = current.max(remote).saturating_add(1);
             match self.local_lamport.compare_exchange_weak(
                 current,
                 target,
@@ -748,6 +823,11 @@ impl PlaybackProjectionCoordinator {
                 .await;
             }
         }
+
+        let cur_lamport = self.current_lamport();
+        let _ =
+            michi_db::set_server_config(&self.db, "sync_server_lamport", &cur_lamport.to_string())
+                .await;
     }
 
     async fn persist_if_changed(

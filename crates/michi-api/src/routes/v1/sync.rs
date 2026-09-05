@@ -592,29 +592,28 @@ pub async fn sync_state_handler(
         ));
     }
 
-    let (device_id, event_id, sequence, epoch, boot_id, lamport) = match body.device_id {
-        Some(dev) => {
-            if let Some(remote_lamp) = body.lamport {
-                state.playback_projection.observe_lamport(remote_lamp);
-            }
-            (
-                Some(dev),
-                Some(body.event_id.unwrap_or_else(Uuid::new_v4)),
-                body.sequence,
-                body.epoch,
-                body.boot_id,
-                body.lamport,
-            )
+    let dev = match body.device_id {
+        Some(d) if !d.trim().is_empty() => d,
+        _ => {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "DEVICE_ID_REQUIRED",
+                "sync_state requires explicit device_id for remote state peer reconciliation",
+            ));
         }
-        None => (
-            Some(state.server_id().to_string()),
-            Some(body.event_id.unwrap_or_else(Uuid::new_v4)),
-            Some(state.playback_projection.next_local_sequence()),
-            Some(state.playback_projection.server_epoch()),
-            Some(state.playback_projection.boot_id()),
-            Some(state.playback_projection.next_lamport()),
-        ),
     };
+
+    if let Some(remote_lamp) = body.lamport {
+        state.playback_projection.observe_lamport(remote_lamp);
+    }
+    let (device_id, event_id, sequence, epoch, boot_id, lamport) = (
+        Some(dev),
+        Some(body.event_id.unwrap_or_else(Uuid::new_v4)),
+        body.sequence,
+        body.epoch,
+        body.boot_id,
+        body.lamport,
+    );
 
     let peer_state = michi_sync::PlaybackState {
         track_id: body.track_id,

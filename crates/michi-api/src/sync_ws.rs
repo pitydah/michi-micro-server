@@ -307,7 +307,8 @@ async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: Cancellati
 
     // 3. Send current playback snapshot immediately upon connection and initialize monotonic tracker
     let initial_playback_state = state.playback_state.read().await.clone();
-    let mut last_sent_updated_at = initial_playback_state.updated_at;
+    let mut last_sent_state: Option<michi_sync::PlaybackState> =
+        Some(initial_playback_state.clone());
     let initial_msg: michi_sync::SyncMessage = initial_playback_state.into();
     if let Ok(json) = serde_json::to_string(&initial_msg) {
         let _ = ws_sender.send(Message::Text(json)).await;
@@ -323,12 +324,46 @@ async fn handle_sync(socket: WebSocket, state: AppState, sync_cancel: Cancellati
                 msg = rx.recv() => {
                     match msg {
                         Ok(sync_msg) => {
-                            if let michi_sync::SyncMessage::State { updated_at, .. } = &sync_msg {
-                                if *updated_at <= last_sent_updated_at {
-                                    // Skip stale or duplicate state captured by snapshot
-                                    continue;
+                            if let michi_sync::SyncMessage::State {
+                                track_id,
+                                position_ms,
+                                playing,
+                                volume,
+                                updated_at,
+                                playlist_id,
+                                queue_position,
+                                origin_device_id,
+                                event_id,
+                                sequence,
+                                epoch,
+                                boot_id,
+                                lamport,
+                            } = &sync_msg
+                            {
+                                let msg_state = michi_sync::PlaybackState {
+                                    track_id: *track_id,
+                                    position_ms: *position_ms,
+                                    playing: *playing,
+                                    volume: *volume,
+                                    updated_at: *updated_at,
+                                    playlist_id: *playlist_id,
+                                    queue_position: *queue_position,
+                                    device_id: origin_device_id.clone(),
+                                    shuffle: false,
+                                    repeat: "off".into(),
+                                    event_id: *event_id,
+                                    sequence: *sequence,
+                                    epoch: *epoch,
+                                    boot_id: *boot_id,
+                                    lamport: *lamport,
+                                };
+                                if let Some(ref last) = last_sent_state {
+                                    if last.has_precedence_over(&msg_state) || last == &msg_state {
+                                        // Skip stale or duplicate state captured by previous sent state
+                                        continue;
+                                    }
                                 }
-                                last_sent_updated_at = *updated_at;
+                                last_sent_state = Some(msg_state);
                             }
                             if let Ok(json) = serde_json::to_string(&sync_msg) {
                                 if ws_sender.send(Message::Text(json)).await.is_err() {

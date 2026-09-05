@@ -7838,3 +7838,146 @@ async fn test_sync_real_websocket_bidirectional_e2e() {
     // Verify Server A observed the higher lamport
     assert!(state_a.playback_projection.current_lamport() >= 100);
 }
+
+#[tokio::test]
+async fn test_sync_reboot_new_epoch_beats_old_lamport_same_origin() {
+    let (_port, pool, state) = run_test_server_with_state().await;
+    let dev_id = "rebooting-node";
+
+    // 1. Apply state from rebooting-node at epoch 10, sequence 5, but high lamport 500
+    let applied1 = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        1000,
+        false,
+        0.5,
+        chrono::Utc::now(),
+        Some(dev_id.to_string()),
+        Some(uuid::Uuid::new_v4()),
+        Some(5),
+        Some(10),
+        Some(uuid::Uuid::new_v4()),
+        Some(500),
+    )
+    .await;
+    assert!(
+        applied1,
+        "First remote state from epoch 10 should be applied"
+    );
+
+    let snap1 = state.playback_engine.snapshot().await.unwrap();
+    assert_eq!(snap1.volume, 50);
+
+    // 2. Node reboots and starts with epoch 11, sequence 1, and initial lamport 1 (much lower than 500!)
+    // Because epoch is higher for the same origin_device_id, this MUST win over epoch 10!
+    let applied2 = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        2000,
+        false,
+        0.75,
+        chrono::Utc::now(),
+        Some(dev_id.to_string()),
+        Some(uuid::Uuid::new_v4()),
+        Some(1),
+        Some(11), // higher epoch!
+        Some(uuid::Uuid::new_v4()),
+        Some(1), // lower lamport!
+    )
+    .await;
+    assert!(
+        applied2,
+        "Reboot incarnation with higher epoch MUST beat older incarnation even with lower Lamport"
+    );
+
+    let snap2 = state.playback_engine.snapshot().await.unwrap();
+    assert_eq!(snap2.volume, 75);
+
+    // 3. Conversely, a delayed/stale packet from epoch 10 with lamport 9999 must NOT override epoch 11
+    let applied3 = michi_api::sync_ws::apply_remote_playback_state(
+        &state,
+        None,
+        3000,
+        false,
+        0.2,
+        chrono::Utc::now(),
+        Some(dev_id.to_string()),
+        Some(uuid::Uuid::new_v4()),
+        Some(99),
+        Some(10), // stale epoch!
+        Some(uuid::Uuid::new_v4()),
+        Some(9999), // gigantic lamport!
+    )
+    .await;
+    assert!(
+        !applied3,
+        "Stale epoch 10 packet must be rejected even if its Lamport is higher"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_lamport_overflow_protection() {
+    let (_port, _pool, state) = run_test_server_with_state().await;
+
+    // Observe extreme lamport near u64::MAX
+    state.playback_projection.observe_lamport(u64::MAX);
+
+    // current_lamport should not exceed u64::MAX - 100_000
+    let cur = state.playback_projection.current_lamport();
+    assert!(cur <= u64::MAX - 100_000);
+
+    // next_lamport should saturate safely and not panic or wrap around to 0
+    let next = state.playback_projection.next_lamport();
+    assert!(next <= u64::MAX - 100_000);
+    assert!(next >= cur);
+}
+
+#[tokio::test]
+async fn test_sync_two_servers_real_network_peer_sync() {
+    // Spin up Server B
+    let (port_b, _pool_b, state_b) = run_test_server_with_state().await;
+
+    // Spin up Server A configured to peer with Server B
+    let pool_a = test_db().await;
+    let mut config_a = test_config();
+    config_a.sync_peers = vec![format!("127.0.0.1:{port_b}")];
+    let state_a = michi_api::AppState::new(config_a, pool_a.clone(), None);
+    let app_a = router_with_test_admin(state_a.clone(), &pool_a).await;
+    let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port_a = listener_a.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(
+            listener_a,
+            app_a.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    // Start background sync peer connector on Server A
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    michi_api::start_sync_peers(&state_a, cancel_token.clone());
+
+    // Give peer connection a moment to connect and handshake over real network WebSocket
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Server A performs a local playback change: set volume to 66
+    let _ = state_a.playback_engine.set_volume(66).await;
+
+    // Let the event propagate from Server A -> Server B over network WebSocket
+    let mut synced = false;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let snap_b = state_b.playback_engine.snapshot().await.unwrap();
+        if snap_b.volume == 66 {
+            synced = true;
+            break;
+        }
+    }
+
+    cancel_token.cancel();
+    assert!(
+        synced,
+        "Server B should receive and apply volume 66 synced from Server A over real network"
+    );
+}
