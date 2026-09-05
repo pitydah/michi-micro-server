@@ -1,23 +1,23 @@
 services:
   michi:
     build: .
-    image: ghcr.io/pitydah/michi-micro-server:latest
+    image: ghcr.io/pitydah/michi-micro-server:1.0.0-rc.1
     container_name: michi
     ports:
-      - "8096:8096"
+      - "9090:9090"
     volumes:
       - ./music:/music:ro
       - ./config:/config
       - ./cache:/cache
     environment:
-      - MICHI_PORT=8096
+      - MICHI_PORT=9090
       - MICHI_MUSIC_PATH=/music
       - MICHI_DATABASE=sqlite:///config/michi.db
       - MICHI_CACHE_PATH=/cache
       - MICHI_SYNC_NAME=michiserver
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8096/api/status"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${MICHI_PORT:-9090}/health/live || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

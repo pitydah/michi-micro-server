@@ -24,7 +24,8 @@
 - [x] Async file I/O (tokio::fs)
 - [x] FFmpeg transcoding (experimental, requires ffmpeg on server)
 - [x] Cover art serving
-- [ ] HLS or adaptive streaming
+- [x] HLS VOD single-rendition streaming
+- [ ] Multi-bitrate adaptive ABR / DASH streaming (post-v1)
 
 ## Phase 4: Web UI
 - [x] Built-in HTML interface (vanilla, no build step)

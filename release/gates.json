@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "release": "1.0.0",
+  "gates": [
+    {
+      "id": "rust-quality",
+      "description": "Compilación, formato, clippy y tests unitarios de todo el workspace",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["STATIC_ANALYSIS", "UNIT"]
+    },
+    {
+      "id": "stream-contract",
+      "description": "Validación estricta contra Michi Link v1-lite schemas y OpenAPI",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["STATIC_ANALYSIS"]
+    },
+    {
+      "id": "receiver-contract-simulator",
+      "description": "Matriz de tests contra simulador canónico v1-lite (pairing, PIN, tokens)",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["CONTRACT_SIMULATOR"]
+    },
+    {
+      "id": "snapcast-contract-mock",
+      "description": "Multi-room audio con topología simulada Snapcast",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["CONTRACT_MOCK"]
+    },
+    {
+      "id": "snapserver-real",
+      "description": "Integración con demonio Snapserver real nativo (JSON-RPC / control)",
+      "required_for": ["ga"],
+      "accepted_evidence_classes": ["INTEGRATION_REAL"]
+    },
+    {
+      "id": "mqtt-contract-simulator",
+      "description": "Integración Home Assistant Auto-Discovery simulada",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["CONTRACT_SIMULATOR"]
+    },
+    {
+      "id": "mosquitto-real",
+      "description": "Integración con broker Mosquitto MQTT real",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["INTEGRATION_REAL"]
+    },
+    {
+      "id": "generic-linux-appliance",
+      "description": "Validación de arranque, permisos, base de datos y migraciones en Linux",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["INTEGRATION_REAL"]
+    },
+    {
+      "id": "reliability-stress",
+      "description": "Batería de escalabilidad (1k/10k), streams concurrentes y desconexión",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["INTEGRATION_REAL"]
+    },
+    {
+      "id": "short-stability-smoke",
+      "description": "Monitor de telemetría de estabilidad y detección de fugas (RSS, FDs, WAL)",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["INTEGRATION_REAL"]
+    },
+    {
+      "id": "resource-budget",
+      "description": "Medición rigurosa de consumo de memoria idle (<50MB) y threads en Linux x86_64",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["INTEGRATION_REAL"]
+    },
+    {
+      "id": "web-ui-functional-integrity",
+      "description": "Integridad funcional del catálogo AST y rutas estáticas de Web UI",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["STATIC_ANALYSIS", "UNIT"]
+    },
+    {
+      "id": "web-ui-browser-e2e",
+      "description": "Pruebas de navegador de extremo a extremo para Web UI",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["INTEGRATION_REAL"]
+    },
+    {
+      "id": "three-way-ecosystem",
+      "description": "Integración tridireccional Mobile -> Micro -> Stream",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["CONTRACT_SIMULATOR"]
+    },
+    {
+      "id": "docker-amd64",
+      "description": "Imagen linux/amd64 construida y verificada con smoke test y contrato",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["CONTAINER_NATIVE"]
+    },
+    {
+      "id": "arm64-qemu",
+      "description": "Imagen linux/arm64 construida y ejecutada en emulación QEMU",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["EMULATED_ARCH"]
+    },
+    {
+      "id": "zimaos-package",
+      "description": "Validación y empaquetado de distribución para App Store de CasaOS/ZimaOS",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["STATIC_ANALYSIS"]
+    },
+    {
+      "id": "raspberry-pi-physical",
+      "description": "Cualificación física en placa de hardware Raspberry Pi 4/5",
+      "required_for": ["ga"],
+      "accepted_evidence_classes": ["PHYSICAL_HARDWARE"]
+    },
+    {
+      "id": "casaos-zimaos-real",
+      "description": "Instalación y actualización en runtime real de CasaOS/ZimaOS",
+      "required_for": ["ga"],
+      "accepted_evidence_classes": ["INTEGRATION_REAL"]
+    },
+    {
+      "id": "soak-24h",
+      "description": "Prueba continua de estabilidad y carga de 24 horas ininterrumpidas",
+      "required_for": ["ga"],
+      "accepted_evidence_classes": ["LONG_SOAK"]
+    }
+  ]
+}

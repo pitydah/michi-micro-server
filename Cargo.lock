@@ -1864,7 +1864,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "michi-api"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "argon2",
  "async-trait",
@@ -1923,7 +1923,7 @@ dependencies = [
 
 [[package]]
 name = "michi-client"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "chrono",
  "michi-core",
@@ -1938,7 +1938,7 @@ dependencies = [
 
 [[package]]
 name = "michi-config"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "michi-core",
  "serde",
@@ -1950,7 +1950,7 @@ dependencies = [
 
 [[package]]
 name = "michi-connect"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "hex",
  "mdns-sd",
@@ -1969,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "michi-core"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "chrono",
  "serde",
@@ -1982,7 +1982,7 @@ dependencies = [
 
 [[package]]
 name = "michi-db"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "chrono",
  "michi-core",
@@ -1997,7 +1997,7 @@ dependencies = [
 
 [[package]]
 name = "michi-homeassistant"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "chrono",
  "michi-config",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "michi-ingest"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "chrono",
  "reqwest",
@@ -2056,7 +2056,7 @@ dependencies = [
 
 [[package]]
 name = "michi-link"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "argon2",
  "chrono",
@@ -2078,7 +2078,7 @@ dependencies = [
 
 [[package]]
 name = "michi-m3u"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2086,7 +2086,7 @@ dependencies = [
 
 [[package]]
 name = "michi-metadata"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "lofty",
  "michi-core",
@@ -2097,7 +2097,7 @@ dependencies = [
 
 [[package]]
 name = "michi-onboard"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "michi-core",
  "michi-db",
@@ -2112,7 +2112,7 @@ dependencies = [
 
 [[package]]
 name = "michi-opensubsonic"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "argon2",
  "axum",
@@ -2132,13 +2132,14 @@ dependencies = [
  "sqlx",
  "tokio",
  "tokio-util",
+ "tower",
  "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "michi-playback"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2159,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "michi-receivers"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2183,7 +2184,7 @@ dependencies = [
 
 [[package]]
 name = "michi-rooms"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "reqwest",
  "serde",
@@ -2195,7 +2196,7 @@ dependencies = [
 
 [[package]]
 name = "michi-scanner"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "chrono",
  "hex",
@@ -2213,7 +2214,7 @@ dependencies = [
 
 [[package]]
 name = "michi-security"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "axum",
  "chrono",
@@ -2235,7 +2236,7 @@ dependencies = [
 
 [[package]]
 name = "michi-server"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2256,7 +2257,7 @@ dependencies = [
 
 [[package]]
 name = "michi-streaming"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "futures-util",
  "michi-core",
@@ -2271,7 +2272,7 @@ dependencies = [
 
 [[package]]
 name = "michi-sync"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "chrono",
  "serde",
@@ -2289,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "michi-tui"
-version = "0.2.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "anyhow",
  "chrono",

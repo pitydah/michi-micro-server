@@ -19,7 +19,7 @@
 
 | Resource | Target | Measured | Environment |
 |----------|--------|----------|-------------|
-| Memory (idle) | < 50 MB | -- | -- |
+| Memory (idle) | < 50 MB | **24.0 MB** (median 24.0 MB) | Linux x86_64 (2026-09-05, commit 04b46110) |
 | Docker image size | < 100 MB (Core) | -- | -- |
 
 ## Resource Profiles

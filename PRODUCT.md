@@ -21,7 +21,7 @@ The claim a neighboring product could not truthfully copy: a complete open music
 
 ## Operating Context
 
-- **Deployment:** Docker multi-arch (`linux/amd64` + `linux/arm64`), CasaOS/ZimaOS app store, systemd + Debian package. Serves on port 8096 without TLS — designed to run behind a reverse proxy, not exposed to the internet.
+- **Deployment:** Docker multi-arch (`linux/amd64` + `linux/arm64`), CasaOS/ZimaOS app store, systemd + Debian package. Serves on port 9090 without TLS — designed to run behind a reverse proxy, not exposed to the internet.
 - **Use:** LAN or Tailscale; desktop browser and installed PWA (standalone, offline-track caching via IndexedDB); audio playback through the HTML `<audio>` element; control from a phone browser works too.
 - **Workflows:** scan library, browse and search, play, route playback chains to receivers, QR-pair with Michi Mobile, review play history, upload files, create backups/snapshots, configure webhooks.
 - **Resource profiles:** Eco / Balanced / Performance, user-selectable.
@@ -37,7 +37,7 @@ The claim a neighboring product could not truthfully copy: a complete open music
 - Play history with stats and export.
 - Michi Link pairing v1 (QR + 6-digit codes), feature negotiation, ecosystem device list.
 - Receiver discovery (mDNS), sessions, groups; multi-server sync and WebSocket handoff; resumable upload with SHA-256 dedup.
-- Backup/snapshot, integrity check, webhook, OpenSubsonic layer (partial: 5 endpoints, JSON-only), bearer-token auth, rate limiting.
+- Backup/snapshot, integrity check, webhook, OpenSubsonic layer (JSON-only compatibility subset), bearer-token auth, rate limiting.
 
 **Constraints**
 - Idle RAM target <50 MB; Docker image <100–200 MB; low-power ARM devices.

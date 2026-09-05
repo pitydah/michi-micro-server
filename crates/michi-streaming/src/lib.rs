@@ -424,7 +424,9 @@ pub async fn transcode_stream_with_plan(
             cmd.arg("-f").arg("ogg");
         }
         TranscodeCodec::Hls => {
-            cmd.arg("-c").arg("copy").arg("-f").arg("hls");
+            return Err(StreamError::Io(io::Error::other(
+                "HLS transcoding requires segmented output via generate_hls_playlist, not stdout pipe",
+            )));
         }
     }
 
@@ -709,8 +711,15 @@ pub async fn generate_hls_playlist(
     let status = Command::new("ffmpeg")
         .arg("-i")
         .arg(file_path)
-        .arg("-c")
-        .arg("copy")
+        .arg("-vn")
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("192k")
+        .arg("-ar")
+        .arg("48000")
+        .arg("-ac")
+        .arg("2")
         .arg("-f")
         .arg("hls")
         .arg("-hls_time")

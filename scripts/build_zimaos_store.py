@@ -22,6 +22,13 @@ import shutil
 import yaml
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import tomllib
+
+with open(os.path.join(ROOT_DIR, "Cargo.toml"), "rb") as _f:
+    _cargo = tomllib.load(_f)
+PRODUCT_VERSION = _cargo["workspace"]["package"]["version"]
+STORE_SCHEMA_VERSION = "3.1"
+
 STORE_SRC = os.path.join(ROOT_DIR, "zimaos-store")
 APPS_SRC = os.path.join(STORE_SRC, "Apps")
 DIST_DIR = os.path.join(ROOT_DIR, "dist")
@@ -113,7 +120,7 @@ def build_store():
             "port_map": x_casaos.get("port_map", "9090"),
             "scheme": x_casaos.get("scheme", "http"),
             "index": x_casaos.get("index", "/"),
-            "version": x_casaos.get("version", "3.1"),
+            "version": PRODUCT_VERSION,
             "architectures": x_casaos.get("architectures", ["amd64", "arm64"]),
             "main_service": x_casaos.get("main", app_name)
         }
@@ -125,7 +132,7 @@ def build_store():
         print(f"  ✓ Packaged and validated {app_name} (ID: {app_id}, Version: {meta['version']})")
 
     index_data = {
-        "version": "3.1",
+        "version": STORE_SCHEMA_VERSION,
         "name": "Michi Official App Store",
         "apps": catalog
     }

@@ -1,7 +1,7 @@
 # Michi Micro Server
 
 [![CI](https://github.com/pitydah/michi-micro-server/actions/workflows/ci.yml/badge.svg)](https://github.com/pitydah/michi-micro-server/actions/workflows/ci.yml)
-[![v0.2.0](https://img.shields.io/badge/version-0.2.0-blue)](https://github.com/pitydah/michi-micro-server/releases)
+[![v1.0.0-rc.1](https://img.shields.io/badge/version-1.0.0--rc.1-blue)](https://github.com/pitydah/michi-micro-server/releases)
 
 > Lightweight, robust home music server written in Rust.
 
@@ -12,7 +12,7 @@ Michi Music Player, Michi Mobile, Home Assistant, and CasaOS/ZimaOS.
 ## Features
 
 - **Library Management** — Scan, index, search, and organize music files
-- **Streaming** — HTTP Range requests, transcoding (MP3/Ogg/HLS), gapless
+- **Streaming** — HTTP Range requests, transcoding (MP3/Ogg/HLS VOD)
 - **Playlists** — CRUD, smart playlists (8 rules), M3U export/import, sync
 - **Playback Chains** — Route audio to multiple receivers with per-device volume
 - **Play History** — Paginated, stats (today/week/month/total), export

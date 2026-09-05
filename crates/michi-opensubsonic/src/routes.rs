@@ -1,6 +1,7 @@
 use axum::{
+    body::Body,
     extract::{Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -12,6 +13,12 @@ use crate::auth::check_auth;
 use crate::errors;
 use crate::models::{json_err, json_ok, SubsonicQuery, SubsonicResponse};
 
+#[derive(Clone, Default)]
+pub struct ScanStatusProvider {
+    pub scanning: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub last_scan_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
 #[derive(Clone)]
 pub struct OsAppState {
     pub db: sqlx::SqlitePool,
@@ -20,6 +27,7 @@ pub struct OsAppState {
     pub auth_username: Option<String>,
     pub auth_password: Option<String>,
     pub auth_enabled: bool,
+    pub scan_status: ScanStatusProvider,
 }
 
 pub fn router(state: OsAppState) -> Router {
@@ -269,6 +277,7 @@ async fn search3(
 async fn stream(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, (StatusCode, Json<SubsonicResponse>)> {
     check_auth(&state, &query).await?;
     let id_str = query
@@ -286,18 +295,50 @@ async fn stream(
         .map_err(|_| json_err(errors::NOT_FOUND, "file not found"))?;
 
     let mime = track.format.mime_type();
-    let file = tokio::fs::File::open(&path)
+    let mut file = tokio::fs::File::open(&path)
         .await
         .map_err(|_| json_err(errors::GENERIC, "cannot open file"))?;
 
     let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+
+    if let Some(range_header) = headers.get(header::RANGE) {
+        if let Ok(range_str) = range_header.to_str() {
+            match michi_streaming::parse_range(range_str, file_size) {
+                Ok(range) => {
+                    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+                    file.seek(std::io::SeekFrom::Start(range.start))
+                        .await
+                        .map_err(|_| json_err(errors::GENERIC, "seek failed"))?;
+                    let taken = file.take(range.content_length());
+                    let stream = tokio_util::io::ReaderStream::new(taken);
+                    return Ok(Response::builder()
+                        .status(StatusCode::PARTIAL_CONTENT)
+                        .header(header::CONTENT_TYPE, mime)
+                        .header(header::CONTENT_RANGE, range.content_range_header())
+                        .header(header::CONTENT_LENGTH, range.content_length().to_string())
+                        .header(header::ACCEPT_RANGES, "bytes")
+                        .body(Body::from_stream(stream))
+                        .unwrap());
+                }
+                Err(michi_streaming::StreamError::InvalidRange(_)) => {
+                    return Ok(Response::builder()
+                        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .header(header::CONTENT_RANGE, format!("bytes */{file_size}"))
+                        .body(Body::empty())
+                        .unwrap());
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
     let stream = tokio_util::io::ReaderStream::new(file);
 
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, mime)
         .header(header::CONTENT_LENGTH, file_size.to_string())
         .header(header::ACCEPT_RANGES, "bytes")
-        .body(axum::body::Body::from_stream(stream))
+        .body(Body::from_stream(stream))
         .unwrap())
 }
 
@@ -585,16 +626,29 @@ async fn start_scan(
     check_auth(&state, &query).await?;
     let music_paths = state.music_paths.clone();
     let db = state.db.clone();
+    let scan_status = state.scan_status.clone();
+
+    scan_status
+        .scanning
+        .store(true, std::sync::atomic::Ordering::SeqCst);
 
     tokio::spawn(async move {
         let tracks = michi_scanner::scan_directories(&music_paths).await;
+        let count = tracks.len() as u64;
         let _ = michi_db::upsert_tracks(&db, &tracks).await;
+        scan_status
+            .last_scan_count
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+        scan_status
+            .scanning
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     });
 
+    let current_count = michi_db::count_tracks(&state.db).await.unwrap_or(0);
     Ok(json_ok(Some(json!({
         "scanStatus": {
             "scanning": true,
-            "count": 0,
+            "count": current_count,
         }
     }))))
 }
@@ -604,10 +658,14 @@ async fn get_scan_status(
     Query(query): Query<SubsonicQuery>,
 ) -> Result<Json<SubsonicResponse>, (StatusCode, Json<SubsonicResponse>)> {
     check_auth(&state, &query).await?;
+    let is_scanning = state
+        .scan_status
+        .scanning
+        .load(std::sync::atomic::Ordering::SeqCst);
     let count = michi_db::count_tracks(&state.db).await.unwrap_or(0);
     Ok(json_ok(Some(json!({
         "scanStatus": {
-            "scanning": false,
+            "scanning": is_scanning,
             "count": count,
             "folderCount": state.music_paths.len() as i64,
         }

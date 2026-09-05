@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.0.0-rc.1] - 2026-09-05
+
+### Added
+- **Release Evidence Ledger**: Marco riguroso de evaluación de evidencia en `release/gates.json`, con clasificación estricta de taxonomías (`STATIC_ANALYSIS`, `INTEGRATION_REAL`, `CONTRACT_SIMULATOR`, `PHYSICAL_HARDWARE`) sin estados hardcodeados.
+- **Lamport Logical Clocks & Causal Ordering**: Reconciliación de estados con relojes lógicos Lamport, preservación de procedencia de línea de tiempo y precedencia estricta de encarnación (`epoch`) ante reinicios.
+- **Product Truth Spec**: Especificación unificada de capacidades y madurez en `spec/v1/product-truth.json` y subset normativo OpenSubsonic en `spec/v1/opensubsonic.json`.
+- **Ecosistema E2E**: Baterías de integración tridireccional Mobile -> Micro -> Stream y cualificación en hardware/emulación QEMU ARM64.
+- **Packaging ZimaOS / CasaOS**: Distribución automatizada con assets normalizados y versionado SemVer coordinado con el workspace.
+
+### Changed
+- **Canonización de Puertos**: Puerto interno y healthcheck estándar unificado a `9090` en Dockerfile, docker-compose y appliance.
+- **Transmisión de Estado WebSocket**: El despachador WebSocket utiliza orden total determinista causal (`has_precedence_over`) en lugar de comparaciones de reloj de pared.
+- **OpenSubsonic Range Support**: `/rest/stream` procesa solicitudes parciales con cabeceras `Range` retornando `206 Partial Content` y `416 Range Not Satisfiable`.
+- **HLS VOD**: Ruta de codificación universal compatible a AAC estéreo (48kHz) desacoplada de la copia directa de codecs incompatibles en streaming.
+
+### Fixed
+- Eliminada dependencia de estados hardcodeados en el release gate.
+- Reparada la verificación de procedencia en `/api/v1/sync/state` requiriendo `device_id` explícito.
+- Evitada fuga de zombies y descriptores de archivo en pruebas de estabilidad soak prolongadas.
+
+### Known Beta
+- Control de receptores y salas multi-room clasificados como `beta` hasta la certificación con hardware físico Michi Stream.
+- Protocolo OpenSubsonic implementado como subset v1 deliberado sin afirmar paridad completa del protocolo heredado.
+
+### Deferred
+- Reproducción gapless sample-perfect postergada a post-v1 tras certificación en banco de audio.
+- Streaming adaptativo ABR / DASH fuera de alcance de la versión Micro.
+
+
 ## [0.2.0] - 2026-07-17
 
 ### Added

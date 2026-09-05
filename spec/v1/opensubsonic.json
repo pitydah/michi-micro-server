@@ -1,0 +1,29 @@
+{
+  "profile": "michi-v1-subset",
+  "version": "1.16.1",
+  "format": "json-only",
+  "endpoints": [
+    {"path": "/rest/ping", "status": "stable", "notes": "Authenticated ping"},
+    {"path": "/rest/getLicense", "status": "stable", "notes": "License check"},
+    {"path": "/rest/getMusicFolders", "status": "stable", "notes": "Configured library folders"},
+    {"path": "/rest/getArtists", "status": "stable", "notes": "Indexed artist list"},
+    {"path": "/rest/getArtist", "status": "stable", "notes": "Artist detail and album catalog"},
+    {"path": "/rest/getAlbum", "status": "stable", "notes": "Album detail with song list"},
+    {"path": "/rest/getSong", "status": "stable", "notes": "Song metadata and duration"},
+    {"path": "/rest/search3", "status": "partial", "notes": "Searches tracks; artist/album empty arrays"},
+    {"path": "/rest/stream", "status": "stable", "notes": "Direct play with HTTP Range (200/206/416)"},
+    {"path": "/rest/download", "status": "stable", "notes": "File download with attachment header"},
+    {"path": "/rest/getCoverArt", "status": "stable", "notes": "Album/track artwork"},
+    {"path": "/rest/getLyrics", "status": "stub", "notes": "Empty payload placeholder"},
+    {"path": "/rest/getPlaylists", "status": "stable", "notes": "List existing playlists"},
+    {"path": "/rest/getPlaylist", "status": "stable", "notes": "Playlist tracks"},
+    {"path": "/rest/scrobble", "status": "stable", "notes": "Register playback event"},
+    {"path": "/rest/star", "status": "stable", "notes": "Star item"},
+    {"path": "/rest/unstar", "status": "stable", "notes": "Unstar item"},
+    {"path": "/rest/startScan", "status": "stable", "notes": "Initiates library scan"},
+    {"path": "/rest/getScanStatus", "status": "stable", "notes": "Returns live scanning status and count"},
+    {"path": "/rest/setRating", "status": "stable", "notes": "Set track rating"},
+    {"path": "/rest/getRandomSongs", "status": "stable", "notes": "Random songs pool"},
+    {"path": "/rest/getNowPlaying", "status": "stub", "notes": "Placeholder empty entries"}
+  ]
+}

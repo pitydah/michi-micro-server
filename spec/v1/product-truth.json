@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "canonical_version": "1.0.0-rc.1",
+  "canonical_port": 9090,
+  "features": {
+    "library": {
+      "maturity": "stable",
+      "release_scope": "core",
+      "description": "Library scanning, indexing and browsing with watcher"
+    },
+    "search": {
+      "maturity": "stable",
+      "release_scope": "core",
+      "description": "Full-text library search with field filters"
+    },
+    "stream": {
+      "maturity": "stable",
+      "release_scope": "core",
+      "description": "HTTP Range streaming (200/206/416) and direct play"
+    },
+    "transcode": {
+      "maturity": "stable",
+      "release_scope": "core",
+      "description": "On-demand transcoding to MP3/Ogg/Opus via FFmpeg"
+    },
+    "hls_vod": {
+      "maturity": "stable",
+      "release_scope": "core",
+      "description": "Single-rendition HLS VOD audio streaming"
+    },
+    "adaptive_hls": {
+      "maturity": "unavailable",
+      "release_scope": "post-v1",
+      "description": "Multi-bitrate adaptive ABR / DASH streaming"
+    },
+    "gapless": {
+      "maturity": "unavailable",
+      "release_scope": "post-v1",
+      "description": "Sample-perfect gapless audio playback"
+    },
+    "playlists": {
+      "maturity": "stable",
+      "release_scope": "core",
+      "description": "CRUD playlists, smart playlists and M3U import/export"
+    },
+    "playback_history": {
+      "maturity": "stable",
+      "release_scope": "core",
+      "description": "Play history tracking, stats and scrobbling"
+    },
+    "sync": {
+      "maturity": "stable",
+      "release_scope": "core",
+      "description": "State sync with Lamport logical clocks and epoch precedence"
+    },
+    "opensubsonic": {
+      "maturity": "beta",
+      "release_scope": "subset",
+      "description": "OpenSubsonic compatible subset layer (JSON-only)"
+    },
+    "receivers": {
+      "maturity": "beta",
+      "release_scope": "v1-beta",
+      "description": "Michi Link v1-lite receiver playback plane"
+    },
+    "rooms": {
+      "maturity": "beta",
+      "release_scope": "v1-beta",
+      "description": "Multi-room group playback routing"
+    },
+    "handoff": {
+      "maturity": "beta",
+      "release_scope": "v1-beta",
+      "description": "Direct stream handoff between peers"
+    },
+    "autonomous_playback": {
+      "maturity": "beta",
+      "release_scope": "v1-beta",
+      "description": "Server-side autonomous playback projection"
+    },
+    "backup": {
+      "maturity": "stable",
+      "release_scope": "core",
+      "description": "Database backup, export and restoration"
+    },
+    "security": {
+      "maturity": "stable",
+      "release_scope": "core",
+      "description": "Argon2 auth, bearer tokens, rate limiting and security headers"
+    }
+  }
+}

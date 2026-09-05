@@ -1,7 +1,7 @@
 name: michi-micro-server
 services:
   michi-micro-server:
-    image: ghcr.io/pitydah/michi-micro-server:r3.1-zima
+    image: ghcr.io/pitydah/michi-micro-server:1.0.0-rc.1
     container_name: michi-micro-server
     network_mode: host
     volumes:
