@@ -30,6 +30,10 @@ mkdir -p "$CFG_DIR" "$CACHE_DIR" "$MUSIC_DIR"
 # 1. Build old version (v0.2.0)
 OLD_VERSION_TAG="${MICHI_UPGRADE_FROM_TAG:-v0.2.0}"
 echo "Building historical release ${OLD_VERSION_TAG}..."
+if ! git rev-parse -q --verify "$OLD_VERSION_TAG" >/dev/null; then
+    echo "Tag $OLD_VERSION_TAG not found in local ref db; fetching tags..."
+    git fetch --tags origin || true
+fi
 git worktree add --detach "$OLD_SRC" "$OLD_VERSION_TAG"
 git -C "$OLD_SRC" submodule update --init --recursive || true
 cargo build --release --manifest-path "$OLD_SRC/Cargo.toml" --target-dir "$OLD_TARGET" --bin michi-server
