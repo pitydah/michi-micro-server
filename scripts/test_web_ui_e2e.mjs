@@ -252,7 +252,8 @@ function createDOM() {
     'settings-scan-concurrency', 'settings-max-transcodes', 'settings-db-pool',
     'ha-discovery-status', 'integ-sync-peers', 'integ-reconnect-max',
     'diag-status', 'diag-ffmpeg', 'diag-transcodes', 'diag-db-pool', 'diag-caps-list',
-    'handoff-track-id', 'handoff-position', 'handoff-playing', 'handoff-result', 'handoff-current-state'
+    'handoff-track-id', 'handoff-position', 'handoff-playing', 'handoff-result', 'handoff-current-state',
+    'discover-result'
   ];
   for (const sid of settingIds) {
     pageSettings.appendChild(el('div', sid));
@@ -411,6 +412,7 @@ async function runE2E() {
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
+    window.ServerPlayback.outputTarget = 'server';
     window.State.tracks = [{ id: 'track-1', title: 'Song 1', duration_ms: 180000 }];
     window.State.queue  = [];
 

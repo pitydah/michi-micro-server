@@ -230,6 +230,12 @@ const MichiAPI = {
   historyStats() { return this.request('/api/v1/history/stats'); },
   exportHistory() { return this.request('/api/v1/history/export', { timeout: 20000 }); },
   clearHistory() { return this.request('/api/v1/history', { method: 'DELETE' }); },
+  recordPlay(track_id, duration_ms) {
+    return this.request('/api/v1/playback/record', {
+      method: 'POST',
+      body: { track_id, duration_ms: duration_ms || 0 }
+    });
+  },
 
   // Ecosystem & Link
   linkDevices() { return this.request('/api/v1/link/devices'); },
@@ -278,7 +284,7 @@ const MichiAPI = {
   deleteSource(id) { return this.request('/api/v1/sources/' + id, { method: 'DELETE' }); },
   sourceEpisodes(id) { return this.request('/api/v1/sources/' + id + '/episodes'); },
   updateEpisode(id, position_ms, played) {
-    return this.request('/api/v1/episodes/' + id, {
+    return this.request('/api/v1/sources/episodes/' + id, {
       method: 'PUT',
       body: { position_ms: position_ms || 0, played: !!played }
     });
@@ -1380,6 +1386,8 @@ function selectLocalBrowserOutput() {
   ServerPlayback.remoteTargetName = null;
   updateOutputRoutingBadge();
   closeOutputSelectorModal();
+  updatePlaybackControlsUI();
+  BrowserPlayback.renderQueue();
   showToast('Output: This Browser');
 }
 
@@ -1390,6 +1398,9 @@ async function selectServerOutputTarget(kind, id, name) {
     ServerPlayback.remoteTargetName = name;
     updateOutputRoutingBadge();
     closeOutputSelectorModal();
+    updatePlaybackControlsUI();
+    await loadCanonicalPlaybackState();
+    await loadCanonicalQueue();
     showToast('Output: ' + name);
   } catch (e) {
     showToast('Failed to select output: ' + e.message, true);
@@ -1413,21 +1424,148 @@ function getAudio() {
   return State.audio;
 }
 
+// ── Browser Playback Authority State & Controller ──────────────
+const BrowserPlayback = {
+  queue: [],
+  currentIndex: -1,
+  originalQueue: [], // For un-shuffle restoration
+  shuffle: false,
+  repeat: 'off', // 'off' | 'all' | 'one'
+  currentTrack: null,
+  listenAccumulatorMs: 0,
+  lastPositionMs: 0,
+  scrobbledForCurrentTrack: false,
+
+  resetScrobbleState() {
+    this.listenAccumulatorMs = 0;
+    this.lastPositionMs = 0;
+    this.scrobbledForCurrentTrack = false;
+  },
+
+  onTimeUpdate(currentMs) {
+    if (!this.currentTrack) return;
+    if (this.lastPositionMs > 0 && currentMs > this.lastPositionMs) {
+      const delta = currentMs - this.lastPositionMs;
+      if (delta < 5000) {
+        this.listenAccumulatorMs += delta;
+      }
+    }
+    this.lastPositionMs = currentMs;
+
+    if (!this.scrobbledForCurrentTrack && this.currentTrack.duration_ms) {
+      const qualifyingThreshold = Math.min(Math.floor(this.currentTrack.duration_ms / 2), 240000);
+      if (this.listenAccumulatorMs >= qualifyingThreshold) {
+        this.scrobbledForCurrentTrack = true;
+        MichiAPI.recordPlay(this.currentTrack.id, Math.floor(this.listenAccumulatorMs)).catch(function() {});
+      }
+    }
+  },
+
+  addToQueue(track) {
+    this.queue.push(track);
+    this.originalQueue.push(track);
+    this.renderQueue();
+  },
+
+  jumpToIndex(idx) {
+    if (idx < 0 || idx >= this.queue.length) return;
+    this.currentIndex = idx;
+    this.playTrack(this.queue[idx]);
+    this.renderQueue();
+  },
+
+  playTrack(track) {
+    this.currentTrack = track;
+    this.resetScrobbleState();
+    State.currentTrack = track;
+    updateNowPlaying(track);
+    updateMiniPlayer(track);
+
+    const audio = getAudio();
+    audio.src = MichiAPI.streamUrl(track.id);
+    audio.play().catch(function (err) {
+      showToast(t('error.could_not_play', {msg: err.message}), true);
+    });
+    updatePlayButtons();
+    this.renderQueue();
+  },
+
+  toggleShuffle() {
+    this.shuffle = !this.shuffle;
+    if (this.shuffle) {
+      // Fisher-Yates shuffle preserving currently playing item at head if present
+      const curItem = this.currentIndex >= 0 ? this.queue[this.currentIndex] : null;
+      const remaining = this.queue.filter((_, i) => i !== this.currentIndex);
+      for (let i = remaining.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const temp = remaining[i];
+        remaining[i] = remaining[j];
+        remaining[j] = temp;
+      }
+      this.queue = curItem ? [curItem, ...remaining] : remaining;
+      this.currentIndex = curItem ? 0 : -1;
+    } else {
+      // Restore original queue order
+      const curItem = this.currentIndex >= 0 ? this.queue[this.currentIndex] : null;
+      this.queue = [...this.originalQueue];
+      this.currentIndex = curItem ? this.queue.findIndex(t => t.id === curItem.id) : -1;
+    }
+    updatePlaybackControlsUI();
+    this.renderQueue();
+    showToast('Browser Shuffle ' + (this.shuffle ? 'ON' : 'OFF'));
+  },
+
+  toggleRepeat() {
+    if (this.repeat === 'off') this.repeat = 'all';
+    else if (this.repeat === 'all') this.repeat = 'one';
+    else this.repeat = 'off';
+    updatePlaybackControlsUI();
+    showToast('Browser Repeat: ' + this.repeat.toUpperCase());
+  },
+
+  onTrackEnded() {
+    if (this.currentTrack && !this.scrobbledForCurrentTrack && this.listenAccumulatorMs > 0) {
+      MichiAPI.recordPlay(this.currentTrack.id, Math.floor(this.listenAccumulatorMs)).catch(function() {});
+      this.scrobbledForCurrentTrack = true;
+    }
+
+    if (this.repeat === 'one') {
+      const audio = getAudio();
+      audio.currentTime = 0;
+      audio.play().catch(function() {});
+      return;
+    }
+
+    if (this.queue.length > 0 && this.currentIndex + 1 < this.queue.length) {
+      this.jumpToIndex(this.currentIndex + 1);
+    } else if (this.repeat === 'all' && this.queue.length > 0) {
+      this.jumpToIndex(0);
+    } else {
+      showToast(t('toast.track_ended'));
+      updatePlayButtons();
+    }
+  },
+
+  renderQueue() {
+    const authorityLabel = $('#queue-authority-label');
+    if (authorityLabel) authorityLabel.textContent = 'Browser Queue (' + this.queue.length + ')';
+    renderQueue(this.queue, this.currentIndex);
+  }
+};
+
+window.BrowserPlayback = BrowserPlayback;
+
 async function playTrack(idx) {
   const tracks = State.tracks;
   if (!tracks || idx < 0 || idx >= tracks.length) return;
   const t = tracks[idx];
 
   if (ServerPlayback.outputTarget === 'browser') {
-    State.currentTrack = t;
-    updateNowPlaying(t);
-    updateMiniPlayer(t);
-    const audio = getAudio();
-    audio.src = MichiAPI.streamUrl(t.id);
-    audio.play().catch(function (err) {
-      showToast(t('error.could_not_play', {msg: err.message}), true);
-    });
-    updatePlayButtons();
+    if (BrowserPlayback.queue.length === 0 || !BrowserPlayback.queue.some(item => item.id === t.id)) {
+      BrowserPlayback.queue = [...tracks];
+      BrowserPlayback.originalQueue = [...tracks];
+    }
+    BrowserPlayback.jumpToIndex(BrowserPlayback.queue.findIndex(item => item.id === t.id));
     return;
   }
 
@@ -1439,6 +1577,7 @@ async function playTrack(idx) {
       position_ms: 0
     });
     await loadCanonicalPlaybackState();
+    await loadCanonicalQueue();
   } catch (err) {
     showToast('Server playback failed: ' + err.message, true);
     if (err.message && err.message.includes('NO_OUTPUT_SELECTED')) {
@@ -1452,8 +1591,11 @@ async function playPause() {
     const audio = getAudio();
     if (audio.paused) {
       if (!audio.src && State.currentTrack) {
-        playTrack(State.tracks.indexOf(State.currentTrack));
-        return;
+        const idx = State.tracks ? State.tracks.indexOf(State.currentTrack) : -1;
+        if (idx >= 0) {
+          playTrack(idx);
+          return;
+        }
       }
       audio.play().catch(function () {});
     } else {
@@ -1476,6 +1618,10 @@ async function playPause() {
 }
 
 async function toggleShuffle() {
+  if (ServerPlayback.outputTarget === 'browser') {
+    BrowserPlayback.toggleShuffle();
+    return;
+  }
   try {
     var nextVal = !ServerPlayback.shuffle;
     var resp = await MichiAPI.playbackControl({ command: 'shuffle', value: nextVal });
@@ -1488,6 +1634,10 @@ async function toggleShuffle() {
 }
 
 async function toggleRepeat() {
+  if (ServerPlayback.outputTarget === 'browser') {
+    BrowserPlayback.toggleRepeat();
+    return;
+  }
   try {
     var nextMode = 'off';
     if (ServerPlayback.repeat === 'off') nextMode = 'all';
@@ -1505,12 +1655,17 @@ async function toggleRepeat() {
 
 function updatePlaybackControlsUI() {
   var shuffleBtn = $('#btn-shuffle');
-  if (shuffleBtn) {
-    shuffleBtn.style.color = ServerPlayback.shuffle ? 'var(--primary)' : 'var(--text-3)';
-  }
   var repeatBtn = $('#btn-repeat');
+  var isBrowser = ServerPlayback.outputTarget === 'browser';
+
+  var isShuffle = isBrowser ? BrowserPlayback.shuffle : ServerPlayback.shuffle;
+  var repeatVal = isBrowser ? BrowserPlayback.repeat : ServerPlayback.repeat;
+
+  if (shuffleBtn) {
+    shuffleBtn.style.color = isShuffle ? 'var(--primary)' : 'var(--text-3)';
+  }
   if (repeatBtn) {
-    repeatBtn.style.color = (ServerPlayback.repeat && ServerPlayback.repeat !== 'off') ? 'var(--primary)' : 'var(--text-3)';
+    repeatBtn.style.color = (repeatVal && repeatVal !== 'off') ? 'var(--primary)' : 'var(--text-3)';
   }
   updateOutputRoutingBadge();
 }
@@ -1519,6 +1674,13 @@ async function addToQueue(idx) {
   const tracks = State.tracks;
   if (!tracks || idx < 0 || idx >= tracks.length) return;
   const t = tracks[idx];
+
+  if (ServerPlayback.outputTarget === 'browser') {
+    BrowserPlayback.addToQueue(t);
+    showToast('Added to Browser Up Next');
+    return;
+  }
+
   try {
     await MichiAPI.addQueueItems([t.id]);
     await loadCanonicalQueue();
@@ -1529,11 +1691,17 @@ async function addToQueue(idx) {
 }
 
 async function loadCanonicalQueue() {
+  if (ServerPlayback.outputTarget === 'browser') {
+    BrowserPlayback.renderQueue();
+    return;
+  }
   if (AuthSession.state !== 'authenticated') return;
   try {
     const raw = await MichiAPI.queue();
     const items = raw.items || [];
     State.queue = items;
+    const authorityLabel = $('#queue-authority-label');
+    if (authorityLabel) authorityLabel.textContent = 'Server Queue (' + items.length + ')';
     renderQueue(items, raw.current_index || 0);
   } catch (e) {}
 }
@@ -1560,6 +1728,10 @@ function renderQueue(items, currentIndex) {
 }
 
 async function jumpToQueueItem(pos) {
+  if (ServerPlayback.outputTarget === 'browser') {
+    BrowserPlayback.jumpToIndex(pos);
+    return;
+  }
   try {
     await MichiAPI.jumpQueue(pos);
     await loadCanonicalQueue();
@@ -1583,7 +1755,7 @@ async function loadCanonicalPlaybackState() {
     ServerPlayback.shuffle = !!st.shuffle;
     ServerPlayback.repeat = st.repeat || 'off';
 
-    if (st.current_track) {
+    if (ServerPlayback.outputTarget === 'server' && st.current_track) {
       State.currentTrack = st.current_track;
       updateNowPlaying(st.current_track);
       updateMiniPlayer(st.current_track);
@@ -1601,7 +1773,15 @@ function onTrackEnd() {
     var posMs = audio ? Math.floor(audio.currentTime * 1000) : 0;
     MichiAPI.updateEpisode(epId, posMs, true).catch(function() {});
     State.currentPodcastEpisode = null;
+    showToast(t('toast.track_ended'));
+    return;
   }
+
+  if (ServerPlayback.outputTarget === 'browser') {
+    BrowserPlayback.onTrackEnded();
+    return;
+  }
+
   showToast(t('toast.track_ended'));
 }
 
@@ -1622,6 +1802,9 @@ function updatePlaybackProgress() {
 
   const audio = getAudio();
   if (!audio || !audio.duration) return;
+
+  const currentMs = Math.floor(audio.currentTime * 1000);
+  BrowserPlayback.onTimeUpdate(currentMs);
 
   const pct = (audio.currentTime / audio.duration) * 100;
   const fill1 = $('#np-progress-fill');
@@ -2806,7 +2989,7 @@ async function discoverDevices() {
   if (resEl) resEl.innerHTML = '<span style="color:var(--text-3)">Scanning local network for Michi receivers...</span>';
   try {
     var res = await MichiAPI.discoverDevices();
-    var devs = res.devices || [];
+    var devs = res.receivers || res.devices || [];
     if (resEl) {
       if (devs.length === 0) {
         resEl.innerHTML = '<span style="color:var(--text-3)">No new devices discovered.</span>';
