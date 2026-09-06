@@ -36,7 +36,7 @@ if ! git rev-parse -q --verify "$OLD_VERSION_TAG" >/dev/null; then
 fi
 git worktree add --detach "$OLD_SRC" "$OLD_VERSION_TAG"
 git -C "$OLD_SRC" submodule update --init --recursive || true
-cargo build --release --manifest-path "$OLD_SRC/Cargo.toml" --target-dir "$OLD_TARGET" --bin michi-server
+RUSTFLAGS="-A warnings" cargo build --release --manifest-path "$OLD_SRC/Cargo.toml" --target-dir "$OLD_TARGET" --bin michi-server
 
 OLD_BIN="$OLD_TARGET/release/michi-server"
 NEW_BIN="$ROOT_DIR/target/release/michi-server"
