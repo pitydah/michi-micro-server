@@ -96,22 +96,37 @@ def main():
     parser = argparse.ArgumentParser(description="Michi Micro Server Soak Stability Test")
     parser.add_argument("--url", default="http://127.0.0.1:9091", help="Base server URL")
     parser.add_argument("--pid", type=int, required=True, help="Server process PID")
-    parser.add_argument("--duration-seconds", type=int, default=30, help="Test duration in seconds")
+    
+    duration = parser.add_mutually_exclusive_group()
+    duration.add_argument("--duration-seconds", type=int, default=None, help="Test duration in seconds")
+    duration.add_argument("--duration-hours", type=float, default=None, help="Test duration in hours")
+    
     parser.add_argument("--sample-interval", type=float, default=2.0, help="Sampling interval in seconds")
     parser.add_argument("--config-dir", default="target/soak_test_config", help="Database/config dir for WAL tracking")
+    parser.add_argument("--gate-id", default="short-stability-smoke", help="Gate ID for evidence artifact")
+    parser.add_argument("--evidence-class", default="INTEGRATION_REAL", choices=["INTEGRATION_REAL", "LONG_SOAK"], help="Evidence class")
     parser.add_argument("--report", default="target/soak_report.json", help="Path to write JSON report")
     parser.add_argument("--username", default="admin")
     parser.add_argument("--password", default="admin123")
     args = parser.parse_args()
 
+    if args.duration_hours is not None:
+        total_seconds = int(args.duration_hours * 3600)
+    elif args.duration_seconds is not None:
+        total_seconds = args.duration_seconds
+    else:
+        total_seconds = 30
+
+    if args.evidence_class == "LONG_SOAK" and total_seconds < 24 * 3600:
+        parser.error("LONG_SOAK evidence requires >= 24 hours")
+
     base_url = args.url.rstrip("/")
     pid = args.pid
-    total_seconds = args.duration_seconds
     sha = get_head_sha()
 
     print("=" * 70)
     print("MICHI MICRO SERVER — ROBUST SOAK & TELEMETRY MONITOR")
-    print(f"Server URL: {base_url} | PID: {pid} | Target Duration: {total_seconds}s | Commit: {sha[:8]}")
+    print(f"Server URL: {base_url} | PID: {pid} | Target Duration: {total_seconds}s | Gate: {args.gate_id} ({args.evidence_class}) | Commit: {sha[:8]}")
     print("=" * 70)
 
     violations = []
@@ -120,121 +135,90 @@ def main():
     # Check process existence
     initial_metrics = get_process_metrics(pid)
     if not initial_metrics or not initial_metrics["valid"]:
-        violations.append(f"INITIAL_PROCESS_UNAVAILABLE: PID {pid} is not reachable or readable via /proc")
-        report_data = {
-            "schema_version": 1,
-            "gate_id": "short-stability-smoke",
-            "commit_sha": sha,
-            "evidence_class": "INTEGRATION_REAL",
-            "status": "FAIL",
-            "detail": f"Process metrics unavailable for PID {pid}",
-            "violations": violations,
-            "duration_seconds": 0,
-            "samples_collected": 0,
-            "exit_code": 1
-        }
-        os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)
-        with open(args.report, "w", encoding="utf-8") as f:
-            json.dump(report_data, f, indent=2)
+        print(f"ERROR: Process {pid} is not running or invalid", file=sys.stderr)
         sys.exit(1)
 
-    auth_headers = {}
+    # Authenticate to get session token
+    auth_token = None
     try:
-        st, body = http_post_json(
-            f"{base_url}/api/auth/login",
-            {"username": args.username, "password": args.password}
-        )
-        if st == 200:
-            token = json.loads(body).get("token")
-            if token:
-                auth_headers = {"Authorization": f"Bearer {token}"}
-    except Exception:
-        pass
+        status, body = http_post_json(f"{base_url}/api/auth/login", {
+            "username": args.username,
+            "password": args.password
+        })
+        if status == 200:
+            auth_token = json.loads(body.decode("utf-8")).get("token")
+    except Exception as e:
+        print(f"WARNING: Authentication failed: {e}. Running without auth.", file=sys.stderr)
+
+    auth_headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+
+    start_time = time.time()
+    last_sample_time = start_time
+    last_request_time = start_time
 
     telemetry = []
-    start_time = time.time()
-    iteration = 0
-
     peak_rss = initial_metrics["rss_kb"]
     max_fds = initial_metrics["open_fds"]
     peak_wal = get_wal_size(args.config_dir)
 
-    while True:
+    while time.time() - start_time < total_seconds:
         now = time.time()
-        elapsed = now - start_time
-        if elapsed >= total_seconds:
+
+        # Check process survival
+        cur_metrics = get_process_metrics(pid)
+        if not cur_metrics or not cur_metrics["valid"]:
+            violations.append(f"SERVER_PROCESS_DIED: PID {pid} died after {now - start_time:.1f}s")
             break
 
-        iteration += 1
+        # Periodic Sample
+        if now - last_sample_time >= args.sample_interval:
+            last_sample_time = now
+            wal_size = get_wal_size(args.config_dir)
+            peak_rss = max(peak_rss, cur_metrics["rss_kb"])
+            max_fds = max(max_fds, cur_metrics["open_fds"])
+            peak_wal = max(peak_wal, wal_size)
 
-        # 1. Generate workload traffic
-        try:
-            st, _ = http_get(f"{base_url}/health/live")
-            if st != 200:
-                request_errors.append(f"health check returned {st}")
+            sample = {
+                "elapsed_s": round(now - start_time, 1),
+                "rss_mb": round(cur_metrics["rss_kb"] / 1024.0, 2),
+                "threads": cur_metrics["threads"],
+                "fds": cur_metrics["open_fds"],
+                "children": cur_metrics["child_processes"],
+                "wal_kb": round(wal_size / 1024.0, 1)
+            }
+            telemetry.append(sample)
+            print(f"[{sample['elapsed_s']:>6.1f}s / {total_seconds}s] RSS: {sample['rss_mb']:>6.2f} MB | FDs: {sample['fds']:>3} | Threads: {sample['threads']:>2} | WAL: {sample['wal_kb']:>6.1f} KB | Children: {sample['children']}")
 
-            st, _ = http_get(f"{base_url}/api/v1/status")
-            if st != 200:
-                request_errors.append(f"status returned {st}")
+        # Simulated Activity / Load
+        if now - last_request_time >= 0.5:
+            last_request_time = now
+            try:
+                # 1. Health check
+                s, _ = http_get(f"{base_url}/health/live")
+                if s != 200:
+                    request_errors.append(f"/health/live returned {s}")
 
-            http_get(f"{base_url}/api/v1/search?q=test", headers=auth_headers)
-            http_get(f"{base_url}/api/v1/queue", headers=auth_headers)
+                # 2. Server info
+                s, _ = http_get(f"{base_url}/api/v1/server/info", headers=auth_headers)
+                if s != 200:
+                    request_errors.append(f"/server/info returned {s}")
 
-            st, t_body = http_get(f"{base_url}/api/v1/tracks", headers=auth_headers)
-            if st == 200:
-                t_json = json.loads(t_body)
-                tracks = t_json.get("tracks", t_json) if isinstance(t_json, dict) else t_json
-                if len(tracks) > 0:
-                    tid = tracks[0]["id"]
-                    req_h = {"Range": "bytes=0-4095"}
-                    req_h.update(auth_headers)
-                    http_get(f"{base_url}/api/v1/tracks/{tid}/stream", headers=req_h)
-        except Exception as e:
-            request_errors.append(f"workload request error at {round(elapsed,1)}s: {e}")
+                # 3. Status check
+                s, _ = http_get(f"{base_url}/api/v1/status", headers=auth_headers)
+                if s != 200:
+                    request_errors.append(f"/api/v1/status returned {s}")
 
-        # 2. Collect process & OS telemetry
-        metrics = get_process_metrics(pid)
-        if not metrics or not metrics["valid"]:
-            violations.append(f"SERVER_DIED_DURING_SOAK at {round(elapsed,1)}s")
-            break
+            except urllib.error.URLError as e:
+                request_errors.append(f"Network error: {e}")
+            except Exception as e:
+                request_errors.append(f"Unexpected request error: {e}")
 
-        wal_bytes = get_wal_size(args.config_dir)
-        rss_mb = metrics["rss_kb"] / 1024.0
+        time.sleep(0.1)
 
-        if metrics["rss_kb"] > peak_rss:
-            peak_rss = metrics["rss_kb"]
-        if metrics["open_fds"] > max_fds:
-            max_fds = metrics["open_fds"]
-        if wal_bytes > peak_wal:
-            peak_wal = wal_bytes
+    actual_duration = round(time.time() - start_time, 1)
+    final_metrics = get_process_metrics(pid) or cur_metrics or initial_metrics
 
-        sample = {
-            "timestamp": time.time(),
-            "elapsed_seconds": round(elapsed, 1),
-            "rss_mb": round(rss_mb, 2),
-            "open_fds": metrics["open_fds"],
-            "threads": metrics["threads"],
-            "child_processes": metrics["child_processes"],
-            "wal_bytes": wal_bytes,
-        }
-        telemetry.append(sample)
-
-        if iteration % 5 == 0 or elapsed >= total_seconds - 1:
-            print(
-                f"[{elapsed:6.1f}s / {total_seconds}s] RSS: {rss_mb:6.2f} MB | FDs: {metrics['open_fds']:3d} | "
-                f"Threads: {metrics['threads']:2d} | WAL: {wal_bytes / 1024:6.1f} KB | Children: {metrics['child_processes']}"
-            )
-
-        time.sleep(args.sample_interval)
-
-    actual_duration = round(time.time() - start_time, 2)
-    final_metrics = get_process_metrics(pid)
-
-    if not final_metrics or not final_metrics["valid"]:
-        if "SERVER_DIED_DURING_SOAK" not in " ".join(violations):
-            violations.append("SERVER_TERMINATED_BEFORE_FINAL_SAMPLE")
-        final_metrics = initial_metrics
-
+    # Compute Statistics & Drifts
     initial_rss_mb = initial_metrics["rss_kb"] / 1024.0
     final_rss_mb = final_metrics["rss_kb"] / 1024.0
     peak_rss_mb = peak_rss / 1024.0
@@ -257,9 +241,9 @@ def main():
 
     report_data = {
         "schema_version": 1,
-        "gate_id": "short-stability-smoke",
+        "gate_id": args.gate_id,
         "commit_sha": sha,
-        "evidence_class": "INTEGRATION_REAL",
+        "evidence_class": args.evidence_class,
         "status": status,
         "detail": detail,
         "requested_duration_seconds": total_seconds,

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Generates and checks Product Truth documentation across README.md, PRODUCT.md and docs/ROADMAP.md.
+Generates and checks Product Truth documentation across README.md, PRODUCT.md,
+docs/ROADMAP.md and crates/michi-api/src/server_caps.rs.
 
 Usage:
   python3 scripts/generate_product_truth.py [--check] [--write]
@@ -40,24 +41,66 @@ def generate_matrix_markdown(spec):
 
 def update_file_matrix(filepath, matrix_md, check=False):
     if not os.path.exists(filepath):
-        return True
+        print(f"❌ File not found: {filepath}", file=sys.stderr)
+        return False
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
     pattern = r"(<!-- BEGIN GENERATED V1 FEATURE MATRIX -->\n)(.*?)(\n<!-- END GENERATED V1 FEATURE MATRIX -->)"
-    if not re.search(pattern, content, flags=re.DOTALL):
-        return True # Markers not present in this file
+    match = re.search(pattern, content, flags=re.DOTALL)
+    if not match:
+        print(f"❌ Missing Product Truth markers in {filepath}", file=sys.stderr)
+        return False
 
     new_content = re.sub(pattern, f"\\1{matrix_md}\\3", content, flags=re.DOTALL)
     if check:
         if new_content != content:
-            print(f"❌ Product Truth drift detected in {filepath}")
+            print(f"❌ Product Truth drift detected in {filepath}", file=sys.stderr)
             return False
         return True
     else:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(new_content)
         print(f"✓ Updated product matrix in {filepath}")
+        return True
+
+def generate_server_caps_block(spec):
+    features = spec.get("features", {})
+    mapping = {
+        "stable": "FeatureMaturity::Stable",
+        "beta": "FeatureMaturity::Beta",
+        "unavailable": "FeatureMaturity::Unavailable",
+    }
+    entries = []
+    for fid, finfo in sorted(features.items()):
+        mat = mapping.get(finfo.get("maturity", "").lower(), "FeatureMaturity::Unavailable")
+        entries.append(f'    ("{fid}", {mat}),')
+    inner = "\n".join(entries)
+    return f"// BEGIN GENERATED PRODUCT MATURITY\nconst CANONICAL_MATURITY: &[(&str, FeatureMaturity)] = &[\n{inner}\n];\n// END GENERATED PRODUCT MATURITY"
+
+def update_server_caps(filepath, caps_block, check=False):
+    if not os.path.exists(filepath):
+        print(f"❌ File not found: {filepath}", file=sys.stderr)
+        return False
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    pattern = r"(// BEGIN GENERATED PRODUCT MATURITY\n)(.*?)(\n// END GENERATED PRODUCT MATURITY)"
+    match = re.search(pattern, content, flags=re.DOTALL)
+    if not match:
+        print(f"❌ Missing Canonical Maturity markers in {filepath}", file=sys.stderr)
+        return False
+
+    new_content = re.sub(pattern, caps_block, content, flags=re.DOTALL)
+    if check:
+        if new_content != content:
+            print(f"❌ Canonical Maturity drift detected in {filepath}", file=sys.stderr)
+            return False
+        return True
+    else:
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        print(f"✓ Updated canonical maturity in {filepath}")
         return True
 
 def main():
@@ -68,12 +111,14 @@ def main():
 
     spec = load_product_truth()
     matrix_md = generate_matrix_markdown(spec)
+    caps_block = generate_server_caps_block(spec)
 
     target_files = [
         os.path.join(ROOT_DIR, "README.md"),
         os.path.join(ROOT_DIR, "PRODUCT.md"),
         os.path.join(ROOT_DIR, "docs", "ROADMAP.md")
     ]
+    caps_file = os.path.join(ROOT_DIR, "crates", "michi-api", "src", "server_caps.rs")
 
     all_ok = True
     for tf in target_files:
@@ -81,12 +126,16 @@ def main():
         if not ok:
             all_ok = False
 
+    ok_caps = update_server_caps(caps_file, caps_block, check=args.check)
+    if not ok_caps:
+        all_ok = False
+
     if args.check:
         if all_ok:
-            print("✅ Product Truth: All feature matrices are consistent.")
+            print("✅ Product Truth: All feature matrices and runtime projection are consistent.")
             sys.exit(0)
         else:
-            print("❌ Product Truth: Documentation is out of sync with spec/v1/product-truth.json", file=sys.stderr)
+            print("❌ Product Truth: Documentation/Runtime is out of sync with spec/v1/product-truth.json", file=sys.stderr)
             sys.exit(1)
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import signal
 import statistics
 import subprocess
@@ -80,6 +81,18 @@ def main():
     print(f"Port: {args.port} | Commit: {sha[:8]}")
     print("=" * 70)
 
+    # Load canonical budget configuration
+    budget_path = os.path.join(ROOT_DIR, "release", "resource-budget.json")
+    with open(budget_path, "r", encoding="utf-8") as f:
+        budget = json.load(f)
+
+    rss_hard_max = float(budget["idle_rss_p95_mb_hard_max"])
+    threads_expected_min = int(budget["threads_expected_min"])
+    threads_expected_max = int(budget["threads_expected_max"])
+    threads_hard_max = int(budget["threads_hard_max"])
+    fds_hard_max = int(budget["fds_hard_max"])
+    startup_hard_max = int(budget["startup_ms_hard_max"])
+
     # Ensure binary is built
     bin_path = os.path.join(ROOT_DIR, "target", "release", "michi-server")
     if not os.path.exists(bin_path):
@@ -104,7 +117,6 @@ def main():
     env["MICHI_RESOURCE_PROFILE"] = "balanced"
     env["RUST_LOG"] = "error"
 
-    start_launch = time.time()
     proc = subprocess.Popen([bin_path], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     try:
@@ -151,16 +163,29 @@ def main():
 
         # Invariants Check
         violations = []
-        if rss_p95 > 50.0:
-            violations.append(f"IDLE_RSS_EXCEEDS_BUDGET: {rss_p95}MB > 50.0MB")
-        if threads_p95 > 16:
-            violations.append(f"THREADS_EXCEED_BUDGET: {threads_p95} > 16")
+        warnings = []
+
+        if rss_p95 > rss_hard_max:
+            violations.append(f"IDLE_RSS_EXCEEDS_HARD_BUDGET: {rss_p95}MB > {rss_hard_max}MB")
+
+        if threads_p95 > threads_hard_max:
+            violations.append(f"THREADS_EXCEED_HARD_BUDGET: {threads_p95} > {threads_hard_max}")
+        elif threads_p95 > threads_expected_max:
+            warnings.append(f"THREADS_ABOVE_EXPECTED_RANGE: {threads_p95} > {threads_expected_max} (within hard max {threads_hard_max})")
+
+        if fds_p95 > fds_hard_max:
+            violations.append(f"FDS_EXCEED_HARD_BUDGET: {fds_p95} > {fds_hard_max}")
+
+        if startup_ms > startup_hard_max:
+            violations.append(f"STARTUP_TOO_SLOW: {startup_ms}ms > {startup_hard_max}ms")
 
         status = "PASS" if not violations else "FAIL"
         detail = (
-            f"Qualified: Idle RSS median {rss_median}MB, p95 {rss_p95}MB (<50MB target PASS), threads {threads_p95}"
+            f"Qualified: Idle RSS median {rss_median}MB, p95 {rss_p95}MB (<{rss_hard_max}MB hard max), threads {threads_p95}"
             if status == "PASS" else f"Violations: {'; '.join(violations)}"
         )
+        if warnings:
+            detail += f" [Warnings: {'; '.join(warnings)}]"
 
         artifact = {
             "schema_version": 1,
@@ -178,9 +203,14 @@ def main():
                 "fds_p95": fds_p95
             },
             "thresholds": {
-                "idle_rss_mb_max": 50.0,
-                "threads_max": 16
+                "idle_rss_mb_hard_max": rss_hard_max,
+                "threads_expected_min": threads_expected_min,
+                "threads_expected_max": threads_expected_max,
+                "threads_hard_max": threads_hard_max,
+                "fds_hard_max": fds_hard_max,
+                "startup_ms_hard_max": startup_hard_max
             },
+            "warnings": warnings,
             "violations": violations,
             "exit_code": 0 if status == "PASS" else 1
         }
@@ -198,13 +228,26 @@ def main():
                 with open(doc_path, "r", encoding="utf-8") as f:
                     doc = f.read()
 
-                old_row = "| Memory (idle) | < 50 MB | -- | -- |"
-                new_row = f"| Memory (idle) | < 50 MB | **{rss_p95:.1f} MB** (median {rss_median:.1f} MB) | {env_str} |"
-                if old_row in doc:
-                    doc = doc.replace(old_row, new_row)
-                    with open(doc_path, "w", encoding="utf-8") as f:
-                        f.write(doc)
-                    print("Updated docs/RESOURCE_BUDGET.md with certified measurements.")
+                pattern = re.compile(
+                    r"<!-- BEGIN GENERATED RESOURCE MEASUREMENTS -->.*?<!-- END GENERATED RESOURCE MEASUREMENTS -->",
+                    re.DOTALL,
+                )
+                replacement = f"""<!-- BEGIN GENERATED RESOURCE MEASUREMENTS -->
+| Resource | Release Limit | Measured | Environment |
+|----------|---------------|----------|-------------|
+| Idle RSS p95 | < {rss_hard_max:.1f} MB | {rss_p95:.2f} MB | {env_str} |
+| Threads p95 | <= {threads_hard_max} | {threads_p95} | {env_str} |
+| FDs p95 | <= {fds_hard_max} | {fds_p95} | {env_str} |
+| Startup | <= {startup_hard_max} ms | {startup_ms:.1f} ms | {env_str} |
+<!-- END GENERATED RESOURCE MEASUREMENTS -->"""
+
+                if not pattern.search(doc):
+                    raise RuntimeError("RESOURCE_BUDGET.md is missing generated markers")
+
+                doc = pattern.sub(replacement, doc)
+                with open(doc_path, "w", encoding="utf-8") as f:
+                    f.write(doc)
+                print("Updated docs/RESOURCE_BUDGET.md with certified measurements.")
 
     finally:
         proc.terminate()

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "profile": "balanced",
+  "idle_rss_p95_mb_hard_max": 50.0,
+  "threads_expected_min": 8,
+  "threads_expected_max": 12,
+  "threads_hard_max": 16,
+  "fds_hard_max": 128,
+  "startup_ms_hard_max": 5000
+}

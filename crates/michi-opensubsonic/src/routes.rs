@@ -138,6 +138,32 @@ fn build_artist_index(artists: &[michi_core::ArtistSummary]) -> Vec<Value> {
         .collect()
 }
 
+use std::collections::BTreeMap;
+
+fn build_artist_albums(tracks: &[michi_core::Track]) -> Vec<Value> {
+    let mut grouped: BTreeMap<String, (Option<String>, usize)> = BTreeMap::new();
+    for track in tracks {
+        let Some(album_name) = track.album.as_deref() else {
+            continue;
+        };
+        let entry = grouped
+            .entry(album_name.to_string())
+            .or_insert_with(|| (track.artist.clone(), 0));
+        entry.1 += 1;
+    }
+    grouped
+        .into_iter()
+        .map(|(album_name, (artist, count))| {
+            json!({
+                "id": album_name,
+                "name": album_name,
+                "artist": artist,
+                "songCount": count
+            })
+        })
+        .collect()
+}
+
 async fn get_artist(
     State(state): State<OsAppState>,
     Query(query): Query<SubsonicQuery>,
@@ -148,18 +174,7 @@ async fn get_artist(
         .await
         .map_err(|e| json_err(errors::GENERIC, &format!("db error: {e}")))?;
 
-    let album_list: Vec<Value> = tracks
-        .iter()
-        .filter(|t| t.album.is_some())
-        .map(|t| {
-            json!({
-                "id": t.id.to_string(),
-                "name": t.album,
-                "artist": t.artist,
-                "songCount": 1,
-            })
-        })
-        .collect();
+    let album_list = build_artist_albums(&tracks);
 
     Ok(json_ok(Some(json!({
         "artist": {
@@ -628,9 +643,26 @@ async fn start_scan(
     let db = state.db.clone();
     let scan_status = state.scan_status.clone();
 
-    scan_status
+    let acquired = scan_status
         .scanning
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_ok();
+
+    if !acquired {
+        let count = michi_db::count_tracks(&state.db).await.unwrap_or(0);
+        return Ok(json_ok(Some(json!({
+            "scanStatus": {
+                "scanning": true,
+                "count": count,
+                "alreadyRunning": true
+            }
+        }))));
+    }
 
     tokio::spawn(async move {
         let tracks = michi_scanner::scan_directories(&music_paths).await;

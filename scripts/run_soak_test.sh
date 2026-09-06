@@ -15,11 +15,33 @@ CONFIG_DIR="${BASE_DIR}/config"
 CACHE_DIR="${BASE_DIR}/cache"
 MUSIC_DIR="${BASE_DIR}/music"
 
+if [ "$DURATION_HOURS" -lt 24 ]; then
+    echo "ERROR: long soak must be >= 24h"
+    exit 2
+fi
+
 SPAWNED_PIDS=""
 
 cleanup() {
-    if [ -n "$SPAWNED_PIDS" ]; then
-        echo "Cleaning up soak test process ($SPAWNED_PIDS)..."
+    if [ -n "${SPAWNED_PIDS:-}" ]; then
+        kill $SPAWNED_PIDS 2>/dev/null || true
+
+        for _ in $(seq 1 20); do
+            ALIVE=0
+
+            for p in $SPAWNED_PIDS; do
+                if kill -0 "$p" 2>/dev/null; then
+                    ALIVE=1
+                fi
+            done
+
+            if [ "$ALIVE" -eq 0 ]; then
+                return
+            fi
+
+            sleep 0.25
+        done
+
         kill -9 $SPAWNED_PIDS 2>/dev/null || true
     fi
 }
@@ -34,7 +56,7 @@ echo "Port:           $SERVER_PORT"
 echo "Duration:       $DURATION_HOURS hours"
 echo "Config Dir:     $CONFIG_DIR"
 echo "Music Dir:      $MUSIC_DIR"
-echo "Report:         ${PROJECT_ROOT}/target/soak_report_${DURATION_HOURS}h.json"
+echo "Report:         ${PROJECT_ROOT}/target/release-evidence/soak-24h.json"
 echo "=========================================================================="
 
 mkdir -p "$CONFIG_DIR" "$CACHE_DIR" "$MUSIC_DIR"
@@ -74,6 +96,8 @@ python3 "${PROJECT_ROOT}/scripts/soak_test.py" \
     --sample-interval 10.0 \
     --username "admin" \
     --password "admin123" \
-    --report "${PROJECT_ROOT}/target/soak_report_${DURATION_HOURS}h.json"
+    --gate-id "soak-24h" \
+    --evidence-class "LONG_SOAK" \
+    --report "${PROJECT_ROOT}/target/release-evidence/soak-24h.json"
 
 echo "=== SOAK TEST (${DURATION_HOURS}h) COMPLETE ==="

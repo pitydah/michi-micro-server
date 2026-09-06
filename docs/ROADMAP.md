@@ -1,3 +1,27 @@
+## Canonical v1 Capability State
+
+<!-- BEGIN GENERATED V1 FEATURE MATRIX -->
+| Feature | Release Scope | Maturity | Description |
+| :--- | :---: | :---: | :--- |
+| **adaptive_hls** | `post-v1` | ⚪ `unavailable` | Multi-bitrate adaptive ABR / DASH streaming |
+| **autonomous_playback** | `v1-beta` | 🟡 `beta` | Server-side autonomous playback projection |
+| **backup** | `core` | 🟢 `stable` | Database backup, export and restoration |
+| **gapless** | `post-v1` | ⚪ `unavailable` | Sample-perfect gapless audio playback |
+| **handoff** | `v1-beta` | 🟡 `beta` | Direct stream handoff between peers |
+| **hls_vod** | `core` | 🟢 `stable` | Single-rendition HLS VOD audio streaming |
+| **library** | `core` | 🟢 `stable` | Library scanning, indexing and browsing with watcher |
+| **opensubsonic** | `subset` | 🟡 `beta` | OpenSubsonic compatible subset layer (JSON-only) |
+| **playback_history** | `core` | 🟢 `stable` | Play history tracking, stats and scrobbling |
+| **playlists** | `core` | 🟢 `stable` | CRUD playlists, smart playlists and M3U import/export |
+| **receivers** | `v1-beta` | 🟡 `beta` | Michi Link v1-lite receiver playback plane |
+| **rooms** | `v1-beta` | 🟡 `beta` | Multi-room group playback routing |
+| **search** | `core` | 🟢 `stable` | Full-text library search with field filters |
+| **security** | `core` | 🟢 `stable` | Argon2 auth, bearer tokens, rate limiting and security headers |
+| **stream** | `core` | 🟢 `stable` | HTTP Range streaming (200/206/416) and direct play |
+| **sync** | `core` | 🟢 `stable` | State sync with Lamport logical clocks and epoch precedence |
+| **transcode** | `core` | 🟢 `stable` | On-demand transcoding to MP3/Ogg/Opus via FFmpeg |
+<!-- END GENERATED V1 FEATURE MATRIX -->
+
 # Roadmap
 
 ## Phase 1: Server Base
