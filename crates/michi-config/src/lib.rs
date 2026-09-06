@@ -3,6 +3,7 @@ use std::{env, path::Path, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+pub use michi_core::ResourceProfile;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiConfig {
