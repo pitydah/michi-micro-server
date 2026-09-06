@@ -251,6 +251,12 @@ impl Config {
                 if !file_cfg.sync_name.is_empty() {
                     self.sync_name = file_cfg.sync_name;
                 }
+                if file_cfg.listenbrainz_token.is_some() {
+                    self.listenbrainz_token = file_cfg.listenbrainz_token;
+                }
+                if file_cfg.lastfm_token.is_some() {
+                    self.lastfm_token = file_cfg.lastfm_token;
+                }
                 self.scrobble_enabled = file_cfg.scrobble_enabled;
                 self.allow_registration = file_cfg.allow_registration;
                 self.dev_mode = file_cfg.dev_mode;

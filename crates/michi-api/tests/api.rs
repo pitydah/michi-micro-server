@@ -8079,3 +8079,57 @@ async fn test_sync_network_policy_enforcement_http_and_link_self_test() {
         .unwrap();
     assert_eq!(local_forwarded_resp.status(), 200);
 }
+
+#[tokio::test]
+async fn test_lastfm_signature_calculation() {
+    let params = [
+        ("method", "track.scrobble"),
+        ("api_key", "test_api_key"),
+        ("artist", "Test Artist"),
+        ("track", "Test Track"),
+        ("timestamp", "1700000000"),
+    ];
+    let secret = "test_secret";
+    let sig = michi_api::routes::v1::playback::calculate_lastfm_signature(&params, secret);
+    assert!(!sig.is_empty());
+    assert_eq!(sig.len(), 32); // 32 hex chars for md5
+
+    // Verify determinism
+    let sig2 = michi_api::routes::v1::playback::calculate_lastfm_signature(&params, secret);
+    assert_eq!(sig, sig2);
+}
+
+#[tokio::test]
+async fn test_scrobbling_integrations_endpoints() {
+    let (port, _pool, _state) = run_test_server_with_state().await;
+    let client = reqwest::Client::new();
+
+    // 1. Get scrobbling status
+    let status_resp = client
+        .get(format!("http://127.0.0.1:{port}/api/v1/integrations/scrobbling"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(status_resp.status(), 200);
+    let status_json: serde_json::Value = status_resp.json().await.unwrap();
+    assert!(status_json.get("scrobble_enabled").is_some());
+
+    // 2. Set empty ListenBrainz token should fail validation
+    let empty_lb = client
+        .post(format!("http://127.0.0.1:{port}/api/v1/integrations/listenbrainz"))
+        .json(&serde_json::json!({ "token": "" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(empty_lb.status(), 400);
+
+    // 3. Set valid format Last.fm session token succeeds
+    let set_lastfm = client
+        .post(format!("http://127.0.0.1:{port}/api/v1/integrations/lastfm"))
+        .json(&serde_json::json!({ "token": "valid_session_token_123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(set_lastfm.status(), 200);
+}
+

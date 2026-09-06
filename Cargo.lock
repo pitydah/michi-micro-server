@@ -1879,6 +1879,7 @@ dependencies = [
  "infer",
  "jsonschema",
  "lazy_static",
+ "md5",
  "mdns-sd",
  "michi-config",
  "michi-connect",

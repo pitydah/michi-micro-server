@@ -1956,6 +1956,12 @@ pub fn create_router(state: AppState) -> Router {
                 auth::v1_auth_middleware,
             )),
         )
+        .merge(
+            scrobble::scrobble_router().layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth::v1_auth_middleware,
+            )),
+        )
         .merge(v1_link_routes_with_auth(state.clone()))
         .merge(v1_public_routes())
         .layer(middleware::from_fn(michi_security::content_type_middleware))
