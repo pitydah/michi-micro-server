@@ -1323,40 +1323,6 @@ fn v1_link_routes() -> Router<AppState> {
             post(routes::v1::favorites::rate_track_handler),
         )
         .route(
-            "/api/v1/sync/manifest",
-            get(routes::v1::sync::sync_manifest_handler),
-        )
-        .route(
-            "/api/v1/sync/manifest/delta",
-            get(routes::v1::sync::sync_manifest_delta_handler),
-        )
-        .route(
-            "/api/v1/sync/state",
-            post(routes::v1::sync::sync_state_handler),
-        )
-        .route(
-            "/api/v1/sync/upload/init",
-            post(routes::v1::sync::sync_upload_init_handler),
-        )
-        .route(
-            "/api/v1/sync/upload/:file_id/chunk",
-            post(routes::v1::sync::sync_upload_chunk_handler)
-                .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
-        )
-        .route(
-            "/api/v1/sync/upload/:file_id/status",
-            get(routes::v1::sync::sync_upload_status_handler),
-        )
-        .route(
-            "/api/v1/sync/upload/file",
-            post(routes::v1::sync::sync_upload_file_handler)
-                .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
-        )
-        .route(
-            "/api/v1/sync/playlist",
-            post(routes::v1::sync::sync_playlist_handler),
-        )
-        .route(
             "/api/v1/artists/:name/insights",
             get(routes::v1::insights::artist_insights_handler),
         )
@@ -1815,6 +1781,10 @@ fn v1_link_routes_with_auth(state: AppState) -> Router<AppState> {
             "/api/v1/health/self-test",
             get(routes::v1::modules::self_test_handler),
         )
+        .route(
+            "/api/v1/link/self-test",
+            get(routes::v1::modules::self_test_handler),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::v1_auth_middleware,
@@ -1949,10 +1919,26 @@ pub fn create_router(state: AppState) -> Router {
         )
         .merge(protected)
         .merge(
-            sync_api::sync_router().layer(middleware::from_fn_with_state(
-                state.clone(),
-                auth::v1_auth_middleware,
-            )),
+            sync_api::sync_router()
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    routes::v1::sync::enforce_sync_network_policy,
+                ))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    auth::v1_auth_middleware,
+                )),
+        )
+        .merge(
+            routes::v1::sync::sync_router()
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    routes::v1::sync::enforce_sync_network_policy,
+                ))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    auth::v1_auth_middleware,
+                )),
         )
         .merge(rooms::rooms_router().layer(middleware::from_fn_with_state(
             state.clone(),

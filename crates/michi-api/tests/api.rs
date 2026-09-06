@@ -7985,3 +7985,97 @@ async fn test_sync_two_servers_real_network_peer_sync() {
         "Server B should receive and apply volume 66 synced from Server A over real network"
     );
 }
+
+#[tokio::test]
+async fn test_sync_network_policy_enforcement_http_and_link_self_test() {
+    let pool = test_db().await;
+    let mut config = test_config();
+    config.remote_sync = false;
+    config.trust_proxy = true;
+    let proxy_ip: std::net::IpAddr = "198.51.100.10".parse().unwrap();
+    config.trusted_proxies = vec![proxy_ip];
+
+    let state = michi_api::AppState::new(config, pool.clone(), None);
+    let app = router_with_test_admin(state.clone(), &pool).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let client = reqwest::Client::new();
+
+    // 1. Verify link/self-test works non-mutatingly
+    let self_test_resp = client
+        .get(format!("http://127.0.0.1:{port}/api/v1/link/self-test"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(self_test_resp.status(), 200);
+    let self_test_json: serde_json::Value = self_test_resp.json().await.unwrap();
+    assert!(self_test_json.get("status").is_some());
+    assert!(self_test_json.get("checks").is_some());
+
+    // 2. Direct local client (127.0.0.1 is not trusted proxy, so peer_ip 127.0.0.1 is used directly) succeeds
+    let local_resp = client
+        .get(format!("http://127.0.0.1:{port}/api/v1/sync/manifest"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(local_resp.status(), 200);
+
+    // 3. Spoofed X-Forwarded-For from untrusted peer (127.0.0.1) is ignored and peer IP is still local -> succeeds
+    let spoof_resp = client
+        .get(format!("http://127.0.0.1:{port}/api/v1/sync/manifest"))
+        .header("X-Forwarded-For", "203.0.113.195")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spoof_resp.status(), 200);
+
+    // 4. Now test with a server where 127.0.0.1 IS a trusted proxy:
+    let mut proxy_cfg = test_config();
+    proxy_cfg.remote_sync = false;
+    proxy_cfg.trust_proxy = true;
+    proxy_cfg.trusted_proxies = vec!["127.0.0.1".parse::<std::net::IpAddr>().unwrap()];
+
+    let proxy_state = michi_api::AppState::new(proxy_cfg, pool.clone(), None);
+    let proxy_app = router_with_test_admin(proxy_state.clone(), &pool).await;
+    let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_port = proxy_listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(
+            proxy_listener,
+            proxy_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // 4a. Forwarded non-local client IP through trusted proxy is rejected 403
+    let non_local_resp = client
+        .get(format!("http://127.0.0.1:{proxy_port}/api/v1/sync/manifest"))
+        .header("X-Forwarded-For", "203.0.113.195")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(non_local_resp.status(), 403);
+    let err_json: serde_json::Value = non_local_resp.json().await.unwrap();
+    assert_eq!(err_json["error"]["code"], "FORBIDDEN");
+
+    // 4b. Forwarded local client IP through trusted proxy is permitted 200
+    let local_forwarded_resp = client
+        .get(format!("http://127.0.0.1:{proxy_port}/api/v1/sync/manifest"))
+        .header("X-Forwarded-For", "192.168.1.50")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(local_forwarded_resp.status(), 200);
+}
