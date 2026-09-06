@@ -47,6 +47,9 @@ window.loadDiagnostics  = loadDiagnostics;
 window.loadIntegrations = loadIntegrations;
 window.loadJobs         = loadJobs;
 window.computeBytesSha256 = computeBytesSha256;
+window.toggleShuffle    = toggleShuffle;
+window.toggleRepeat     = toggleRepeat;
+window.discoverDevices  = discoverDevices;
 })(window, document, window.navigator, window.localStorage, window.sessionStorage,
    window.fetch,
    globalThis.setTimeout, globalThis.clearTimeout,
@@ -754,6 +757,67 @@ async function runE2E() {
       'Authoritative server cover_art_enabled=false hydrates into DOM data-cover-art');
     assert(document.documentElement.getAttribute('data-sidebar-collapsed') === 'true',
       'Authoritative server sidebar_collapsed=true hydrates into DOM data-sidebar-collapsed');
+  }
+
+  // ── Regression Test 1: Podcast updateEpisode must target canonical route ──
+  {
+    let requestedUrl = null;
+    const fetchImpl = async (url, opts) => {
+      requestedUrl = url;
+      return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ status: 'ok' }) };
+    };
+    const { sandbox, window } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    await window.MichiAPI.updateEpisode('ep-123', 5000, false);
+    assert(requestedUrl && requestedUrl.includes('/api/v1/sources/episodes/ep-123'),
+      `REGRESSION: updateEpisode called '${requestedUrl}', expected canonical '/api/v1/sources/episodes/ep-123'`);
+  }
+
+  // ── Regression Test 2: Receiver discovery must parse 'receivers' key ──
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ receivers: [{ id: 'rx-1', name: 'Living Room Receiver' }] })
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.AuthSession.state = 'authenticated';
+    await window.discoverDevices();
+    const resultText = document.querySelector('#discover-result')?.textContent || '';
+    assert(resultText.includes('Living Room Receiver'),
+      `REGRESSION: discoverDevices rendered '${resultText}', expected 'Living Room Receiver' from receivers key`);
+  }
+
+  // ── Regression Test 3: Browser output authority must not mutate server queue ──
+  {
+    let serverQueueCalled = false;
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/queue')) {
+        serverQueueCalled = true;
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.AuthSession.state = 'authenticated';
+    window.ServerPlayback.outputTarget = 'browser';
+    window.State.tracks = [{ id: 'track-1', title: 'Browser Local Track' }];
+
+    await window.addToQueue(0);
+    assert(!serverQueueCalled,
+      'REGRESSION: addToQueue in browser output mode called server /api/v1/queue, violating authority separation');
   }
 
   console.log('======================================================================');
