@@ -112,7 +112,6 @@ fn main() -> Result<()> {
 }
 
 async fn async_main(config: michi_config::Config) -> Result<()> {
-
     // Guard: OpenSubsonic must not run without authentication.
     // An unauthenticated OpenSubsonic endpoint exposes the entire library to anyone on the network.
     if config.opensubsonic_enabled && !config.auth_enabled {

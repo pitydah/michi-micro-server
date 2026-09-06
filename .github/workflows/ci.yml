@@ -534,6 +534,36 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  ci-web-ui-action-contract:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify WebUI Action Contracts and Forbidden Route Invariance
+        run: python3 scripts/check_webui_action_contracts.py
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate web-ui-action-contract \
+            --class STATIC_ANALYSIS \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/web-ui-action-contract.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-web-ui-action-contract
+          path: target/release-evidence/web-ui-action-contract.json
+          if-no-files-found: error
+          retention-days: 30
+
   ci-no-test-api-release:
     runs-on: ubuntu-latest
     needs: ci-rust
@@ -969,6 +999,7 @@ jobs:
       - ci-resource-budget
       - ci-web-ui-functional-integrity
       - ci-web-ui-browser-e2e
+      - ci-web-ui-action-contract
       - ci-three-way-ecosystem
       - ci-docker-amd64
       - ci-arm64-qemu

@@ -8061,7 +8061,9 @@ async fn test_sync_network_policy_enforcement_http_and_link_self_test() {
 
     // 4a. Forwarded non-local client IP through trusted proxy is rejected 403
     let non_local_resp = client
-        .get(format!("http://127.0.0.1:{proxy_port}/api/v1/sync/manifest"))
+        .get(format!(
+            "http://127.0.0.1:{proxy_port}/api/v1/sync/manifest"
+        ))
         .header("X-Forwarded-For", "203.0.113.195")
         .send()
         .await
@@ -8072,7 +8074,9 @@ async fn test_sync_network_policy_enforcement_http_and_link_self_test() {
 
     // 4b. Forwarded local client IP through trusted proxy is permitted 200
     let local_forwarded_resp = client
-        .get(format!("http://127.0.0.1:{proxy_port}/api/v1/sync/manifest"))
+        .get(format!(
+            "http://127.0.0.1:{proxy_port}/api/v1/sync/manifest"
+        ))
         .header("X-Forwarded-For", "192.168.1.50")
         .send()
         .await
@@ -8106,7 +8110,9 @@ async fn test_scrobbling_integrations_endpoints() {
 
     // 1. Get scrobbling status
     let status_resp = client
-        .get(format!("http://127.0.0.1:{port}/api/v1/integrations/scrobbling"))
+        .get(format!(
+            "http://127.0.0.1:{port}/api/v1/integrations/scrobbling"
+        ))
         .send()
         .await
         .unwrap();
@@ -8116,7 +8122,9 @@ async fn test_scrobbling_integrations_endpoints() {
 
     // 2. Set empty ListenBrainz token should fail validation
     let empty_lb = client
-        .post(format!("http://127.0.0.1:{port}/api/v1/integrations/listenbrainz"))
+        .post(format!(
+            "http://127.0.0.1:{port}/api/v1/integrations/listenbrainz"
+        ))
         .json(&serde_json::json!({ "token": "" }))
         .send()
         .await
@@ -8125,11 +8133,12 @@ async fn test_scrobbling_integrations_endpoints() {
 
     // 3. Set valid format Last.fm session token succeeds
     let set_lastfm = client
-        .post(format!("http://127.0.0.1:{port}/api/v1/integrations/lastfm"))
+        .post(format!(
+            "http://127.0.0.1:{port}/api/v1/integrations/lastfm"
+        ))
         .json(&serde_json::json!({ "token": "valid_session_token_123" }))
         .send()
         .await
         .unwrap();
     assert_eq!(set_lastfm.status(), 200);
 }
-

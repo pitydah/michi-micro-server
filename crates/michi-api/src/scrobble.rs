@@ -222,7 +222,7 @@ pub fn calculate_lastfm_signature(params: &[(&str, &str)], secret: &str) -> Stri
     sig_base.push_str(secret);
 
     let digest = md5::compute(sig_base.as_bytes());
-    format!("{:x}", digest)
+    format!("{digest:x}")
 }
 
 async fn submit_listenbrainz(
@@ -291,8 +291,8 @@ async fn submit_lastfm(db: &sqlx::SqlitePool, token: &str, track_id: &Uuid, list
     let title = track.title.unwrap_or_else(|| "Unknown Track".to_string());
     let album = track.album.unwrap_or_default();
 
-    let api_key = std::env::var("MICHI_LASTFM_API_KEY")
-        .unwrap_or_else(|_| "michi_lastfm_proxy".to_string());
+    let api_key =
+        std::env::var("MICHI_LASTFM_API_KEY").unwrap_or_else(|_| "michi_lastfm_proxy".to_string());
     let shared_secret = std::env::var("MICHI_LASTFM_SHARED_SECRET").unwrap_or_default();
 
     let listened_at_str = listened_at.to_string();
@@ -315,17 +315,15 @@ async fn submit_lastfm(db: &sqlx::SqlitePool, token: &str, track_id: &Uuid, list
 
     let client = reqwest::Client::new();
     let url = lastfm_api_base_url();
-    match client
-        .post(&url)
-        .form(&params_vec)
-        .send()
-        .await
-    {
+    match client.post(&url).form(&params_vec).send().await {
         Ok(resp) => {
             if resp.status().is_success() {
                 let body_str = resp.text().await.unwrap_or_default();
                 if body_str.contains("\"error\"") {
-                    tracing::warn!("last.fm scrobble response contained error payload: {}", body_str);
+                    tracing::warn!(
+                        "last.fm scrobble response contained error payload: {}",
+                        body_str
+                    );
                 } else {
                     tracing::info!("last.fm scrobble submitted for track {}", track_id);
                 }
@@ -417,7 +415,10 @@ pub async fn set_listenbrainz_handler(
     }
 
     // Persist token in config.json
-    let mut cfg = state.config.read_file_config().unwrap_or_else(|| state.config.clone());
+    let mut cfg = state
+        .config
+        .read_file_config()
+        .unwrap_or_else(|| state.config.clone());
     cfg.listenbrainz_token = Some(trimmed.to_string());
     cfg.save_to_file().map_err(|e| {
         (
@@ -455,7 +456,10 @@ pub async fn set_lastfm_handler(
     }
 
     // Persist token in config.json
-    let mut cfg = state.config.read_file_config().unwrap_or_else(|| state.config.clone());
+    let mut cfg = state
+        .config
+        .read_file_config()
+        .unwrap_or_else(|| state.config.clone());
     cfg.lastfm_token = Some(trimmed.to_string());
     cfg.save_to_file().map_err(|e| {
         (
@@ -475,7 +479,13 @@ pub async fn set_lastfm_handler(
 pub fn scrobble_router() -> axum::Router<AppState> {
     use axum::routing::{get, post};
     axum::Router::new()
-        .route("/api/v1/integrations/scrobbling", get(get_scrobble_status_handler))
-        .route("/api/v1/integrations/listenbrainz", post(set_listenbrainz_handler))
+        .route(
+            "/api/v1/integrations/scrobbling",
+            get(get_scrobble_status_handler),
+        )
+        .route(
+            "/api/v1/integrations/listenbrainz",
+            post(set_listenbrainz_handler),
+        )
         .route("/api/v1/integrations/lastfm", post(set_lastfm_handler))
 }

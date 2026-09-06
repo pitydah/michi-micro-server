@@ -81,6 +81,12 @@
       "accepted_evidence_classes": ["INTEGRATION_REAL"]
     },
     {
+      "id": "web-ui-action-contract",
+      "description": "Verificación de contratos y ausencia de rutas heredadas prohibidas en WebUI",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["STATIC_ANALYSIS"]
+    },
+    {
       "id": "three-way-ecosystem",
       "description": "Integración tridireccional Mobile -> Micro -> Stream",
       "required_for": ["rc", "ga"],
