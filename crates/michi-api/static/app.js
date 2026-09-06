@@ -239,6 +239,7 @@ const MichiAPI = {
 
   // Ecosystem & Link
   linkDevices() { return this.request('/api/v1/link/devices'); },
+  linkSelfTest() { return this.request('/api/v1/link/self-test', { timeout: 30000 }); },
   revokeLinkDevice(device_id) {
     return this.request('/api/v1/devices/revoke', {
       method: 'POST',
@@ -1898,15 +1899,17 @@ async function testMichiLink() {
   const btn = $('#page-michilink button[onclick="testMichiLink()"]');
   if (btn) { btn.disabled = true; btn.textContent = 'Testing...'; }
   try {
-    const [infoRes, capsRes] = await Promise.allSettled([
+    const [infoRes, capsRes, selfTestRes] = await Promise.allSettled([
       MichiAPI.serverInfo(),
       MichiAPI.capabilities(),
+      MichiAPI.linkSelfTest(),
     ]);
 
     const infoOk = infoRes.status === 'fulfilled' && infoRes.value && !infoRes.value.error;
     const capsOk = capsRes.status === 'fulfilled' && capsRes.value && !capsRes.value.error;
+    const selfTestOk = selfTestRes.status === 'fulfilled' && selfTestRes.value && selfTestRes.value.status !== 'failed';
 
-    if (infoOk && capsOk) {
+    if (infoOk && capsOk && selfTestOk) {
       showToast('Connection verified: CONNECTED / HEALTHY');
       await Promise.allSettled([loadStatus(), loadServerInfo(), loadEcosystemDevices()]);
     } else {
