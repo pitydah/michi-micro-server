@@ -1576,6 +1576,10 @@ fn v1_link_routes() -> Router<AppState> {
             post(routes::v1::playback::handoff_handler),
         )
         .route(
+            "/api/v1/playback/record",
+            post(routes::v1::playback::record_play_handler),
+        )
+        .route(
             "/api/v1/sessions/active",
             get(routes::v1::sessions::active_streams_handler),
         )

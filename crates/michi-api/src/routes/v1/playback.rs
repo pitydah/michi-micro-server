@@ -15,6 +15,7 @@ use crate::AppState;
 
 pub use get_playback_session_handler as playback_session_get_handler;
 pub use restore_playback_state_handler as playback_session_restore_handler;
+pub use crate::scrobble::record_play_handler;
 
 fn v1_error_code(
     status: StatusCode,
