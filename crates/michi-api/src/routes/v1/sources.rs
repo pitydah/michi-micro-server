@@ -182,7 +182,7 @@ pub async fn update_episode_handler(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateEpisodeBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    michi_db::update_episode_progress(
+    let updated = michi_db::update_episode_progress(
         &state.db,
         &id,
         body.position_ms.unwrap_or(0),
@@ -196,6 +196,13 @@ pub async fn update_episode_handler(
             &e.to_string(),
         )
     })?;
+    if !updated {
+        return Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "episode not found",
+        ));
+    }
     Ok(Json(serde_json::json!({ "status": "updated" })))
 }
 

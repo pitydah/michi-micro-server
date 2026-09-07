@@ -105,29 +105,30 @@ class TestPlaybackAuthorityContract:
         assert "state" in body, f"'state' field missing: {body}"
         assert body["state"] in ("idle", "playing", "paused", "stopped", "error", "loading")
 
-    def test_server_queue_returns_queue_key(self):
-        """GET /api/v1/queue must return { queue: [...] } — server authority."""
+    def test_server_queue_returns_items_array(self):
+        """GET /api/v1/queue must return { items: [...], queue_id: ..., items_count: ... } — server authority."""
         opener, _ = _authenticated_opener()
         status, body = _get(opener, "/api/v1/queue")
         assert status == 200
-        assert "queue" in body, f"'queue' key missing: {body}"
-        assert isinstance(body["queue"], list)
+        assert "items" in body, f"'items' key missing in response: {body}"
+        assert "items_count" in body, f"'items_count' key missing in response: {body}"
+        assert "queue_id" in body, f"'queue_id' key missing in response: {body}"
+        assert isinstance(body["items"], list)
 
-    def test_server_queue_clear_not_5xx(self):
-        """DELETE /api/v1/queue — server queue clear must not return 5xx."""
+    def test_server_queue_delete_nonexistent_returns_404(self):
+        """DELETE /api/v1/queue/:queue_id for unknown queue returns 404, validating routing."""
         opener, _ = _authenticated_opener()
-        data = json.dumps({}).encode()
+        fake_qid = str(uuid.uuid4())
         req = urllib.request.Request(
-            f"{SERVER_URL}/api/v1/queue",
-            data=data,
+            f"{SERVER_URL}/api/v1/queue/{fake_qid}",
             headers={"Content-Type": "application/json"},
             method="DELETE",
         )
         try:
             with opener.open(req, timeout=5) as r:
-                assert r.status in (200, 204), f"queue clear returned {r.status}"
+                assert r.status == 404
         except urllib.error.HTTPError as e:
-            pytest.fail(f"DELETE /api/v1/queue failed: {e.code} {e.reason}")
+            assert e.code == 404, f"Expected 404 for unknown queue, got {e.code}"
 
 
 # ── Listen history & threshold ─────────────────────────────────────────────────
@@ -155,9 +156,9 @@ class TestListenHistoryContract:
             assert body.get("status") in ("recorded", "ok", "duplicate_skipped"), body
 
     def test_play_history_returns_list(self):
-        """GET /api/v1/playback/history must return an array (or object with list)."""
+        """GET /api/v1/history must return an object with a history list."""
         opener, _ = _authenticated_opener()
-        status, body = _get(opener, "/api/v1/playback/history")
+        status, body = _get(opener, "/api/v1/history")
         assert status == 200
         if isinstance(body, list):
             entries = body
@@ -204,7 +205,7 @@ class TestPodcastEpisodeProgressContract:
     """
 
     def test_update_episode_endpoint_registered(self):
-        """PUT /api/v1/sources/episodes/<id> must be registered (404 for unknown, never 405)."""
+        """PUT /api/v1/sources/episodes/<id> must be registered (strictly 404 for unknown, never 405)."""
         opener, _ = _authenticated_opener()
         episode_id = str(uuid.uuid4())
         data = json.dumps({"position_ms": 42_000, "played": False}).encode()
@@ -216,13 +217,77 @@ class TestPodcastEpisodeProgressContract:
         )
         try:
             with opener.open(req, timeout=5) as r:
-                assert r.status in (200, 204), f"Unexpected success code: {r.status}"
+                pytest.fail(f"Expected 404 for unknown episode, got {r.status}")
         except urllib.error.HTTPError as e:
             assert e.code != 405, (
                 "PUT /api/v1/sources/episodes/:id returned 405 Method Not Allowed — "
                 "endpoint is missing. Phase 4 fix is not applied."
             )
-            assert e.code in (400, 404), f"Unexpected error code: {e.code}"
+            assert e.code == 404, f"Expected 404 for nonexistent episode, got {e.code}"
+
+    def test_update_episode_progress_persists_when_episode_exists(self):
+        """If a podcast source/episode exists, PUT persists position_ms and played state."""
+        opener, _ = _authenticated_opener()
+        # Query existing sources
+        req = urllib.request.Request(f"{SERVER_URL}/api/v1/sources")
+        try:
+            with opener.open(req, timeout=5) as r:
+                data = json.loads(r.read())
+                sources = data.get("sources", [])
+        except Exception:
+            sources = []
+
+        episode = None
+        source_id = None
+        for s in sources:
+            sid = s.get("id")
+            if not sid:
+                continue
+            try:
+                with opener.open(urllib.request.Request(f"{SERVER_URL}/api/v1/sources/{sid}/episodes"), timeout=5) as er:
+                    ep_data = json.loads(er.read())
+                    episodes = ep_data.get("episodes", [])
+                    if episodes:
+                        episode = episodes[0]
+                        source_id = sid
+                        break
+            except Exception:
+                continue
+
+        if not episode:
+            # If no episodes in current live DB, verify endpoint rejects malformed payload with 400/422
+            req_bad = urllib.request.Request(
+                f"{SERVER_URL}/api/v1/sources/episodes/{uuid.uuid4()}",
+                data=b"invalid-json",
+                headers={"Content-Type": "application/json"},
+                method="PUT",
+            )
+            try:
+                with opener.open(req_bad, timeout=5) as r:
+                    pytest.fail(f"Expected 400/422 for invalid JSON, got {r.status}")
+            except urllib.error.HTTPError as err:
+                assert err.code in (400, 422), f"Expected 400 or 422, got {err.code}"
+            return
+
+        ep_id = episode["id"]
+        target_pos = 42_000
+        data = json.dumps({"position_ms": target_pos, "played": False}).encode()
+        put_req = urllib.request.Request(
+            f"{SERVER_URL}/api/v1/sources/episodes/{ep_id}",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="PUT",
+        )
+        with opener.open(put_req, timeout=5) as r:
+            assert r.status in (200, 204)
+
+        # Verify state through GET /api/v1/sources/:source_id/episodes
+        with opener.open(urllib.request.Request(f"{SERVER_URL}/api/v1/sources/{source_id}/episodes"), timeout=5) as r:
+            verified_data = json.loads(r.read())
+            verified_ep = next((e for e in verified_data.get("episodes", []) if e["id"] == ep_id), None)
+            assert verified_ep is not None, f"Episode {ep_id} missing in source {source_id}"
+            assert verified_ep.get("position_ms") == target_pos, f"Expected position_ms {target_pos}, got {verified_ep.get('position_ms')}"
+            assert verified_ep.get("played") is False, f"Expected played False, got {verified_ep.get('played')}"
 
     def test_legacy_episode_path_not_routed(self):
         """GET /api/v1/episodes/:id (legacy path) must return 404."""
@@ -258,19 +323,16 @@ class TestReceiverDiscoveryContract:
         assert isinstance(body["receivers"], list)
 
     def test_discover_endpoint_uses_receivers_key(self):
-        """GET /api/v1/receivers/discover must return { receivers: [...] }."""
+        """POST /api/v1/devices/discover must return { receivers: [...] } without skipping."""
         opener, _ = _authenticated_opener()
-        try:
-            status, body = _get(opener, "/api/v1/receivers/discover", timeout=8)
-        except urllib.error.HTTPError as e:
-            pytest.skip(f"Discovery endpoint unavailable: {e.code}")
+        status, body = _post(opener, "/api/v1/devices/discover", {}, timeout=10)
         assert status == 200, f"Unexpected status: {status}"
         assert "receivers" in body, (
             f"Discovery response missing 'receivers' key — got: {list(body.keys())}. "
-            "WebUI discoverDevices() will silently render no results."
+            "WebUI discoverDevices() requires 'receivers' array."
         )
-        assert "devices" not in body, "Discovery response uses deprecated 'devices' key."
-        assert isinstance(body["receivers"], list)
+        assert "devices" not in body, "Discovery response must not use deprecated 'devices' key."
+        assert isinstance(body["receivers"], list), "'receivers' must be an array"
 
 
 # ── Remote sync network policy enforcement ────────────────────────────────────

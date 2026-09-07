@@ -250,7 +250,8 @@
                 </div>
             </div>
             <div class="panel">
-                <button class="btn btn-primary" onclick="testMichiLink()">Test Connection</button>
+                <button class="btn btn-primary" onclick="testMichiLink()">Run Michi Link Self-Test</button>
+                <div id="michilink-self-test-results" class="panel-result" style="margin-top:10px"></div>
             </div>
             <div class="panel">
                 <div class="panel-header">Ecosystem</div>
@@ -595,10 +596,10 @@
                     <div class="panel-row"><span class="panel-label">CORS Origin</span><span class="panel-mono" id="settings-cors" style="flex:1">--</span></div>
                     <div class="panel-row"><span class="panel-label">Auth</span><span id="settings-auth" class="badge disabled">Disabled</span></div>
                     <div class="panel-row">
-                        <span class="panel-label">Dev Mode</span>
+                        <span class="panel-label">Development CORS</span>
                         <select id="settings-dev-mode-select" class="panel-input" style="max-width:200px" onchange="saveSetting('dev_mode', this.value === 'true')">
-                            <option value="false">Off (Production Security)</option>
-                            <option value="true">On (Development Bypass)</option>
+                            <option value="false">Restricted (Production Security)</option>
+                            <option value="true">Permissive (Development CORS)</option>
                         </select>
                     </div>
                     <div class="panel-row">

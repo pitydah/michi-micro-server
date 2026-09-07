@@ -21,10 +21,12 @@ BANNED_LEGACY_PATTERNS = [
     r"/api/playback/record",
 ]
 
-# Allowlist for best-effort optional cleanup catches (e.g. audio pause on teardown)
+# Allowlist for best-effort optional cleanup catches (e.g. audio pause on teardown, serviceWorker registration)
 ALLOWED_EMPTY_CATCHES = [
     "audio.pause",
     "Audio pause on teardown",
+    "sw.js",
+    "serviceWorker",
 ]
 
 def load_manifest():
@@ -83,9 +85,11 @@ def check_empty_catches(js):
     empty_catch_pattern = re.compile(r'\.catch\s*\(\s*(?:function\s*\([^)]*\)\s*\{\s*\}|\([^)]*\)\s*=>\s*\{\s*\}|\(\)\s*=>\s*\{\s*\})\s*\)')
     matches = empty_catch_pattern.finditer(js)
     for m in matches:
+        snippet = js[max(0, m.start()-30):min(len(js), m.end()+30)].replace("\n", " ")
+        if any(allowed in snippet for allowed in ALLOWED_EMPTY_CATCHES):
+            continue
         # Get line number
         line_num = js[:m.start()].count("\n") + 1
-        snippet = js[max(0, m.start()-30):min(len(js), m.end()+30)].replace("\n", " ")
         violations.append(f"Line {line_num}: Unhandled silent catch: {snippet}")
     return violations
 
@@ -136,12 +140,19 @@ def main():
         for v in banned_violations:
             errors.append(f"BANNED_ENDPOINT: {v}")
 
+    # 3. Check empty / silent catches in JS
+    catch_violations = check_empty_catches(js_data["js"])
+    if catch_violations:
+        for v in catch_violations:
+            errors.append(f"SILENT_CATCH: {v}")
+
     # Output report
     report = {
         "actions_declared": len(actions),
         "actions_valid": len(action_ids) - len(errors),
         "errors": errors,
         "banned_violations": banned_violations,
+        "catch_violations": catch_violations,
     }
 
     report_path = ROOT / "target/webui-contract-report.json"

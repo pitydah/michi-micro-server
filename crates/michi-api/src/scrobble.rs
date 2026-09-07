@@ -73,11 +73,26 @@ pub async fn record_play_handler(
         )
     })?;
 
-    // If ListenBrainz is configured, submit scrobble asynchronously
-    if state.config.scrobble_enabled {
-        if let Some(token) = &state.config.listenbrainz_token {
+    // If scrobbling is configured, submit scrobble asynchronously using live config
+    let disk_cfg = state.config.read_file_config();
+    let scrobble_enabled = disk_cfg
+        .as_ref()
+        .map(|d| d.scrobble_enabled)
+        .unwrap_or(state.config.scrobble_enabled);
+
+    let lb_token = disk_cfg
+        .as_ref()
+        .and_then(|d| d.listenbrainz_token.clone())
+        .or_else(|| state.config.listenbrainz_token.clone());
+
+    let lfm_token = disk_cfg
+        .as_ref()
+        .and_then(|d| d.lastfm_token.clone())
+        .or_else(|| state.config.lastfm_token.clone());
+
+    if scrobble_enabled {
+        if let Some(token) = lb_token {
             let db = state.db.clone();
-            let token = token.clone();
             let play_id = play.id;
             let track_id = input.track_id;
             let played_at = now.timestamp() as u64;
@@ -88,9 +103,8 @@ pub async fn record_play_handler(
         }
 
         // Also submit to Last.fm if configured
-        if let Some(token) = &state.config.lastfm_token {
+        if let Some(token) = lfm_token {
             let db = state.db.clone();
-            let token = token.clone();
             let track_id = input.track_id;
             let played_at = now.timestamp();
 
@@ -291,8 +305,13 @@ async fn submit_lastfm(db: &sqlx::SqlitePool, token: &str, track_id: &Uuid, list
     let title = track.title.unwrap_or_else(|| "Unknown Track".to_string());
     let album = track.album.unwrap_or_default();
 
-    let api_key =
-        std::env::var("MICHI_LASTFM_API_KEY").unwrap_or_else(|_| "michi_lastfm_proxy".to_string());
+    let api_key = match std::env::var("MICHI_LASTFM_API_KEY") {
+        Ok(k) if !k.trim().is_empty() => k,
+        _ => {
+            tracing::warn!("Last.fm scrobble skipped: MICHI_LASTFM_API_KEY is not configured");
+            return;
+        }
+    };
     let shared_secret = std::env::var("MICHI_LASTFM_SHARED_SECRET").unwrap_or_default();
 
     let listened_at_str = listened_at.to_string();
@@ -414,12 +433,13 @@ pub async fn set_listenbrainz_handler(
         ));
     }
 
-    // Persist token in config.json
+    // Persist token in config.json and enable scrobbling
     let mut cfg = state
         .config
         .read_file_config()
         .unwrap_or_else(|| state.config.clone());
     cfg.listenbrainz_token = Some(trimmed.to_string());
+    cfg.scrobble_enabled = true;
     cfg.save_to_file().map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -455,12 +475,13 @@ pub async fn set_lastfm_handler(
         ));
     }
 
-    // Persist token in config.json
+    // Persist token in config.json and enable scrobbling
     let mut cfg = state
         .config
         .read_file_config()
         .unwrap_or_else(|| state.config.clone());
     cfg.lastfm_token = Some(trimmed.to_string());
+    cfg.scrobble_enabled = true;
     cfg.save_to_file().map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,

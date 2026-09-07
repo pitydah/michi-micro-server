@@ -8142,3 +8142,102 @@ async fn test_scrobbling_integrations_endpoints() {
         .unwrap();
     assert_eq!(set_lastfm.status(), 200);
 }
+
+#[tokio::test]
+async fn test_link_self_test_verifies_all_subsystems() {
+    let (port, _pool, _state) = run_test_server_with_state().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/api/v1/link/self-test"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["status"], "passed");
+
+    let checks = json["checks"]
+        .as_array()
+        .expect("checks should be an array");
+    let names: Vec<&str> = checks.iter().filter_map(|c| c["name"].as_str()).collect();
+
+    assert!(names.contains(&"server_identity"));
+    assert!(names.contains(&"pairing_registry"));
+    assert!(names.contains(&"receiver_manager"));
+    assert!(names.contains(&"playback_engine"));
+    assert!(names.contains(&"token_store"));
+    assert!(names.contains(&"database"));
+}
+
+#[tokio::test]
+async fn test_podcast_episode_progress_persistence() {
+    let (port, pool, _state) = run_test_server_with_state().await;
+    let client = reqwest::Client::new();
+
+    let source_id = Uuid::new_v4();
+    let source = michi_core::StreamSource {
+        id: source_id,
+        url: "https://example.com/feed.xml".to_string(),
+        stream_type: "podcast".to_string(),
+        name: Some("Test Podcast".to_string()),
+        genre: None,
+        description: None,
+        logo_url: None,
+        codec: None,
+        enabled: true,
+    };
+    michi_db::add_stream_source(&pool, &source).await.unwrap();
+
+    let ep_id = Uuid::new_v4();
+    let ep = michi_core::PodcastEpisodeDb {
+        id: ep_id,
+        source_id,
+        title: "Episode 1".to_string(),
+        audio_url: "https://example.com/ep1.mp3".to_string(),
+        pub_date: Some("2026-01-01T00:00:00Z".to_string()),
+        duration_secs: Some(3600),
+        played: false,
+        position_ms: 0,
+    };
+    michi_db::upsert_podcast_episode(&pool, &ep).await.unwrap();
+
+    // 1. Unknown episode id should return 404
+    let unknown_id = Uuid::new_v4();
+    let not_found_resp = client
+        .put(format!(
+            "http://127.0.0.1:{port}/api/v1/sources/episodes/{unknown_id}"
+        ))
+        .json(&serde_json::json!({ "position_ms": 10000, "played": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(not_found_resp.status(), 404);
+
+    // 2. Update existing episode position to 42000
+    let update_resp = client
+        .put(format!(
+            "http://127.0.0.1:{port}/api/v1/sources/episodes/{ep_id}"
+        ))
+        .json(&serde_json::json!({ "position_ms": 42000, "played": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(update_resp.status(), 200);
+
+    // 3. Query episodes and assert progress is persisted
+    let get_resp = client
+        .get(format!(
+            "http://127.0.0.1:{port}/api/v1/sources/{source_id}/episodes"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), 200);
+    let get_json: serde_json::Value = get_resp.json().await.unwrap();
+    let episodes = get_json["episodes"].as_array().expect("episodes array");
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(episodes[0]["id"], ep_id.to_string());
+    assert_eq!(episodes[0]["position_ms"], 42000);
+    assert_eq!(episodes[0]["played"], false);
+}

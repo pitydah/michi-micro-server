@@ -1783,7 +1783,7 @@ fn v1_link_routes_with_auth(state: AppState) -> Router<AppState> {
         )
         .route(
             "/api/v1/link/self-test",
-            get(routes::v1::modules::self_test_handler),
+            get(routes::v1::modules::link_self_test_handler),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),

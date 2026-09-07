@@ -81,10 +81,16 @@
       "accepted_evidence_classes": ["INTEGRATION_REAL"]
     },
     {
-      "id": "web-ui-action-contract",
-      "description": "Verificación de contratos y ausencia de rutas heredadas prohibidas en WebUI",
+      "id": "web-ui-action-manifest",
+      "description": "Verificación estática del manifiesto de acciones, contratos y ausencia de catches silenciosos",
       "required_for": ["rc", "ga"],
       "accepted_evidence_classes": ["STATIC_ANALYSIS"]
+    },
+    {
+      "id": "web-ui-action-effects",
+      "description": "Verificación de efectos observables de acciones WebUI en backend real (colas, historial, podcasts)",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["INTEGRATION_REAL"]
     },
     {
       "id": "three-way-ecosystem",

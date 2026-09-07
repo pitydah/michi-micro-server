@@ -887,13 +887,18 @@ async fn migration_031(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
             id TEXT PRIMARY KEY,
             source_id TEXT NOT NULL REFERENCES stream_sources(id),
             title TEXT NOT NULL,
-            audio_url TEXT NOT NULL,
+            audio_url TEXT NOT NULL UNIQUE,
             pub_date TEXT,
             duration_secs INTEGER,
             played INTEGER NOT NULL DEFAULT 0,
             position_ms INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         )",
+    )
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_podcast_episodes_audio_url ON podcast_episodes(audio_url)",
     )
     .execute(&mut **tx)
     .await?;
@@ -5061,7 +5066,11 @@ pub async fn add_stream_source(
     pool: &SqlitePool,
     source: &michi_core::StreamSource,
 ) -> Result<(), DbError> {
-    let id = Uuid::new_v4();
+    let id = if source.id.is_nil() {
+        Uuid::new_v4()
+    } else {
+        source.id
+    };
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         "INSERT INTO stream_sources (id, url, stream_type, name, genre, description, logo_url, codec, enabled, created_at)
@@ -5146,7 +5155,11 @@ pub async fn upsert_podcast_episode(
     pool: &SqlitePool,
     ep: &michi_core::PodcastEpisodeDb,
 ) -> Result<(), DbError> {
-    let id = Uuid::new_v4();
+    let id = if ep.id.is_nil() {
+        Uuid::new_v4()
+    } else {
+        ep.id
+    };
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         "INSERT INTO podcast_episodes (id, source_id, title, audio_url, pub_date, duration_secs, created_at)
@@ -5163,15 +5176,15 @@ pub async fn update_episode_progress(
     id: &Uuid,
     position_ms: u64,
     played: bool,
-) -> Result<(), DbError> {
+) -> Result<bool, DbError> {
     let id_s = id.to_string();
-    sqlx::query("UPDATE podcast_episodes SET position_ms = ?, played = ? WHERE id = ?")
+    let res = sqlx::query("UPDATE podcast_episodes SET position_ms = ?, played = ? WHERE id = ?")
         .bind(position_ms as i64)
         .bind(played as i64)
         .bind(&id_s)
         .execute(pool)
         .await?;
-    Ok(())
+    Ok(res.rows_affected() > 0)
 }
 
 // ── Mount Guard ─────────────────────────────────────────────────

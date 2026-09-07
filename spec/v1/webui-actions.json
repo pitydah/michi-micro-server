@@ -121,7 +121,7 @@
       "authority": "server",
       "endpoint": {
         "method": "POST",
-        "path": "/api/v1/tracks/:id/star"
+        "path": "/api/v1/star/:id"
       },
       "effect": "Track star state toggled in database, star icon updates visually",
       "test": "WEBUI-ACT-LIB-003"
@@ -133,8 +133,8 @@
       "frontend_handler": "rateTrack",
       "authority": "server",
       "endpoint": {
-        "method": "PUT",
-        "path": "/api/v1/tracks/:id/rating"
+        "method": "POST",
+        "path": "/api/v1/rate/:id"
       },
       "effect": "Track rating 0-5 saved to database and rendered in detail modal",
       "test": "WEBUI-ACT-LIB-004"
@@ -327,7 +327,7 @@
       "authority": "server",
       "endpoint": {
         "method": "POST",
-        "path": "/api/v1/link/qr"
+        "path": "/api/v1/pair/qr"
       },
       "effect": "Generates QR claim code and renders SVG QR image",
       "test": "WEBUI-ACT-ML-001"
@@ -352,8 +352,8 @@
       "frontend_handler": "revokeDevice",
       "authority": "server",
       "endpoint": {
-        "method": "DELETE",
-        "path": "/api/v1/devices/:id"
+        "method": "POST",
+        "path": "/api/v1/devices/revoke"
       },
       "effect": "Revokes paired device certificate/token and removes it from active devices list",
       "test": "WEBUI-ACT-ML-003"
@@ -379,7 +379,7 @@
       "authority": "server",
       "endpoint": {
         "method": "POST",
-        "path": "/api/v1/devices/pair/start"
+        "path": "/api/v1/receivers/pair/start"
       },
       "effect": "Starts pairing exchange with selected receiver and prompts for PIN confirmation",
       "test": "WEBUI-ACT-RX-002"
@@ -392,7 +392,7 @@
       "authority": "server",
       "endpoint": {
         "method": "POST",
-        "path": "/api/v1/devices/pair/confirm"
+        "path": "/api/v1/receivers/pair/confirm"
       },
       "effect": "Validates PIN, establishes secure shared credentials, and registers receiver",
       "test": "WEBUI-ACT-RX-003"
@@ -457,7 +457,7 @@
       "authority": "server",
       "endpoint": {
         "method": "POST",
-        "path": "/api/v1/playback/chains"
+        "path": "/api/v1/chains"
       },
       "effect": "Initializes audio processing chain and persists to database",
       "test": "WEBUI-ACT-CH-001"
@@ -470,7 +470,7 @@
       "authority": "server",
       "endpoint": {
         "method": "PUT",
-        "path": "/api/v1/playback/chains/:id/track"
+        "path": "/api/v1/chains/:id"
       },
       "effect": "Associates track with chain",
       "test": "WEBUI-ACT-CH-002"
@@ -483,7 +483,7 @@
       "authority": "server",
       "endpoint": {
         "method": "POST",
-        "path": "/api/v1/playback/chains/:id/links"
+        "path": "/api/v1/chains/:id/links"
       },
       "effect": "Appends filter/sink node to processing chain",
       "test": "WEBUI-ACT-CH-003"
@@ -496,7 +496,7 @@
       "authority": "server",
       "endpoint": {
         "method": "DELETE",
-        "path": "/api/v1/playback/chains/:id/links/:link_id"
+        "path": "/api/v1/chains/:chain_id/links/:link_id"
       },
       "effect": "Removes node from chain pipeline",
       "test": "WEBUI-ACT-CH-004"
@@ -509,7 +509,7 @@
       "authority": "server",
       "endpoint": {
         "method": "POST",
-        "path": "/api/v1/playback/chains/:id/play"
+        "path": "/api/v1/chains/:id/play"
       },
       "effect": "Starts audio streaming through chain topology",
       "test": "WEBUI-ACT-CH-005"
@@ -522,7 +522,7 @@
       "authority": "server",
       "endpoint": {
         "method": "POST",
-        "path": "/api/v1/playback/chains/:id/stop"
+        "path": "/api/v1/chains/:id/stop"
       },
       "effect": "Stops stream flow on chain",
       "test": "WEBUI-ACT-CH-006"
@@ -534,8 +534,8 @@
       "frontend_handler": "setChainVolume",
       "authority": "server",
       "endpoint": {
-        "method": "PUT",
-        "path": "/api/v1/playback/chains/:id/volume"
+        "method": "POST",
+        "path": "/api/v1/chains/:id/volume"
       },
       "effect": "Adjusts output gain on chain sink",
       "test": "WEBUI-ACT-CH-007"
@@ -561,7 +561,7 @@
       "authority": "server",
       "endpoint": {
         "method": "POST",
-        "path": "/api/v1/sync/playlists"
+        "path": "/api/v1/playlists"
       },
       "effect": "Reconciles playlist tracks across sync peers and reports partial or complete status",
       "test": "WEBUI-ACT-SY-002"
@@ -573,8 +573,8 @@
       "frontend_handler": "addSyncPeer",
       "authority": "server",
       "endpoint": {
-        "method": "POST",
-        "path": "/api/v1/sync/peers"
+        "method": "PUT",
+        "path": "/api/v1/settings"
       },
       "effect": "Validates and adds remote sync peer respecting LAN/WAN network policy",
       "test": "WEBUI-ACT-SY-003"
@@ -586,8 +586,8 @@
       "frontend_handler": "removeSyncPeer",
       "authority": "server",
       "endpoint": {
-        "method": "DELETE",
-        "path": "/api/v1/sync/peers/:id"
+        "method": "PUT",
+        "path": "/api/v1/settings"
       },
       "effect": "Removes sync peer and discontinues reconciliation",
       "test": "WEBUI-ACT-SY-004"
@@ -815,8 +815,8 @@
       "frontend_handler": "setWebhook",
       "authority": "server",
       "endpoint": {
-        "method": "PUT",
-        "path": "/api/v1/settings/webhook"
+        "method": "POST",
+        "path": "/api/v1/webhook"
       },
       "effect": "Validates URL scheme and registers webhook URL propagating database errors fail-closed",
       "test": "WEBUI-ACT-WH-001"
@@ -829,7 +829,7 @@
       "authority": "server",
       "endpoint": {
         "method": "POST",
-        "path": "/api/v1/settings/webhook/test"
+        "path": "/api/v1/webhook/test"
       },
       "effect": "Sends test ping event to webhook recipient and reports status",
       "test": "WEBUI-ACT-WH-002"
@@ -842,7 +842,7 @@
       "authority": "server",
       "endpoint": {
         "method": "DELETE",
-        "path": "/api/v1/settings/webhook"
+        "path": "/api/v1/webhook"
       },
       "effect": "Removes webhook configuration from server",
       "test": "WEBUI-ACT-WH-003"
@@ -868,7 +868,7 @@
       "authority": "server",
       "endpoint": {
         "method": "GET",
-        "path": "/api/v1/backup/export"
+        "path": "/api/v1/backup/download"
       },
       "effect": "Downloads encrypted or raw sqlite database backup file",
       "test": "WEBUI-ACT-BK-002"
