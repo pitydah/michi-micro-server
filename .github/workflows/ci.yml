@@ -511,6 +511,16 @@ jobs:
           MICHI_SERVER_URL=http://127.0.0.1:9090 \
           MICHI_ADMIN_USERNAME=admin \
           MICHI_ADMIN_PASSWORD=admin12345 \
+          pytest tests/e2e/test_webui_action_effects.py -v
+
+          MICHI_SERVER_URL=http://127.0.0.1:9090 \
+          MICHI_ADMIN_USERNAME=admin \
+          MICHI_ADMIN_PASSWORD=admin12345 \
+          pytest tests/e2e/test_scrobble_integrations.py -v
+
+          MICHI_SERVER_URL=http://127.0.0.1:9090 \
+          MICHI_ADMIN_USERNAME=admin \
+          MICHI_ADMIN_PASSWORD=admin12345 \
           pytest tests/e2e/test_webui_browser_e2e.py -v
 
           MICHI_SERVER_URL=http://127.0.0.1:9090 \
