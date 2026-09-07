@@ -544,6 +544,41 @@
                         <input type="text" id="settings-sync-name-input" class="panel-input" style="max-width:200px" onchange="saveSetting('sync_name', this.value.trim())">
                     </div>
                 </div>
+                <div class="panel">
+                    <div class="panel-header">ListenBrainz Integration</div>
+                    <div class="panel-row">
+                        <span class="panel-label">Status</span>
+                        <span id="settings-lb-status" class="badge disabled">Not Configured</span>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">User Token</span>
+                        <input type="password" id="settings-lb-token" class="panel-input" placeholder="ListenBrainz user token" autocomplete="off" style="max-width:280px">
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
+                        <button class="btn btn-primary btn-sm" onclick="saveListenBrainzToken()">Connect ListenBrainz</button>
+                    </div>
+                    <div id="settings-lb-result" class="panel-result"></div>
+                </div>
+                <div class="panel">
+                    <div class="panel-header">Last.fm Integration (Beta)</div>
+                    <div class="panel-row">
+                        <span class="panel-label">Status</span>
+                        <span id="settings-lfm-status" class="badge disabled">Not Configured</span>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Session Key</span>
+                        <input type="password" id="settings-lfm-token" class="panel-input" placeholder="32-character session key" autocomplete="off" style="max-width:280px">
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
+                        <button class="btn btn-primary btn-sm" onclick="saveLastFmToken()">Save Last.fm Session</button>
+                    </div>
+                    <div class="panel-row" style="font-size:0.75rem;color:var(--text-muted)">
+                        <span>Requires server MICHI_LASTFM_API_KEY and MICHI_LASTFM_SHARED_SECRET.</span>
+                    </div>
+                    <div id="settings-lfm-result" class="panel-result"></div>
+                </div>
             </div>
 
             <!-- Sync -->

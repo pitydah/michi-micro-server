@@ -432,11 +432,13 @@ pub async fn link_self_test_handler(State(state): State<AppState>) -> Json<serde
         "info": format!("Michi-ID: {}", michi_id),
     }));
 
-    // 2. Pairing registry check
+    // 2. Pairing registry check: real active session query and expired pruning
+    let active_pairings = state.pairing_registry.active_sessions();
+    let _ = state.pairing_registry.cleanup_expired();
     results.push(serde_json::json!({
         "name": "pairing_registry",
         "status": "passed",
-        "info": "v1-lite RAM pairing sessions operational",
+        "info": format!("active pairing sessions: {}", active_pairings),
     }));
 
     // 3. Receiver session manager check
@@ -458,11 +460,20 @@ pub async fn link_self_test_handler(State(state): State<AppState>) -> Json<serde
         "info": if engine_ok { "autonomous playback engine online" } else { "engine unreachable" },
     }));
 
-    // 5. Token store check
+    // 5. Token store check: real validation probe against token store
+    let probe_res = state
+        .token_store
+        .validate("__michi_link_probe__", michi_link::TokenType::Device)
+        .await;
+    let token_store_ok = matches!(probe_res, Err(michi_link::LinkError::InvalidToken));
     results.push(serde_json::json!({
         "name": "token_store",
-        "status": "passed",
-        "info": "link token store active",
+        "status": if token_store_ok { "passed" } else { "failed" },
+        "info": if token_store_ok {
+            "token store validation operational"
+        } else {
+            "token store probe failed"
+        },
     }));
 
     // 6. Database readiness check

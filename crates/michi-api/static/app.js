@@ -230,10 +230,25 @@ const MichiAPI = {
   historyStats() { return this.request('/api/v1/history/stats'); },
   exportHistory() { return this.request('/api/v1/history/export', { timeout: 20000 }); },
   clearHistory() { return this.request('/api/v1/history', { method: 'DELETE' }); },
-  recordPlay(track_id, duration_ms) {
+  recordPlay(track_id, duration_ms, client_event_id) {
+    const body = { track_id, duration_ms: duration_ms || 0 };
+    if (client_event_id) body.client_event_id = client_event_id;
     return this.request('/api/v1/playback/record', {
       method: 'POST',
-      body: { track_id, duration_ms: duration_ms || 0 }
+      body: body
+    });
+  },
+  getScrobbleStatus() { return this.request('/api/v1/integrations/scrobbling'); },
+  setListenBrainz(token) {
+    return this.request('/api/v1/integrations/listenbrainz', {
+      method: 'POST',
+      body: { token }
+    });
+  },
+  setLastFm(token) {
+    return this.request('/api/v1/integrations/lastfm', {
+      method: 'POST',
+      body: { token }
     });
   },
 
@@ -1434,13 +1449,16 @@ const BrowserPlayback = {
   repeat: 'off', // 'off' | 'all' | 'one'
   currentTrack: null,
   listenAccumulatorMs: 0,
-  lastPositionMs: 0,
   scrobbledForCurrentTrack: false,
+  scrobbleInFlight: false,
+  currentEventId: null,
 
   resetScrobbleState() {
     this.listenAccumulatorMs = 0;
     this.lastPositionMs = 0;
     this.scrobbledForCurrentTrack = false;
+    this.scrobbleInFlight = false;
+    this.currentEventId = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : null;
   },
 
   onTimeUpdate(currentMs) {
@@ -1453,15 +1471,21 @@ const BrowserPlayback = {
     }
     this.lastPositionMs = currentMs;
 
-    if (!this.scrobbledForCurrentTrack && this.currentTrack.duration_ms) {
+    if (!this.scrobbledForCurrentTrack && !this.scrobbleInFlight && this.currentTrack.duration_ms) {
       const qualifyingThreshold = Math.min(Math.floor(this.currentTrack.duration_ms / 2), 240000);
       if (this.listenAccumulatorMs >= qualifyingThreshold) {
+        this.scrobbleInFlight = true;
         const trackId = this.currentTrack.id;
         const duration = Math.floor(this.listenAccumulatorMs);
+        const eventId = this.currentEventId;
         const self = this;
-        MichiAPI.recordPlay(trackId, duration).then(function() {
-          self.scrobbledForCurrentTrack = true;
+        MichiAPI.recordPlay(trackId, duration, eventId).then(function(res) {
+          self.scrobbleInFlight = false;
+          if (res && res.status !== 'threshold_not_reached') {
+            self.scrobbledForCurrentTrack = true;
+          }
         }).catch(function(err) {
+          self.scrobbleInFlight = false;
           console.warn('Failed to record qualifying play:', err);
         });
       }
@@ -1531,15 +1555,21 @@ const BrowserPlayback = {
   },
 
   onTrackEnded() {
-    if (this.currentTrack && !this.scrobbledForCurrentTrack && this.currentTrack.duration_ms) {
+    if (this.currentTrack && !this.scrobbledForCurrentTrack && !this.scrobbleInFlight && this.currentTrack.duration_ms) {
       const qualifyingThreshold = Math.min(Math.floor(this.currentTrack.duration_ms / 2), 240000);
       if (this.listenAccumulatorMs >= qualifyingThreshold) {
+        this.scrobbleInFlight = true;
         const trackId = this.currentTrack.id;
         const duration = Math.floor(this.listenAccumulatorMs);
+        const eventId = this.currentEventId;
         const self = this;
-        MichiAPI.recordPlay(trackId, duration).then(function() {
-          self.scrobbledForCurrentTrack = true;
+        MichiAPI.recordPlay(trackId, duration, eventId).then(function(res) {
+          self.scrobbleInFlight = false;
+          if (res && res.status !== 'threshold_not_reached') {
+            self.scrobbledForCurrentTrack = true;
+          }
         }).catch(function(err) {
+          self.scrobbleInFlight = false;
           console.warn('Failed to record play on track end:', err);
         });
       }
@@ -3143,6 +3173,7 @@ async function loadSettings() {
     if ($('#settings-auth')) $('#settings-auth').innerHTML = s.auth_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
     if ($('#settings-dev-mode')) $('#settings-dev-mode').innerHTML = s.dev_mode ? '<span class="badge stable">On</span>' : '<span class="badge disabled">Off</span>';
     if ($('#settings-scrobble')) $('#settings-scrobble').innerHTML = s.scrobble_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
+    updateScrobbleStatusUI();
 
     var scanWorkers = s.effective_scan_workers !== undefined ? s.effective_scan_workers : (s.resource_profile === 'eco' ? 1 : (s.resource_profile === 'performance' ? 4 : 2));
     var maxTc = s.effective_transcode_workers !== undefined ? s.effective_transcode_workers : (s.resource_profile === 'eco' ? 0 : (s.resource_profile === 'performance' ? 4 : 2));
@@ -3224,6 +3255,88 @@ function applySidebarPreference(collapsed) {
 
 window.applyCoverArtPreference = applyCoverArtPreference;
 window.applySidebarPreference = applySidebarPreference;
+
+async function updateScrobbleStatusUI() {
+  try {
+    var status = await MichiAPI.getScrobbleStatus();
+    var lbEl = $('#settings-lb-status');
+    if (lbEl) {
+      if (status.listenbrainz_ready) {
+        lbEl.className = 'badge stable';
+        lbEl.textContent = 'Ready';
+      } else if (status.listenbrainz_configured) {
+        lbEl.className = 'badge warning';
+        lbEl.textContent = 'Configured (Scrobbling Disabled)';
+      } else {
+        lbEl.className = 'badge disabled';
+        lbEl.textContent = 'Not Configured';
+      }
+    }
+    var lfmEl = $('#settings-lfm-status');
+    if (lfmEl) {
+      if (status.lastfm_ready) {
+        lfmEl.className = 'badge stable';
+        lfmEl.textContent = 'Ready (Beta)';
+      } else if (status.lastfm_configured) {
+        lfmEl.className = 'badge warning';
+        lfmEl.textContent = 'Configured (Missing Server Secret or Scrobbling Disabled)';
+      } else {
+        lfmEl.className = 'badge disabled';
+        lfmEl.textContent = 'Not Configured';
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to load scrobble status:', err);
+  }
+}
+
+async function saveListenBrainzToken() {
+  var input = $('#settings-lb-token');
+  var resultEl = $('#settings-lb-result');
+  if (!input || !resultEl) return;
+  var token = input.value.trim();
+  if (!token) {
+    showToast('Please enter a ListenBrainz token', true);
+    return;
+  }
+  resultEl.textContent = 'Validating token with ListenBrainz...';
+  try {
+    await MichiAPI.setListenBrainz(token);
+    input.value = '';
+    resultEl.textContent = 'Token saved and validated successfully!';
+    showToast('ListenBrainz configured successfully', false);
+    updateScrobbleStatusUI();
+  } catch (err) {
+    resultEl.textContent = 'Validation error: ' + (err.message || err);
+    showToast('ListenBrainz validation failed: ' + (err.message || err), true);
+  }
+}
+
+async function saveLastFmToken() {
+  var input = $('#settings-lfm-token');
+  var resultEl = $('#settings-lfm-result');
+  if (!input || !resultEl) return;
+  var token = input.value.trim();
+  if (!token) {
+    showToast('Please enter a Last.fm session key', true);
+    return;
+  }
+  resultEl.textContent = 'Saving session key...';
+  try {
+    await MichiAPI.setLastFm(token);
+    input.value = '';
+    resultEl.textContent = 'Last.fm session key saved successfully!';
+    showToast('Last.fm configured (Beta)', false);
+    updateScrobbleStatusUI();
+  } catch (err) {
+    resultEl.textContent = 'Error: ' + (err.message || err);
+    showToast('Failed to save Last.fm key: ' + (err.message || err), true);
+  }
+}
+
+window.updateScrobbleStatusUI = updateScrobbleStatusUI;
+window.saveListenBrainzToken = saveListenBrainzToken;
+window.saveLastFmToken = saveLastFmToken;
 
 function renderRestartBanner(fieldsStr) {
   var banner = $('#settings-restart-banner');

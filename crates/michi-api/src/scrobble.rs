@@ -14,12 +14,14 @@ use crate::AppState;
 pub struct RecordPlayRequest {
     pub track_id: Uuid,
     pub duration_ms: Option<u64>,
+    pub client_event_id: Option<Uuid>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct RecordPlayResponse {
     pub status: String,
-    pub id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -52,6 +54,48 @@ pub async fn record_play_handler(
     headers: HeaderMap,
     Json(input): Json<RecordPlayRequest>,
 ) -> Result<Json<RecordPlayResponse>, (StatusCode, Json<crate::library::ErrorResponse>)> {
+    // 1. Deduplication check via client_event_id and IdempotencyStore
+    if let Some(event_id) = input.client_event_id {
+        let dedupe_key = format!("play:{event_id}");
+        if let Some(cached) = state.security_state.idempotency_store.get(&dedupe_key) {
+            if let Ok(resp) = serde_json::from_value::<RecordPlayResponse>(cached) {
+                return Ok(Json(resp));
+            }
+        }
+    }
+
+    // 2. Authoritative qualifying listen threshold check
+    // Threshold is min(duration / 2, 4 min); fallback 30s if duration unknown
+    let track = michi_db::get_track(&state.db, &input.track_id)
+        .await
+        .ok()
+        .flatten();
+    let track_duration_ms = track.as_ref().and_then(|t| t.duration_ms);
+    let threshold = match track_duration_ms {
+        Some(d) if d > 0 => (d / 2).min(240_000),
+        _ => 30_000,
+    };
+
+    let listened_ms = input.duration_ms.unwrap_or(0);
+    if listened_ms < threshold {
+        let resp = RecordPlayResponse {
+            status: "threshold_not_reached".to_string(),
+            id: None,
+        };
+        if let Some(event_id) = input.client_event_id {
+            let dedupe_key = format!("play:{event_id}");
+            if let Ok(val) = serde_json::to_value(&resp) {
+                state.security_state.idempotency_store.set(
+                    &dedupe_key,
+                    &val,
+                    "POST",
+                    "/api/v1/playback/record",
+                );
+            }
+        }
+        return Ok(Json(resp));
+    }
+
     let now = Utc::now();
     let user_id = state.get_user_id(&headers).await;
 
@@ -114,10 +158,23 @@ pub async fn record_play_handler(
         }
     }
 
-    Ok(Json(RecordPlayResponse {
+    let resp = RecordPlayResponse {
         status: "ok".to_string(),
-        id: play.id,
-    }))
+        id: Some(play.id),
+    };
+    if let Some(event_id) = input.client_event_id {
+        let dedupe_key = format!("play:{event_id}");
+        if let Ok(val) = serde_json::to_value(&resp) {
+            state.security_state.idempotency_store.set(
+                &dedupe_key,
+                &val,
+                "POST",
+                "/api/v1/playback/record",
+            );
+        }
+    }
+
+    Ok(Json(resp))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -312,7 +369,15 @@ async fn submit_lastfm(db: &sqlx::SqlitePool, token: &str, track_id: &Uuid, list
             return;
         }
     };
-    let shared_secret = std::env::var("MICHI_LASTFM_SHARED_SECRET").unwrap_or_default();
+    let shared_secret = match std::env::var("MICHI_LASTFM_SHARED_SECRET") {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => {
+            tracing::warn!(
+                "Last.fm scrobble skipped: MICHI_LASTFM_SHARED_SECRET is not configured"
+            );
+            return;
+        }
+    };
 
     let listened_at_str = listened_at.to_string();
     let mut params_vec: Vec<(&str, &str)> = vec![
@@ -325,11 +390,8 @@ async fn submit_lastfm(db: &sqlx::SqlitePool, token: &str, track_id: &Uuid, list
         ("timestamp", &listened_at_str),
     ];
 
-    let api_sig;
-    if !shared_secret.is_empty() {
-        api_sig = calculate_lastfm_signature(&params_vec, &shared_secret);
-        params_vec.push(("api_sig", &api_sig));
-    }
+    let api_sig = calculate_lastfm_signature(&params_vec, &shared_secret);
+    params_vec.push(("api_sig", &api_sig));
     params_vec.push(("format", "json"));
 
     let client = reqwest::Client::new();
@@ -366,7 +428,10 @@ async fn submit_lastfm(db: &sqlx::SqlitePool, token: &str, track_id: &Uuid, list
 pub struct ScrobbleStatusResponse {
     pub scrobble_enabled: bool,
     pub listenbrainz_configured: bool,
+    pub listenbrainz_ready: bool,
     pub lastfm_configured: bool,
+    pub lastfm_ready: bool,
+    pub lastfm_auth_type: String,
 }
 
 pub async fn get_scrobble_status_handler(
@@ -382,16 +447,28 @@ pub async fn get_scrobble_status_handler(
         .and_then(|d| d.listenbrainz_token.as_ref())
         .or(state.config.listenbrainz_token.as_ref())
         .is_some();
+    let listenbrainz_ready = scrobble_enabled && listenbrainz_configured;
+
     let lastfm_configured = disk_cfg
         .as_ref()
         .and_then(|d| d.lastfm_token.as_ref())
         .or(state.config.lastfm_token.as_ref())
         .is_some();
+    let has_lfm_key = std::env::var("MICHI_LASTFM_API_KEY")
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    let has_lfm_secret = std::env::var("MICHI_LASTFM_SHARED_SECRET")
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let lastfm_ready = scrobble_enabled && lastfm_configured && has_lfm_key && has_lfm_secret;
 
     Json(ScrobbleStatusResponse {
         scrobble_enabled,
         listenbrainz_configured,
+        listenbrainz_ready,
         lastfm_configured,
+        lastfm_ready,
+        lastfm_auth_type: "manual_session_key_beta".to_string(),
     })
 }
 

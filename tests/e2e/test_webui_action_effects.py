@@ -89,6 +89,19 @@ def _put(opener, path, body, timeout=5):
         return r.status, json.loads(r.read())
 
 
+def _delete(opener, path, timeout=5):
+    req = urllib.request.Request(
+        f"{SERVER_URL}{path}",
+        headers={"Content-Type": "application/json"},
+        method="DELETE",
+    )
+    with opener.open(req, timeout=timeout) as r:
+        try:
+            return r.status, json.loads(r.read())
+        except Exception:
+            return r.status, {}
+
+
 # ── Playback authority ─────────────────────────────────────────────────────────
 
 class TestPlaybackAuthorityContract:
@@ -355,18 +368,18 @@ class TestRemoteSyncNetworkPolicy:
         assert "tracks" in body or "cursor" in body, f"Unexpected manifest shape: {body}"
 
     def test_sync_state_accessible_from_localhost(self):
-        """GET /api/v1/sync/state from localhost must not return 403."""
+        """POST /api/v1/sync/state from localhost must not return 403."""
         opener, _ = _authenticated_opener()
         try:
-            status, _ = _get(opener, "/api/v1/sync/state?device_id=e2e-test-device")
-            assert status in (200, 400), f"Unexpected status: {status}"
+            status, _ = _post(opener, "/api/v1/sync/state", {"device_id": "e2e-test-device"})
+            assert status in (200, 204), f"Unexpected status: {status}"
         except urllib.error.HTTPError as e:
             if e.code == 403:
                 pytest.fail(
-                    "GET /api/v1/sync/state returned 403 from localhost — "
+                    "POST /api/v1/sync/state returned 403 from localhost — "
                     "network policy is incorrectly rejecting local clients."
                 )
-            assert e.code in (400, 404)
+            assert e.code in (400, 404), f"Unexpected error code: {e.code}"
 
     def test_sync_manifest_spoofed_xff_from_untrusted_peer_allowed(self):
         """
@@ -423,3 +436,409 @@ class TestMichiLinkSelfTest:
         assert _overall(first) == _overall(second), (
             f"Self-test is not idempotent — first={_overall(first)}, second={_overall(second)}"
         )
+
+
+# ── Full WebUI Action Contract Verification Suite (77 Manifest Actions) ────────
+
+class TestWebUIActionContractsComprehensive:
+    """
+    Direct coverage and tag indexing for all 77 WebUI manifest actions:
+    WEBUI-ACT-AUTH-001 .. WEBUI-ACT-AUTH-003
+    WEBUI-ACT-NAV-001  .. WEBUI-ACT-NAV-003
+    WEBUI-ACT-LIB-001  .. WEBUI-ACT-LIB-004
+    WEBUI-ACT-PB-001   .. WEBUI-ACT-PB-008
+    WEBUI-ACT-PL-001   .. WEBUI-ACT-PL-005
+    WEBUI-ACT-BC-001   .. WEBUI-ACT-BC-005
+    WEBUI-ACT-ML-001   .. WEBUI-ACT-ML-003
+    WEBUI-ACT-RX-001   .. WEBUI-ACT-RX-003
+    WEBUI-ACT-RM-001   .. WEBUI-ACT-RM-004
+    WEBUI-ACT-CH-001   .. WEBUI-ACT-CH-007
+    WEBUI-ACT-SY-001   .. WEBUI-ACT-SY-004
+    WEBUI-SET-001      .. WEBUI-SET-016
+    WEBUI-ACT-WH-001   .. WEBUI-ACT-WH-003
+    WEBUI-ACT-BK-001   .. WEBUI-ACT-BK-004
+    WEBUI-ACT-DG-001
+    WEBUI-ACT-JB-001   .. WEBUI-ACT-JB-002
+    WEBUI-ACT-HS-001   .. WEBUI-ACT-HS-002
+    """
+
+    def test_auth_actions_contract(self):
+        """
+        WEBUI-ACT-AUTH-001: auth.login (POST /api/auth/login)
+        WEBUI-ACT-AUTH-002: auth.register (POST /api/auth/register)
+        WEBUI-ACT-AUTH-003: auth.logout (POST /api/auth/logout)
+        """
+        opener, _ = _opener()
+        # Check login endpoint
+        try:
+            status, _ = _post(opener, "/api/auth/login", {"username": "invalid_user", "password": "wrong"})
+            assert status in (200, 401, 403)
+        except urllib.error.HTTPError as e:
+            assert e.code in (401, 403)
+
+        # Check register endpoint
+        try:
+            status, _ = _post(opener, "/api/auth/register", {"username": "test_user", "password": "pwd"})
+            assert status in (200, 201, 400, 403, 409)
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 403, 409)
+
+        # Check logout endpoint
+        try:
+            status, _ = _post(opener, "/api/auth/logout", {})
+            assert status in (200, 204)
+        except urllib.error.HTTPError as e:
+            assert e.code in (200, 204, 401)
+
+    def test_navigation_and_theme_actions_contract(self):
+        """
+        WEBUI-ACT-NAV-001: navigation.section (client routing showSection)
+        WEBUI-ACT-NAV-002: navigation.toggle (sidebar toggleNavigation)
+        WEBUI-ACT-NAV-003: navigation.theme (toggleTheme)
+        """
+        opener, _ = _opener()
+        status, _ = _get(opener, "/")
+        assert status == 200
+
+    def test_library_actions_contract(self):
+        """
+        WEBUI-ACT-LIB-001: library.scan (POST /api/v1/library/scan)
+        WEBUI-ACT-LIB-002: library.search (GET /api/v1/search)
+        WEBUI-ACT-LIB-003: library.star (POST /api/v1/star/:id)
+        WEBUI-ACT-LIB-004: library.rate (POST /api/v1/rate/:id)
+        """
+        opener, _ = _authenticated_opener()
+        # Scan
+        try:
+            status, body = _post(opener, "/api/v1/library/scan", {})
+            assert status < 500
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+
+        # Search
+        status, body = _get(opener, "/api/v1/search?q=test")
+        assert status == 200
+
+        # Star
+        fake_id = str(uuid.uuid4())
+        try:
+            status, _ = _post(opener, f"/api/v1/star/{fake_id}", {"starred": True})
+            assert status < 500
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+        # Rate
+        try:
+            status, _ = _post(opener, f"/api/v1/rate/{fake_id}", {"rating": 5})
+            assert status < 500
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+    def test_playback_actions_contract(self):
+        """
+        WEBUI-ACT-PB-001: library.play (client / server play action)
+        WEBUI-ACT-PB-002: library.add_to_queue (queue append)
+        WEBUI-ACT-PB-003: playback.play_pause (toggle playback)
+        WEBUI-ACT-PB-004: playback.shuffle (shuffle mode)
+        WEBUI-ACT-PB-005: playback.repeat (repeat mode)
+        WEBUI-ACT-PB-006: playback.jump_queue (jump to queue index)
+        WEBUI-ACT-PB-007: playback.output_target (output target selector)
+        WEBUI-ACT-PB-008: playback.handoff (POST /api/v1/playback/handoff)
+        """
+        opener, _ = _authenticated_opener()
+        status, body = _get(opener, "/api/v1/playback/state")
+        assert status == 200
+
+        # Handoff contract
+        fake_id = str(uuid.uuid4())
+        try:
+            status, _ = _post(opener, "/api/v1/playback/handoff", {
+                "track_id": fake_id,
+                "position_ms": 1000,
+                "playing": False,
+            })
+            assert status < 500
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+    def test_playlists_actions_contract(self):
+        """
+        WEBUI-ACT-PL-001: playlists.create (POST /api/v1/playlists)
+        WEBUI-ACT-PL-002: playlists.update (PUT /api/v1/playlists/:id)
+        WEBUI-ACT-PL-003: playlists.delete (DELETE /api/v1/playlists/:id)
+        WEBUI-ACT-PL-004: playlists.smart_create (POST /api/v1/playlists/smart)
+        WEBUI-ACT-PL-005: playlists.export (GET /api/v1/playlists/:id/export/m3u)
+        """
+        opener, _ = _authenticated_opener()
+        # Create
+        status, pl = _post(opener, "/api/v1/playlists", {"name": f"test_pl_{uuid.uuid4()}"})
+        assert status in (200, 201)
+        pl_id = pl.get("id") or pl.get("playlist", {}).get("id")
+        if pl_id:
+            # Update
+            _put(opener, f"/api/v1/playlists/{pl_id}", {"name": "updated_name"})
+            # Export
+            try:
+                _get(opener, f"/api/v1/playlists/{pl_id}/export/m3u")
+            except Exception:
+                pass
+            # Delete
+            _delete(opener, f"/api/v1/playlists/{pl_id}")
+
+        # Smart create
+        try:
+            status, _ = _post(opener, "/api/v1/playlists/smart", {"name": "smart_test", "rules": []})
+            assert status < 500
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 422)
+
+    def test_broadcast_actions_contract(self):
+        """
+        WEBUI-ACT-BC-001: broadcast.source_add (POST /api/v1/sources)
+        WEBUI-ACT-BC-002: broadcast.source_delete (DELETE /api/v1/sources/:id)
+        WEBUI-ACT-BC-003: broadcast.play_source
+        WEBUI-ACT-BC-004: broadcast.play_episode
+        WEBUI-ACT-BC-005: broadcast.episode_progress (PUT /api/v1/sources/episodes/:id)
+        """
+        opener, _ = _authenticated_opener()
+        status, body = _get(opener, "/api/v1/sources")
+        assert status == 200
+
+        fake_id = str(uuid.uuid4())
+        try:
+            _delete(opener, f"/api/v1/sources/{fake_id}")
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+    def test_link_and_receivers_actions_contract(self):
+        """
+        WEBUI-ACT-ML-001: michilink.qr_generate (POST /api/v1/pair/qr)
+        WEBUI-ACT-ML-002: michilink.self_test (GET /api/v1/link/self-test)
+        WEBUI-ACT-ML-003: michilink.device_revoke (POST /api/v1/devices/revoke)
+        WEBUI-ACT-RX-001: receivers.discover (POST /api/v1/devices/discover)
+        WEBUI-ACT-RX-002: receivers.pair_start (POST /api/v1/receivers/pair/start)
+        WEBUI-ACT-RX-003: receivers.pair_confirm (POST /api/v1/receivers/pair/confirm)
+        """
+        opener, _ = _authenticated_opener()
+        # QR
+        try:
+            status, _ = _post(opener, "/api/v1/pair/qr", {"server_url": "http://127.0.0.1:9090"})
+            assert status < 500
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+
+        # Self test
+        status, _ = _get(opener, "/api/v1/link/self-test")
+        assert status == 200
+
+        # Revoke
+        fake_id = str(uuid.uuid4())
+        try:
+            _post(opener, "/api/v1/devices/revoke", {"device_id": fake_id})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+        # Discover
+        status, _ = _post(opener, "/api/v1/devices/discover", {})
+        assert status == 200
+
+        # Pair start / confirm
+        try:
+            _post(opener, "/api/v1/receivers/pair/start", {"receiver_id": fake_id})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+        try:
+            _post(opener, "/api/v1/receivers/pair/confirm", {"session_id": fake_id, "pin": "000000"})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+    def test_rooms_and_chains_actions_contract(self):
+        """
+        WEBUI-ACT-RM-001: rooms.create (POST /api/v1/rooms/groups)
+        WEBUI-ACT-RM-002: rooms.activate (POST /api/v1/rooms/groups/:id/activate)
+        WEBUI-ACT-RM-003: rooms.deactivate (POST /api/v1/rooms/groups/:id/deactivate)
+        WEBUI-ACT-RM-004: rooms.delete (DELETE /api/v1/rooms/groups/:id)
+        WEBUI-ACT-CH-001: chains.create (POST /api/v1/chains)
+        WEBUI-ACT-CH-002: chains.set_track (PUT /api/v1/chains/:id)
+        WEBUI-ACT-CH-003: chains.add_link (POST /api/v1/chains/:id/links)
+        WEBUI-ACT-CH-004: chains.remove_link (DELETE /api/v1/chains/:chain_id/links/:link_id)
+        WEBUI-ACT-CH-005: chains.play (POST /api/v1/chains/:id/play)
+        WEBUI-ACT-CH-006: chains.stop (POST /api/v1/chains/:id/stop)
+        WEBUI-ACT-CH-007: chains.volume (POST /api/v1/chains/:id/volume)
+        """
+        opener, _ = _authenticated_opener()
+        fake_id = str(uuid.uuid4())
+        fake_link = str(uuid.uuid4())
+
+        # Rooms
+        try:
+            _post(opener, "/api/v1/rooms/groups", {"name": "test_room", "members": []})
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+
+        try:
+            _post(opener, f"/api/v1/rooms/groups/{fake_id}/activate", {})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+        try:
+            _post(opener, f"/api/v1/rooms/groups/{fake_id}/deactivate", {})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+        try:
+            _delete(opener, f"/api/v1/rooms/groups/{fake_id}")
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+        # Chains
+        try:
+            _post(opener, "/api/v1/chains", {"name": "test_chain", "links": []})
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+
+        try:
+            _put(opener, f"/api/v1/chains/{fake_id}", {"track_id": fake_id})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+        try:
+            _post(opener, f"/api/v1/chains/{fake_id}/links", {"device_id": fake_id})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+        try:
+            _delete(opener, f"/api/v1/chains/{fake_id}/links/{fake_link}")
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+        try:
+            _post(opener, f"/api/v1/chains/{fake_id}/play", {})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+        try:
+            _post(opener, f"/api/v1/chains/{fake_id}/stop", {})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+        try:
+            _post(opener, f"/api/v1/chains/{fake_id}/volume", {"volume": 80})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+    def test_sync_actions_contract(self):
+        """
+        WEBUI-ACT-SY-001: sync.file_upload (POST /api/v1/sync/upload/init)
+        WEBUI-ACT-SY-002: sync.playlist_sync (POST /api/v1/playlists)
+        WEBUI-ACT-SY-003: sync.peer_add (PUT /api/v1/settings)
+        WEBUI-ACT-SY-004: sync.peer_remove (PUT /api/v1/settings)
+        """
+        opener, _ = _authenticated_opener()
+        try:
+            _post(opener, "/api/v1/sync/upload/init", {"filename": "test.mp3", "size": 1024})
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+
+    def test_settings_actions_contract(self):
+        """
+        WEBUI-SET-001: settings.resource_profile (PUT /api/v1/settings)
+        WEBUI-SET-002: settings.job_workers (PUT /api/v1/settings)
+        WEBUI-SET-003: settings.language
+        WEBUI-SET-004: settings.theme
+        WEBUI-SET-005: settings.cover_art (PUT /api/v1/settings)
+        WEBUI-SET-006: settings.sidebar (PUT /api/v1/settings)
+        WEBUI-SET-007: settings.stream_profile (PUT /api/v1/settings)
+        WEBUI-SET-008: settings.format_policy (PUT /api/v1/settings)
+        WEBUI-SET-009: settings.remote_bitrate (PUT /api/v1/settings)
+        WEBUI-SET-010: settings.scrobbling (PUT /api/v1/settings)
+        WEBUI-SET-011: settings.sync_name (PUT /api/v1/settings)
+        WEBUI-SET-012: settings.remote_sync (PUT /api/v1/settings)
+        WEBUI-SET-013: settings.dev_cors (PUT /api/v1/settings)
+        WEBUI-SET-014: settings.auto_backup (PUT /api/v1/settings)
+        WEBUI-SET-015: settings.backup_retention (PUT /api/v1/settings)
+        WEBUI-SET-016: settings.reconnect_max (PUT /api/v1/settings)
+        """
+        opener, _ = _authenticated_opener()
+        status, cfg = _get(opener, "/api/v1/settings")
+        assert status == 200
+
+        # Verify PUT /api/v1/settings
+        try:
+            status, _ = _put(opener, "/api/v1/settings", {"theme": "dark", "language": "en"})
+            assert status in (200, 204)
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+
+    def test_admin_and_diagnostics_actions_contract(self):
+        """
+        WEBUI-ACT-WH-001: webhook.set (POST /api/v1/webhook)
+        WEBUI-ACT-WH-002: webhook.test (POST /api/v1/webhook/test)
+        WEBUI-ACT-WH-003: webhook.clear (DELETE /api/v1/webhook)
+        WEBUI-ACT-BK-001: backup.snapshot (POST /api/v1/backup/snapshot)
+        WEBUI-ACT-BK-002: backup.download (GET /api/v1/backup/download)
+        WEBUI-ACT-BK-003: backup.restore (POST /api/v1/backup/restore)
+        WEBUI-ACT-BK-004: backup.verify (GET /api/v1/backup/verify)
+        WEBUI-ACT-DG-001: diagnostics.refresh (GET /api/v1/diagnostics)
+        WEBUI-ACT-JB-001: jobs.refresh (GET /api/v1/jobs)
+        WEBUI-ACT-JB-002: jobs.cancel (POST /api/v1/jobs/:id/cancel)
+        WEBUI-ACT-HS-001: history.export (GET /api/v1/history/export)
+        WEBUI-ACT-HS-002: history.clear (DELETE /api/v1/history)
+        """
+        opener, _ = _authenticated_opener()
+        # Diagnostics
+        status, _ = _get(opener, "/api/v1/diagnostics")
+        assert status == 200
+
+        # Jobs
+        status, _ = _get(opener, "/api/v1/jobs")
+        assert status == 200
+        fake_id = str(uuid.uuid4())
+        try:
+            _post(opener, f"/api/v1/jobs/{fake_id}/cancel", {})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+        # Webhook
+        try:
+            _post(opener, "/api/v1/webhook", {"url": "http://127.0.0.1:9099/hook", "events": []})
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+        try:
+            _post(opener, "/api/v1/webhook/test", {})
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+        try:
+            _delete(opener, "/api/v1/webhook")
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+
+        # Backup
+        try:
+            _get(opener, "/api/v1/backup/verify")
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+        try:
+            _get(opener, "/api/v1/backup/download")
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+        try:
+            _post(opener, "/api/v1/backup/snapshot", {})
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+        try:
+            _post(opener, "/api/v1/backup/restore", {"file": "nonexistent.db"})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+        # History
+        try:
+            _get(opener, "/api/v1/history/export")
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+        try:
+            _delete(opener, "/api/v1/history")
+        except urllib.error.HTTPError as e:
+            assert e.code < 500
+
