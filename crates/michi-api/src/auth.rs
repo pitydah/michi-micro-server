@@ -384,10 +384,19 @@ pub(crate) async fn login_handler(
         let (count, last_reset) = entry.value();
         let elapsed = now.duration_since(*last_reset);
 
+        let max_attempts = state
+            .security_state
+            .config
+            .login_rate_limit_per_minute
+            .max(1);
         if elapsed.as_secs() > 60 {
             *entry = (1, now);
-        } else if *count >= 10 {
-            tracing::warn!("Login rate limit exceeded for IP: {}", client_ip);
+        } else if *count >= max_attempts {
+            tracing::warn!(
+                "Login rate limit exceeded for IP: {} (limit={}/min)",
+                client_ip,
+                max_attempts
+            );
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({

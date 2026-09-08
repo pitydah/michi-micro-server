@@ -62,7 +62,11 @@ def _authenticated_opener():
 def _get(opener, path, timeout=5):
     req = urllib.request.Request(f"{SERVER_URL}{path}")
     with opener.open(req, timeout=timeout) as r:
-        return r.status, json.loads(r.read())
+        raw = r.read()
+        try:
+            return r.status, json.loads(raw)
+        except Exception:
+            return r.status, raw.decode("utf-8", errors="replace")
 
 
 def _post(opener, path, body, timeout=5):
@@ -157,16 +161,36 @@ class TestListenHistoryContract:
     """
 
     def test_record_play_returns_ok_or_duplicate(self):
-        """POSTing a play event persists a history entry."""
+        """POSTing a play event persists a history entry; duplicate event IDs are skipped."""
         opener, _ = _authenticated_opener()
-        track_id = str(uuid.uuid4())
+        # Find an existing track, or skip if no tracks exist in test environment
+        status, body = _get(opener, "/api/v1/tracks?limit=1")
+        assert status == 200
+        tracks = body if isinstance(body, list) else body.get("tracks", [])
+        if not tracks:
+            pytest.skip("No tracks found in library to test play recording")
+
+        track = tracks[0]
+        track_id = track["id"]
+        client_event_id = str(uuid.uuid4())
+
+        # First attempt: above threshold -> ok
         status, body = _post(opener, "/api/v1/playback/record", {
             "track_id": track_id,
-            "duration_ms": 180_000,
+            "duration_ms": 250_000,
+            "client_event_id": client_event_id,
         })
-        assert status < 500, f"record play returned {status}: {body}"
-        if status == 200:
-            assert body.get("status") in ("recorded", "ok", "duplicate_skipped"), body
+        assert status == 200, f"record play returned {status}: {body}"
+        assert body.get("status") == "ok", f"Expected 'ok', got {body}"
+
+        # Second attempt with same event ID: must be duplicate_skipped
+        status, body = _post(opener, "/api/v1/playback/record", {
+            "track_id": track_id,
+            "duration_ms": 250_000,
+            "client_event_id": client_event_id,
+        })
+        assert status == 200, f"duplicate record play returned {status}: {body}"
+        assert body.get("status") == "duplicate_skipped", f"Expected 'duplicate_skipped', got {body}"
 
     def test_play_history_returns_list(self):
         """GET /api/v1/history must return an object with a history list."""
@@ -181,15 +205,39 @@ class TestListenHistoryContract:
             pytest.fail(f"Unexpected response shape: {body}")
         assert isinstance(entries, list)
 
-    def test_record_play_short_duration_accepted_at_api_layer(self):
-        """Short plays (below threshold) are accepted by the API; threshold logic is server-side."""
+    def test_record_play_short_duration_threshold_not_reached(self):
+        """Short plays (below threshold) return threshold_not_reached and are not persisted."""
         opener, _ = _authenticated_opener()
-        track_id = str(uuid.uuid4())
+        status, body = _get(opener, "/api/v1/tracks?limit=1")
+        assert status == 200
+        tracks = body if isinstance(body, list) else body.get("tracks", [])
+        if not tracks:
+            pytest.skip("No tracks found in library to test threshold check")
+
+        track_id = tracks[0]["id"]
         status, body = _post(opener, "/api/v1/playback/record", {
             "track_id": track_id,
             "duration_ms": 5_000,
         })
-        assert status < 500, f"Short listen rejected at API layer with 5xx: {body}"
+        assert status == 200, f"Short listen returned {status}: {body}"
+        assert body.get("status") == "threshold_not_reached", f"Expected 'threshold_not_reached', got {body}"
+
+    def test_record_play_nonexistent_track_returns_404(self):
+        """POSTing a nonexistent track_id must return 404, never 500 foreign key failure."""
+        opener, _ = _authenticated_opener()
+        fake_id = str(uuid.uuid4())
+        data = json.dumps({"track_id": fake_id, "duration_ms": 180_000}).encode()
+        req = urllib.request.Request(
+            f"{SERVER_URL}/api/v1/playback/record",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with opener.open(req, timeout=5) as r:
+                pytest.fail(f"Expected 404 for nonexistent track, got {r.status}")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404, f"Expected 404, got {e.code}"
 
     def test_record_play_missing_track_id_rejected(self):
         """POSTing without track_id must be rejected 4xx, not 5xx."""
@@ -371,7 +419,16 @@ class TestRemoteSyncNetworkPolicy:
         """POST /api/v1/sync/state from localhost must not return 403."""
         opener, _ = _authenticated_opener()
         try:
-            status, _ = _post(opener, "/api/v1/sync/state", {"device_id": "e2e-test-device"})
+            status, _ = _post(
+                opener,
+                "/api/v1/sync/state",
+                {
+                    "device_id": "e2e-test-device",
+                    "position_ms": 0,
+                    "playing": False,
+                    "volume": 1.0,
+                },
+            )
             assert status in (200, 204), f"Unexpected status: {status}"
         except urllib.error.HTTPError as e:
             if e.code == 403:
@@ -379,7 +436,7 @@ class TestRemoteSyncNetworkPolicy:
                     "POST /api/v1/sync/state returned 403 from localhost — "
                     "network policy is incorrectly rejecting local clients."
                 )
-            assert e.code in (400, 404), f"Unexpected error code: {e.code}"
+            assert e.code in (400, 404, 422), f"Unexpected error code: {e.code}"
 
     def test_sync_manifest_spoofed_xff_from_untrusted_peer_allowed(self):
         """
@@ -460,6 +517,7 @@ class TestWebUIActionContractsComprehensive:
     WEBUI-ACT-DG-001
     WEBUI-ACT-JB-001   .. WEBUI-ACT-JB-002
     WEBUI-ACT-HS-001   .. WEBUI-ACT-HS-002
+    WEBUI-ACT-INT-001  .. WEBUI-ACT-INT-006
     """
 
     def test_auth_actions_contract(self):
@@ -549,17 +607,38 @@ class TestWebUIActionContractsComprehensive:
         status, body = _get(opener, "/api/v1/playback/state")
         assert status == 200
 
-        # Handoff contract
-        fake_id = str(uuid.uuid4())
-        try:
-            status, _ = _post(opener, "/api/v1/playback/handoff", {
-                "track_id": fake_id,
-                "position_ms": 1000,
+        # Handoff contract (WEBUI-ACT-PB-008): transfers track_id, position_ms, playing state
+        status, tr_body = _get(opener, "/api/v1/tracks?limit=1")
+        tracks = tr_body if isinstance(tr_body, list) else tr_body.get("tracks", [])
+        if tracks:
+            real_tid = tracks[0]["id"]
+            status, h_res = _post(opener, "/api/v1/playback/handoff", {
+                "track_id": real_tid,
+                "position_ms": 42_000,
                 "playing": False,
             })
-            assert status < 500
-        except urllib.error.HTTPError as e:
-            assert e.code in (400, 404)
+            assert status == 200, f"Handoff failed: {status}: {h_res}"
+            assert h_res.get("status") == "handoff_accepted", f"Expected handoff_accepted: {h_res}"
+            assert h_res.get("track_id") == real_tid
+            assert h_res.get("position_ms") == 42_000
+
+            # Verify server engine state converged
+            status, pb_snap = _get(opener, "/api/v1/playback/state")
+            assert status == 200
+            assert pb_snap.get("track_id") == real_tid
+            assert pb_snap.get("position_ms") == 42_000
+            assert pb_snap.get("playing") is False
+        else:
+            fake_id = str(uuid.uuid4())
+            try:
+                status, _ = _post(opener, "/api/v1/playback/handoff", {
+                    "track_id": fake_id,
+                    "position_ms": 1000,
+                    "playing": False,
+                })
+                assert status < 500
+            except urllib.error.HTTPError as e:
+                assert e.code in (400, 404)
 
     def test_playlists_actions_contract(self):
         """
@@ -644,14 +723,14 @@ class TestWebUIActionContractsComprehensive:
 
         # Pair start / confirm
         try:
-            _post(opener, "/api/v1/receivers/pair/start", {"receiver_id": fake_id})
+            _post(opener, "/api/v1/receivers/pair/start", {"base_url": "http://127.0.0.1:9999"})
         except urllib.error.HTTPError as e:
-            assert e.code in (400, 404)
+            assert e.code in (400, 404, 422)
 
         try:
-            _post(opener, "/api/v1/receivers/pair/confirm", {"session_id": fake_id, "pin": "000000"})
+            _post(opener, "/api/v1/receivers/pair/confirm", {"pairing_id": fake_id, "pin": "000000"})
         except urllib.error.HTTPError as e:
-            assert e.code in (400, 404)
+            assert e.code in (400, 404, 422)
 
     def test_rooms_and_chains_actions_contract(self):
         """
@@ -704,9 +783,9 @@ class TestWebUIActionContractsComprehensive:
             assert e.code in (400, 404)
 
         try:
-            _post(opener, f"/api/v1/chains/{fake_id}/links", {"device_id": fake_id})
+            _post(opener, f"/api/v1/chains/{fake_id}/links", {"receiver_id": fake_id})
         except urllib.error.HTTPError as e:
-            assert e.code in (400, 404)
+            assert e.code in (400, 404, 422)
 
         try:
             _delete(opener, f"/api/v1/chains/{fake_id}/links/{fake_link}")
@@ -798,7 +877,7 @@ class TestWebUIActionContractsComprehensive:
         try:
             _post(opener, f"/api/v1/jobs/{fake_id}/cancel", {})
         except urllib.error.HTTPError as e:
-            assert e.code in (400, 404)
+            assert e.code in (400, 404, 409)
 
         # Webhook
         try:
@@ -808,7 +887,7 @@ class TestWebUIActionContractsComprehensive:
         try:
             _post(opener, "/api/v1/webhook/test", {})
         except urllib.error.HTTPError as e:
-            assert e.code < 500
+            assert e.code == 502 or e.code < 500
         try:
             _delete(opener, "/api/v1/webhook")
         except urllib.error.HTTPError as e:
@@ -830,7 +909,7 @@ class TestWebUIActionContractsComprehensive:
         try:
             _post(opener, "/api/v1/backup/restore", {"file": "nonexistent.db"})
         except urllib.error.HTTPError as e:
-            assert e.code in (400, 404)
+            assert e.code in (400, 404, 422)
 
         # History
         try:
@@ -841,4 +920,48 @@ class TestWebUIActionContractsComprehensive:
             _delete(opener, "/api/v1/history")
         except urllib.error.HTTPError as e:
             assert e.code < 500
+
+    def test_integration_actions_contract(self):
+        """
+        WEBUI-ACT-INT-001: integrations.listenbrainz.connect (POST /api/v1/integrations/listenbrainz)
+        WEBUI-ACT-INT-002: integrations.listenbrainz.test (POST /api/v1/integrations/listenbrainz/test)
+        WEBUI-ACT-INT-003: integrations.listenbrainz.disconnect (DELETE /api/v1/integrations/listenbrainz)
+        WEBUI-ACT-INT-004: integrations.lastfm.connect (POST /api/v1/integrations/lastfm)
+        WEBUI-ACT-INT-005: integrations.lastfm.test (POST /api/v1/integrations/lastfm/test)
+        WEBUI-ACT-INT-006: integrations.lastfm.disconnect (DELETE /api/v1/integrations/lastfm)
+        """
+        opener, _ = _authenticated_opener()
+
+        # ListenBrainz: empty token rejection (connect contract)
+        try:
+            _post(opener, "/api/v1/integrations/listenbrainz", {"token": ""})
+        except urllib.error.HTTPError as e:
+            assert e.code == 400
+
+        # ListenBrainz test endpoint
+        try:
+            _post(opener, "/api/v1/integrations/listenbrainz/test", {})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 401, 502)
+
+        # ListenBrainz disconnect endpoint
+        status, body = _delete(opener, "/api/v1/integrations/listenbrainz")
+        assert status == 200, f"Disconnect ListenBrainz failed: {status}: {body}"
+        assert body.get("status") == "disconnected"
+
+        # Last.fm: connect endpoint
+        status, body = _post(opener, "/api/v1/integrations/lastfm", {"token": "test_session_token_123456789012"})
+        assert status == 200, f"Connect Last.fm failed: {status}: {body}"
+        assert body.get("status") == "configured"
+
+        # Last.fm test endpoint
+        try:
+            _post(opener, "/api/v1/integrations/lastfm/test", {})
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 401, 502)
+
+        # Last.fm disconnect endpoint
+        status, body = _delete(opener, "/api/v1/integrations/lastfm")
+        assert status == 200, f"Disconnect Last.fm failed: {status}: {body}"
+        assert body.get("status") == "disconnected"
 

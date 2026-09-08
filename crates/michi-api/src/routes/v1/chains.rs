@@ -140,6 +140,22 @@ pub async fn add_link_handler(
             "receiver_id is required",
         ));
     }
+    let chain = michi_db::get_chain(&state.db, &chain_id)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+    if chain.is_none() {
+        return Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "Chain not found",
+        ));
+    }
     let link = michi_db::add_chain_link(&state.db, &chain_id, &body)
         .await
         .map_err(|e| {

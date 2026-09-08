@@ -480,6 +480,8 @@ jobs:
           export MICHI_PORT=9090
           export MICHI_AUTH_USERNAME=admin
           export MICHI_AUTH_PASSWORD=admin12345
+          export MICHI_RATE_LIMIT_RPS=100
+          export MICHI_RATE_LIMIT_BURST=300
 
           ./target/debug/michi-server &
           PID=$!

@@ -194,7 +194,7 @@
         "method": "POST",
         "path": "/api/v1/playback/handoff"
       },
-      "effect": "Transfers current track, queue, position, and transport between browser and server",
+      "effect": "Transfers selected track ID, position in ms, and playing state to server playback engine",
       "test": "WEBUI-ACT-PB-008"
     },
     {
@@ -963,6 +963,84 @@
       },
       "effect": "Purges play history records from database",
       "test": "WEBUI-ACT-HS-002"
+    },
+    {
+      "id": "integrations.listenbrainz.connect",
+      "surface": "settings.integrations",
+      "element": "button[onclick='saveListenBrainzToken()']",
+      "frontend_handler": "saveListenBrainzToken",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/integrations/listenbrainz"
+      },
+      "effect": "Validates ListenBrainz token against upstream API and persists in config",
+      "test": "WEBUI-ACT-INT-001"
+    },
+    {
+      "id": "integrations.listenbrainz.test",
+      "surface": "settings.integrations",
+      "element": "button[onclick='testListenBrainz()']",
+      "frontend_handler": "testListenBrainz",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/integrations/listenbrainz/test"
+      },
+      "effect": "Tests configured ListenBrainz token with upstream validate-token endpoint",
+      "test": "WEBUI-ACT-INT-002"
+    },
+    {
+      "id": "integrations.listenbrainz.disconnect",
+      "surface": "settings.integrations",
+      "element": "button[onclick='disconnectListenBrainz()']",
+      "frontend_handler": "disconnectListenBrainz",
+      "authority": "server",
+      "endpoint": {
+        "method": "DELETE",
+        "path": "/api/v1/integrations/listenbrainz"
+      },
+      "effect": "Removes ListenBrainz token from config and disables ListenBrainz scrobbling",
+      "test": "WEBUI-ACT-INT-003"
+    },
+    {
+      "id": "integrations.lastfm.connect",
+      "surface": "settings.integrations",
+      "element": "button[onclick='saveLastFmToken()']",
+      "frontend_handler": "saveLastFmToken",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/integrations/lastfm"
+      },
+      "effect": "Persists Last.fm session key in server configuration",
+      "test": "WEBUI-ACT-INT-004"
+    },
+    {
+      "id": "integrations.lastfm.test",
+      "surface": "settings.integrations",
+      "element": "button[onclick='testLastFm()']",
+      "frontend_handler": "testLastFm",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/integrations/lastfm/test"
+      },
+      "effect": "Tests configured Last.fm session key with upstream user.getInfo API",
+      "test": "WEBUI-ACT-INT-005"
+    },
+    {
+      "id": "integrations.lastfm.disconnect",
+      "surface": "settings.integrations",
+      "element": "button[onclick='disconnectLastFm()']",
+      "frontend_handler": "disconnectLastFm",
+      "authority": "server",
+      "endpoint": {
+        "method": "DELETE",
+        "path": "/api/v1/integrations/lastfm"
+      },
+      "effect": "Removes Last.fm session key from config and disables Last.fm scrobbling",
+      "test": "WEBUI-ACT-INT-006"
     }
   ]
 }

@@ -54,23 +54,32 @@ pub async fn record_play_handler(
     headers: HeaderMap,
     Json(input): Json<RecordPlayRequest>,
 ) -> Result<Json<RecordPlayResponse>, (StatusCode, Json<crate::library::ErrorResponse>)> {
-    // 1. Deduplication check via client_event_id and IdempotencyStore
-    if let Some(event_id) = input.client_event_id {
-        let dedupe_key = format!("play:{event_id}");
-        if let Some(cached) = state.security_state.idempotency_store.get(&dedupe_key) {
-            if let Ok(resp) = serde_json::from_value::<RecordPlayResponse>(cached) {
-                return Ok(Json(resp));
-            }
+    // 1. Authoritative track lookup
+    let track = match michi_db::get_track(&state.db, &input.track_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(crate::library::ErrorResponse {
+                    status: "error".to_string(),
+                    message: "track not found".to_string(),
+                }),
+            ));
         }
-    }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::library::ErrorResponse {
+                    status: "error".to_string(),
+                    message: format!("database error: {e}"),
+                }),
+            ));
+        }
+    };
 
     // 2. Authoritative qualifying listen threshold check
     // Threshold is min(duration / 2, 4 min); fallback 30s if duration unknown
-    let track = michi_db::get_track(&state.db, &input.track_id)
-        .await
-        .ok()
-        .flatten();
-    let track_duration_ms = track.as_ref().and_then(|t| t.duration_ms);
+    let track_duration_ms = track.duration_ms;
     let threshold = match track_duration_ms {
         Some(d) if d > 0 => (d / 2).min(240_000),
         _ => 30_000,
@@ -99,12 +108,14 @@ pub async fn record_play_handler(
     let now = Utc::now();
     let user_id = state.get_user_id(&headers).await;
 
-    let play = michi_db::record_play(
+    // 3. Persistent atomic deduplication via DB
+    let (play, was_new) = michi_db::record_play(
         &state.db,
         &input.track_id,
         input.duration_ms,
         &now,
         user_id.as_ref(),
+        input.client_event_id.as_ref(),
     )
     .await
     .map_err(|e| {
@@ -116,6 +127,25 @@ pub async fn record_play_handler(
             }),
         )
     })?;
+
+    if !was_new {
+        let resp = RecordPlayResponse {
+            status: "duplicate_skipped".to_string(),
+            id: Some(play.id),
+        };
+        if let Some(event_id) = input.client_event_id {
+            let dedupe_key = format!("play:{event_id}");
+            if let Ok(val) = serde_json::to_value(&resp) {
+                state.security_state.idempotency_store.set(
+                    &dedupe_key,
+                    &val,
+                    "POST",
+                    "/api/v1/playback/record",
+                );
+            }
+        }
+        return Ok(Json(resp));
+    }
 
     // If scrobbling is configured, submit scrobble asynchronously using live config
     let disk_cfg = state.config.read_file_config();
@@ -574,6 +604,195 @@ pub async fn set_lastfm_handler(
     })))
 }
 
+pub async fn disconnect_listenbrainz_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let mut cfg = state
+        .config
+        .read_file_config()
+        .unwrap_or_else(|| state.config.clone());
+    cfg.listenbrainz_token = None;
+    cfg.save_to_file().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": { "code": "SAVE_ERROR", "message": e }
+            })),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "disconnected",
+        "provider": "listenbrainz",
+    })))
+}
+
+pub async fn test_listenbrainz_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let disk_cfg = state.config.read_file_config();
+    let token = disk_cfg
+        .as_ref()
+        .and_then(|c| c.listenbrainz_token.as_ref())
+        .or(state.config.listenbrainz_token.as_ref());
+
+    let token = match token {
+        Some(t) if !t.trim().is_empty() => t.trim(),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": { "code": "NOT_CONFIGURED", "message": "ListenBrainz token is not configured" }
+                })),
+            ));
+        }
+    };
+
+    let is_valid = validate_listenbrainz_token(token).await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": { "code": "UPSTREAM_ERROR", "message": e }
+            })),
+        )
+    })?;
+
+    if !is_valid {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": { "code": "INVALID_TOKEN", "message": "ListenBrainz token validation rejected by upstream service" }
+            })),
+        ));
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "provider": "listenbrainz",
+        "valid": true,
+    })))
+}
+
+pub async fn disconnect_lastfm_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let mut cfg = state
+        .config
+        .read_file_config()
+        .unwrap_or_else(|| state.config.clone());
+    cfg.lastfm_token = None;
+    cfg.save_to_file().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": { "code": "SAVE_ERROR", "message": e }
+            })),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "disconnected",
+        "provider": "lastfm",
+    })))
+}
+
+pub async fn test_lastfm_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let disk_cfg = state.config.read_file_config();
+    let token = disk_cfg
+        .as_ref()
+        .and_then(|c| c.lastfm_token.as_ref())
+        .or(state.config.lastfm_token.as_ref());
+
+    let token = match token {
+        Some(t) if !t.trim().is_empty() => t.trim(),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": { "code": "NOT_CONFIGURED", "message": "Last.fm session key is not configured" }
+                })),
+            ));
+        }
+    };
+
+    let api_key = match std::env::var("MICHI_LASTFM_API_KEY") {
+        Ok(k) if !k.trim().is_empty() => k,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": { "code": "NOT_CONFIGURED", "message": "MICHI_LASTFM_API_KEY is not configured" }
+                })),
+            ));
+        }
+    };
+
+    let shared_secret = match std::env::var("MICHI_LASTFM_SHARED_SECRET") {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": { "code": "NOT_CONFIGURED", "message": "MICHI_LASTFM_SHARED_SECRET is not configured" }
+                })),
+            ));
+        }
+    };
+
+    let mut params_vec: Vec<(&str, &str)> = vec![
+        ("method", "user.getInfo"),
+        ("api_key", &api_key),
+        ("sk", token),
+    ];
+    let api_sig = calculate_lastfm_signature(&params_vec, &shared_secret);
+    params_vec.push(("api_sig", &api_sig));
+    params_vec.push(("format", "json"));
+
+    let client = reqwest::Client::new();
+    let url = lastfm_api_base_url();
+    let resp = client
+        .get(&url)
+        .query(&params_vec)
+        .send()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": { "code": "UPSTREAM_ERROR", "message": format!("Last.fm test request failed: {e}") }
+                })),
+            )
+        })?;
+
+    if !resp.status().is_success() {
+        let err_text = resp.text().await.unwrap_or_default();
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": { "code": "UPSTREAM_ERROR", "message": err_text }
+            })),
+        ));
+    }
+
+    let body_str = resp.text().await.unwrap_or_default();
+    if body_str.contains("\"error\"") {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": { "code": "INVALID_TOKEN", "message": body_str }
+            })),
+        ));
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "provider": "lastfm",
+        "valid": true,
+    })))
+}
+
 pub fn scrobble_router() -> axum::Router<AppState> {
     use axum::routing::{get, post};
     axum::Router::new()
@@ -583,7 +802,18 @@ pub fn scrobble_router() -> axum::Router<AppState> {
         )
         .route(
             "/api/v1/integrations/listenbrainz",
-            post(set_listenbrainz_handler),
+            post(set_listenbrainz_handler).delete(disconnect_listenbrainz_handler),
         )
-        .route("/api/v1/integrations/lastfm", post(set_lastfm_handler))
+        .route(
+            "/api/v1/integrations/listenbrainz/test",
+            post(test_listenbrainz_handler),
+        )
+        .route(
+            "/api/v1/integrations/lastfm",
+            post(set_lastfm_handler).delete(disconnect_lastfm_handler),
+        )
+        .route(
+            "/api/v1/integrations/lastfm/test",
+            post(test_lastfm_handler),
+        )
 }

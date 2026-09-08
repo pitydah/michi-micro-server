@@ -2,6 +2,25 @@
    Michi Control UI — Truthful Functional Conformance WebUI
    ================================================================ */
 
+function generateUUID() {
+  if (typeof crypto !== 'undefined') {
+    if (typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    if (typeof crypto.getRandomValues === 'function') {
+      return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, function (c) {
+        return (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16);
+      });
+    }
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+    var r = (Math.random() * 16) | 0;
+    var v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+window.generateUUID = generateUUID;
+
 // ── API client ──────────────────────────────────────────────────
 const MichiAPI = {
   base: '',
@@ -245,10 +264,30 @@ const MichiAPI = {
       body: { token }
     });
   },
+  disconnectListenBrainz() {
+    return this.request('/api/v1/integrations/listenbrainz', {
+      method: 'DELETE'
+    });
+  },
+  testListenBrainz() {
+    return this.request('/api/v1/integrations/listenbrainz/test', {
+      method: 'POST'
+    });
+  },
   setLastFm(token) {
     return this.request('/api/v1/integrations/lastfm', {
       method: 'POST',
       body: { token }
+    });
+  },
+  disconnectLastFm() {
+    return this.request('/api/v1/integrations/lastfm', {
+      method: 'DELETE'
+    });
+  },
+  testLastFm() {
+    return this.request('/api/v1/integrations/lastfm/test', {
+      method: 'POST'
     });
   },
 
@@ -1458,7 +1497,7 @@ const BrowserPlayback = {
     this.lastPositionMs = 0;
     this.scrobbledForCurrentTrack = false;
     this.scrobbleInFlight = false;
-    this.currentEventId = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : null;
+    this.currentEventId = generateUUID();
   },
 
   onTimeUpdate(currentMs) {
@@ -3334,9 +3373,73 @@ async function saveLastFmToken() {
   }
 }
 
+async function disconnectListenBrainz() {
+  var resultEl = $('#settings-lb-result');
+  if (resultEl) resultEl.textContent = 'Disconnecting ListenBrainz...';
+  try {
+    await MichiAPI.disconnectListenBrainz();
+    var input = $('#settings-lb-token');
+    if (input) input.value = '';
+    if (resultEl) resultEl.textContent = 'ListenBrainz disconnected.';
+    showToast('ListenBrainz disconnected', false);
+    updateScrobbleStatusUI();
+  } catch (err) {
+    if (resultEl) resultEl.textContent = 'Error: ' + (err.message || err);
+    showToast('Failed to disconnect ListenBrainz: ' + (err.message || err), true);
+  }
+}
+
+async function testListenBrainz() {
+  var resultEl = $('#settings-lb-result');
+  if (resultEl) resultEl.textContent = 'Testing ListenBrainz connection...';
+  try {
+    await MichiAPI.testListenBrainz();
+    if (resultEl) resultEl.textContent = 'ListenBrainz connection test successful!';
+    showToast('ListenBrainz connection OK', false);
+    updateScrobbleStatusUI();
+  } catch (err) {
+    if (resultEl) resultEl.textContent = 'Test failed: ' + (err.message || err);
+    showToast('ListenBrainz test failed: ' + (err.message || err), true);
+  }
+}
+
+async function disconnectLastFm() {
+  var resultEl = $('#settings-lfm-result');
+  if (resultEl) resultEl.textContent = 'Disconnecting Last.fm...';
+  try {
+    await MichiAPI.disconnectLastFm();
+    var input = $('#settings-lfm-token');
+    if (input) input.value = '';
+    if (resultEl) resultEl.textContent = 'Last.fm disconnected.';
+    showToast('Last.fm disconnected', false);
+    updateScrobbleStatusUI();
+  } catch (err) {
+    if (resultEl) resultEl.textContent = 'Error: ' + (err.message || err);
+    showToast('Failed to disconnect Last.fm: ' + (err.message || err), true);
+  }
+}
+
+async function testLastFm() {
+  var resultEl = $('#settings-lfm-result');
+  if (resultEl) resultEl.textContent = 'Testing Last.fm connection...';
+  try {
+    await MichiAPI.testLastFm();
+    if (resultEl) resultEl.textContent = 'Last.fm connection test successful!';
+    showToast('Last.fm connection OK', false);
+    updateScrobbleStatusUI();
+  } catch (err) {
+    if (resultEl) resultEl.textContent = 'Test failed: ' + (err.message || err);
+    showToast('Last.fm test failed: ' + (err.message || err), true);
+  }
+}
+
 window.updateScrobbleStatusUI = updateScrobbleStatusUI;
 window.saveListenBrainzToken = saveListenBrainzToken;
+window.disconnectListenBrainz = disconnectListenBrainz;
+window.testListenBrainz = testListenBrainz;
 window.saveLastFmToken = saveLastFmToken;
+window.disconnectLastFm = disconnectLastFm;
+window.testLastFm = testLastFm;
 
 function renderRestartBanner(fieldsStr) {
   var banner = $('#settings-restart-banner');

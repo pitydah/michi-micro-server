@@ -51,8 +51,6 @@ ALLOWED_UI_HELPERS = {
     "stopPropagation",
     "setLanguage",
     "setTheme",
-    "saveListenBrainzToken",
-    "saveLastFmToken",
 }
 
 

@@ -299,8 +299,16 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
             migration_046
         );
     }
+    if current < 47 {
+        run_migration_step!(
+            conn,
+            47,
+            "play_history client_event_id column and unique index",
+            migration_047
+        );
+    }
 
-    info!("database schema at version 46");
+    info!("database schema at version 47");
     Ok(())
 }
 
@@ -1255,6 +1263,29 @@ async fn migration_046(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
     Ok(())
 }
 
+async fn migration_047(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    let rows: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as("PRAGMA table_info(play_history)")
+            .fetch_all(&mut **tx)
+            .await?;
+
+    let existing_cols: std::collections::HashSet<String> = rows.into_iter().map(|r| r.1).collect();
+
+    if !existing_cols.contains("client_event_id") {
+        sqlx::query("ALTER TABLE play_history ADD COLUMN client_event_id TEXT")
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_play_history_client_event_id ON play_history(client_event_id) WHERE client_event_id IS NOT NULL",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedReceiver {
     pub id: String,
@@ -1721,7 +1752,40 @@ pub async fn record_play(
     duration_ms: Option<u64>,
     played_at: &DateTime<Utc>,
     user_id: Option<&Uuid>,
-) -> Result<PlayHistory, DbError> {
+    client_event_id: Option<&Uuid>,
+) -> Result<(PlayHistory, bool), DbError> {
+    let client_event_str = client_event_id.map(|u| u.to_string());
+
+    if let Some(ref ceid) = client_event_str {
+        if let Some(row) = sqlx::query(
+            "SELECT id, track_id, played_at, duration_ms, scrobbled FROM play_history WHERE client_event_id = ?",
+        )
+        .bind(ceid)
+        .fetch_optional(pool)
+        .await?
+        {
+            let id = Uuid::parse_str(row.get::<&str, _>("id")).unwrap_or(Uuid::nil());
+            let tid = Uuid::parse_str(row.get::<&str, _>("track_id")).unwrap_or(*track_id);
+            let played = row
+                .get::<&str, _>("played_at")
+                .parse()
+                .unwrap_or(*played_at);
+            let dur = row.get::<Option<i64>, _>("duration_ms").map(|v| v as u64);
+            let scrobbled = row.get::<i64, _>("scrobbled") != 0;
+
+            return Ok((
+                PlayHistory {
+                    id,
+                    track_id: tid,
+                    played_at: played,
+                    duration_ms: dur,
+                    scrobbled,
+                },
+                false, // was_new = false (duplicate skipped)
+            ));
+        }
+    }
+
     let id = Uuid::new_v4();
     let id_str = id.to_string();
     let tid_str = track_id.to_string();
@@ -1729,23 +1793,27 @@ pub async fn record_play(
     let uid_str = user_id.map(|u| u.to_string());
 
     sqlx::query(
-        "INSERT INTO play_history (id, track_id, played_at, duration_ms, scrobbled, user_id) VALUES (?, ?, ?, ?, 0, ?)",
+        "INSERT INTO play_history (id, track_id, played_at, duration_ms, scrobbled, user_id, client_event_id) VALUES (?, ?, ?, ?, 0, ?, ?)",
     )
     .bind(&id_str)
     .bind(&tid_str)
     .bind(&played_str)
     .bind(duration_ms.map(|v| v as i64))
     .bind(&uid_str)
+    .bind(&client_event_str)
     .execute(pool)
     .await?;
 
-    Ok(PlayHistory {
-        id,
-        track_id: *track_id,
-        played_at: *played_at,
-        duration_ms,
-        scrobbled: false,
-    })
+    Ok((
+        PlayHistory {
+            id,
+            track_id: *track_id,
+            played_at: *played_at,
+            duration_ms,
+            scrobbled: false,
+        },
+        true, // was_new = true
+    ))
 }
 
 pub async fn get_play_history(
