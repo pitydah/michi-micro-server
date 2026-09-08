@@ -459,8 +459,12 @@ pub struct ScrobbleStatusResponse {
     pub scrobble_enabled: bool,
     pub listenbrainz_configured: bool,
     pub listenbrainz_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listenbrainz_managed_by: Option<String>,
     pub lastfm_configured: bool,
     pub lastfm_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lastfm_managed_by: Option<String>,
     pub lastfm_auth_type: String,
 }
 
@@ -478,6 +482,16 @@ pub async fn get_scrobble_status_handler(
         .or(state.config.listenbrainz_token.as_ref())
         .is_some();
     let listenbrainz_ready = scrobble_enabled && listenbrainz_configured;
+    let lb_env = std::env::var("MICHI_LISTENBRAINZ_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty());
+    let listenbrainz_managed_by = if lb_env.is_some() {
+        Some("environment".to_string())
+    } else if listenbrainz_configured {
+        Some("config".to_string())
+    } else {
+        None
+    };
 
     let lastfm_configured = disk_cfg
         .as_ref()
@@ -491,13 +505,25 @@ pub async fn get_scrobble_status_handler(
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
     let lastfm_ready = scrobble_enabled && lastfm_configured && has_lfm_key && has_lfm_secret;
+    let lfm_env = std::env::var("MICHI_LASTFM_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty());
+    let lastfm_managed_by = if lfm_env.is_some() {
+        Some("environment".to_string())
+    } else if lastfm_configured {
+        Some("config".to_string())
+    } else {
+        None
+    };
 
     Json(ScrobbleStatusResponse {
         scrobble_enabled,
         listenbrainz_configured,
         listenbrainz_ready,
+        listenbrainz_managed_by,
         lastfm_configured,
         lastfm_ready,
+        lastfm_managed_by,
         lastfm_auth_type: "manual_session_key_beta".to_string(),
     })
 }
@@ -607,6 +633,18 @@ pub async fn set_lastfm_handler(
 pub async fn disconnect_listenbrainz_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if std::env::var("MICHI_LISTENBRAINZ_TOKEN")
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": { "code": "ENV_OVERRIDE", "message": "ListenBrainz token is managed by environment variable MICHI_LISTENBRAINZ_TOKEN" }
+            })),
+        ));
+    }
+
     let mut cfg = state
         .config
         .read_file_config()
@@ -676,6 +714,18 @@ pub async fn test_listenbrainz_handler(
 pub async fn disconnect_lastfm_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if std::env::var("MICHI_LASTFM_TOKEN")
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": { "code": "ENV_OVERRIDE", "message": "Last.fm session key is managed by environment variable MICHI_LASTFM_TOKEN" }
+            })),
+        ));
+    }
+
     let mut cfg = state
         .config
         .read_file_config()

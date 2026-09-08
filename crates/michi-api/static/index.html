@@ -559,7 +559,7 @@
                         <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
                             <button class="btn btn-primary btn-sm" onclick="saveListenBrainzToken()">Connect ListenBrainz</button>
                             <button class="btn btn-ghost btn-sm" onclick="testListenBrainz()">Test Connection</button>
-                            <button class="btn btn-danger btn-sm" onclick="disconnectListenBrainz()">Disconnect</button>
+                            <button id="settings-lb-disconnect" class="btn btn-danger btn-sm" onclick="disconnectListenBrainz()">Disconnect</button>
                         </div>
                     </div>
                     <div id="settings-lb-result" class="panel-result"></div>
@@ -579,7 +579,7 @@
                         <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
                             <button class="btn btn-primary btn-sm" onclick="saveLastFmToken()">Save Last.fm Session</button>
                             <button class="btn btn-ghost btn-sm" onclick="testLastFm()">Test Connection</button>
-                            <button class="btn btn-danger btn-sm" onclick="disconnectLastFm()">Disconnect</button>
+                            <button id="settings-lfm-disconnect" class="btn btn-danger btn-sm" onclick="disconnectLastFm()">Disconnect</button>
                         </div>
                     </div>
                     <div class="panel-row" style="font-size:0.75rem;color:var(--text-muted)">

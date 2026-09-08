@@ -1755,15 +1755,37 @@ pub async fn record_play(
     client_event_id: Option<&Uuid>,
 ) -> Result<(PlayHistory, bool), DbError> {
     let client_event_str = client_event_id.map(|u| u.to_string());
+    let id = Uuid::new_v4();
+    let id_str = id.to_string();
+    let tid_str = track_id.to_string();
+    let played_str = played_at.to_rfc3339();
+    let uid_str = user_id.map(|u| u.to_string());
 
     if let Some(ref ceid) = client_event_str {
-        if let Some(row) = sqlx::query(
-            "SELECT id, track_id, played_at, duration_ms, scrobbled FROM play_history WHERE client_event_id = ?",
+        // Atomic insert with ON CONFLICT DO NOTHING against unique partial index
+        let result = sqlx::query(
+            "INSERT INTO play_history (id, track_id, played_at, duration_ms, scrobbled, user_id, client_event_id)
+             VALUES (?, ?, ?, ?, 0, ?, ?)
+             ON CONFLICT DO NOTHING",
         )
+        .bind(&id_str)
+        .bind(&tid_str)
+        .bind(&played_str)
+        .bind(duration_ms.map(|v| v as i64))
+        .bind(&uid_str)
         .bind(ceid)
-        .fetch_optional(pool)
-        .await?
-        {
+        .execute(pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            // Already existed or concurrent request inserted it: retrieve existing row
+            let row = sqlx::query(
+                "SELECT id, track_id, played_at, duration_ms, scrobbled FROM play_history WHERE client_event_id = ?",
+            )
+            .bind(ceid)
+            .fetch_one(pool)
+            .await?;
+
             let id = Uuid::parse_str(row.get::<&str, _>("id")).unwrap_or(Uuid::nil());
             let tid = Uuid::parse_str(row.get::<&str, _>("track_id")).unwrap_or(*track_id);
             let played = row
@@ -1784,23 +1806,28 @@ pub async fn record_play(
                 false, // was_new = false (duplicate skipped)
             ));
         }
+
+        return Ok((
+            PlayHistory {
+                id,
+                track_id: *track_id,
+                played_at: *played_at,
+                duration_ms,
+                scrobbled: false,
+            },
+            true, // was_new = true
+        ));
     }
 
-    let id = Uuid::new_v4();
-    let id_str = id.to_string();
-    let tid_str = track_id.to_string();
-    let played_str = played_at.to_rfc3339();
-    let uid_str = user_id.map(|u| u.to_string());
-
+    // No client_event_id provided: standard insert
     sqlx::query(
-        "INSERT INTO play_history (id, track_id, played_at, duration_ms, scrobbled, user_id, client_event_id) VALUES (?, ?, ?, ?, 0, ?, ?)",
+        "INSERT INTO play_history (id, track_id, played_at, duration_ms, scrobbled, user_id, client_event_id) VALUES (?, ?, ?, ?, 0, ?, NULL)",
     )
     .bind(&id_str)
     .bind(&tid_str)
     .bind(&played_str)
     .bind(duration_ms.map(|v| v as i64))
     .bind(&uid_str)
-    .bind(&client_event_str)
     .execute(pool)
     .await?;
 
@@ -4513,6 +4540,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(canonical_id, id1);
+    }
+
+    #[tokio::test]
+    async fn test_record_play_concurrent_atomic_idempotency() {
+        let pool = test_pool().await;
+        let track = sample_track();
+        upsert_track(&pool, &track).await.unwrap();
+
+        let event_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+
+        // Spawn 10 concurrent tasks all attempting to record play with the same client_event_id
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let pool_clone = pool.clone();
+            let tid = track.id;
+            let eid = event_id;
+            handles.push(tokio::spawn(async move {
+                record_play(&pool_clone, &tid, Some(120_000), &now, None, Some(&eid)).await
+            }));
+        }
+
+        let mut inserted_count = 0;
+        let mut skipped_count = 0;
+
+        for h in handles {
+            let res = h
+                .await
+                .unwrap()
+                .expect("record_play must succeed without database errors");
+            let (_, was_new) = res;
+            if was_new {
+                inserted_count += 1;
+            } else {
+                skipped_count += 1;
+            }
+        }
+
+        assert_eq!(
+            inserted_count, 1,
+            "Exactly one concurrent request must insert the record"
+        );
+        assert_eq!(
+            skipped_count, 9,
+            "Remaining 9 concurrent requests must be skipped as duplicates"
+        );
+
+        // Verify only 1 row exists in DB
+        let total_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM play_history WHERE client_event_id = ?")
+                .bind(event_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(total_rows, 1);
     }
 }
 

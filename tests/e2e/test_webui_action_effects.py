@@ -160,24 +160,44 @@ class TestListenHistoryContract:
     is enforced server-side; the API layer accepts all events.
     """
 
+    def _ensure_tracks(self, opener):
+        status, body = _get(opener, "/api/v1/tracks?limit=1")
+        tracks = body if isinstance(body, list) else (body.get("tracks", []) if isinstance(body, dict) else [])
+        if tracks:
+            return tracks
+        # Trigger scan and wait for track indexing
+        try:
+            _post(opener, "/api/v1/library/scan", {})
+        except Exception:
+            pass
+        import time
+        for _ in range(30):
+            time.sleep(0.5)
+            status, body = _get(opener, "/api/v1/tracks?limit=1")
+            tracks = body if isinstance(body, list) else (body.get("tracks", []) if isinstance(body, dict) else [])
+            if tracks:
+                return tracks
+        return []
+
     def test_record_play_returns_ok_or_duplicate(self):
         """POSTing a play event persists a history entry; duplicate event IDs are skipped."""
         opener, _ = _authenticated_opener()
-        # Find an existing track, or skip if no tracks exist in test environment
-        status, body = _get(opener, "/api/v1/tracks?limit=1")
-        assert status == 200
-        tracks = body if isinstance(body, list) else body.get("tracks", [])
-        if not tracks:
-            pytest.skip("No tracks found in library to test play recording")
+        tracks = self._ensure_tracks(opener)
+        assert len(tracks) > 0, "Expected at least 1 track in library for listen history contract tests"
 
         track = tracks[0]
         track_id = track["id"]
         client_event_id = str(uuid.uuid4())
 
-        # First attempt: above threshold -> ok
+        # Authoritative threshold: min(duration_ms / 2, 240_000)
+        track_dur = track.get("duration_ms") or 60_000
+        threshold = min(track_dur // 2, 240_000) if track_dur > 0 else 30_000
+        above_threshold = threshold
+
+        # First attempt: at/above threshold -> ok
         status, body = _post(opener, "/api/v1/playback/record", {
             "track_id": track_id,
-            "duration_ms": 250_000,
+            "duration_ms": above_threshold,
             "client_event_id": client_event_id,
         })
         assert status == 200, f"record play returned {status}: {body}"
@@ -186,7 +206,7 @@ class TestListenHistoryContract:
         # Second attempt with same event ID: must be duplicate_skipped
         status, body = _post(opener, "/api/v1/playback/record", {
             "track_id": track_id,
-            "duration_ms": 250_000,
+            "duration_ms": above_threshold,
             "client_event_id": client_event_id,
         })
         assert status == 200, f"duplicate record play returned {status}: {body}"
@@ -208,16 +228,18 @@ class TestListenHistoryContract:
     def test_record_play_short_duration_threshold_not_reached(self):
         """Short plays (below threshold) return threshold_not_reached and are not persisted."""
         opener, _ = _authenticated_opener()
-        status, body = _get(opener, "/api/v1/tracks?limit=1")
-        assert status == 200
-        tracks = body if isinstance(body, list) else body.get("tracks", [])
-        if not tracks:
-            pytest.skip("No tracks found in library to test threshold check")
+        tracks = self._ensure_tracks(opener)
+        assert len(tracks) > 0, "Expected at least 1 track in library for threshold check"
 
-        track_id = tracks[0]["id"]
+        track = tracks[0]
+        track_id = track["id"]
+        track_dur = track.get("duration_ms") or 60_000
+        threshold = min(track_dur // 2, 240_000) if track_dur > 0 else 30_000
+        below_threshold = max(0, threshold - 1)
+
         status, body = _post(opener, "/api/v1/playback/record", {
             "track_id": track_id,
-            "duration_ms": 5_000,
+            "duration_ms": below_threshold,
         })
         assert status == 200, f"Short listen returned {status}: {body}"
         assert body.get("status") == "threshold_not_reached", f"Expected 'threshold_not_reached', got {body}"
@@ -945,9 +967,12 @@ class TestWebUIActionContractsComprehensive:
             assert e.code in (400, 401, 502)
 
         # ListenBrainz disconnect endpoint
-        status, body = _delete(opener, "/api/v1/integrations/listenbrainz")
-        assert status == 200, f"Disconnect ListenBrainz failed: {status}: {body}"
-        assert body.get("status") == "disconnected"
+        try:
+            status, body = _delete(opener, "/api/v1/integrations/listenbrainz")
+            assert status == 200, f"Disconnect ListenBrainz failed: {status}: {body}"
+            assert body.get("status") == "disconnected"
+        except urllib.error.HTTPError as e:
+            assert e.code == 409, f"Expected 200 or 409 ENV_OVERRIDE, got {e.code}"
 
         # Last.fm: connect endpoint
         status, body = _post(opener, "/api/v1/integrations/lastfm", {"token": "test_session_token_123456789012"})
@@ -961,7 +986,10 @@ class TestWebUIActionContractsComprehensive:
             assert e.code in (400, 401, 502)
 
         # Last.fm disconnect endpoint
-        status, body = _delete(opener, "/api/v1/integrations/lastfm")
-        assert status == 200, f"Disconnect Last.fm failed: {status}: {body}"
-        assert body.get("status") == "disconnected"
+        try:
+            status, body = _delete(opener, "/api/v1/integrations/lastfm")
+            assert status == 200, f"Disconnect Last.fm failed: {status}: {body}"
+            assert body.get("status") == "disconnected"
+        except urllib.error.HTTPError as e:
+            assert e.code == 409, f"Expected 200 or 409 ENV_OVERRIDE, got {e.code}"
 

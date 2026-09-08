@@ -65,7 +65,7 @@ impl Default for SecurityConfig {
         let login_rate_limit_per_minute = std::env::var("MICHI_LOGIN_RATE_LIMIT_PER_MINUTE")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(100);
+            .unwrap_or(10);
 
         Self {
             rate_limit_rps,
@@ -273,6 +273,7 @@ mod tests {
         let config = SecurityConfig::default();
         assert_eq!(config.rate_limit_rps, 10);
         assert_eq!(config.pairing_rate_limit_per_minute, 5);
+        assert_eq!(config.login_rate_limit_per_minute, 10);
     }
 
     #[test]

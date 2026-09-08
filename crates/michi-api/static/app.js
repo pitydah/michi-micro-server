@@ -3299,29 +3299,45 @@ async function updateScrobbleStatusUI() {
   try {
     var status = await MichiAPI.getScrobbleStatus();
     var lbEl = $('#settings-lb-status');
+    var lbDiscBtn = $('#settings-lb-disconnect');
     if (lbEl) {
-      if (status.listenbrainz_ready) {
+      if (status.listenbrainz_managed_by === 'environment') {
+        lbEl.className = 'badge info';
+        lbEl.textContent = status.listenbrainz_ready ? 'Ready (Managed by environment)' : 'Configured via environment';
+        if (lbDiscBtn) lbDiscBtn.disabled = true;
+      } else if (status.listenbrainz_ready) {
         lbEl.className = 'badge stable';
         lbEl.textContent = 'Ready';
+        if (lbDiscBtn) lbDiscBtn.disabled = !status.listenbrainz_configured;
       } else if (status.listenbrainz_configured) {
         lbEl.className = 'badge warning';
         lbEl.textContent = 'Configured (Scrobbling Disabled)';
+        if (lbDiscBtn) lbDiscBtn.disabled = false;
       } else {
         lbEl.className = 'badge disabled';
         lbEl.textContent = 'Not Configured';
+        if (lbDiscBtn) lbDiscBtn.disabled = true;
       }
     }
     var lfmEl = $('#settings-lfm-status');
+    var lfmDiscBtn = $('#settings-lfm-disconnect');
     if (lfmEl) {
-      if (status.lastfm_ready) {
+      if (status.lastfm_managed_by === 'environment') {
+        lfmEl.className = 'badge info';
+        lfmEl.textContent = status.lastfm_ready ? 'Ready (Beta, Managed by environment)' : 'Configured via environment';
+        if (lfmDiscBtn) lfmDiscBtn.disabled = true;
+      } else if (status.lastfm_ready) {
         lfmEl.className = 'badge stable';
         lfmEl.textContent = 'Ready (Beta)';
+        if (lfmDiscBtn) lfmDiscBtn.disabled = !status.lastfm_configured;
       } else if (status.lastfm_configured) {
         lfmEl.className = 'badge warning';
         lfmEl.textContent = 'Configured (Missing Server Secret or Scrobbling Disabled)';
+        if (lfmDiscBtn) lfmDiscBtn.disabled = false;
       } else {
         lfmEl.className = 'badge disabled';
         lfmEl.textContent = 'Not Configured';
+        if (lfmDiscBtn) lfmDiscBtn.disabled = true;
       }
     }
   } catch (err) {
