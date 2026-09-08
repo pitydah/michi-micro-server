@@ -128,26 +128,6 @@ jobs:
 
           echo "CI run ${RUN_ID} is 100% green across all 15 required gates for SHA ${SHA}. Proceeding with publish."
 
-      - name: Set up Python for Store Package Builder
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Store Package Dependencies
-        run: pip install -r requirements-zima.txt
-
-      - name: Build and Validate ZimaOS App Store Package Distribution
-        run: |
-          set -euo pipefail
-          python3 scripts/build_zimaos_store.py
-
-      - name: Upload ZimaOS App Store package artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zimaos-store-package-${{ steps.source.outputs.sha }}
-          path: dist/
-          retention-days: 90
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -175,6 +155,30 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Set up Python for Store Package Builder
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Store Package Dependencies
+        run: pip install -r requirements-zima.txt
+
+      - name: Pin distribution Compose to immutable digest and build package
+        run: |
+          set -euo pipefail
+          DIGEST="${{ steps.build.outputs.digest }}"
+          PINNED_IMAGE="ghcr.io/${{ github.repository }}@${DIGEST}"
+          echo "Pinning compose images in zimaos-store to: ${PINNED_IMAGE}"
+          sed -i -E "s|image: ghcr.io/pitydah/michi-micro-server:[^ ]+|image: ${PINNED_IMAGE}|g" zimaos-store/Apps/MichiMicroServer/docker-compose.yml
+          python3 scripts/build_zimaos_store.py
+
+      - name: Upload ZimaOS App Store package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zimaos-store-package-${{ steps.source.outputs.sha }}
+          path: dist/
+          retention-days: 90
+
       - name: Update mutable r3.1-zima alias if still on main HEAD (LAST STEP)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -200,7 +204,8 @@ jobs:
           echo "- **Source SHA**: \`${{ steps.source.outputs.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Image Digest**: \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Pinned URI**: \`ghcr.io/pitydah/michi-micro-server@${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **App Package**: \`dist/apps/io.michi.micro-server/\` (ID: \`io.michi.micro-server\`, Version: \`3.1\`)" >> $GITHUB_STEP_SUMMARY
+          echo "- **App Package**: \`dist/apps/io.michi.micro-server/\` (ID: \`io.michi.micro-server\`, Version: \`1.0.0-rc.1\`)" >> $GITHUB_STEP_SUMMARY
           echo "Certified digest: ${{ steps.build.outputs.digest }}"
+
 
 

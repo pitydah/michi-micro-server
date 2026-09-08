@@ -1,0 +1,10 @@
+{
+  "historical_version": "0.2.0",
+  "git_tag": "v0.2.0",
+  "schema_version": 29,
+  "fixture_file": "historical_v0_2_0.sql",
+  "sha256": "baf6c76cf2bc2d933974d2b97753021f429b9440e6b264bcef917cfc0967312d",
+  "generator": "michi-server v0.2.0 release SQLite dump with sample tracks, playlists, play_history, queues, users, and receivers",
+  "target_version": "1.0.0-rc.1",
+  "expected_final_schema_version": 47
+}

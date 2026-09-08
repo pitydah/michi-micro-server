@@ -20,6 +20,7 @@ import sys
 import json
 import shutil
 import subprocess
+import hashlib
 import yaml
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -118,6 +119,16 @@ def build_store():
             sys.exit(1)
         shutil.copy2(thumbnail_png, os.path.join(target_assets_dir, "thumbnail.png"))
 
+        # Calculate content hash of compose and assets
+        sha256 = hashlib.sha256()
+        with open(compose_file, "rb") as cf:
+            sha256.update(cf.read())
+        with open(icon_svg, "rb") as ic:
+            sha256.update(ic.read())
+        with open(thumbnail_png, "rb") as th:
+            sha256.update(th.read())
+        content_hash = sha256.hexdigest()
+
         meta = {
             "id": app_id,
             "title": x_casaos.get("title", {"en_US": app_name}),
@@ -132,6 +143,7 @@ def build_store():
             "scheme": x_casaos.get("scheme", "http"),
             "index": x_casaos.get("index", "/"),
             "version": PRODUCT_VERSION,
+            "content_hash": content_hash,
             "architectures": x_casaos.get("architectures", ["amd64", "arm64"]),
             "main_service": x_casaos.get("main", app_name)
         }
@@ -140,18 +152,41 @@ def build_store():
             json.dump(meta, f, indent=2, ensure_ascii=False)
 
         catalog.append(meta)
-        print(f"  ✓ Packaged and validated {app_name} (ID: {app_id}, Version: {meta['version']})")
+        print(f"  ✓ Packaged and validated {app_name} (ID: {app_id}, Version: {meta['version']}, Hash: {content_hash[:10]}...)")
 
+    # Load store-config.json for canonical store metadata if present
+    store_config_file = os.path.join(STORE_SRC, "store-config.json")
+    store_metadata = {}
+    if os.path.exists(store_config_file):
+        with open(store_config_file, "r", encoding="utf-8") as f:
+            try:
+                store_metadata = json.load(f)
+            except Exception as e:
+                print(f"WARNING: could not parse store-config.json: {e}")
+
+    # Backward-compatible index.json (Schema 3.1)
     index_data = {
         "version": STORE_SCHEMA_VERSION,
         "name": "Michi Official App Store",
         "apps": catalog
     }
-
     with open(os.path.join(DIST_DIR, "index.json"), "w", encoding="utf-8") as f:
         json.dump(index_data, f, indent=2, ensure_ascii=False)
+
+    # Canonical Store v2 store.json
+    store_data = {
+        "version": 2,
+        "store_id": store_metadata.get("store_id", "io.michi.store"),
+        "name": store_metadata.get("name", {"en_US": "Michi Official App Store"}),
+        "maintainer": store_metadata.get("maintainer", "pitydah"),
+        "url": store_metadata.get("url", "https://raw.githubusercontent.com/pitydah/michi-micro-server/main"),
+        "apps": catalog
+    }
+    with open(os.path.join(DIST_DIR, "store.json"), "w", encoding="utf-8") as f:
+        json.dump(store_data, f, indent=2, ensure_ascii=False)
 
     print(f"Successfully generated and validated ZimaOS store distribution at {DIST_DIR} with {len(catalog)} app(s).")
 
 if __name__ == "__main__":
     build_store()
+

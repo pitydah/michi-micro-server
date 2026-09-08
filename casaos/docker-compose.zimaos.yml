@@ -58,4 +58,4 @@ x-casaos:
   index: /
   port_map: "${WEBUI_PORT:-9090}"
   scheme: http
-  version: "3.1"
+  version: "1.0.0-rc.1"

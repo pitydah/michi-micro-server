@@ -121,16 +121,27 @@ def main():
         conn.close()
     test("Storage Permissions & SQLite Integrity Verification", test_permissions)
 
-    # 3. Database Schema Version Verification
+    # 3. Database Schema Version & Play History Invariant Verification
     def test_schema_version():
         db_path = os.path.join(args.config_dir, "michi.db")
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute("SELECT MAX(version) FROM _migrations")
         max_ver = cursor.fetchone()[0]
+        assert max_ver == 47, f"expected exact schema version 47, got {max_ver}"
+
+        # Assert play_history client_event_id column is present
+        cursor.execute("PRAGMA table_info(play_history)")
+        columns = [row[1] for row in cursor.fetchall()]
+        assert "client_event_id" in columns, f"client_event_id missing in play_history: {columns}"
+
+        # Assert idx_play_history_client_event_id unique index is present
+        cursor.execute("PRAGMA index_list(play_history)")
+        indexes = [row[1] for row in cursor.fetchall()]
+        assert "idx_play_history_client_event_id" in indexes, f"idx_play_history_client_event_id missing: {indexes}"
+
         conn.close()
-        assert max_ver >= 37, f"expected schema version >= 37, got {max_ver}"
-    test("Database Migrations Complete (schema version >= 37)", test_schema_version)
+    test("Database Migrations Complete & Schema Invariants (version == 47, client_event_id unique index)", test_schema_version)
 
     # 4. Range Streaming Verification
     def test_range_streaming():
@@ -138,36 +149,73 @@ def main():
         track_path = os.path.join(args.music_dir, "appliance_test_track.flac")
         file_size = create_mock_flac_file(track_path, "Appliance Test", "Michi Appliance", "Qualification")
 
-        # Trigger scan
-        try:
-            http_post_json(f"{server_url}/api/v1/library/scan", {}, headers=auth_headers)
-        except Exception:
-            pass
+        # Trigger scan and assert non-empty scan response
+        scan_st, _, scan_body = http_post_json(f"{server_url}/api/v1/library/scan", {}, headers=auth_headers)
+        assert scan_st == 200, f"library scan returned {scan_st}"
+        scan_res = json.loads(scan_body)
+        assert scan_res.get("scanned", 0) > 0, f"expected scanned tracks > 0, got {scan_res}"
         time.sleep(1.0)
 
         # List tracks
         status, _, body = http_get(f"{server_url}/api/v1/tracks", headers=auth_headers)
+        assert status == 200, f"list tracks returned {status}"
         tracks_data = json.loads(body)
         tracks = tracks_data.get("tracks", tracks_data) if isinstance(tracks_data, dict) else tracks_data
+        assert len(tracks) > 0, "expected at least one track in library after scan"
 
-        if len(tracks) > 0:
-            track_id = tracks[0]["id"]
-            # Request byte range 0-1023
-            req_headers = {"Range": "bytes=0-1023"}
-            req_headers.update(auth_headers)
-            status, headers, body = http_get(
-                f"{server_url}/api/v1/tracks/{track_id}/stream",
-                headers=req_headers
-            )
-            assert status in (200, 206), f"stream returned {status}"
-            assert len(body) in (1024, file_size), f"unexpected body length: {len(body)}"
+        # Find the scanned test track
+        test_tracks = [t for t in tracks if t.get("title") == "Appliance Test"]
+        target_track = test_tracks[0] if test_tracks else tracks[0]
+        track_id = target_track["id"]
+
+        # Request byte range 0-1023
+        req_headers = {"Range": "bytes=0-1023"}
+        req_headers.update(auth_headers)
+        status, headers, body = http_get(
+            f"{server_url}/api/v1/tracks/{track_id}/stream",
+            headers=req_headers
+        )
+        assert status == 206, f"expected 206 Partial Content, got {status}"
+        assert len(body) == 1024, f"expected 1024 bytes in partial content body, got {len(body)}"
+        content_range = headers.get("content-range") or headers.get("Content-Range")
+        assert content_range is not None and "bytes 0-1023/" in content_range, f"invalid Content-Range header: {content_range}"
+        accept_ranges = headers.get("accept-ranges") or headers.get("Accept-Ranges")
+        assert accept_ranges == "bytes", f"invalid Accept-Ranges: {accept_ranges}"
     test("HTTP Range Request Streaming (206 Partial Content / Accept-Ranges)", test_range_streaming)
 
     # 5. Playback Queue State Persistence Across Restarts
     def test_queue_persistence():
-        status, _, body = http_get(f"{server_url}/api/v1/queue", headers=auth_headers)
-        assert status == 200, f"queue endpoint returned {status}"
-    test("Playback Queue State Verification", test_queue_persistence)
+        # Fetch tracks to seed queue if empty
+        status, _, body = http_get(f"{server_url}/api/v1/tracks", headers=auth_headers)
+        assert status == 200
+        tracks_data = json.loads(body)
+        tracks = tracks_data.get("tracks", tracks_data) if isinstance(tracks_data, dict) else tracks_data
+        assert len(tracks) > 0, "tracks required to test queue"
+
+        q_status, _, q_body = http_get(f"{server_url}/api/v1/queue", headers=auth_headers)
+        assert q_status == 200, f"queue endpoint returned {q_status}"
+        q_data = json.loads(q_body)
+
+        # If queue is empty, populate it so post-restart runs will verify its persistence
+        if q_data.get("items_count", 0) == 0:
+            target_track_id = tracks[0]["id"]
+            add_st, _, add_body = http_post_json(
+                f"{server_url}/api/v1/queue/items",
+                {"track_ids": [target_track_id], "name": "appliance-persistence-queue"},
+                headers=auth_headers
+            )
+            assert add_st == 200, f"failed to seed queue items: {add_st} {add_body}"
+            # Verify it was added
+            st, _, b = http_get(f"{server_url}/api/v1/queue", headers=auth_headers)
+            assert st == 200
+            new_q = json.loads(b)
+            assert new_q.get("items_count", 0) > 0, "queue items count did not increase"
+        else:
+            # Queue was already seeded prior to restart; verify items persisted
+            assert q_data.get("items_count", 0) > 0, f"persisted queue should have items: {q_data}"
+            assert len(q_data.get("items", [])) > 0, "persisted items list should not be empty"
+    test("Playback Queue State Verification & Persistence", test_queue_persistence)
+
 
     # Summary
     print("\n" + "=" * 70)

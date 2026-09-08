@@ -916,6 +916,7 @@ jobs:
       - name: Assert ZimaOS store distribution integrity
         run: |
           test -f dist/index.json
+          test -f dist/store.json
           test -f dist/apps/io.michi.micro-server/docker-compose.yml
           test -f dist/apps/io.michi.micro-server/meta.json
           test -s dist/apps/io.michi.micro-server/assets/icon.svg
@@ -937,7 +938,17 @@ jobs:
           assert app["scheme"] == "http"
           assert data["version"] == "3.1"
           assert app["version"] == expected_version, (app["version"], expected_version)
+          assert "content_hash" in app and len(app["content_hash"]) == 64
+
+          with open("dist/store.json") as f:
+              store_v2 = json.load(f)
+
+          assert store_v2["version"] == 2
+          assert store_v2["store_id"] == "io.michi.store"
+          assert store_v2["apps"][0]["id"] == "io.michi.micro-server"
+          assert store_v2["apps"][0]["version"] == expected_version
           PY
+
       - name: Record release evidence
         if: always()
         run: |
