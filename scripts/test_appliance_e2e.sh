@@ -41,48 +41,16 @@ rm -rf "$BASE_DIR"
 mkdir -p "$CONFIG_DIR" "$CACHE_DIR" "$MUSIC_DIR"
 
 # 2. Historical Database Migration Simulation
-# Create a historical SQLite database with schema version 10 and dummy track data
-echo "Preparing historical SQLite database (v0.1.0 schema)..."
-sqlite3 "${CONFIG_DIR}/michi.db" <<'EOF'
-CREATE TABLE _migrations (
-    version INTEGER PRIMARY KEY,
-    applied_at TEXT NOT NULL
-);
-INSERT INTO _migrations (version, applied_at) VALUES 
-(1, datetime('now')), (2, datetime('now')), (3, datetime('now')), 
-(4, datetime('now')), (5, datetime('now')), (6, datetime('now')), 
-(7, datetime('now')), (8, datetime('now')), (9, datetime('now')), (10, datetime('now'));
+# Load authentic historical SQLite database fixture (v0.2.0 schema, migrations 1-29)
+echo "Preparing historical SQLite database (v0.2.0 authentic schema)..."
+HISTORICAL_FIXTURE="${PROJECT_ROOT}/tests/fixtures/historical_v0_2_0.sql"
+if [ ! -f "$HISTORICAL_FIXTURE" ]; then
+    echo "ERROR: Historical database fixture not found at $HISTORICAL_FIXTURE" >&2
+    exit 1
+fi
+sqlite3 "${CONFIG_DIR}/michi.db" < "$HISTORICAL_FIXTURE"
 
-CREATE TABLE tracks (
-    id TEXT PRIMARY KEY,
-    title TEXT,
-    artist TEXT,
-    album TEXT,
-    album_artist TEXT,
-    duration_ms INTEGER,
-    file_path TEXT NOT NULL UNIQUE,
-    format TEXT NOT NULL DEFAULT 'unknown',
-    sample_rate INTEGER,
-    bit_depth INTEGER,
-    channels INTEGER,
-    artwork_id TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-INSERT INTO tracks (id, title, artist, album, file_path, format, created_at, updated_at) 
-VALUES ('hist-track-001', 'Historical Ballad', 'Vintage Artist', 'First Edition', '/music/historical_track.flac', 'flac', datetime('now'), datetime('now'));
-
-CREATE TABLE users (
-    id TEXT PRIMARY KEY,
-    username TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    is_admin INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-EOF
-
-echo "Historical database prepared with 1 track and 1 user."
+echo "Historical database prepared with authentic v0.2.0 schema (tracks, playlists, history, users)."
 
 # 3. Locate / Build Binary
 TARGET_BIN="${PROJECT_ROOT}/target/debug/michi-server"

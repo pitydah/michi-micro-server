@@ -14,11 +14,12 @@ services:
       - type: bind
         source: ${MUSIC_PATH:-/DATA/Media/Music}
         target: /music
+        read_only: true
     environment:
       - TZ=${TZ:-UTC}
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
-      - MICHI_PORT=9090
+      - MICHI_PORT=${WEBUI_PORT:-9090}
       - MICHI_MUSIC_PATH=/music
       - MICHI_CONFIG_PATH=/config
       - MICHI_CACHE_PATH=/cache
@@ -40,7 +41,7 @@ x-casaos:
     - amd64
     - arm64
   author: pitydah
-  category: Music
+  category: Media
   developer: pitydah
   icon: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server.svg"
   thumbnail: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server-512.png"
@@ -55,6 +56,6 @@ x-casaos:
     en_US: Michi Micro Server
     es_ES: Servidor Michi Micro
   index: /
-  port_map: "9090"
+  port_map: "${WEBUI_PORT:-9090}"
   scheme: http
   version: "3.1"

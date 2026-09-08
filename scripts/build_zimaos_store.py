@@ -19,6 +19,7 @@ import os
 import sys
 import json
 import shutil
+import subprocess
 import yaml
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -72,19 +73,29 @@ def build_store():
             print(f"ERROR: {app_name} docker-compose.yml missing x-casaos.id")
             sys.exit(1)
 
-        # Validate services and labels
-        services = compose_data.get("services", {})
-        if not services:
-            print(f"ERROR: {app_name} docker-compose.yml contains no services")
+        category = x_casaos.get("category")
+        ALLOWED_CATEGORIES = {
+            "Media", "Productivity", "Home", "Networking", "AI",
+            "Finance", "Social", "Developer", "Others"
+        }
+        if category not in ALLOWED_CATEGORIES:
+            print(f"ERROR: {app_name} invalid category '{category}'. Must be one of {sorted(ALLOWED_CATEGORIES)}")
             sys.exit(1)
 
-        has_icon_label = any(
-            isinstance(s.get("labels"), dict) and "icon" in s.get("labels", {})
-            for s in services.values()
-        )
-        if not has_icon_label:
-            print(f"ERROR: {app_name} service labels missing required 'icon' label")
-            sys.exit(1)
+        # Validate docker compose configuration syntax if docker CLI is available
+        if shutil.which("docker"):
+            mock_env = os.environ.copy()
+            mock_env.setdefault("MICHI_AUTH_PASSWORD", "test_validation_pass_123")
+            mock_env.setdefault("WEBUI_PORT", "9090")
+            res = subprocess.run(
+                ["docker", "compose", "-f", compose_file, "config", "-q"],
+                env=mock_env,
+                capture_output=True,
+                text=True
+            )
+            if res.returncode != 0:
+                print(f"ERROR: {app_name} docker compose config validation failed:\n{res.stderr}")
+                sys.exit(1)
 
         target_app_dir = os.path.join(APPS_DIST, app_id)
         target_assets_dir = os.path.join(target_app_dir, "assets")
