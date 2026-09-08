@@ -1733,11 +1733,13 @@ async fn test_casaos_zimaos_metadata_icon_conformance() {
         "ZimaOS compose must preserve network_mode: host"
     );
     assert!(
-        zimaos_content.contains("port_map: \"9090\""),
+        zimaos_content.contains("port_map: \"9090\"")
+            || zimaos_content.contains("port_map: \"${WEBUI_PORT:-9090}\""),
         "ZimaOS compose must map port 9090"
     );
     assert!(
-        casaos_content.contains("port_map: \"9090\""),
+        casaos_content.contains("port_map: \"9090\"")
+            || casaos_content.contains("port_map: \"${WEBUI_PORT:-9090}\""),
         "CasaOS compose must map port 9090"
     );
 }
