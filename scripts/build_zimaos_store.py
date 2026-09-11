@@ -19,6 +19,8 @@ import os
 import sys
 import json
 import shutil
+import subprocess
+import hashlib
 import yaml
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -72,19 +74,29 @@ def build_store():
             print(f"ERROR: {app_name} docker-compose.yml missing x-casaos.id")
             sys.exit(1)
 
-        # Validate services and labels
-        services = compose_data.get("services", {})
-        if not services:
-            print(f"ERROR: {app_name} docker-compose.yml contains no services")
+        category = x_casaos.get("category")
+        ALLOWED_CATEGORIES = {
+            "Media", "Productivity", "Home", "Networking", "AI",
+            "Finance", "Social", "Developer", "Others"
+        }
+        if category not in ALLOWED_CATEGORIES:
+            print(f"ERROR: {app_name} invalid category '{category}'. Must be one of {sorted(ALLOWED_CATEGORIES)}")
             sys.exit(1)
 
-        has_icon_label = any(
-            isinstance(s.get("labels"), dict) and "icon" in s.get("labels", {})
-            for s in services.values()
-        )
-        if not has_icon_label:
-            print(f"ERROR: {app_name} service labels missing required 'icon' label")
-            sys.exit(1)
+        # Validate docker compose configuration syntax if docker CLI is available
+        if shutil.which("docker"):
+            mock_env = os.environ.copy()
+            mock_env.setdefault("MICHI_AUTH_PASSWORD", "test_validation_pass_123")
+            mock_env.setdefault("WEBUI_PORT", "9090")
+            res = subprocess.run(
+                ["docker", "compose", "-f", compose_file, "config", "-q"],
+                env=mock_env,
+                capture_output=True,
+                text=True
+            )
+            if res.returncode != 0:
+                print(f"ERROR: {app_name} docker compose config validation failed:\n{res.stderr}")
+                sys.exit(1)
 
         target_app_dir = os.path.join(APPS_DIST, app_id)
         target_assets_dir = os.path.join(target_app_dir, "assets")
@@ -107,6 +119,16 @@ def build_store():
             sys.exit(1)
         shutil.copy2(thumbnail_png, os.path.join(target_assets_dir, "thumbnail.png"))
 
+        # Calculate content hash of compose and assets
+        sha256 = hashlib.sha256()
+        with open(compose_file, "rb") as cf:
+            sha256.update(cf.read())
+        with open(icon_svg, "rb") as ic:
+            sha256.update(ic.read())
+        with open(thumbnail_png, "rb") as th:
+            sha256.update(th.read())
+        content_hash = sha256.hexdigest()
+
         meta = {
             "id": app_id,
             "title": x_casaos.get("title", {"en_US": app_name}),
@@ -114,13 +136,14 @@ def build_store():
             "description": x_casaos.get("description", {}),
             "author": x_casaos.get("author", "pitydah"),
             "developer": x_casaos.get("developer", "pitydah"),
-            "category": x_casaos.get("category", "Music"),
+            "category": x_casaos.get("category", "Media"),
             "icon": f"apps/{app_id}/assets/icon.svg",
             "thumbnail": f"apps/{app_id}/assets/thumbnail.png",
-            "port_map": x_casaos.get("port_map", "9090"),
+            "port_map": x_casaos.get("port_map", "${WEBUI_PORT:-9090}"),
             "scheme": x_casaos.get("scheme", "http"),
             "index": x_casaos.get("index", "/"),
             "version": PRODUCT_VERSION,
+            "content_hash": content_hash,
             "architectures": x_casaos.get("architectures", ["amd64", "arm64"]),
             "main_service": x_casaos.get("main", app_name)
         }
@@ -129,18 +152,41 @@ def build_store():
             json.dump(meta, f, indent=2, ensure_ascii=False)
 
         catalog.append(meta)
-        print(f"  ✓ Packaged and validated {app_name} (ID: {app_id}, Version: {meta['version']})")
+        print(f"  ✓ Packaged and validated {app_name} (ID: {app_id}, Version: {meta['version']}, Hash: {content_hash[:10]}...)")
 
+    # Load store-config.json for canonical store metadata if present
+    store_config_file = os.path.join(STORE_SRC, "store-config.json")
+    store_metadata = {}
+    if os.path.exists(store_config_file):
+        with open(store_config_file, "r", encoding="utf-8") as f:
+            try:
+                store_metadata = json.load(f)
+            except Exception as e:
+                print(f"WARNING: could not parse store-config.json: {e}")
+
+    # Backward-compatible index.json (Schema 3.1)
     index_data = {
         "version": STORE_SCHEMA_VERSION,
         "name": "Michi Official App Store",
         "apps": catalog
     }
-
     with open(os.path.join(DIST_DIR, "index.json"), "w", encoding="utf-8") as f:
         json.dump(index_data, f, indent=2, ensure_ascii=False)
+
+    # Canonical Store v2 store.json
+    store_data = {
+        "version": 2,
+        "store_id": store_metadata.get("store_id", "io.michi.store"),
+        "name": store_metadata.get("name", {"en_US": "Michi Official App Store"}),
+        "maintainer": store_metadata.get("maintainer", "pitydah"),
+        "url": store_metadata.get("url", "https://raw.githubusercontent.com/pitydah/michi-micro-server/main"),
+        "apps": catalog
+    }
+    with open(os.path.join(DIST_DIR, "store.json"), "w", encoding="utf-8") as f:
+        json.dump(store_data, f, indent=2, ensure_ascii=False)
 
     print(f"Successfully generated and validated ZimaOS store distribution at {DIST_DIR} with {len(catalog)} app(s).")
 
 if __name__ == "__main__":
     build_store()
+

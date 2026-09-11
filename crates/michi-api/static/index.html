@@ -250,7 +250,8 @@
                 </div>
             </div>
             <div class="panel">
-                <button class="btn btn-primary" onclick="testMichiLink()">Test Connection</button>
+                <button class="btn btn-primary" onclick="testMichiLink()">Run Michi Link Self-Test</button>
+                <div id="michilink-self-test-results" class="panel-result" style="margin-top:10px"></div>
             </div>
             <div class="panel">
                 <div class="panel-header">Ecosystem</div>
@@ -543,6 +544,49 @@
                         <input type="text" id="settings-sync-name-input" class="panel-input" style="max-width:200px" onchange="saveSetting('sync_name', this.value.trim())">
                     </div>
                 </div>
+                <div class="panel">
+                    <div class="panel-header">ListenBrainz Integration</div>
+                    <div class="panel-row">
+                        <span class="panel-label">Status</span>
+                        <span id="settings-lb-status" class="badge disabled">Not Configured</span>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">User Token</span>
+                        <input type="password" id="settings-lb-token" class="panel-input" placeholder="ListenBrainz user token" autocomplete="off" style="max-width:280px">
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
+                        <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                            <button class="btn btn-primary btn-sm" onclick="saveListenBrainzToken()">Connect ListenBrainz</button>
+                            <button class="btn btn-ghost btn-sm" onclick="testListenBrainz()">Test Connection</button>
+                            <button id="settings-lb-disconnect" class="btn btn-danger btn-sm" onclick="disconnectListenBrainz()">Disconnect</button>
+                        </div>
+                    </div>
+                    <div id="settings-lb-result" class="panel-result"></div>
+                </div>
+                <div class="panel">
+                    <div class="panel-header">Last.fm Integration (Beta)</div>
+                    <div class="panel-row">
+                        <span class="panel-label">Status</span>
+                        <span id="settings-lfm-status" class="badge disabled">Not Configured</span>
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label">Session Key</span>
+                        <input type="password" id="settings-lfm-token" class="panel-input" placeholder="32-character session key" autocomplete="off" style="max-width:280px">
+                    </div>
+                    <div class="panel-row">
+                        <span class="panel-label"></span>
+                        <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                            <button class="btn btn-primary btn-sm" onclick="saveLastFmToken()">Save Last.fm Session</button>
+                            <button class="btn btn-ghost btn-sm" onclick="testLastFm()">Test Connection</button>
+                            <button id="settings-lfm-disconnect" class="btn btn-danger btn-sm" onclick="disconnectLastFm()">Disconnect</button>
+                        </div>
+                    </div>
+                    <div class="panel-row" style="font-size:0.75rem;color:var(--text-muted)">
+                        <span>Requires server MICHI_LASTFM_API_KEY and MICHI_LASTFM_SHARED_SECRET.</span>
+                    </div>
+                    <div id="settings-lfm-result" class="panel-result"></div>
+                </div>
             </div>
 
             <!-- Sync -->
@@ -595,10 +639,10 @@
                     <div class="panel-row"><span class="panel-label">CORS Origin</span><span class="panel-mono" id="settings-cors" style="flex:1">--</span></div>
                     <div class="panel-row"><span class="panel-label">Auth</span><span id="settings-auth" class="badge disabled">Disabled</span></div>
                     <div class="panel-row">
-                        <span class="panel-label">Dev Mode</span>
+                        <span class="panel-label">Development CORS</span>
                         <select id="settings-dev-mode-select" class="panel-input" style="max-width:200px" onchange="saveSetting('dev_mode', this.value === 'true')">
-                            <option value="false">Off (Production Security)</option>
-                            <option value="true">On (Development Bypass)</option>
+                            <option value="false">Restricted (Production Security)</option>
+                            <option value="true">Permissive (Development CORS)</option>
                         </select>
                     </div>
                     <div class="panel-row">
@@ -831,7 +875,7 @@
             <button class="btn btn-ghost btn-sm" id="btn-repeat" onclick="toggleRepeat()" title="Repeat" style="font-size:1rem;color:var(--text-3)">🔁</button>
         </div>
         <div class="np-queue">
-            <h4>Up Next</h4>
+            <h4 style="display:flex;align-items:center;justify-content:space-between"><span>Up Next</span><span id="queue-authority-label" style="font-size:0.68rem;font-weight:normal;color:var(--text-3);text-transform:none">Browser Queue</span></h4>
             <div id="queue-content"><p class="queue-empty" data-i18n="queue_empty">Queue empty</p></div>
         </div>
     </aside>

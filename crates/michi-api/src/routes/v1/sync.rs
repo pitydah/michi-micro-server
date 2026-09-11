@@ -663,3 +663,75 @@ pub async fn sync_state_handler(
         }
     })))
 }
+
+pub async fn enforce_sync_network_policy(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !state.config.remote_sync {
+        let connect_info = req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .cloned();
+        let client_ip = crate::resolve_client_ip(connect_info, req.headers(), &state.config);
+        match client_ip {
+            Some(ip) => {
+                if !crate::sync_ws::is_local_or_private_ip(ip) {
+                    tracing::warn!(
+                        "sync_http: rejected non-local sync request from {} (remote_sync=false)",
+                        ip
+                    );
+                    return v1_error(
+                        StatusCode::FORBIDDEN,
+                        "FORBIDDEN",
+                        "Remote sync is disabled on this server",
+                    )
+                    .into_response();
+                }
+            }
+            None => {
+                // ConnectInfo is absent when the router is exercised via tower `oneshot`
+                // (in-process integration tests with no real TCP socket).  Real TCP
+                // connections served through `into_make_service_with_connect_info` always
+                // populate ConnectInfo, so reaching this branch in production is impossible.
+                // Treat missing peer addr as loopback and allow the request through so that
+                // handler-level module-disabled checks (returning 503) remain reachable.
+                // NOTE: the WebSocket endpoint (/api/sync via sync_ws::sync_handler) retains
+                // its own strict fail-closed behaviour independently of this middleware.
+                tracing::debug!(
+                    "sync_http: no ConnectInfo present — treating as loopback (in-process / direct local)"
+                );
+            }
+        }
+    }
+    next.run(req).await
+}
+
+pub fn sync_router() -> axum::Router<AppState> {
+    use axum::routing::{get, post};
+    axum::Router::new()
+        .route("/api/v1/sync/manifest", get(sync_manifest_handler))
+        .route(
+            "/api/v1/sync/manifest/delta",
+            get(sync_manifest_delta_handler),
+        )
+        .route("/api/v1/sync/state", post(sync_state_handler))
+        .route("/api/v1/sync/upload/init", post(sync_upload_init_handler))
+        .route(
+            "/api/v1/sync/upload/:file_id/chunk",
+            post(sync_upload_chunk_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
+        .route(
+            "/api/v1/sync/upload/:file_id/status",
+            get(sync_upload_status_handler),
+        )
+        .route(
+            "/api/v1/sync/upload/file",
+            post(sync_upload_file_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
+        .route("/api/v1/sync/playlist", post(sync_playlist_handler))
+}

@@ -7985,3 +7985,259 @@ async fn test_sync_two_servers_real_network_peer_sync() {
         "Server B should receive and apply volume 66 synced from Server A over real network"
     );
 }
+
+#[tokio::test]
+async fn test_sync_network_policy_enforcement_http_and_link_self_test() {
+    let pool = test_db().await;
+    let mut config = test_config();
+    config.remote_sync = false;
+    config.trust_proxy = true;
+    let proxy_ip: std::net::IpAddr = "198.51.100.10".parse().unwrap();
+    config.trusted_proxies = vec![proxy_ip];
+
+    let state = michi_api::AppState::new(config, pool.clone(), None);
+    let app = router_with_test_admin(state.clone(), &pool).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let client = reqwest::Client::new();
+
+    // 1. Verify link/self-test works non-mutatingly
+    let self_test_resp = client
+        .get(format!("http://127.0.0.1:{port}/api/v1/link/self-test"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(self_test_resp.status(), 200);
+    let self_test_json: serde_json::Value = self_test_resp.json().await.unwrap();
+    assert!(self_test_json.get("status").is_some());
+    assert!(self_test_json.get("checks").is_some());
+
+    // 2. Direct local client (127.0.0.1 is not trusted proxy, so peer_ip 127.0.0.1 is used directly) succeeds
+    let local_resp = client
+        .get(format!("http://127.0.0.1:{port}/api/v1/sync/manifest"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(local_resp.status(), 200);
+
+    // 3. Spoofed X-Forwarded-For from untrusted peer (127.0.0.1) is ignored and peer IP is still local -> succeeds
+    let spoof_resp = client
+        .get(format!("http://127.0.0.1:{port}/api/v1/sync/manifest"))
+        .header("X-Forwarded-For", "203.0.113.195")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spoof_resp.status(), 200);
+
+    // 4. Now test with a server where 127.0.0.1 IS a trusted proxy:
+    let mut proxy_cfg = test_config();
+    proxy_cfg.remote_sync = false;
+    proxy_cfg.trust_proxy = true;
+    proxy_cfg.trusted_proxies = vec!["127.0.0.1".parse::<std::net::IpAddr>().unwrap()];
+
+    let proxy_state = michi_api::AppState::new(proxy_cfg, pool.clone(), None);
+    let proxy_app = router_with_test_admin(proxy_state.clone(), &pool).await;
+    let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_port = proxy_listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(
+            proxy_listener,
+            proxy_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // 4a. Forwarded non-local client IP through trusted proxy is rejected 403
+    let non_local_resp = client
+        .get(format!(
+            "http://127.0.0.1:{proxy_port}/api/v1/sync/manifest"
+        ))
+        .header("X-Forwarded-For", "203.0.113.195")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(non_local_resp.status(), 403);
+    let err_json: serde_json::Value = non_local_resp.json().await.unwrap();
+    assert_eq!(err_json["error"]["code"], "FORBIDDEN");
+
+    // 4b. Forwarded local client IP through trusted proxy is permitted 200
+    let local_forwarded_resp = client
+        .get(format!(
+            "http://127.0.0.1:{proxy_port}/api/v1/sync/manifest"
+        ))
+        .header("X-Forwarded-For", "192.168.1.50")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(local_forwarded_resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_lastfm_signature_calculation() {
+    let params = [
+        ("method", "track.scrobble"),
+        ("api_key", "test_api_key"),
+        ("artist", "Test Artist"),
+        ("track", "Test Track"),
+        ("timestamp", "1700000000"),
+    ];
+    let secret = "test_secret";
+    let sig = michi_api::routes::v1::playback::calculate_lastfm_signature(&params, secret);
+    assert!(!sig.is_empty());
+    assert_eq!(sig.len(), 32); // 32 hex chars for md5
+
+    // Verify determinism
+    let sig2 = michi_api::routes::v1::playback::calculate_lastfm_signature(&params, secret);
+    assert_eq!(sig, sig2);
+}
+
+#[tokio::test]
+async fn test_scrobbling_integrations_endpoints() {
+    let (port, _pool, _state) = run_test_server_with_state().await;
+    let client = reqwest::Client::new();
+
+    // 1. Get scrobbling status
+    let status_resp = client
+        .get(format!(
+            "http://127.0.0.1:{port}/api/v1/integrations/scrobbling"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(status_resp.status(), 200);
+    let status_json: serde_json::Value = status_resp.json().await.unwrap();
+    assert!(status_json.get("scrobble_enabled").is_some());
+
+    // 2. Set empty ListenBrainz token should fail validation
+    let empty_lb = client
+        .post(format!(
+            "http://127.0.0.1:{port}/api/v1/integrations/listenbrainz"
+        ))
+        .json(&serde_json::json!({ "token": "" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(empty_lb.status(), 400);
+
+    // 3. Set valid format Last.fm session token succeeds
+    let set_lastfm = client
+        .post(format!(
+            "http://127.0.0.1:{port}/api/v1/integrations/lastfm"
+        ))
+        .json(&serde_json::json!({ "token": "valid_session_token_123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(set_lastfm.status(), 200);
+}
+
+#[tokio::test]
+async fn test_link_self_test_verifies_all_subsystems() {
+    let (port, _pool, _state) = run_test_server_with_state().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/api/v1/link/self-test"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["status"], "passed");
+
+    let checks = json["checks"]
+        .as_array()
+        .expect("checks should be an array");
+    let names: Vec<&str> = checks.iter().filter_map(|c| c["name"].as_str()).collect();
+
+    assert!(names.contains(&"server_identity"));
+    assert!(names.contains(&"pairing_registry"));
+    assert!(names.contains(&"receiver_manager"));
+    assert!(names.contains(&"playback_engine"));
+    assert!(names.contains(&"token_store"));
+    assert!(names.contains(&"database"));
+}
+
+#[tokio::test]
+async fn test_podcast_episode_progress_persistence() {
+    let (port, pool, _state) = run_test_server_with_state().await;
+    let client = reqwest::Client::new();
+
+    let source_id = Uuid::new_v4();
+    let source = michi_core::StreamSource {
+        id: source_id,
+        url: "https://example.com/feed.xml".to_string(),
+        stream_type: "podcast".to_string(),
+        name: Some("Test Podcast".to_string()),
+        genre: None,
+        description: None,
+        logo_url: None,
+        codec: None,
+        enabled: true,
+    };
+    michi_db::add_stream_source(&pool, &source).await.unwrap();
+
+    let ep_id = Uuid::new_v4();
+    let ep = michi_core::PodcastEpisodeDb {
+        id: ep_id,
+        source_id,
+        title: "Episode 1".to_string(),
+        audio_url: "https://example.com/ep1.mp3".to_string(),
+        pub_date: Some("2026-01-01T00:00:00Z".to_string()),
+        duration_secs: Some(3600),
+        played: false,
+        position_ms: 0,
+    };
+    michi_db::upsert_podcast_episode(&pool, &ep).await.unwrap();
+
+    // 1. Unknown episode id should return 404
+    let unknown_id = Uuid::new_v4();
+    let not_found_resp = client
+        .put(format!(
+            "http://127.0.0.1:{port}/api/v1/sources/episodes/{unknown_id}"
+        ))
+        .json(&serde_json::json!({ "position_ms": 10000, "played": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(not_found_resp.status(), 404);
+
+    // 2. Update existing episode position to 42000
+    let update_resp = client
+        .put(format!(
+            "http://127.0.0.1:{port}/api/v1/sources/episodes/{ep_id}"
+        ))
+        .json(&serde_json::json!({ "position_ms": 42000, "played": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(update_resp.status(), 200);
+
+    // 3. Query episodes and assert progress is persisted
+    let get_resp = client
+        .get(format!(
+            "http://127.0.0.1:{port}/api/v1/sources/{source_id}/episodes"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), 200);
+    let get_json: serde_json::Value = get_resp.json().await.unwrap();
+    let episodes = get_json["episodes"].as_array().expect("episodes array");
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(episodes[0]["id"], ep_id.to_string());
+    assert_eq!(episodes[0]["position_ms"], 42000);
+    assert_eq!(episodes[0]["played"], false);
+}

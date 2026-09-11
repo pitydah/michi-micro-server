@@ -49,16 +49,31 @@ pub struct SecurityConfig {
     pub max_body_size: usize,
     pub enable_validation: bool,
     pub pairing_rate_limit_per_minute: u32,
+    pub login_rate_limit_per_minute: u32,
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
+        let rate_limit_rps = std::env::var("MICHI_RATE_LIMIT_RPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let rate_limit_burst = std::env::var("MICHI_RATE_LIMIT_BURST")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
+        let login_rate_limit_per_minute = std::env::var("MICHI_LOGIN_RATE_LIMIT_PER_MINUTE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+
         Self {
-            rate_limit_rps: 10,
-            rate_limit_burst: 20,
+            rate_limit_rps,
+            rate_limit_burst,
             max_body_size: 10 * 1024 * 1024,
             enable_validation: true,
             pairing_rate_limit_per_minute: 5,
+            login_rate_limit_per_minute,
         }
     }
 }
@@ -258,6 +273,7 @@ mod tests {
         let config = SecurityConfig::default();
         assert_eq!(config.rate_limit_rps, 10);
         assert_eq!(config.pairing_rate_limit_per_minute, 5);
+        assert_eq!(config.login_rate_limit_per_minute, 10);
     }
 
     #[test]

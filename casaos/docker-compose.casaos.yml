@@ -1,13 +1,14 @@
+name: michi-micro-server
 services:
   michi-micro-server:
     image: ghcr.io/pitydah/michi-micro-server:1.0.0-rc.1
     container_name: michi-micro-server
     ports:
-      - "9090:9090"
+      - "${WEBUI_PORT:-9090}:9090"
     volumes:
       - ${CONFIG_PATH:-/DATA/AppData/michi/config}:/config
       - ${CACHE_PATH:-/DATA/AppData/michi/cache}:/cache
-      - ${MUSIC_PATH:-/DATA/Media/Music}:/music
+      - ${MUSIC_PATH:-/DATA/Media/Music}:/music:ro
     environment:
       - TZ=${TZ:-UTC}
       - PUID=${PUID:-1000}
@@ -31,7 +32,7 @@ x-casaos:
     - amd64
     - arm64
   author: pitydah
-  category: Music
+  category: Media
   developer: pitydah
   icon: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server.svg"
   thumbnail: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server-512.png"
@@ -46,6 +47,6 @@ x-casaos:
     en_US: Michi Micro Server
     es_ES: Servidor Michi Micro
   index: /
-  port_map: "9090"
+  port_map: "${WEBUI_PORT:-9090}"
   scheme: http
-  version: "3.1"
+  version: "1.0.0-rc.1"

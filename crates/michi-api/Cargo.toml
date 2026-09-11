@@ -55,6 +55,7 @@ urlencoding = "2"
 tar = "0.4"
 flate2 = "1"
 blake3 = "1"
+md5 = "0.7"
 
 [dev-dependencies]
 tower = "0.5"

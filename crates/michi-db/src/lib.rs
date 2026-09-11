@@ -299,8 +299,16 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
             migration_046
         );
     }
+    if current < 47 {
+        run_migration_step!(
+            conn,
+            47,
+            "play_history client_event_id column and unique index",
+            migration_047
+        );
+    }
 
-    info!("database schema at version 46");
+    info!("database schema at version 47");
     Ok(())
 }
 
@@ -887,13 +895,18 @@ async fn migration_031(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
             id TEXT PRIMARY KEY,
             source_id TEXT NOT NULL REFERENCES stream_sources(id),
             title TEXT NOT NULL,
-            audio_url TEXT NOT NULL,
+            audio_url TEXT NOT NULL UNIQUE,
             pub_date TEXT,
             duration_secs INTEGER,
             played INTEGER NOT NULL DEFAULT 0,
             position_ms INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         )",
+    )
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_podcast_episodes_audio_url ON podcast_episodes(audio_url)",
     )
     .execute(&mut **tx)
     .await?;
@@ -1243,6 +1256,29 @@ async fn migration_046(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
     // Ensure synced_files has a unique index on (file_hash, server_path) for atomic DB-level dedup
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_synced_files_hash_path ON synced_files(file_hash, server_path)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn migration_047(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    let rows: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as("PRAGMA table_info(play_history)")
+            .fetch_all(&mut **tx)
+            .await?;
+
+    let existing_cols: std::collections::HashSet<String> = rows.into_iter().map(|r| r.1).collect();
+
+    if !existing_cols.contains("client_event_id") {
+        sqlx::query("ALTER TABLE play_history ADD COLUMN client_event_id TEXT")
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_play_history_client_event_id ON play_history(client_event_id) WHERE client_event_id IS NOT NULL",
     )
     .execute(&mut **tx)
     .await?;
@@ -1716,15 +1752,76 @@ pub async fn record_play(
     duration_ms: Option<u64>,
     played_at: &DateTime<Utc>,
     user_id: Option<&Uuid>,
-) -> Result<PlayHistory, DbError> {
+    client_event_id: Option<&Uuid>,
+) -> Result<(PlayHistory, bool), DbError> {
+    let client_event_str = client_event_id.map(|u| u.to_string());
     let id = Uuid::new_v4();
     let id_str = id.to_string();
     let tid_str = track_id.to_string();
     let played_str = played_at.to_rfc3339();
     let uid_str = user_id.map(|u| u.to_string());
 
+    if let Some(ref ceid) = client_event_str {
+        // Atomic insert with ON CONFLICT DO NOTHING against unique partial index
+        let result = sqlx::query(
+            "INSERT INTO play_history (id, track_id, played_at, duration_ms, scrobbled, user_id, client_event_id)
+             VALUES (?, ?, ?, ?, 0, ?, ?)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&id_str)
+        .bind(&tid_str)
+        .bind(&played_str)
+        .bind(duration_ms.map(|v| v as i64))
+        .bind(&uid_str)
+        .bind(ceid)
+        .execute(pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            // Already existed or concurrent request inserted it: retrieve existing row
+            let row = sqlx::query(
+                "SELECT id, track_id, played_at, duration_ms, scrobbled FROM play_history WHERE client_event_id = ?",
+            )
+            .bind(ceid)
+            .fetch_one(pool)
+            .await?;
+
+            let id = Uuid::parse_str(row.get::<&str, _>("id")).unwrap_or(Uuid::nil());
+            let tid = Uuid::parse_str(row.get::<&str, _>("track_id")).unwrap_or(*track_id);
+            let played = row
+                .get::<&str, _>("played_at")
+                .parse()
+                .unwrap_or(*played_at);
+            let dur = row.get::<Option<i64>, _>("duration_ms").map(|v| v as u64);
+            let scrobbled = row.get::<i64, _>("scrobbled") != 0;
+
+            return Ok((
+                PlayHistory {
+                    id,
+                    track_id: tid,
+                    played_at: played,
+                    duration_ms: dur,
+                    scrobbled,
+                },
+                false, // was_new = false (duplicate skipped)
+            ));
+        }
+
+        return Ok((
+            PlayHistory {
+                id,
+                track_id: *track_id,
+                played_at: *played_at,
+                duration_ms,
+                scrobbled: false,
+            },
+            true, // was_new = true
+        ));
+    }
+
+    // No client_event_id provided: standard insert
     sqlx::query(
-        "INSERT INTO play_history (id, track_id, played_at, duration_ms, scrobbled, user_id) VALUES (?, ?, ?, ?, 0, ?)",
+        "INSERT INTO play_history (id, track_id, played_at, duration_ms, scrobbled, user_id, client_event_id) VALUES (?, ?, ?, ?, 0, ?, NULL)",
     )
     .bind(&id_str)
     .bind(&tid_str)
@@ -1734,13 +1831,16 @@ pub async fn record_play(
     .execute(pool)
     .await?;
 
-    Ok(PlayHistory {
-        id,
-        track_id: *track_id,
-        played_at: *played_at,
-        duration_ms,
-        scrobbled: false,
-    })
+    Ok((
+        PlayHistory {
+            id,
+            track_id: *track_id,
+            played_at: *played_at,
+            duration_ms,
+            scrobbled: false,
+        },
+        true, // was_new = true
+    ))
 }
 
 pub async fn get_play_history(
@@ -4441,6 +4541,61 @@ mod tests {
             .unwrap();
         assert_eq!(canonical_id, id1);
     }
+
+    #[tokio::test]
+    async fn test_record_play_concurrent_atomic_idempotency() {
+        let pool = test_pool().await;
+        let track = sample_track();
+        upsert_track(&pool, &track).await.unwrap();
+
+        let event_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+
+        // Spawn 10 concurrent tasks all attempting to record play with the same client_event_id
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let pool_clone = pool.clone();
+            let tid = track.id;
+            let eid = event_id;
+            handles.push(tokio::spawn(async move {
+                record_play(&pool_clone, &tid, Some(120_000), &now, None, Some(&eid)).await
+            }));
+        }
+
+        let mut inserted_count = 0;
+        let mut skipped_count = 0;
+
+        for h in handles {
+            let res = h
+                .await
+                .unwrap()
+                .expect("record_play must succeed without database errors");
+            let (_, was_new) = res;
+            if was_new {
+                inserted_count += 1;
+            } else {
+                skipped_count += 1;
+            }
+        }
+
+        assert_eq!(
+            inserted_count, 1,
+            "Exactly one concurrent request must insert the record"
+        );
+        assert_eq!(
+            skipped_count, 9,
+            "Remaining 9 concurrent requests must be skipped as duplicates"
+        );
+
+        // Verify only 1 row exists in DB
+        let total_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM play_history WHERE client_event_id = ?")
+                .bind(event_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(total_rows, 1);
+    }
 }
 
 // ── Bookmarks ────────────────────────────────────────────────────
@@ -5061,7 +5216,11 @@ pub async fn add_stream_source(
     pool: &SqlitePool,
     source: &michi_core::StreamSource,
 ) -> Result<(), DbError> {
-    let id = Uuid::new_v4();
+    let id = if source.id.is_nil() {
+        Uuid::new_v4()
+    } else {
+        source.id
+    };
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         "INSERT INTO stream_sources (id, url, stream_type, name, genre, description, logo_url, codec, enabled, created_at)
@@ -5146,7 +5305,11 @@ pub async fn upsert_podcast_episode(
     pool: &SqlitePool,
     ep: &michi_core::PodcastEpisodeDb,
 ) -> Result<(), DbError> {
-    let id = Uuid::new_v4();
+    let id = if ep.id.is_nil() {
+        Uuid::new_v4()
+    } else {
+        ep.id
+    };
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         "INSERT INTO podcast_episodes (id, source_id, title, audio_url, pub_date, duration_secs, created_at)
@@ -5163,15 +5326,15 @@ pub async fn update_episode_progress(
     id: &Uuid,
     position_ms: u64,
     played: bool,
-) -> Result<(), DbError> {
+) -> Result<bool, DbError> {
     let id_s = id.to_string();
-    sqlx::query("UPDATE podcast_episodes SET position_ms = ?, played = ? WHERE id = ?")
+    let res = sqlx::query("UPDATE podcast_episodes SET position_ms = ?, played = ? WHERE id = ?")
         .bind(position_ms as i64)
         .bind(played as i64)
         .bind(&id_s)
         .execute(pool)
         .await?;
-    Ok(())
+    Ok(res.rows_affected() > 0)
 }
 
 // ── Mount Guard ─────────────────────────────────────────────────

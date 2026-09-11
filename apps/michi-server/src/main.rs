@@ -89,21 +89,6 @@ impl Watchdog {
 }
 
 fn main() -> Result<()> {
-    let threads = match std::env::var("MICHI_RESOURCE_PROFILE").as_deref() {
-        Ok("eco") => 2,
-        Ok("performance") => std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4),
-        _ => 4, // Balanced / default micro server footprint (4 worker threads)
-    };
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(threads)
-        .enable_all()
-        .build()?;
-    runtime.block_on(async_main())
-}
-
-async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -112,7 +97,21 @@ async fn async_main() -> Result<()> {
         .init();
 
     let config = michi_config::Config::from_env();
+    let threads = match config.resource_profile {
+        michi_config::ResourceProfile::Eco => 2,
+        michi_config::ResourceProfile::Performance => std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4),
+        _ => 4, // Balanced / default micro server footprint (4 worker threads)
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async_main(config))
+}
 
+async fn async_main(config: michi_config::Config) -> Result<()> {
     // Guard: OpenSubsonic must not run without authentication.
     // An unauthenticated OpenSubsonic endpoint exposes the entire library to anyone on the network.
     if config.opensubsonic_enabled && !config.auth_enabled {

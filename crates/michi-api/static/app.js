@@ -2,6 +2,25 @@
    Michi Control UI — Truthful Functional Conformance WebUI
    ================================================================ */
 
+function generateUUID() {
+  if (typeof crypto !== 'undefined') {
+    if (typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    if (typeof crypto.getRandomValues === 'function') {
+      return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, function (c) {
+        return (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16);
+      });
+    }
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+    var r = (Math.random() * 16) | 0;
+    var v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+window.generateUUID = generateUUID;
+
 // ── API client ──────────────────────────────────────────────────
 const MichiAPI = {
   base: '',
@@ -230,9 +249,51 @@ const MichiAPI = {
   historyStats() { return this.request('/api/v1/history/stats'); },
   exportHistory() { return this.request('/api/v1/history/export', { timeout: 20000 }); },
   clearHistory() { return this.request('/api/v1/history', { method: 'DELETE' }); },
+  recordPlay(track_id, duration_ms, client_event_id) {
+    const body = { track_id, duration_ms: duration_ms || 0 };
+    if (client_event_id) body.client_event_id = client_event_id;
+    return this.request('/api/v1/playback/record', {
+      method: 'POST',
+      body: body
+    });
+  },
+  getScrobbleStatus() { return this.request('/api/v1/integrations/scrobbling'); },
+  setListenBrainz(token) {
+    return this.request('/api/v1/integrations/listenbrainz', {
+      method: 'POST',
+      body: { token }
+    });
+  },
+  disconnectListenBrainz() {
+    return this.request('/api/v1/integrations/listenbrainz', {
+      method: 'DELETE'
+    });
+  },
+  testListenBrainz() {
+    return this.request('/api/v1/integrations/listenbrainz/test', {
+      method: 'POST'
+    });
+  },
+  setLastFm(token) {
+    return this.request('/api/v1/integrations/lastfm', {
+      method: 'POST',
+      body: { token }
+    });
+  },
+  disconnectLastFm() {
+    return this.request('/api/v1/integrations/lastfm', {
+      method: 'DELETE'
+    });
+  },
+  testLastFm() {
+    return this.request('/api/v1/integrations/lastfm/test', {
+      method: 'POST'
+    });
+  },
 
   // Ecosystem & Link
   linkDevices() { return this.request('/api/v1/link/devices'); },
+  linkSelfTest() { return this.request('/api/v1/link/self-test', { timeout: 30000 }); },
   revokeLinkDevice(device_id) {
     return this.request('/api/v1/devices/revoke', {
       method: 'POST',
@@ -278,7 +339,7 @@ const MichiAPI = {
   deleteSource(id) { return this.request('/api/v1/sources/' + id, { method: 'DELETE' }); },
   sourceEpisodes(id) { return this.request('/api/v1/sources/' + id + '/episodes'); },
   updateEpisode(id, position_ms, played) {
-    return this.request('/api/v1/episodes/' + id, {
+    return this.request('/api/v1/sources/episodes/' + id, {
       method: 'PUT',
       body: { position_ms: position_ms || 0, played: !!played }
     });
@@ -1380,6 +1441,8 @@ function selectLocalBrowserOutput() {
   ServerPlayback.remoteTargetName = null;
   updateOutputRoutingBadge();
   closeOutputSelectorModal();
+  updatePlaybackControlsUI();
+  BrowserPlayback.renderQueue();
   showToast('Output: This Browser');
 }
 
@@ -1390,6 +1453,9 @@ async function selectServerOutputTarget(kind, id, name) {
     ServerPlayback.remoteTargetName = name;
     updateOutputRoutingBadge();
     closeOutputSelectorModal();
+    updatePlaybackControlsUI();
+    await loadCanonicalPlaybackState();
+    await loadCanonicalQueue();
     showToast('Output: ' + name);
   } catch (e) {
     showToast('Failed to select output: ' + e.message, true);
@@ -1413,21 +1479,180 @@ function getAudio() {
   return State.audio;
 }
 
+// ── Browser Playback Authority State & Controller ──────────────
+const BrowserPlayback = {
+  queue: [],
+  currentIndex: -1,
+  originalQueue: [], // For un-shuffle restoration
+  shuffle: false,
+  repeat: 'off', // 'off' | 'all' | 'one'
+  currentTrack: null,
+  listenAccumulatorMs: 0,
+  scrobbledForCurrentTrack: false,
+  scrobbleInFlight: false,
+  currentEventId: null,
+
+  resetScrobbleState() {
+    this.listenAccumulatorMs = 0;
+    this.lastPositionMs = 0;
+    this.scrobbledForCurrentTrack = false;
+    this.scrobbleInFlight = false;
+    this.currentEventId = generateUUID();
+  },
+
+  onTimeUpdate(currentMs) {
+    if (!this.currentTrack) return;
+    if (this.lastPositionMs > 0 && currentMs > this.lastPositionMs) {
+      const delta = currentMs - this.lastPositionMs;
+      if (delta < 5000) {
+        this.listenAccumulatorMs += delta;
+      }
+    }
+    this.lastPositionMs = currentMs;
+
+    if (!this.scrobbledForCurrentTrack && !this.scrobbleInFlight && this.currentTrack.duration_ms) {
+      const qualifyingThreshold = Math.min(Math.floor(this.currentTrack.duration_ms / 2), 240000);
+      if (this.listenAccumulatorMs >= qualifyingThreshold) {
+        this.scrobbleInFlight = true;
+        const trackId = this.currentTrack.id;
+        const duration = Math.floor(this.listenAccumulatorMs);
+        const eventId = this.currentEventId;
+        const self = this;
+        MichiAPI.recordPlay(trackId, duration, eventId).then(function(res) {
+          self.scrobbleInFlight = false;
+          if (res && res.status !== 'threshold_not_reached') {
+            self.scrobbledForCurrentTrack = true;
+          }
+        }).catch(function(err) {
+          self.scrobbleInFlight = false;
+          console.warn('Failed to record qualifying play:', err);
+        });
+      }
+    }
+  },
+
+  addToQueue(track) {
+    this.queue.push(track);
+    this.originalQueue.push(track);
+    this.renderQueue();
+  },
+
+  jumpToIndex(idx) {
+    if (idx < 0 || idx >= this.queue.length) return;
+    this.currentIndex = idx;
+    this.playTrack(this.queue[idx]);
+    this.renderQueue();
+  },
+
+  playTrack(track) {
+    this.currentTrack = track;
+    this.resetScrobbleState();
+    State.currentTrack = track;
+    updateNowPlaying(track);
+    updateMiniPlayer(track);
+
+    const audio = getAudio();
+    audio.src = MichiAPI.streamUrl(track.id);
+    audio.play().catch(function (err) {
+      showToast(t('error.could_not_play', {msg: err.message}), true);
+    });
+    updatePlayButtons();
+    this.renderQueue();
+  },
+
+  toggleShuffle() {
+    this.shuffle = !this.shuffle;
+    if (this.shuffle) {
+      // Fisher-Yates shuffle preserving currently playing item at head if present
+      const curItem = this.currentIndex >= 0 ? this.queue[this.currentIndex] : null;
+      const remaining = this.queue.filter((_, i) => i !== this.currentIndex);
+      for (let i = remaining.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const temp = remaining[i];
+        remaining[i] = remaining[j];
+        remaining[j] = temp;
+      }
+      this.queue = curItem ? [curItem, ...remaining] : remaining;
+      this.currentIndex = curItem ? 0 : -1;
+    } else {
+      // Restore original queue order
+      const curItem = this.currentIndex >= 0 ? this.queue[this.currentIndex] : null;
+      this.queue = [...this.originalQueue];
+      this.currentIndex = curItem ? this.queue.findIndex(t => t.id === curItem.id) : -1;
+    }
+    updatePlaybackControlsUI();
+    this.renderQueue();
+    showToast('Browser Shuffle ' + (this.shuffle ? 'ON' : 'OFF'));
+  },
+
+  toggleRepeat() {
+    if (this.repeat === 'off') this.repeat = 'all';
+    else if (this.repeat === 'all') this.repeat = 'one';
+    else this.repeat = 'off';
+    updatePlaybackControlsUI();
+    showToast('Browser Repeat: ' + this.repeat.toUpperCase());
+  },
+
+  onTrackEnded() {
+    if (this.currentTrack && !this.scrobbledForCurrentTrack && !this.scrobbleInFlight && this.currentTrack.duration_ms) {
+      const qualifyingThreshold = Math.min(Math.floor(this.currentTrack.duration_ms / 2), 240000);
+      if (this.listenAccumulatorMs >= qualifyingThreshold) {
+        this.scrobbleInFlight = true;
+        const trackId = this.currentTrack.id;
+        const duration = Math.floor(this.listenAccumulatorMs);
+        const eventId = this.currentEventId;
+        const self = this;
+        MichiAPI.recordPlay(trackId, duration, eventId).then(function(res) {
+          self.scrobbleInFlight = false;
+          if (res && res.status !== 'threshold_not_reached') {
+            self.scrobbledForCurrentTrack = true;
+          }
+        }).catch(function(err) {
+          self.scrobbleInFlight = false;
+          console.warn('Failed to record play on track end:', err);
+        });
+      }
+    }
+
+    if (this.repeat === 'one') {
+      const audio = getAudio();
+      audio.currentTime = 0;
+      audio.play().catch(function(err) {
+        console.warn('Audio replay failed:', err);
+      });
+      return;
+    }
+
+    if (this.queue.length > 0 && this.currentIndex + 1 < this.queue.length) {
+      this.jumpToIndex(this.currentIndex + 1);
+    } else if (this.repeat === 'all' && this.queue.length > 0) {
+      this.jumpToIndex(0);
+    } else {
+      showToast(t('toast.track_ended'));
+      updatePlayButtons();
+    }
+  },
+
+  renderQueue() {
+    const authorityLabel = $('#queue-authority-label');
+    if (authorityLabel) authorityLabel.textContent = 'Browser Queue (' + this.queue.length + ')';
+    renderQueue(this.queue, this.currentIndex);
+  }
+};
+
+window.BrowserPlayback = BrowserPlayback;
+
 async function playTrack(idx) {
   const tracks = State.tracks;
   if (!tracks || idx < 0 || idx >= tracks.length) return;
   const t = tracks[idx];
 
   if (ServerPlayback.outputTarget === 'browser') {
-    State.currentTrack = t;
-    updateNowPlaying(t);
-    updateMiniPlayer(t);
-    const audio = getAudio();
-    audio.src = MichiAPI.streamUrl(t.id);
-    audio.play().catch(function (err) {
-      showToast(t('error.could_not_play', {msg: err.message}), true);
-    });
-    updatePlayButtons();
+    if (BrowserPlayback.queue.length === 0 || !BrowserPlayback.queue.some(item => item.id === t.id)) {
+      BrowserPlayback.queue = [...tracks];
+      BrowserPlayback.originalQueue = [...tracks];
+    }
+    BrowserPlayback.jumpToIndex(BrowserPlayback.queue.findIndex(item => item.id === t.id));
     return;
   }
 
@@ -1439,6 +1664,7 @@ async function playTrack(idx) {
       position_ms: 0
     });
     await loadCanonicalPlaybackState();
+    await loadCanonicalQueue();
   } catch (err) {
     showToast('Server playback failed: ' + err.message, true);
     if (err.message && err.message.includes('NO_OUTPUT_SELECTED')) {
@@ -1452,10 +1678,15 @@ async function playPause() {
     const audio = getAudio();
     if (audio.paused) {
       if (!audio.src && State.currentTrack) {
-        playTrack(State.tracks.indexOf(State.currentTrack));
-        return;
+        const idx = State.tracks ? State.tracks.indexOf(State.currentTrack) : -1;
+        if (idx >= 0) {
+          playTrack(idx);
+          return;
+        }
       }
-      audio.play().catch(function () {});
+      audio.play().catch(function (err) {
+        console.warn('Browser audio resume failed:', err);
+      });
     } else {
       audio.pause();
     }
@@ -1476,6 +1707,10 @@ async function playPause() {
 }
 
 async function toggleShuffle() {
+  if (ServerPlayback.outputTarget === 'browser') {
+    BrowserPlayback.toggleShuffle();
+    return;
+  }
   try {
     var nextVal = !ServerPlayback.shuffle;
     var resp = await MichiAPI.playbackControl({ command: 'shuffle', value: nextVal });
@@ -1488,6 +1723,10 @@ async function toggleShuffle() {
 }
 
 async function toggleRepeat() {
+  if (ServerPlayback.outputTarget === 'browser') {
+    BrowserPlayback.toggleRepeat();
+    return;
+  }
   try {
     var nextMode = 'off';
     if (ServerPlayback.repeat === 'off') nextMode = 'all';
@@ -1505,12 +1744,17 @@ async function toggleRepeat() {
 
 function updatePlaybackControlsUI() {
   var shuffleBtn = $('#btn-shuffle');
-  if (shuffleBtn) {
-    shuffleBtn.style.color = ServerPlayback.shuffle ? 'var(--primary)' : 'var(--text-3)';
-  }
   var repeatBtn = $('#btn-repeat');
+  var isBrowser = ServerPlayback.outputTarget === 'browser';
+
+  var isShuffle = isBrowser ? BrowserPlayback.shuffle : ServerPlayback.shuffle;
+  var repeatVal = isBrowser ? BrowserPlayback.repeat : ServerPlayback.repeat;
+
+  if (shuffleBtn) {
+    shuffleBtn.style.color = isShuffle ? 'var(--primary)' : 'var(--text-3)';
+  }
   if (repeatBtn) {
-    repeatBtn.style.color = (ServerPlayback.repeat && ServerPlayback.repeat !== 'off') ? 'var(--primary)' : 'var(--text-3)';
+    repeatBtn.style.color = (repeatVal && repeatVal !== 'off') ? 'var(--primary)' : 'var(--text-3)';
   }
   updateOutputRoutingBadge();
 }
@@ -1519,6 +1763,13 @@ async function addToQueue(idx) {
   const tracks = State.tracks;
   if (!tracks || idx < 0 || idx >= tracks.length) return;
   const t = tracks[idx];
+
+  if (ServerPlayback.outputTarget === 'browser') {
+    BrowserPlayback.addToQueue(t);
+    showToast('Added to Browser Up Next');
+    return;
+  }
+
   try {
     await MichiAPI.addQueueItems([t.id]);
     await loadCanonicalQueue();
@@ -1529,11 +1780,17 @@ async function addToQueue(idx) {
 }
 
 async function loadCanonicalQueue() {
+  if (ServerPlayback.outputTarget === 'browser') {
+    BrowserPlayback.renderQueue();
+    return;
+  }
   if (AuthSession.state !== 'authenticated') return;
   try {
     const raw = await MichiAPI.queue();
     const items = raw.items || [];
     State.queue = items;
+    const authorityLabel = $('#queue-authority-label');
+    if (authorityLabel) authorityLabel.textContent = 'Server Queue (' + items.length + ')';
     renderQueue(items, raw.current_index || 0);
   } catch (e) {}
 }
@@ -1560,6 +1817,10 @@ function renderQueue(items, currentIndex) {
 }
 
 async function jumpToQueueItem(pos) {
+  if (ServerPlayback.outputTarget === 'browser') {
+    BrowserPlayback.jumpToIndex(pos);
+    return;
+  }
   try {
     await MichiAPI.jumpQueue(pos);
     await loadCanonicalQueue();
@@ -1583,7 +1844,7 @@ async function loadCanonicalPlaybackState() {
     ServerPlayback.shuffle = !!st.shuffle;
     ServerPlayback.repeat = st.repeat || 'off';
 
-    if (st.current_track) {
+    if (ServerPlayback.outputTarget === 'server' && st.current_track) {
       State.currentTrack = st.current_track;
       updateNowPlaying(st.current_track);
       updateMiniPlayer(st.current_track);
@@ -1599,9 +1860,19 @@ function onTrackEnd() {
     var epId = State.currentPodcastEpisode.id;
     var audio = getAudio();
     var posMs = audio ? Math.floor(audio.currentTime * 1000) : 0;
-    MichiAPI.updateEpisode(epId, posMs, true).catch(function() {});
+    MichiAPI.updateEpisode(epId, posMs, true).catch(function(err) {
+      console.warn('Failed to update podcast episode progress on track end:', err);
+    });
     State.currentPodcastEpisode = null;
+    showToast(t('toast.track_ended'));
+    return;
   }
+
+  if (ServerPlayback.outputTarget === 'browser') {
+    BrowserPlayback.onTrackEnded();
+    return;
+  }
+
   showToast(t('toast.track_ended'));
 }
 
@@ -1623,6 +1894,9 @@ function updatePlaybackProgress() {
   const audio = getAudio();
   if (!audio || !audio.duration) return;
 
+  const currentMs = Math.floor(audio.currentTime * 1000);
+  BrowserPlayback.onTimeUpdate(currentMs);
+
   const pct = (audio.currentTime / audio.duration) * 100;
   const fill1 = $('#np-progress-fill');
   const fill2 = $('#mini-progress-fill');
@@ -1641,7 +1915,9 @@ function updatePlaybackProgress() {
             State.currentPodcastEpisode.id,
             Math.floor(audio.currentTime * 1000),
             false
-          ).catch(function() {});
+          ).catch(function(err) {
+            console.warn('Failed to persist periodic podcast episode progress:', err);
+          });
         }
       }, 5000);
     }
@@ -1715,24 +1991,42 @@ async function testMichiLink() {
   const btn = $('#page-michilink button[onclick="testMichiLink()"]');
   if (btn) { btn.disabled = true; btn.textContent = 'Testing...'; }
   try {
-    const [infoRes, capsRes] = await Promise.allSettled([
+    const [infoRes, capsRes, selfTestRes] = await Promise.allSettled([
       MichiAPI.serverInfo(),
       MichiAPI.capabilities(),
+      MichiAPI.linkSelfTest(),
     ]);
 
+    const resultsEl = $('#michilink-self-test-results');
     const infoOk = infoRes.status === 'fulfilled' && infoRes.value && !infoRes.value.error;
     const capsOk = capsRes.status === 'fulfilled' && capsRes.value && !capsRes.value.error;
+    const selfTestVal = selfTestRes.status === 'fulfilled' ? selfTestRes.value : null;
+    const selfTestOk = selfTestVal && selfTestVal.status !== 'failed';
 
-    if (infoOk && capsOk) {
-      showToast('Connection verified: CONNECTED / HEALTHY');
+    if (resultsEl && selfTestVal && Array.isArray(selfTestVal.checks)) {
+      resultsEl.innerHTML = '<div style="font-size:0.8rem;padding:6px 0;display:flex;flex-direction:column;gap:4px">' +
+        selfTestVal.checks.map(function(c) {
+          const pass = c.status === 'passed';
+          const icon = pass ? '✓' : '⚠';
+          const color = pass ? 'var(--online)' : 'var(--amber)';
+          return '<div style="display:flex;justify-content:space-between;padding:2px 0">' +
+            '<span>' + icon + ' ' + esc(c.name) + '</span>' +
+            '<span style="color:' + color + '">' + esc(c.status) + (c.info ? ' (' + esc(c.info) + ')' : '') + '</span>' +
+            '</div>';
+        }).join('') +
+        '</div>';
+    }
+
+    if (infoOk && capsOk && selfTestOk) {
+      showToast('Michi Link verified: CONNECTED / HEALTHY');
       await Promise.allSettled([loadStatus(), loadServerInfo(), loadEcosystemDevices()]);
     } else {
-      showToast('Connection degraded', true);
+      showToast('Michi Link status degraded', true);
     }
   } catch (err) {
-    showToast('Connection test failed: ' + (err.message || 'Error'), true);
+    showToast('Michi Link test failed: ' + (err.message || 'Error'), true);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Test Connection'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Run Michi Link Self-Test'; }
   }
 }
 
@@ -2806,7 +3100,10 @@ async function discoverDevices() {
   if (resEl) resEl.innerHTML = '<span style="color:var(--text-3)">Scanning local network for Michi receivers...</span>';
   try {
     var res = await MichiAPI.discoverDevices();
-    var devs = res.devices || [];
+    if (!res || !Array.isArray(res.receivers)) {
+      throw new Error("API contract violation: 'receivers' array field required in discovery response");
+    }
+    var devs = res.receivers;
     if (resEl) {
       if (devs.length === 0) {
         resEl.innerHTML = '<span style="color:var(--text-3)">No new devices discovered.</span>';
@@ -2915,6 +3212,7 @@ async function loadSettings() {
     if ($('#settings-auth')) $('#settings-auth').innerHTML = s.auth_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
     if ($('#settings-dev-mode')) $('#settings-dev-mode').innerHTML = s.dev_mode ? '<span class="badge stable">On</span>' : '<span class="badge disabled">Off</span>';
     if ($('#settings-scrobble')) $('#settings-scrobble').innerHTML = s.scrobble_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
+    updateScrobbleStatusUI();
 
     var scanWorkers = s.effective_scan_workers !== undefined ? s.effective_scan_workers : (s.resource_profile === 'eco' ? 1 : (s.resource_profile === 'performance' ? 4 : 2));
     var maxTc = s.effective_transcode_workers !== undefined ? s.effective_transcode_workers : (s.resource_profile === 'eco' ? 0 : (s.resource_profile === 'performance' ? 4 : 2));
@@ -2996,6 +3294,168 @@ function applySidebarPreference(collapsed) {
 
 window.applyCoverArtPreference = applyCoverArtPreference;
 window.applySidebarPreference = applySidebarPreference;
+
+async function updateScrobbleStatusUI() {
+  try {
+    var status = await MichiAPI.getScrobbleStatus();
+    var lbEl = $('#settings-lb-status');
+    var lbDiscBtn = $('#settings-lb-disconnect');
+    if (lbEl) {
+      if (status.listenbrainz_managed_by === 'environment') {
+        lbEl.className = 'badge info';
+        lbEl.textContent = status.listenbrainz_ready ? 'Ready (Managed by environment)' : 'Configured via environment';
+        if (lbDiscBtn) lbDiscBtn.disabled = true;
+      } else if (status.listenbrainz_ready) {
+        lbEl.className = 'badge stable';
+        lbEl.textContent = 'Ready';
+        if (lbDiscBtn) lbDiscBtn.disabled = !status.listenbrainz_configured;
+      } else if (status.listenbrainz_configured) {
+        lbEl.className = 'badge warning';
+        lbEl.textContent = 'Configured (Scrobbling Disabled)';
+        if (lbDiscBtn) lbDiscBtn.disabled = false;
+      } else {
+        lbEl.className = 'badge disabled';
+        lbEl.textContent = 'Not Configured';
+        if (lbDiscBtn) lbDiscBtn.disabled = true;
+      }
+    }
+    var lfmEl = $('#settings-lfm-status');
+    var lfmDiscBtn = $('#settings-lfm-disconnect');
+    if (lfmEl) {
+      if (status.lastfm_managed_by === 'environment') {
+        lfmEl.className = 'badge info';
+        lfmEl.textContent = status.lastfm_ready ? 'Ready (Beta, Managed by environment)' : 'Configured via environment';
+        if (lfmDiscBtn) lfmDiscBtn.disabled = true;
+      } else if (status.lastfm_ready) {
+        lfmEl.className = 'badge stable';
+        lfmEl.textContent = 'Ready (Beta)';
+        if (lfmDiscBtn) lfmDiscBtn.disabled = !status.lastfm_configured;
+      } else if (status.lastfm_configured) {
+        lfmEl.className = 'badge warning';
+        lfmEl.textContent = 'Configured (Missing Server Secret or Scrobbling Disabled)';
+        if (lfmDiscBtn) lfmDiscBtn.disabled = false;
+      } else {
+        lfmEl.className = 'badge disabled';
+        lfmEl.textContent = 'Not Configured';
+        if (lfmDiscBtn) lfmDiscBtn.disabled = true;
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to load scrobble status:', err);
+  }
+}
+
+async function saveListenBrainzToken() {
+  var input = $('#settings-lb-token');
+  var resultEl = $('#settings-lb-result');
+  if (!input || !resultEl) return;
+  var token = input.value.trim();
+  if (!token) {
+    showToast('Please enter a ListenBrainz token', true);
+    return;
+  }
+  resultEl.textContent = 'Validating token with ListenBrainz...';
+  try {
+    await MichiAPI.setListenBrainz(token);
+    input.value = '';
+    resultEl.textContent = 'Token saved and validated successfully!';
+    showToast('ListenBrainz configured successfully', false);
+    updateScrobbleStatusUI();
+  } catch (err) {
+    resultEl.textContent = 'Validation error: ' + (err.message || err);
+    showToast('ListenBrainz validation failed: ' + (err.message || err), true);
+  }
+}
+
+async function saveLastFmToken() {
+  var input = $('#settings-lfm-token');
+  var resultEl = $('#settings-lfm-result');
+  if (!input || !resultEl) return;
+  var token = input.value.trim();
+  if (!token) {
+    showToast('Please enter a Last.fm session key', true);
+    return;
+  }
+  resultEl.textContent = 'Saving session key...';
+  try {
+    await MichiAPI.setLastFm(token);
+    input.value = '';
+    resultEl.textContent = 'Last.fm session key saved successfully!';
+    showToast('Last.fm configured (Beta)', false);
+    updateScrobbleStatusUI();
+  } catch (err) {
+    resultEl.textContent = 'Error: ' + (err.message || err);
+    showToast('Failed to save Last.fm key: ' + (err.message || err), true);
+  }
+}
+
+async function disconnectListenBrainz() {
+  var resultEl = $('#settings-lb-result');
+  if (resultEl) resultEl.textContent = 'Disconnecting ListenBrainz...';
+  try {
+    await MichiAPI.disconnectListenBrainz();
+    var input = $('#settings-lb-token');
+    if (input) input.value = '';
+    if (resultEl) resultEl.textContent = 'ListenBrainz disconnected.';
+    showToast('ListenBrainz disconnected', false);
+    updateScrobbleStatusUI();
+  } catch (err) {
+    if (resultEl) resultEl.textContent = 'Error: ' + (err.message || err);
+    showToast('Failed to disconnect ListenBrainz: ' + (err.message || err), true);
+  }
+}
+
+async function testListenBrainz() {
+  var resultEl = $('#settings-lb-result');
+  if (resultEl) resultEl.textContent = 'Testing ListenBrainz connection...';
+  try {
+    await MichiAPI.testListenBrainz();
+    if (resultEl) resultEl.textContent = 'ListenBrainz connection test successful!';
+    showToast('ListenBrainz connection OK', false);
+    updateScrobbleStatusUI();
+  } catch (err) {
+    if (resultEl) resultEl.textContent = 'Test failed: ' + (err.message || err);
+    showToast('ListenBrainz test failed: ' + (err.message || err), true);
+  }
+}
+
+async function disconnectLastFm() {
+  var resultEl = $('#settings-lfm-result');
+  if (resultEl) resultEl.textContent = 'Disconnecting Last.fm...';
+  try {
+    await MichiAPI.disconnectLastFm();
+    var input = $('#settings-lfm-token');
+    if (input) input.value = '';
+    if (resultEl) resultEl.textContent = 'Last.fm disconnected.';
+    showToast('Last.fm disconnected', false);
+    updateScrobbleStatusUI();
+  } catch (err) {
+    if (resultEl) resultEl.textContent = 'Error: ' + (err.message || err);
+    showToast('Failed to disconnect Last.fm: ' + (err.message || err), true);
+  }
+}
+
+async function testLastFm() {
+  var resultEl = $('#settings-lfm-result');
+  if (resultEl) resultEl.textContent = 'Testing Last.fm connection...';
+  try {
+    await MichiAPI.testLastFm();
+    if (resultEl) resultEl.textContent = 'Last.fm connection test successful!';
+    showToast('Last.fm connection OK', false);
+    updateScrobbleStatusUI();
+  } catch (err) {
+    if (resultEl) resultEl.textContent = 'Test failed: ' + (err.message || err);
+    showToast('Last.fm test failed: ' + (err.message || err), true);
+  }
+}
+
+window.updateScrobbleStatusUI = updateScrobbleStatusUI;
+window.saveListenBrainzToken = saveListenBrainzToken;
+window.disconnectListenBrainz = disconnectListenBrainz;
+window.testListenBrainz = testListenBrainz;
+window.saveLastFmToken = saveLastFmToken;
+window.disconnectLastFm = disconnectLastFm;
+window.testLastFm = testLastFm;
 
 function renderRestartBanner(fieldsStr) {
   var banner = $('#settings-restart-banner');

@@ -546,7 +546,7 @@ async fn scrobble(
         .ok_or_else(|| json_err(errors::MISSING_PARAMETER, "id parameter required"))?;
     let id = Uuid::parse_str(id_str).map_err(|_| json_err(errors::NOT_FOUND, "invalid id"))?;
 
-    let _ = michi_db::record_play(&state.db, &id, None, &chrono::Utc::now(), None).await;
+    let _ = michi_db::record_play(&state.db, &id, None, &chrono::Utc::now(), None, None).await;
 
     Ok(json_ok(None))
 }

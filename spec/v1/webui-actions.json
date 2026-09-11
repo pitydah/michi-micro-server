@@ -1,0 +1,1046 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema_version": 1,
+  "description": "Michi Micro Server WebUI Action Contract Manifest",
+  "actions": [
+    {
+      "id": "auth.login",
+      "surface": "modal.auth",
+      "element": "button[onclick='submitAuth()']",
+      "frontend_handler": "submitAuth",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/auth/login"
+      },
+      "effect": "Session token created, AuthSession updated to authenticated, UI reflects account status",
+      "test": "WEBUI-ACT-AUTH-001"
+    },
+    {
+      "id": "auth.register",
+      "surface": "modal.auth",
+      "element": "button[onclick='submitAuth()']",
+      "frontend_handler": "submitAuth",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/auth/register"
+      },
+      "effect": "User registered, session created and UI enters authenticated state",
+      "test": "WEBUI-ACT-AUTH-002"
+    },
+    {
+      "id": "auth.logout",
+      "surface": "modal.auth",
+      "element": "button[onclick='handleLogout()']",
+      "frontend_handler": "handleLogout",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/auth/logout"
+      },
+      "effect": "Session invalidated, AuthSession becomes anonymous, UI resets user state",
+      "test": "WEBUI-ACT-AUTH-003"
+    },
+    {
+      "id": "navigation.section",
+      "surface": "sidebar",
+      "element": "button[onclick*='showSection']",
+      "frontend_handler": "showSection",
+      "authority": "local",
+      "effect": "Active view switches in DOM, nav button highlights, corresponding data loads",
+      "test": "WEBUI-ACT-NAV-001"
+    },
+    {
+      "id": "navigation.toggle",
+      "surface": "topbar",
+      "element": "button[onclick*='toggleNavigation']",
+      "frontend_handler": "toggleNavigation",
+      "authority": "local",
+      "effect": "Sidebar drawer opens or closes with aria-expanded updated",
+      "test": "WEBUI-ACT-NAV-002"
+    },
+    {
+      "id": "navigation.theme",
+      "surface": "topbar",
+      "element": "button[onclick='toggleTheme()']",
+      "frontend_handler": "toggleTheme",
+      "authority": "local",
+      "effect": "Document element data-theme toggles between light and dark, persisted to localStorage",
+      "test": "WEBUI-ACT-NAV-003"
+    },
+    {
+      "id": "library.scan",
+      "surface": "topbar",
+      "element": "button[onclick='handleScan()']",
+      "frontend_handler": "handleScan",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/library/scan"
+      },
+      "effect": "Library scan job created, scan status renders scanning indicator",
+      "test": "WEBUI-ACT-LIB-001"
+    },
+    {
+      "id": "library.search",
+      "surface": "library",
+      "element": "input#search-input",
+      "frontend_handler": "handleSearch",
+      "authority": "server",
+      "endpoint": {
+        "method": "GET",
+        "path": "/api/v1/search"
+      },
+      "effect": "Filtered tracks matching query are fetched and rendered in catalog table",
+      "test": "WEBUI-ACT-LIB-002"
+    },
+    {
+      "id": "library.play",
+      "surface": "library",
+      "element": "button[onclick*='playTrack']",
+      "frontend_handler": "playTrack",
+      "authority": "active_target",
+      "effect": "Plays track on currently selected output authority (Browser or Server)",
+      "test": "WEBUI-ACT-PB-001"
+    },
+    {
+      "id": "library.add_to_queue",
+      "surface": "library",
+      "element": "button[onclick*='addToQueue']",
+      "frontend_handler": "addToQueue",
+      "authority": "active_target",
+      "effect": "Appends track to the active playback authority queue without mutating other authorities",
+      "test": "WEBUI-ACT-PB-002"
+    },
+    {
+      "id": "library.star",
+      "surface": "library",
+      "element": "button[onclick*='toggleStar']",
+      "frontend_handler": "toggleStar",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/star/:id"
+      },
+      "effect": "Track star state toggled in database, star icon updates visually",
+      "test": "WEBUI-ACT-LIB-003"
+    },
+    {
+      "id": "library.rate",
+      "surface": "modal.track_detail",
+      "element": "button[onclick*='rateTrack']",
+      "frontend_handler": "rateTrack",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/rate/:id"
+      },
+      "effect": "Track rating 0-5 saved to database and rendered in detail modal",
+      "test": "WEBUI-ACT-LIB-004"
+    },
+    {
+      "id": "playback.play_pause",
+      "surface": "player",
+      "element": "button[onclick='playPause()']",
+      "frontend_handler": "playPause",
+      "authority": "active_target",
+      "effect": "Toggles play/pause on currently active output authority",
+      "test": "WEBUI-ACT-PB-003"
+    },
+    {
+      "id": "playback.shuffle",
+      "surface": "player",
+      "element": "button[onclick='toggleShuffle()']",
+      "frontend_handler": "toggleShuffle",
+      "authority": "active_target",
+      "effect": "Toggles shuffle mode on active authority; reorders remaining playback items",
+      "test": "WEBUI-ACT-PB-004"
+    },
+    {
+      "id": "playback.repeat",
+      "surface": "player",
+      "element": "button[onclick='toggleRepeat()']",
+      "frontend_handler": "toggleRepeat",
+      "authority": "active_target",
+      "effect": "Cycles repeat mode off->all->one->off on active authority and updates ended behavior",
+      "test": "WEBUI-ACT-PB-005"
+    },
+    {
+      "id": "playback.jump_queue",
+      "surface": "queue_drawer",
+      "element": "button[onclick*='jumpToQueueItem']",
+      "frontend_handler": "jumpToQueueItem",
+      "authority": "active_target",
+      "effect": "Jumps active playback to selected queue index on current authority",
+      "test": "WEBUI-ACT-PB-006"
+    },
+    {
+      "id": "playback.output_target",
+      "surface": "player",
+      "element": "button[onclick='toggleOutputTarget()']",
+      "frontend_handler": "toggleOutputTarget",
+      "authority": "local",
+      "effect": "Opens output routing modal or switches routing target",
+      "test": "WEBUI-ACT-PB-007"
+    },
+    {
+      "id": "playback.handoff",
+      "surface": "modal.handoff",
+      "element": "button[onclick='transferHandoff()']",
+      "frontend_handler": "transferHandoff",
+      "authority": "shared",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/playback/handoff"
+      },
+      "effect": "Transfers selected track ID, position in ms, and playing state to server playback engine",
+      "test": "WEBUI-ACT-PB-008"
+    },
+    {
+      "id": "playlists.create",
+      "surface": "playlists",
+      "element": "button[onclick*='createPlaylist']",
+      "frontend_handler": "createPlaylist",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/playlists"
+      },
+      "effect": "Creates new playlist in database and renders it in playlist list",
+      "test": "WEBUI-ACT-PL-001"
+    },
+    {
+      "id": "playlists.update",
+      "surface": "playlists",
+      "element": "button[onclick*='updatePlaylist']",
+      "frontend_handler": "updatePlaylist",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/playlists/:id"
+      },
+      "effect": "Updates playlist metadata or track ordering in database",
+      "test": "WEBUI-ACT-PL-002"
+    },
+    {
+      "id": "playlists.delete",
+      "surface": "playlists",
+      "element": "button[onclick*='confirmDeletePlaylist']",
+      "frontend_handler": "confirmDeletePlaylist",
+      "authority": "server",
+      "endpoint": {
+        "method": "DELETE",
+        "path": "/api/v1/playlists/:id"
+      },
+      "effect": "Deletes playlist from database and removes it from DOM",
+      "test": "WEBUI-ACT-PL-003"
+    },
+    {
+      "id": "playlists.smart_create",
+      "surface": "playlists.smart",
+      "element": "button[onclick='createSmartPlaylist()']",
+      "frontend_handler": "createSmartPlaylist",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/playlists/smart"
+      },
+      "effect": "Evaluates smart playlist rules (e.g. favorites, most_played) and creates playlist",
+      "test": "WEBUI-ACT-PL-004"
+    },
+    {
+      "id": "playlists.export",
+      "surface": "playlists",
+      "element": "button[onclick*='exportPlaylistM3U']",
+      "frontend_handler": "exportPlaylistM3U",
+      "authority": "server",
+      "endpoint": {
+        "method": "GET",
+        "path": "/api/v1/playlists/:id/export/m3u"
+      },
+      "effect": "Downloads M3U formatted playlist file",
+      "test": "WEBUI-ACT-PL-005"
+    },
+    {
+      "id": "broadcast.source_add",
+      "surface": "broadcast",
+      "element": "button[onclick='addSource()']",
+      "frontend_handler": "addSource",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/sources"
+      },
+      "effect": "Adds audio broadcast or podcast feed source to database",
+      "test": "WEBUI-ACT-BC-001"
+    },
+    {
+      "id": "broadcast.source_delete",
+      "surface": "broadcast",
+      "element": "button[onclick*='deleteSource']",
+      "frontend_handler": "deleteSource",
+      "authority": "server",
+      "endpoint": {
+        "method": "DELETE",
+        "path": "/api/v1/sources/:id"
+      },
+      "effect": "Deletes broadcast source and episodes from database",
+      "test": "WEBUI-ACT-BC-002"
+    },
+    {
+      "id": "broadcast.play_source",
+      "surface": "broadcast",
+      "element": "button[onclick*='playSource']",
+      "frontend_handler": "playSource",
+      "authority": "browser",
+      "effect": "Streams broadcast source directly in local browser audio player",
+      "test": "WEBUI-ACT-BC-003"
+    },
+    {
+      "id": "broadcast.play_episode",
+      "surface": "broadcast",
+      "element": "button[onclick*='playEpisode']",
+      "frontend_handler": "playEpisode",
+      "authority": "browser",
+      "effect": "Loads podcast episode, restores saved position_ms and begins streaming",
+      "test": "WEBUI-ACT-BC-004"
+    },
+    {
+      "id": "broadcast.episode_progress",
+      "surface": "broadcast",
+      "element": "audio.timeupdate",
+      "frontend_handler": "updateEpisode",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/sources/episodes/:id"
+      },
+      "effect": "Persists episode position_ms and played flag into database without silencing errors",
+      "test": "WEBUI-ACT-BC-005"
+    },
+    {
+      "id": "michilink.qr_generate",
+      "surface": "michilink",
+      "element": "button[onclick='generateQR()']",
+      "frontend_handler": "generateQR",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/pair/qr"
+      },
+      "effect": "Generates QR claim code and renders SVG QR image",
+      "test": "WEBUI-ACT-ML-001"
+    },
+    {
+      "id": "michilink.self_test",
+      "surface": "michilink",
+      "element": "button[onclick='testMichiLink()']",
+      "frontend_handler": "testMichiLink",
+      "authority": "server",
+      "endpoint": {
+        "method": "GET",
+        "path": "/api/v1/link/self-test"
+      },
+      "effect": "Executes non-mutating self-test across subsystems and displays detailed check statuses",
+      "test": "WEBUI-ACT-ML-002"
+    },
+    {
+      "id": "michilink.device_revoke",
+      "surface": "michilink",
+      "element": "button[onclick*='revokeDevice']",
+      "frontend_handler": "revokeDevice",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/devices/revoke"
+      },
+      "effect": "Revokes paired device certificate/token and removes it from active devices list",
+      "test": "WEBUI-ACT-ML-003"
+    },
+    {
+      "id": "receivers.discover",
+      "surface": "settings.receivers",
+      "element": "button[onclick='discoverDevices()']",
+      "frontend_handler": "discoverDevices",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/devices/discover"
+      },
+      "effect": "Triggers mDNS discovery, reads 'receivers' field from response and renders discovered units",
+      "test": "WEBUI-ACT-RX-001"
+    },
+    {
+      "id": "receivers.pair_start",
+      "surface": "settings.receivers",
+      "element": "button[onclick*='startPairing']",
+      "frontend_handler": "startReceiverPair",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/receivers/pair/start"
+      },
+      "effect": "Starts pairing exchange with selected receiver and prompts for PIN confirmation",
+      "test": "WEBUI-ACT-RX-002"
+    },
+    {
+      "id": "receivers.pair_confirm",
+      "surface": "settings.receivers",
+      "element": "button[onclick*='confirmPairing']",
+      "frontend_handler": "confirmReceiverPair",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/receivers/pair/confirm"
+      },
+      "effect": "Validates PIN, establishes secure shared credentials, and registers receiver",
+      "test": "WEBUI-ACT-RX-003"
+    },
+    {
+      "id": "rooms.create",
+      "surface": "settings.rooms",
+      "element": "button[onclick='createRoomGroup()']",
+      "frontend_handler": "createRoomGroup",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/rooms/groups"
+      },
+      "effect": "Creates multi-room audio group associating multiple receivers",
+      "test": "WEBUI-ACT-RM-001"
+    },
+    {
+      "id": "rooms.activate",
+      "surface": "settings.rooms",
+      "element": "button[onclick*='activateRoomGroup']",
+      "frontend_handler": "activateRoomGroup",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/rooms/groups/:id/activate"
+      },
+      "effect": "Activates synchronized stream dispatch to members of the room group",
+      "test": "WEBUI-ACT-RM-002"
+    },
+    {
+      "id": "rooms.deactivate",
+      "surface": "settings.rooms",
+      "element": "button[onclick*='deactivateRoomGroup']",
+      "frontend_handler": "deactivateRoomGroup",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/rooms/groups/:id/deactivate"
+      },
+      "effect": "Deactivates room group streaming",
+      "test": "WEBUI-ACT-RM-003"
+    },
+    {
+      "id": "rooms.delete",
+      "surface": "settings.rooms",
+      "element": "button[onclick*='deleteRoomGroup']",
+      "frontend_handler": "deleteRoomGroup",
+      "authority": "server",
+      "endpoint": {
+        "method": "DELETE",
+        "path": "/api/v1/rooms/groups/:id"
+      },
+      "effect": "Removes room group definition from database",
+      "test": "WEBUI-ACT-RM-004"
+    },
+    {
+      "id": "chains.create",
+      "surface": "chains",
+      "element": "button[onclick='createChain()']",
+      "frontend_handler": "createChain",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/chains"
+      },
+      "effect": "Initializes audio processing chain and persists to database",
+      "test": "WEBUI-ACT-CH-001"
+    },
+    {
+      "id": "chains.set_track",
+      "surface": "chains",
+      "element": "button[onclick='setChainTrack()']",
+      "frontend_handler": "setChainTrack",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/chains/:id"
+      },
+      "effect": "Associates track with chain",
+      "test": "WEBUI-ACT-CH-002"
+    },
+    {
+      "id": "chains.add_link",
+      "surface": "chains",
+      "element": "button[onclick='addLink()']",
+      "frontend_handler": "addLink",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/chains/:id/links"
+      },
+      "effect": "Appends filter/sink node to processing chain",
+      "test": "WEBUI-ACT-CH-003"
+    },
+    {
+      "id": "chains.remove_link",
+      "surface": "chains",
+      "element": "button[onclick*='removeLink']",
+      "frontend_handler": "removeLink",
+      "authority": "server",
+      "endpoint": {
+        "method": "DELETE",
+        "path": "/api/v1/chains/:chain_id/links/:link_id"
+      },
+      "effect": "Removes node from chain pipeline",
+      "test": "WEBUI-ACT-CH-004"
+    },
+    {
+      "id": "chains.play",
+      "surface": "chains",
+      "element": "button[onclick='playChain()']",
+      "frontend_handler": "playChain",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/chains/:id/play"
+      },
+      "effect": "Starts audio streaming through chain topology",
+      "test": "WEBUI-ACT-CH-005"
+    },
+    {
+      "id": "chains.stop",
+      "surface": "chains",
+      "element": "button[onclick='stopChain()']",
+      "frontend_handler": "stopChain",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/chains/:id/stop"
+      },
+      "effect": "Stops stream flow on chain",
+      "test": "WEBUI-ACT-CH-006"
+    },
+    {
+      "id": "chains.volume",
+      "surface": "chains",
+      "element": "input#chain-volume",
+      "frontend_handler": "setChainVolume",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/chains/:id/volume"
+      },
+      "effect": "Adjusts output gain on chain sink",
+      "test": "WEBUI-ACT-CH-007"
+    },
+    {
+      "id": "sync.file_upload",
+      "surface": "sync",
+      "element": "button[onclick='uploadFile()']",
+      "frontend_handler": "uploadFile",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/sync/upload/init"
+      },
+      "effect": "Uploads track binary in chunked verifiable pipeline",
+      "test": "WEBUI-ACT-SY-001"
+    },
+    {
+      "id": "sync.playlist_sync",
+      "surface": "sync",
+      "element": "button[onclick='syncPlaylist()']",
+      "frontend_handler": "syncPlaylist",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/playlists"
+      },
+      "effect": "Reconciles playlist tracks across sync peers and reports partial or complete status",
+      "test": "WEBUI-ACT-SY-002"
+    },
+    {
+      "id": "sync.peer_add",
+      "surface": "sync",
+      "element": "button[onclick='addSyncPeer()']",
+      "frontend_handler": "addSyncPeer",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "effect": "Validates and adds remote sync peer respecting LAN/WAN network policy",
+      "test": "WEBUI-ACT-SY-003"
+    },
+    {
+      "id": "sync.peer_remove",
+      "surface": "sync",
+      "element": "button[onclick*='removeSyncPeer']",
+      "frontend_handler": "removeSyncPeer",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "effect": "Removes sync peer and discontinues reconciliation",
+      "test": "WEBUI-ACT-SY-004"
+    },
+    {
+      "id": "settings.resource_profile",
+      "surface": "settings.general",
+      "element": "select#setting-resource_profile",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "restart_required",
+      "effect": "Saves profile, reports restart requirement, and determines runtime thread count on next boot",
+      "test": "WEBUI-SET-001"
+    },
+    {
+      "id": "settings.job_workers",
+      "surface": "settings.general",
+      "element": "input#setting-job_max_concurrent",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "restart_required",
+      "effect": "Validates integer within bounds and updates background scanner concurrency",
+      "test": "WEBUI-SET-002"
+    },
+    {
+      "id": "settings.language",
+      "surface": "settings.general",
+      "element": "select#setting-language",
+      "frontend_handler": "setLanguage",
+      "authority": "local",
+      "apply_mode": "live",
+      "effect": "Immediately translates UI elements across active view and persists preference",
+      "test": "WEBUI-SET-003"
+    },
+    {
+      "id": "settings.theme",
+      "surface": "settings.general",
+      "element": "button[onclick*='setTheme']",
+      "frontend_handler": "setTheme",
+      "authority": "local",
+      "apply_mode": "live",
+      "effect": "Immediately updates DOM theme and persists preference",
+      "test": "WEBUI-SET-004"
+    },
+    {
+      "id": "settings.cover_art",
+      "surface": "settings.general",
+      "element": "select#setting-cover_art_enabled",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "live",
+      "effect": "Updates DOM data-cover-art attribute and hides/shows artwork",
+      "test": "WEBUI-SET-005"
+    },
+    {
+      "id": "settings.sidebar",
+      "surface": "settings.general",
+      "element": "select#setting-sidebar_collapsed",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "live",
+      "effect": "Updates DOM data-sidebar-collapsed attribute and collapses/expands sidebar",
+      "test": "WEBUI-SET-006"
+    },
+    {
+      "id": "settings.stream_profile",
+      "surface": "settings.streaming",
+      "element": "select#setting-stream_profile",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "live",
+      "effect": "Persists profile and influences transcoding plan decisions",
+      "test": "WEBUI-SET-007"
+    },
+    {
+      "id": "settings.format_policy",
+      "surface": "settings.streaming",
+      "element": "select#setting-format_policy",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "live",
+      "effect": "Enforces direct vs lossless vs standard format requirements",
+      "test": "WEBUI-SET-008"
+    },
+    {
+      "id": "settings.remote_bitrate",
+      "surface": "settings.streaming",
+      "element": "select#setting-max_remote_bitrate",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "live",
+      "effect": "Clamps transcode bitrate for non-LAN clients",
+      "test": "WEBUI-SET-009"
+    },
+    {
+      "id": "settings.scrobbling",
+      "surface": "settings.audio",
+      "element": "select#setting-scrobble_enabled",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "live",
+      "effect": "Enables/disables external scrobble dispatch while preserving local history",
+      "test": "WEBUI-SET-010"
+    },
+    {
+      "id": "settings.sync_name",
+      "surface": "settings.sync",
+      "element": "input#setting-sync_name",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "restart_required",
+      "effect": "Saves sync instance advertising name",
+      "test": "WEBUI-SET-011"
+    },
+    {
+      "id": "settings.remote_sync",
+      "surface": "settings.sync",
+      "element": "select#setting-remote_sync",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "restart_required",
+      "effect": "Restricts sync endpoints strictly to trusted private LAN CIDRs when disabled",
+      "test": "WEBUI-SET-012"
+    },
+    {
+      "id": "settings.dev_cors",
+      "surface": "settings.network",
+      "element": "select#setting-dev_mode",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "restart_required",
+      "effect": "Enables permissive CORS header policy for local web development",
+      "test": "WEBUI-SET-013"
+    },
+    {
+      "id": "settings.auto_backup",
+      "surface": "settings.backup",
+      "element": "select#setting-auto_backup_enabled",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "restart_required",
+      "effect": "Enables background database backup scheduler",
+      "test": "WEBUI-SET-014"
+    },
+    {
+      "id": "settings.backup_retention",
+      "surface": "settings.backup",
+      "element": "input#setting-backup_max_keep",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "live",
+      "effect": "Controls number of historical snapshots retained during pruning",
+      "test": "WEBUI-SET-015"
+    },
+    {
+      "id": "settings.reconnect_max",
+      "surface": "settings.integrations",
+      "element": "input#setting-reconnect_delay_max",
+      "frontend_handler": "saveSetting",
+      "authority": "server",
+      "endpoint": {
+        "method": "PUT",
+        "path": "/api/v1/settings"
+      },
+      "apply_mode": "live",
+      "effect": "Sets upper bound cap on exponential backoff delays",
+      "test": "WEBUI-SET-016"
+    },
+    {
+      "id": "webhook.set",
+      "surface": "settings.webhook",
+      "element": "button[onclick='setWebhook()']",
+      "frontend_handler": "setWebhook",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/webhook"
+      },
+      "effect": "Validates URL scheme and registers webhook URL propagating database errors fail-closed",
+      "test": "WEBUI-ACT-WH-001"
+    },
+    {
+      "id": "webhook.test",
+      "surface": "settings.webhook",
+      "element": "button[onclick='testWebhook()']",
+      "frontend_handler": "testWebhook",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/webhook/test"
+      },
+      "effect": "Sends test ping event to webhook recipient and reports status",
+      "test": "WEBUI-ACT-WH-002"
+    },
+    {
+      "id": "webhook.clear",
+      "surface": "settings.webhook",
+      "element": "button[onclick='deleteWebhook()']",
+      "frontend_handler": "deleteWebhook",
+      "authority": "server",
+      "endpoint": {
+        "method": "DELETE",
+        "path": "/api/v1/webhook"
+      },
+      "effect": "Removes webhook configuration from server",
+      "test": "WEBUI-ACT-WH-003"
+    },
+    {
+      "id": "backup.snapshot",
+      "surface": "settings.backup",
+      "element": "button[onclick='createSnapshot()']",
+      "frontend_handler": "createSnapshot",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/backup/snapshot"
+      },
+      "effect": "Generates point-in-time database snapshot",
+      "test": "WEBUI-ACT-BK-001"
+    },
+    {
+      "id": "backup.download",
+      "surface": "playlists.backup",
+      "element": "button[onclick='downloadBackup()']",
+      "frontend_handler": "downloadBackup",
+      "authority": "server",
+      "endpoint": {
+        "method": "GET",
+        "path": "/api/v1/backup/download"
+      },
+      "effect": "Downloads encrypted or raw sqlite database backup file",
+      "test": "WEBUI-ACT-BK-002"
+    },
+    {
+      "id": "backup.restore",
+      "surface": "playlists.backup",
+      "element": "button[onclick='restoreBackup()']",
+      "frontend_handler": "restoreBackup",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/backup/restore"
+      },
+      "effect": "Restores database from uploaded backup file verifying PRAGMA integrity",
+      "test": "WEBUI-ACT-BK-003"
+    },
+    {
+      "id": "backup.verify",
+      "surface": "settings.backup",
+      "element": "button[onclick='verifyIntegrity()']",
+      "frontend_handler": "verifyIntegrity",
+      "authority": "server",
+      "endpoint": {
+        "method": "GET",
+        "path": "/api/v1/backup/verify"
+      },
+      "effect": "Runs SQLite PRAGMA quick_check/integrity_check and reports status",
+      "test": "WEBUI-ACT-BK-004"
+    },
+    {
+      "id": "diagnostics.refresh",
+      "surface": "settings.diagnostics",
+      "element": "button[onclick='loadDiagnostics()']",
+      "frontend_handler": "loadDiagnostics",
+      "authority": "server",
+      "endpoint": {
+        "method": "GET",
+        "path": "/api/v1/diagnostics"
+      },
+      "effect": "Fetches disk, memory, threads, and receiver diagnostics",
+      "test": "WEBUI-ACT-DG-001"
+    },
+    {
+      "id": "jobs.refresh",
+      "surface": "settings.jobs",
+      "element": "button[onclick='loadJobs()']",
+      "frontend_handler": "loadJobs",
+      "authority": "server",
+      "endpoint": {
+        "method": "GET",
+        "path": "/api/v1/jobs"
+      },
+      "effect": "Renders background jobs queue and statuses",
+      "test": "WEBUI-ACT-JB-001"
+    },
+    {
+      "id": "jobs.cancel",
+      "surface": "settings.jobs",
+      "element": "button[onclick*='cancelJobAction']",
+      "frontend_handler": "cancelJobAction",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/jobs/:id/cancel"
+      },
+      "effect": "Cancels in-flight background job",
+      "test": "WEBUI-ACT-JB-002"
+    },
+    {
+      "id": "history.export",
+      "surface": "history",
+      "element": "button[onclick='exportHistory()']",
+      "frontend_handler": "exportHistory",
+      "authority": "server",
+      "endpoint": {
+        "method": "GET",
+        "path": "/api/v1/history/export"
+      },
+      "effect": "Downloads play history as CSV/JSON file",
+      "test": "WEBUI-ACT-HS-001"
+    },
+    {
+      "id": "history.clear",
+      "surface": "history",
+      "element": "button[onclick='clearHistory()']",
+      "frontend_handler": "clearHistory",
+      "authority": "server",
+      "endpoint": {
+        "method": "DELETE",
+        "path": "/api/v1/history"
+      },
+      "effect": "Purges play history records from database",
+      "test": "WEBUI-ACT-HS-002"
+    },
+    {
+      "id": "integrations.listenbrainz.connect",
+      "surface": "settings.integrations",
+      "element": "button[onclick='saveListenBrainzToken()']",
+      "frontend_handler": "saveListenBrainzToken",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/integrations/listenbrainz"
+      },
+      "effect": "Validates ListenBrainz token against upstream API and persists in config",
+      "test": "WEBUI-ACT-INT-001"
+    },
+    {
+      "id": "integrations.listenbrainz.test",
+      "surface": "settings.integrations",
+      "element": "button[onclick='testListenBrainz()']",
+      "frontend_handler": "testListenBrainz",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/integrations/listenbrainz/test"
+      },
+      "effect": "Tests configured ListenBrainz token with upstream validate-token endpoint",
+      "test": "WEBUI-ACT-INT-002"
+    },
+    {
+      "id": "integrations.listenbrainz.disconnect",
+      "surface": "settings.integrations",
+      "element": "button[onclick='disconnectListenBrainz()']",
+      "frontend_handler": "disconnectListenBrainz",
+      "authority": "server",
+      "endpoint": {
+        "method": "DELETE",
+        "path": "/api/v1/integrations/listenbrainz"
+      },
+      "effect": "Removes ListenBrainz token from config and disables ListenBrainz scrobbling",
+      "test": "WEBUI-ACT-INT-003"
+    },
+    {
+      "id": "integrations.lastfm.connect",
+      "surface": "settings.integrations",
+      "element": "button[onclick='saveLastFmToken()']",
+      "frontend_handler": "saveLastFmToken",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/integrations/lastfm"
+      },
+      "effect": "Persists Last.fm session key in server configuration",
+      "test": "WEBUI-ACT-INT-004"
+    },
+    {
+      "id": "integrations.lastfm.test",
+      "surface": "settings.integrations",
+      "element": "button[onclick='testLastFm()']",
+      "frontend_handler": "testLastFm",
+      "authority": "server",
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/v1/integrations/lastfm/test"
+      },
+      "effect": "Tests configured Last.fm session key with upstream user.getInfo API",
+      "test": "WEBUI-ACT-INT-005"
+    },
+    {
+      "id": "integrations.lastfm.disconnect",
+      "surface": "settings.integrations",
+      "element": "button[onclick='disconnectLastFm()']",
+      "frontend_handler": "disconnectLastFm",
+      "authority": "server",
+      "endpoint": {
+        "method": "DELETE",
+        "path": "/api/v1/integrations/lastfm"
+      },
+      "effect": "Removes Last.fm session key from config and disables Last.fm scrobbling",
+      "test": "WEBUI-ACT-INT-006"
+    }
+  ]
+}

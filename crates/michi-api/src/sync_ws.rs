@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 
-fn is_local_or_private_ip(ip: IpAddr) -> bool {
+pub(crate) fn is_local_or_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             v4.is_loopback()

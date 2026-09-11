@@ -144,3 +144,28 @@ def test_unauthorized_producer_rejected():
     }
     status, _ = validate_evidence_artifact(art, current_sha="aaaa", requirement=requirement)
     assert status == "INVALID_EVIDENCE"
+
+def test_blocked_external_blocks_when_required():
+    reqs = {
+        "gates": [
+            {
+                "id": "raspberry-pi-physical",
+                "required_for": ["ga"],
+                "accepted_evidence_classes": ["PHYSICAL_HARDWARE"]
+            }
+        ]
+    }
+    artifacts = {
+        "raspberry-pi-physical": {
+            "schema_version": 1,
+            "gate_id": "raspberry-pi-physical",
+            "commit_sha": "aaaa",
+            "evidence_class": "PHYSICAL_HARDWARE",
+            "status": "BLOCKED_EXTERNAL",
+            "exit_code": 0,
+            "detail": "waiting on physical runner"
+        }
+    }
+    evaluated, has_blocking_failure = aggregate_gates(reqs, artifacts, "aaaa", "ga")
+    assert has_blocking_failure is True
+    assert evaluated[0]["status"] == "BLOCKED_EXTERNAL"

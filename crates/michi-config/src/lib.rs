@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::{env, path::Path, path::PathBuf};
 
+pub use michi_core::ResourceProfile;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -250,6 +251,12 @@ impl Config {
                 if !file_cfg.sync_name.is_empty() {
                     self.sync_name = file_cfg.sync_name;
                 }
+                if file_cfg.listenbrainz_token.is_some() {
+                    self.listenbrainz_token = file_cfg.listenbrainz_token;
+                }
+                if file_cfg.lastfm_token.is_some() {
+                    self.lastfm_token = file_cfg.lastfm_token;
+                }
                 self.scrobble_enabled = file_cfg.scrobble_enabled;
                 self.allow_registration = file_cfg.allow_registration;
                 self.dev_mode = file_cfg.dev_mode;
@@ -279,6 +286,12 @@ impl Config {
         std::fs::read_to_string(&path)
             .ok()
             .and_then(|content| serde_json::from_str::<Config>(&content).ok())
+            .map(|mut c| {
+                c.config_path = self.config_path.clone();
+                c.cache_path = self.cache_path.clone();
+                c.database_url = self.database_url.clone();
+                c
+            })
     }
 
     pub fn get_env_overrides() -> std::collections::HashSet<String> {
@@ -520,11 +533,13 @@ impl Serialize for Config {
     where
         S: serde::Serializer,
     {
-        let mut s = serializer.serialize_struct("Config", 20)?;
+        let mut s = serializer.serialize_struct("Config", 22)?;
         s.serialize_field("port", &self.port)?;
         s.serialize_field("music_paths", &self.music_paths)?;
         s.serialize_field("sync_peers", &self.sync_peers)?;
         s.serialize_field("sync_name", &self.sync_name)?;
+        s.serialize_field("listenbrainz_token", &self.listenbrainz_token)?;
+        s.serialize_field("lastfm_token", &self.lastfm_token)?;
         s.serialize_field("scrobble_enabled", &self.scrobble_enabled)?;
         s.serialize_field("allow_registration", &self.allow_registration)?;
         s.serialize_field("dev_mode", &self.dev_mode)?;
@@ -557,6 +572,8 @@ impl<'de> Deserialize<'de> for Config {
             music_paths: Option<Vec<PathBuf>>,
             sync_peers: Option<Vec<String>>,
             sync_name: Option<String>,
+            listenbrainz_token: Option<String>,
+            lastfm_token: Option<String>,
             scrobble_enabled: Option<bool>,
             allow_registration: Option<bool>,
             dev_mode: Option<bool>,
@@ -627,6 +644,12 @@ impl<'de> Deserialize<'de> for Config {
         }
         if let Some(v) = h.sync_name {
             cfg.sync_name = v;
+        }
+        if let Some(v) = h.listenbrainz_token {
+            cfg.listenbrainz_token = Some(v);
+        }
+        if let Some(v) = h.lastfm_token {
+            cfg.lastfm_token = Some(v);
         }
         if let Some(v) = h.scrobble_enabled {
             cfg.scrobble_enabled = v;

@@ -61,8 +61,8 @@ def aggregate_gates(reqs_data, artifacts, current_sha, mode):
             ev_class = art.get("evidence_class", "UNKNOWN")
             status, detail = validate_evidence_artifact(art, current_sha, g)
 
-        # Failure classification
-        if is_required and status in {"FAIL", "INVALID_EVIDENCE", "STALE", "NOT_RUN"}:
+        # Failure classification: if a gate is required for this mode, anything other than PASS blocks release
+        if is_required and status != "PASS":
             has_blocking_failure = True
 
         evaluated.append({

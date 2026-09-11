@@ -471,7 +471,7 @@ jobs:
           rm -rf "${TEST_ROOT}"
           mkdir -p "${TEST_ROOT}/config" "${TEST_ROOT}/cache" "${TEST_ROOT}/music"
 
-          python3 -c "import wave, struct, math; f = wave.open('${TEST_ROOT}/music/fixture.wav', 'w'); f.setnchannels(2); f.setsampwidth(2); f.setframerate(48000); [f.writeframes(struct.pack('<hh', int(32767.0 * 0.3 * math.sin(2.0 * math.pi * 440.0 * i / 48000)), int(32767.0 * 0.3 * math.sin(2.0 * math.pi * 440.0 * i / 48000)))) for i in range(48000)]; f.close()"
+          python3 -c "import wave, struct; f = wave.open('${TEST_ROOT}/music/fixture.wav', 'w'); f.setnchannels(1); f.setsampwidth(2); f.setframerate(8000); f.writeframes(b'\x00\x00' * 8000 * 120); f.close()"
 
           export MICHI_CONFIG_PATH="${TEST_ROOT}/config"
           export MICHI_CACHE_PATH="${TEST_ROOT}/cache"
@@ -480,6 +480,9 @@ jobs:
           export MICHI_PORT=9090
           export MICHI_AUTH_USERNAME=admin
           export MICHI_AUTH_PASSWORD=admin12345
+          export MICHI_RATE_LIMIT_RPS=100
+          export MICHI_RATE_LIMIT_BURST=300
+          export MICHI_LOGIN_RATE_LIMIT_PER_MINUTE=100
 
           ./target/debug/michi-server &
           PID=$!
@@ -508,6 +511,39 @@ jobs:
             exit 1
           fi
 
+          # Seed library and wait for track indexing before executing action effects
+          python3 -c '
+          import urllib.request, json, time
+          opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
+          login_data = json.dumps({"username": "admin", "password": "admin12345"}).encode()
+          req = urllib.request.Request("http://127.0.0.1:9090/api/auth/login", data=login_data, headers={"Content-Type": "application/json"}, method="POST")
+          opener.open(req)
+          scan_req = urllib.request.Request("http://127.0.0.1:9090/api/v1/library/scan", data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
+          opener.open(scan_req)
+          for _ in range(30):
+              time.sleep(0.5)
+              tracks_req = urllib.request.Request("http://127.0.0.1:9090/api/v1/tracks?limit=1")
+              try:
+                  with opener.open(tracks_req) as r:
+                      data = json.loads(r.read())
+                      tracks = data if isinstance(data, list) else data.get("tracks", [])
+                      if len(tracks) > 0:
+                          print(f"Library scanned: {len(tracks)} track(s) ready")
+                          break
+              except Exception:
+                  pass
+          '
+
+          MICHI_SERVER_URL=http://127.0.0.1:9090 \
+          MICHI_ADMIN_USERNAME=admin \
+          MICHI_ADMIN_PASSWORD=admin12345 \
+          pytest tests/e2e/test_webui_action_effects.py -v
+
+          MICHI_SERVER_URL=http://127.0.0.1:9090 \
+          MICHI_ADMIN_USERNAME=admin \
+          MICHI_ADMIN_PASSWORD=admin12345 \
+          pytest tests/e2e/test_scrobble_integrations.py -v
+
           MICHI_SERVER_URL=http://127.0.0.1:9090 \
           MICHI_ADMIN_USERNAME=admin \
           MICHI_ADMIN_PASSWORD=admin12345 \
@@ -525,12 +561,49 @@ jobs:
             --class INTEGRATION_REAL \
             --job-status "${{ job.status }}" \
             --output target/release-evidence/web-ui-browser-e2e.json
+          python3 scripts/record_job_evidence.py \
+            --gate web-ui-action-effects \
+            --class INTEGRATION_REAL \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/web-ui-action-effects.json
       - name: Upload release evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: release-evidence-web-ui-browser-e2e
-          path: target/release-evidence/web-ui-browser-e2e.json
+          path: |
+            target/release-evidence/web-ui-browser-e2e.json
+            target/release-evidence/web-ui-action-effects.json
+          if-no-files-found: error
+          retention-days: 30
+
+  ci-web-ui-action-manifest:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify WebUI Action Manifest Contracts and Zero Silent Catches
+        run: python3 scripts/check_webui_action_contracts.py
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate web-ui-action-manifest \
+            --class STATIC_ANALYSIS \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/web-ui-action-manifest.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-web-ui-action-manifest
+          path: target/release-evidence/web-ui-action-manifest.json
           if-no-files-found: error
           retention-days: 30
 
@@ -843,6 +916,7 @@ jobs:
       - name: Assert ZimaOS store distribution integrity
         run: |
           test -f dist/index.json
+          test -f dist/store.json
           test -f dist/apps/io.michi.micro-server/docker-compose.yml
           test -f dist/apps/io.michi.micro-server/meta.json
           test -s dist/apps/io.michi.micro-server/assets/icon.svg
@@ -864,7 +938,17 @@ jobs:
           assert app["scheme"] == "http"
           assert data["version"] == "3.1"
           assert app["version"] == expected_version, (app["version"], expected_version)
+          assert "content_hash" in app and len(app["content_hash"]) == 64
+
+          with open("dist/store.json") as f:
+              store_v2 = json.load(f)
+
+          assert store_v2["version"] == 2
+          assert store_v2["store_id"] == "io.michi.store"
+          assert store_v2["apps"][0]["id"] == "io.michi.micro-server"
+          assert store_v2["apps"][0]["version"] == expected_version
           PY
+
       - name: Record release evidence
         if: always()
         run: |
@@ -969,6 +1053,7 @@ jobs:
       - ci-resource-budget
       - ci-web-ui-functional-integrity
       - ci-web-ui-browser-e2e
+      - ci-web-ui-action-manifest
       - ci-three-way-ecosystem
       - ci-docker-amd64
       - ci-arm64-qemu

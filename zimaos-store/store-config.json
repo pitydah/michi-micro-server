@@ -1,6 +1,9 @@
 {
-  "name": "Michi App Store",
-  "developer": "pitydah",
-  "category": ["Music", "Audio", "Home Server"],
-  "version": "3.1"
+  "version": 2,
+  "store_id": "io.michi.store",
+  "name": {
+    "en_US": "Michi Official App Store"
+  },
+  "maintainer": "pitydah",
+  "url": "https://raw.githubusercontent.com/pitydah/michi-micro-server/main"
 }
