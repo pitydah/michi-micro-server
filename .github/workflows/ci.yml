@@ -1155,3 +1155,20 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  ci-ghcr-public-release:
+    needs: [release-ghcr]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Verify Anonymous Pull and Multi-Arch Runtime
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY}:${VERSION}"
+          echo "Verifying public accessibility for image: ${IMAGE}"
+          ./scripts/verify_public_release_image.sh "${IMAGE}" 9090
+
