@@ -71,6 +71,7 @@ fn test_config_with_url(db_url: String) -> Config {
         opensubsonic_enabled: false,
         trust_proxy: false,
         trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
+        deployment_platform: "unknown".into(),
     }
 }
 

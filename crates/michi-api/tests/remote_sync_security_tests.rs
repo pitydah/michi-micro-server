@@ -59,6 +59,7 @@ async fn setup_app(
             .into_iter()
             .map(|s| s.parse().unwrap())
             .collect(),
+        deployment_platform: "unknown".into(),
     };
 
     let state = michi_api::AppState::new(config, pool, None);
@@ -364,6 +365,7 @@ async fn test_remote_sync_real_tcp_websocket_connect() {
         opensubsonic_enabled: false,
         trust_proxy: false,
         trusted_proxies: vec![],
+        deployment_platform: "unknown".into(),
     };
 
     let state = michi_api::AppState::new(config, pool, None);

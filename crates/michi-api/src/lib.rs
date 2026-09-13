@@ -308,7 +308,7 @@ impl AppState {
     ) -> Self {
         let (tx, _) = broadcast::channel(64);
         let (sync_tx, _) = broadcast::channel(64);
-        let auth_sessions = auth::AuthState::new();
+        let auth_sessions = auth::AuthState::new_with_db(db.clone());
         let auth_enabled = config.auth_enabled;
         if auth_enabled {
             auth::spawn_session_cleanup(auth_sessions.clone());
@@ -969,18 +969,35 @@ pub async fn init_admin_user(config: &Config, db: &SqlitePool) -> Option<Uuid> {
         .ok()
         .flatten()
     {
-        Some((id, _, _, is_admin)) => {
-            if !is_admin {
-                if sqlx::query("UPDATE users SET is_admin = 1 WHERE id = ?")
-                    .bind(id.to_string())
-                    .execute(db)
-                    .await
-                    .is_err()
+        Some((id, _, password_hash, is_admin)) => {
+            let password_matches = auth::verify_password(password, &password_hash).unwrap_or(false);
+            if !password_matches || !is_admin {
+                let target_hash = if !password_matches {
+                    match auth::hash_password(password) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            warn!("failed to hash updated admin password: {e}");
+                            return None;
+                        }
+                    }
+                } else {
+                    password_hash
+                };
+                if let Err(e) =
+                    michi_db::update_user_password_and_admin(db, &id, &target_hash, true).await
                 {
-                    warn!("failed to promote configured admin user");
+                    warn!("failed to reconcile admin credentials in database: {e}");
                     return None;
                 }
-                info!("promoted configured user '{}' to administrator", username);
+                if !password_matches {
+                    info!(
+                        "reconciled and updated configured admin user password for '{}'",
+                        username
+                    );
+                }
+                if !is_admin {
+                    info!("promoted configured user '{}' to administrator", username);
+                }
             }
             Some(id)
         }
@@ -1563,6 +1580,14 @@ fn v1_link_routes() -> Router<AppState> {
                 .put(routes::v1::settings::update_settings_handler),
         )
         .route(
+            "/api/v1/update/status",
+            get(routes::v1::update::update_status_handler),
+        )
+        .route(
+            "/api/v1/update/check",
+            post(routes::v1::update::update_check_handler),
+        )
+        .route(
             "/api/v1/setup/status",
             get(routes::v1::setup::setup_status_handler),
         )
@@ -2106,6 +2131,7 @@ mod tests {
                 .into_iter()
                 .map(|s| s.parse().unwrap())
                 .collect(),
+            deployment_platform: "unknown".into(),
         }
     }
 

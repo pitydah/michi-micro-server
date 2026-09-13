@@ -307,8 +307,11 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
             migration_047
         );
     }
+    if current < 48 {
+        run_migration_step!(conn, 48, "auth_sessions table and indexes", migration_048);
+    }
 
-    info!("database schema at version 47");
+    info!("database schema at version 48");
     Ok(())
 }
 
@@ -1286,6 +1289,32 @@ async fn migration_047(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
     Ok(())
 }
 
+async fn migration_048(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS auth_sessions (
+            token_hash TEXT PRIMARY KEY,
+            user_id BLOB NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            last_seen_at TEXT
+        )",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id)")
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedReceiver {
     pub id: String,
@@ -1744,6 +1773,90 @@ pub async fn get_user_by_id(
             is_admin,
         )
     }))
+}
+
+pub async fn update_user_password_and_admin(
+    pool: &SqlitePool,
+    id: &Uuid,
+    password_hash: &str,
+    is_admin: bool,
+) -> Result<(), DbError> {
+    let id_str = id.to_string();
+    sqlx::query("UPDATE users SET password_hash = ?, is_admin = ? WHERE id = ?")
+        .bind(password_hash)
+        .bind(is_admin as i64)
+        .bind(&id_str)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn create_auth_session(
+    pool: &SqlitePool,
+    token_hash: &str,
+    user_id: &Uuid,
+    created_at: &str,
+    expires_at: &str,
+) -> Result<(), DbError> {
+    let user_id_str = user_id.to_string();
+    sqlx::query(
+        "INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at, last_seen_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(token_hash)
+    .bind(&user_id_str)
+    .bind(created_at)
+    .bind(expires_at)
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_auth_session(
+    pool: &SqlitePool,
+    token_hash: &str,
+) -> Result<Option<(Uuid, String)>, DbError> {
+    let row = sqlx::query("SELECT user_id, expires_at FROM auth_sessions WHERE token_hash = ?")
+        .bind(token_hash)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(row.map(|r| {
+        let uid_str: &str = r.get("user_id");
+        let user_id = Uuid::parse_str(uid_str).unwrap_or(Uuid::nil());
+        let expires_at: &str = r.get("expires_at");
+        (user_id, expires_at.to_string())
+    }))
+}
+
+pub async fn touch_auth_session(
+    pool: &SqlitePool,
+    token_hash: &str,
+    last_seen_at: &str,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?")
+        .bind(last_seen_at)
+        .bind(token_hash)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_auth_session(pool: &SqlitePool, token_hash: &str) -> Result<(), DbError> {
+    sqlx::query("DELETE FROM auth_sessions WHERE token_hash = ?")
+        .bind(token_hash)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn cleanup_expired_auth_sessions(pool: &SqlitePool, now: &str) -> Result<u64, DbError> {
+    let res = sqlx::query("DELETE FROM auth_sessions WHERE expires_at <= ?")
+        .bind(now)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
 }
 
 pub async fn record_play(

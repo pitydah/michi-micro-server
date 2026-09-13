@@ -1172,3 +1172,20 @@ jobs:
           echo "Verifying public accessibility for image: ${IMAGE}"
           ./scripts/verify_public_release_image.sh "${IMAGE}" 9090
 
+  release-github:
+    needs: [ci-ghcr-public-release]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Michi Micro Server ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          draft: false
+
