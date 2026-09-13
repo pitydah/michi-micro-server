@@ -173,10 +173,15 @@
   "keyboard.play_pause": "Espacio",
   "keyboard.search": "Ctrl+K",
   "auth.signin_required": "Se requiere iniciar sesión para realizar esta acción.",
+  "auth.disabled_notice": "Las acciones administrativas no están disponibles porque la autenticación está desactivada en este despliegue.",
   "settings.unable_load": "No se pudieron cargar las configuraciones del servidor",
   "settings.managed_by_env": "Controlado por variable de entorno",
   "update.stale_cache": "Caché obsoleta (servidor no disponible)",
   "update.check_failed": "Fallo de comprobación: no disponible",
   "update.up_to_date": "Actualizado",
-  "update.available": "Actualización disponible"
+  "update.available": "Actualización disponible",
+  "update.toast_available": "Actualización disponible: {ver}",
+  "update.toast_up_to_date": "Michi Micro Server está actualizado.",
+  "update.toast_check_failed": "No se pudieron buscar actualizaciones.",
+  "update.toast_stale_cache": "No se pudo conectar con el servicio de actualización. Mostrando la última información conocida."
 }

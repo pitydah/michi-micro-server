@@ -214,7 +214,7 @@ impl AuthState {
                     let token_clone = token.to_string();
                     let auth_clone = self.clone();
                     tokio::spawn(async move {
-                        auth_clone.invalidate(&token_clone).await;
+                        let _ = auth_clone.invalidate(&token_clone).await;
                     });
                     return None;
                 }
@@ -272,25 +272,37 @@ impl AuthState {
         None
     }
 
-    pub async fn invalidate(&self, token: &str) {
+    pub async fn invalidate(&self, token: &str) -> Result<(), String> {
         {
             let mut sessions = self.sessions.write().await;
             sessions.remove(token);
         }
         if let Some(ref db) = self.db {
             let token_hash = hash_token(token);
-            let _ = michi_db::delete_auth_session(db, &token_hash).await;
+            michi_db::delete_auth_session(db, &token_hash)
+                .await
+                .map_err(|e| {
+                    tracing::error!("failed to delete auth session from database: {e}");
+                    format!("database deletion error: {e}")
+                })?;
         }
+        Ok(())
     }
 
-    pub async fn invalidate_user_sessions(&self, user_id: &Uuid) {
+    pub async fn invalidate_user_sessions(&self, user_id: &Uuid) -> Result<(), String> {
         {
             let mut sessions = self.sessions.write().await;
             sessions.retain(|_, data| data.user_id != *user_id);
         }
         if let Some(ref db) = self.db {
-            let _ = michi_db::delete_auth_sessions_for_user(db, user_id).await;
+            michi_db::delete_auth_sessions_for_user(db, user_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!("failed to delete user auth sessions from database: {e}");
+                    format!("database deletion error: {e}")
+                })?;
         }
+        Ok(())
     }
 
     pub async fn cleanup(&self) {
@@ -740,8 +752,12 @@ pub(crate) async fn logout_handler(
     headers: axum::http::HeaderMap,
     request: Request,
 ) -> impl IntoResponse {
+    let mut revocation_error = None;
     if let Some(token) = extract_token(&request) {
-        state.auth_sessions.invalidate(&token).await;
+        if let Err(e) = state.auth_sessions.invalidate(&token).await {
+            tracing::error!("durable session revocation failed on logout: {e}");
+            revocation_error = Some(e);
+        }
     }
     let secure = is_secure_request(connect_info, &headers, &state.config);
     let cookie_val = make_session_cookie("", 0, secure);
@@ -753,6 +769,17 @@ pub(crate) async fn logout_handler(
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),
     );
+
+    if let Some(err) = revocation_error {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            resp_headers,
+            Json(
+                json!({"status": "error", "message": format!("session revocation failed: {err}")}),
+            ),
+        );
+    }
+
     (StatusCode::OK, resp_headers, Json(json!({"status": "ok"})))
 }
 
@@ -787,7 +814,7 @@ pub(crate) async fn check_handler(
                 {
                     (true, Some(id), Some(uname), Some(admin))
                 } else {
-                    state.auth_sessions.invalidate(&t).await;
+                    let _ = state.auth_sessions.invalidate(&t).await;
                     (false, None, None, None)
                 }
             } else {

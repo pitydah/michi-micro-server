@@ -14,8 +14,9 @@ import re
 import sys
 
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+DIGEST_RE = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
 
-def generate_manifest(tag: str, commit: str, image: str, platforms: list[str], output_file: str, digest: str | None = None) -> dict:
+def generate_manifest(tag: str, commit: str, image: str, platforms: list[str], output_file: str, digest: str) -> dict:
     if not tag:
         raise ValueError("Tag must not be empty")
     if not SHA_RE.match(commit):
@@ -24,6 +25,8 @@ def generate_manifest(tag: str, commit: str, image: str, platforms: list[str], o
         raise ValueError("Image reference must not be empty")
     if not platforms:
         platforms = ["linux/amd64", "linux/arm64"]
+    if not digest or not DIGEST_RE.match(digest):
+        raise ValueError(f"Digest must be a valid sha256:hex64 string, got: {digest!r}")
 
     manifest = {
         "schema_version": "1.0.0",
@@ -31,7 +34,7 @@ def generate_manifest(tag: str, commit: str, image: str, platforms: list[str], o
         "commit": commit,
         "image": image,
         "platforms": platforms,
-        "digest": digest or "",
+        "digest": digest,
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "publisher": "michi-micro-server-ci",
     }
@@ -45,7 +48,7 @@ def generate_manifest(tag: str, commit: str, image: str, platforms: list[str], o
     print(json.dumps(manifest, indent=2))
     return manifest
 
-def verify_manifest(manifest_path: str, expected_tag: str | None = None, expected_commit: str | None = None, expected_image: str | None = None) -> bool:
+def verify_manifest(manifest_path: str, expected_tag: str | None = None, expected_commit: str | None = None, expected_image: str | None = None, expected_digest: str | None = None) -> bool:
     if not os.path.exists(manifest_path):
         print(f"ERROR: Manifest file not found: {manifest_path}", file=sys.stderr)
         return False
@@ -58,13 +61,17 @@ def verify_manifest(manifest_path: str, expected_tag: str | None = None, expecte
         return False
 
     errors = []
-    required_keys = ["schema_version", "tag", "commit", "image", "platforms", "generated_at"]
+    required_keys = ["schema_version", "tag", "commit", "image", "platforms", "digest", "generated_at"]
     for key in required_keys:
         if key not in manifest:
             errors.append(f"Missing required key: {key}")
 
     if "commit" in manifest and not SHA_RE.match(manifest["commit"]):
         errors.append(f"Invalid commit SHA in manifest: {manifest['commit']}")
+
+    if "digest" in manifest:
+        if not manifest["digest"] or not DIGEST_RE.match(manifest["digest"]):
+            errors.append(f"Invalid or empty image digest in manifest: {manifest.get('digest')!r}")
 
     if "platforms" in manifest:
         if not isinstance(manifest["platforms"], list) or len(manifest["platforms"]) == 0:
@@ -84,6 +91,9 @@ def verify_manifest(manifest_path: str, expected_tag: str | None = None, expecte
     if expected_image and manifest.get("image") != expected_image:
         errors.append(f"Image mismatch: expected {expected_image}, found {manifest.get('image')}")
 
+    if expected_digest and manifest.get("digest") != expected_digest:
+        errors.append(f"Digest mismatch: expected {expected_digest}, found {manifest.get('digest')}")
+
     if errors:
         print(f"ERROR: Manifest verification failed with {len(errors)} error(s):", file=sys.stderr)
         for err in errors:
@@ -95,6 +105,7 @@ def verify_manifest(manifest_path: str, expected_tag: str | None = None, expecte
     print(f"  Commit: {manifest.get('commit')}")
     print(f"  Image: {manifest.get('image')}")
     print(f"  Platforms: {', '.join(manifest.get('platforms', []))}")
+    print(f"  Digest: {manifest.get('digest')}")
     return True
 
 def main():
@@ -111,6 +122,9 @@ def main():
     args = parser.parse_args()
 
     if args.generate:
+        if not args.tag or not args.commit or not args.image or not args.digest:
+            print("ERROR: --generate requires --tag, --commit, --image, and --digest", file=sys.stderr)
+            sys.exit(1)
         platforms = [p.strip() for p in args.platforms.split(",") if p.strip()]
         generate_manifest(
             tag=args.tag,
@@ -120,7 +134,13 @@ def main():
             output_file=args.manifest,
             digest=args.digest,
         )
-        if not verify_manifest(args.manifest, expected_tag=args.tag, expected_commit=args.commit, expected_image=args.image):
+        if not verify_manifest(
+            args.manifest,
+            expected_tag=args.tag,
+            expected_commit=args.commit,
+            expected_image=args.image,
+            expected_digest=args.digest,
+        ):
             sys.exit(1)
         sys.exit(0)
 
@@ -130,6 +150,7 @@ def main():
             expected_tag=args.tag,
             expected_commit=args.commit,
             expected_image=args.image,
+            expected_digest=args.digest,
         )
         sys.exit(0 if ok else 1)
 

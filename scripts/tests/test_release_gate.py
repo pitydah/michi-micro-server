@@ -169,3 +169,49 @@ def test_blocked_external_blocks_when_required():
     evaluated, has_blocking_failure = aggregate_gates(reqs, artifacts, "aaaa", "ga")
     assert has_blocking_failure is True
     assert evaluated[0]["status"] == "BLOCKED_EXTERNAL"
+
+from verify_release_manifest import generate_manifest, verify_manifest
+
+def test_release_manifest_valid(tmp_path):
+    out = str(tmp_path / "release-manifest.json")
+    tag = "v1.0.0-rc.2"
+    commit = "a" * 40
+    image = "ghcr.io/pitydah/michi-micro-server:1.0.0-rc.2"
+    digest = "sha256:" + "b" * 64
+    manifest = generate_manifest(
+        tag=tag,
+        commit=commit,
+        image=image,
+        platforms=["linux/amd64", "linux/arm64"],
+        output_file=out,
+        digest=digest,
+    )
+    assert manifest["tag"] == tag
+    assert manifest["commit"] == commit
+    assert manifest["digest"] == digest
+    assert verify_manifest(out, expected_tag=tag, expected_commit=commit, expected_image=image, expected_digest=digest) is True
+
+def test_release_manifest_rejects_missing_digest(tmp_path):
+    out = str(tmp_path / "release-manifest.json")
+    with pytest.raises(ValueError, match="Digest must be a valid sha256:hex64 string"):
+        generate_manifest(
+            tag="v1.0.0-rc.2",
+            commit="a" * 40,
+            image="ghcr.io/pitydah/michi-micro-server:1.0.0-rc.2",
+            platforms=["linux/amd64"],
+            output_file=out,
+            digest="",
+        )
+
+def test_release_manifest_rejects_invalid_commit(tmp_path):
+    out = str(tmp_path / "release-manifest.json")
+    with pytest.raises(ValueError, match="Commit SHA must be a 40-character hex string"):
+        generate_manifest(
+            tag="v1.0.0-rc.2",
+            commit="invalid_sha",
+            image="ghcr.io/pitydah/michi-micro-server:1.0.0-rc.2",
+            platforms=["linux/amd64"],
+            output_file=out,
+            digest="sha256:" + "b" * 64,
+        )
+

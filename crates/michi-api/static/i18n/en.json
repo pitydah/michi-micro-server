@@ -173,10 +173,15 @@
   "keyboard.play_pause": "Space",
   "keyboard.search": "Ctrl+K",
   "auth.signin_required": "Sign in required to perform this action.",
+  "auth.disabled_notice": "Administrative actions are unavailable because authentication is disabled for this deployment.",
   "settings.unable_load": "Unable to load settings from server",
   "settings.managed_by_env": "Controlled by environment variable",
   "update.stale_cache": "Stale cache (upstream unreachable)",
   "update.check_failed": "Check failed: upstream unavailable",
   "update.up_to_date": "Up to date",
-  "update.available": "Update Available"
+  "update.available": "Update Available",
+  "update.toast_available": "Update available: {ver}",
+  "update.toast_up_to_date": "Michi Micro Server is up to date.",
+  "update.toast_check_failed": "Could not check for updates.",
+  "update.toast_stale_cache": "Could not contact the update service. Showing last known update information."
 }

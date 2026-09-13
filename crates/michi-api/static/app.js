@@ -741,11 +741,23 @@ function closeModal() {
   _modalPreviousFocus = null;
 }
 
+function canPerformProtectedAction() {
+  if (AuthSession.state === 'authenticated') {
+    return true;
+  }
+  if (AuthSession.state === 'disabled') {
+    showToast(t('auth.disabled_notice') || 'Administrative actions are unavailable because authentication is disabled for this deployment.', true);
+    return false;
+  }
+  showToast(t('auth.signin_required') || 'Sign in required to perform this action.', true);
+  openAuthModal();
+  return false;
+}
+window.canPerformProtectedAction = canPerformProtectedAction;
+
 function withAuthenticatedAction(fn, actionName) {
   return async function(...args) {
-    if (AuthSession.state !== 'authenticated' && AuthSession.state !== 'disabled') {
-      showToast(t('auth.signin_required') || 'Sign in required to perform this action.', true);
-      openAuthModal();
+    if (!canPerformProtectedAction()) {
       return;
     }
     return await fn.apply(this, args);
@@ -916,7 +928,55 @@ const SECTION_POLICY = {
   chains: 'protected',
 };
 
+var currentSection = 'dashboard';
+
+function reevaluateCurrentSectionAccess() {
+  var section = currentSection || 'dashboard';
+  var page = $('#page-' + section);
+  if (!page) return;
+
+  var policy = SECTION_POLICY[section] || 'protected';
+  var existingAuthGate = page.querySelector('.auth-required-gate');
+  var isAuthRequired = policy === 'protected' && AuthSession.state !== 'authenticated';
+
+  if (isAuthRequired) {
+    if (!existingAuthGate) {
+      existingAuthGate = document.createElement('div');
+      existingAuthGate.className = 'auth-required-gate';
+      existingAuthGate.innerHTML =
+        '<div class="empty-state mascot" style="padding:48px 16px;text-align:center">' +
+        '<div class="icon" style="font-size:2.5rem;margin-bottom:12px">🔒</div>' +
+        '<p><strong style="font-size:1.1rem">' + (t('auth.signin_required') || 'Sign in required') + '</strong></p>' +
+        '<p style="color:var(--text-3);font-size:.85rem;margin:6px 0 16px 0">Authentication is enabled on this server. Please sign in to view and manage this section.</p>' +
+        '<button class="btn btn-primary" onclick="openAuthModal()">Sign in to Michi</button>' +
+        '</div>';
+      page.prepend(existingAuthGate);
+    }
+    existingAuthGate.style.display = '';
+    Array.from(page.children).forEach(function(child) {
+      if (child !== existingAuthGate) {
+        child.dataset.authHidden = 'true';
+        child.style.display = 'none';
+      }
+    });
+    // Safely move focus away from hidden protected controls to the auth gate button
+    var gateBtn = existingAuthGate.querySelector('button');
+    if (gateBtn && document.activeElement && page.contains(document.activeElement)) {
+      gateBtn.focus();
+    }
+  } else {
+    if (existingAuthGate) existingAuthGate.remove();
+    Array.from(page.children).forEach(function(child) {
+      if (child.dataset.authHidden === 'true') {
+        delete child.dataset.authHidden;
+        child.style.display = '';
+      }
+    });
+  }
+}
+
 function showSection(section) {
+  currentSection = section || 'dashboard';
   $$('.nav-item').forEach(n => {
     n.classList.remove('active');
     n.removeAttribute('aria-current');
@@ -941,44 +1001,13 @@ function showSection(section) {
   }
   toggleNavigation(false);
 
-  // Check access policy for section
-  var policy = SECTION_POLICY[section] || 'protected';
-  if (page) {
-    var existingAuthGate = page.querySelector('.auth-required-gate');
-    var isAuthRequired = policy === 'protected' && AuthSession.state !== 'authenticated';
-    if (isAuthRequired) {
-      if (!existingAuthGate) {
-        existingAuthGate = document.createElement('div');
-        existingAuthGate.className = 'auth-required-gate';
-        existingAuthGate.innerHTML =
-          '<div class="empty-state mascot" style="padding:48px 16px;text-align:center">' +
-          '<div class="icon" style="font-size:2.5rem;margin-bottom:12px">🔒</div>' +
-          '<p><strong style="font-size:1.1rem">Sign in required</strong></p>' +
-          '<p style="color:var(--text-3);font-size:.85rem;margin:6px 0 16px 0">Authentication is enabled on this server. Please sign in to view and manage this section.</p>' +
-          '<button class="btn btn-primary" onclick="openAuthModal()">Sign in to Michi</button>' +
-          '</div>';
-        page.prepend(existingAuthGate);
-      }
-      existingAuthGate.style.display = '';
-      Array.from(page.children).forEach(function(child) {
-        if (child !== existingAuthGate) {
-          child.dataset.authHidden = 'true';
-          child.style.display = 'none';
-        }
-      });
-      return;
-    } else {
-      if (existingAuthGate) existingAuthGate.remove();
-      Array.from(page.children).forEach(function(child) {
-        if (child.dataset.authHidden === 'true') {
-          delete child.dataset.authHidden;
-          child.style.display = '';
-        }
-      });
-    }
-  }
+  // Check and apply access policy for section
+  reevaluateCurrentSectionAccess();
 
-  if (AuthSession.state !== 'authenticated') return;
+  var policy = SECTION_POLICY[section] || 'protected';
+  if (policy === 'protected' && AuthSession.state !== 'authenticated') {
+    return;
+  }
 
   // Lazy loaders for sections
   if (section === 'playlists') loadPlaylists();
@@ -1043,6 +1072,7 @@ function teardownProtected() {
   renderTracks([], 'tracks-table');
   renderTracks([], 'library-table');
   renderQueue([], 0);
+  reevaluateCurrentSectionAccess();
 }
 
 async function init() {
@@ -1401,9 +1431,7 @@ document.addEventListener('keydown', (e) => {
 
 // ── Scan ────────────────────────────────────────────────────────
 async function handleScan() {
-  if (AuthSession.state !== 'authenticated' && AuthSession.state !== 'disabled') {
-    showToast(t('auth.signin_required') || 'Sign in required to perform this action.', true);
-    openAuthModal();
+  if (!canPerformProtectedAction()) {
     return;
   }
   try {
@@ -2066,9 +2094,7 @@ function updateMiniPlayer(t) {
 
 // ── Michi Link & Ecosystem ──────────────────────────────────────
 async function testMichiLink() {
-  if (AuthSession.state !== 'authenticated' && AuthSession.state !== 'disabled') {
-    showToast(t('auth.signin_required') || 'Sign in required to perform this action.', true);
-    openAuthModal();
+  if (!canPerformProtectedAction()) {
     return;
   }
   const btn = $('#page-michilink button[onclick="testMichiLink()"]');
@@ -3280,14 +3306,14 @@ async function loadSettings() {
     if ($('#settings-resource-profile')) $('#settings-resource-profile').value = s.resource_profile;
     if ($('#settings-stream-profile')) $('#settings-stream-profile').value = s.stream_profile;
     if ($('#settings-format-policy')) $('#settings-format-policy').value = s.format_policy;
-    if ($('#settings-job-max-concurrent')) $('#settings-job-max-concurrent').value = s.job_max_concurrent || 3;
-    if ($('#settings-max-remote-bitrate')) $('#settings-max-remote-bitrate').value = s.max_remote_bitrate || 320000;
+    if ($('#settings-job-max-concurrent')) $('#settings-job-max-concurrent').value = s.job_max_concurrent !== undefined ? s.job_max_concurrent : '';
+    if ($('#settings-max-remote-bitrate')) $('#settings-max-remote-bitrate').value = s.max_remote_bitrate !== undefined ? s.max_remote_bitrate : '';
     if ($('#settings-scrobble-toggle')) $('#settings-scrobble-toggle').value = s.scrobble_enabled ? 'true' : 'false';
     if ($('#settings-sync-name-input')) $('#settings-sync-name-input').value = s.sync_name || '';
     if ($('#settings-remote-sync')) $('#settings-remote-sync').value = s.remote_sync ? 'true' : 'false';
     if ($('#settings-auto-backup')) $('#settings-auto-backup').value = s.auto_backup_enabled ? 'true' : 'false';
-    if ($('#settings-backup-max-keep')) $('#settings-backup-max-keep').value = s.backup_max_keep || 7;
-    if ($('#settings-reconnect-delay-max')) $('#settings-reconnect-delay-max').value = s.reconnect_delay_max || 300;
+    if ($('#settings-backup-max-keep')) $('#settings-backup-max-keep').value = s.backup_max_keep !== undefined ? s.backup_max_keep : '';
+    if ($('#settings-reconnect-delay-max')) $('#settings-reconnect-delay-max').value = s.reconnect_delay_max !== undefined ? s.reconnect_delay_max : '';
     if ($('#settings-dev-mode-select')) $('#settings-dev-mode-select').value = s.dev_mode ? 'true' : 'false';
     if ($('#settings-cover-art')) $('#settings-cover-art').value = (s.cover_art_enabled !== false) ? 'true' : 'false';
     if ($('#settings-sidebar-collapsed')) $('#settings-sidebar-collapsed').value = s.sidebar_collapsed ? 'true' : 'false';
@@ -3334,12 +3360,12 @@ async function loadSettings() {
     if ($('#settings-scrobble')) $('#settings-scrobble').innerHTML = s.scrobble_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
     updateScrobbleStatusUI();
 
-    var scanWorkers = s.effective_scan_workers !== undefined ? s.effective_scan_workers : (s.resource_profile === 'eco' ? 1 : (s.resource_profile === 'performance' ? 4 : 2));
-    var maxTc = s.effective_transcode_workers !== undefined ? s.effective_transcode_workers : (s.resource_profile === 'eco' ? 0 : (s.resource_profile === 'performance' ? 4 : 2));
-    var dbPool = s.effective_db_pool !== undefined ? s.effective_db_pool : (s.resource_profile === 'eco' ? 4 : (s.resource_profile === 'performance' ? 16 : 8));
-    if ($('#settings-scan-concurrency')) $('#settings-scan-concurrency').textContent = scanWorkers + ' worker(s)';
-    if ($('#settings-max-transcodes')) $('#settings-max-transcodes').textContent = maxTc + ' simultaneous';
-    if ($('#settings-db-pool')) $('#settings-db-pool').textContent = dbPool + ' connections';
+    var scanWorkers = s.effective_scan_workers !== undefined ? (s.effective_scan_workers + ' worker(s)') : 'Unavailable';
+    var maxTc = s.effective_transcode_workers !== undefined ? (s.effective_transcode_workers + ' simultaneous') : 'Unavailable';
+    var dbPool = s.effective_db_pool !== undefined ? (s.effective_db_pool + ' connections') : 'Unavailable';
+    if ($('#settings-scan-concurrency')) $('#settings-scan-concurrency').textContent = scanWorkers;
+    if ($('#settings-max-transcodes')) $('#settings-max-transcodes').textContent = maxTc;
+    if ($('#settings-db-pool')) $('#settings-db-pool').textContent = dbPool;
 
     // Show environment overrides indicators and lock inputs if overridden
     var src = s.effective_sources || {};
@@ -4202,6 +4228,7 @@ function renderUpdateStatus(info) {
 
 async function checkUpdateStatus(channel) {
   var sel = $('#update-channel-select');
+  var btn = $('#update-check-btn');
   if (channel && sel) {
     sel.dataset.userChanged = 'true';
   }
@@ -4214,11 +4241,19 @@ async function checkUpdateStatus(channel) {
 
   try {
     var res = await MichiAPI.updateStatus(ch);
-    if (sel && res.channel && !sel.dataset.userChanged) {
-      sel.value = res.channel;
+    if (sel) {
+      sel.disabled = false;
+      var loadingOpt = sel.querySelector('option[value=""]');
+      if (loadingOpt) loadingOpt.remove();
+      if (res.channel && !sel.dataset.userChanged) {
+        sel.value = res.channel;
+      }
     }
+    if (btn) btn.disabled = false;
     renderUpdateStatus(res);
   } catch (e) {
+    if (sel) sel.disabled = false;
+    if (btn) btn.disabled = false;
     if (badgeEl) {
       badgeEl.className = 'badge disabled';
       badgeEl.textContent = 'Check failed: ' + (e.message || 'Error');
@@ -4244,10 +4279,14 @@ async function checkForUpdates() {
   try {
     var res = await MichiAPI.updateCheck({ channel: ch });
     renderUpdateStatus(res);
-    if (res.update_available) {
-      showToast('Update available: ' + (res.latest_version || 'New version'));
+    if (res.status === 'update_available' || res.update_available) {
+      showToast(t('update.toast_available', { ver: res.latest_version || 'New version' }));
+    } else if (res.status === 'stale_cache') {
+      showToast(t('update.toast_stale_cache') || 'Could not contact the update service. Showing last known update information.');
+    } else if (res.status === 'check_failed') {
+      showToast(t('update.toast_check_failed') || 'Could not check for updates.', true);
     } else {
-      showToast('Michi Micro Server is up to date');
+      showToast(t('update.toast_up_to_date') || 'Michi Micro Server is up to date.');
     }
   } catch (e) {
     if (badgeEl) {

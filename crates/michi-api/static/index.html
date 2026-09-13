@@ -674,7 +674,8 @@
                             </div>
                             <div class="panel-row">
                                 <span class="panel-label">Update Channel</span>
-                                <select id="update-channel-select" class="panel-input" style="max-width:200px" onchange="checkUpdateStatus(this.value)">
+                                <select id="update-channel-select" class="panel-input" style="max-width:200px" onchange="checkUpdateStatus(this.value)" disabled>
+                                    <option value="" disabled selected>Loading...</option>
                                     <option value="stable">Stable (Releases)</option>
                                     <option value="preview">Preview (RC & Betas)</option>
                                 </select>
@@ -697,7 +698,7 @@
                             <div class="panel-row">
                                 <span class="panel-label"></span>
                                 <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
-                                    <button class="btn btn-primary btn-sm" id="update-check-btn" onclick="checkForUpdates()" data-i18n="settings.check_updates">Check for Updates</button>
+                                    <button class="btn btn-primary btn-sm" id="update-check-btn" onclick="checkForUpdates()" data-i18n="settings.check_updates" disabled>Check for Updates</button>
                                     <a id="update-release-link" class="btn btn-ghost btn-sm" href="#" target="_blank" rel="noopener noreferrer" style="display:none">View Release Notes ↗</a>
                                 </div>
                             </div>

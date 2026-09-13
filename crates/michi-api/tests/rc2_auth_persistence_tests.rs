@@ -168,7 +168,7 @@ async fn test_session_persistence_across_restarts() {
     assert_eq!(res.status(), StatusCode::OK);
 
     // Now invalidate session and verify it is removed from SQLite
-    state2.auth_sessions.invalidate(&token).await;
+    state2.auth_sessions.invalidate(&token).await.unwrap();
     assert!(!state2.auth_sessions.validate(&token).await);
 
     // Reboot once more and verify session remains gone
@@ -876,5 +876,113 @@ async fn test_update_status_matrix_with_mock_source() {
     michi_api::routes::v1::update::set_test_release_source(None).await;
     michi_api::routes::v1::update::clear_releases_cache().await;
 
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_update_invalid_version_fail_closed() {
+    let (pool, db_path) = test_db_file().await;
+    let mut cfg = test_config_for_db(&db_path, "admin", "adminpass123");
+    cfg.version = "banana"; // invalid semver
+
+    let admin_id = init_admin_user(&cfg, &pool).await.unwrap();
+    let state = AppState::new(cfg, pool.clone(), Some(admin_id));
+    let token = state.auth_sessions.create_session(admin_id).await.unwrap();
+
+    michi_api::routes::v1::update::clear_releases_cache().await;
+    michi_api::routes::v1::update::set_test_release_source(Some(std::sync::Arc::new(
+        MockReleaseSource {
+            releases: Ok(vec![mock_release("v1.0.0-rc.3", true)]),
+        },
+    )))
+    .await;
+
+    let app = create_router(state.clone());
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/update/status?channel=preview")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let json: Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), 1024 * 64)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(json["status"], "check_failed");
+    assert_eq!(json["error"], "invalid_current_version");
+    assert!(json["update_available"].is_null());
+
+    michi_api::routes::v1::update::set_test_release_source(None).await;
+    michi_api::routes::v1::update::clear_releases_cache().await;
+    let _ = std::fs::remove_file(db_path);
+}
+
+struct CountingReleaseSource {
+    count: std::sync::atomic::AtomicUsize,
+    releases: Vec<michi_api::routes::v1::update::GitHubRelease>,
+}
+
+#[async_trait::async_trait]
+impl michi_api::routes::v1::update::ReleaseSource for CountingReleaseSource {
+    async fn fetch_releases(
+        &self,
+    ) -> Result<Vec<michi_api::routes::v1::update::GitHubRelease>, String> {
+        self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        Ok(self.releases.clone())
+    }
+}
+
+#[tokio::test]
+async fn test_update_concurrent_refresh_coalescing() {
+    let (pool, db_path) = test_db_file().await;
+    let cfg = test_config_for_db(&db_path, "admin", "adminpass123");
+    let admin_id = init_admin_user(&cfg, &pool).await.unwrap();
+    let state = AppState::new(cfg, pool.clone(), Some(admin_id));
+    let token = state.auth_sessions.create_session(admin_id).await.unwrap();
+
+    michi_api::routes::v1::update::clear_releases_cache().await;
+    let counting_source = std::sync::Arc::new(CountingReleaseSource {
+        count: std::sync::atomic::AtomicUsize::new(0),
+        releases: vec![mock_release("v1.0.0-rc.3", true)],
+    });
+    michi_api::routes::v1::update::set_test_release_source(Some(counting_source.clone())).await;
+
+    // Launch 5 concurrent status requests
+    let mut handles = Vec::new();
+    for _ in 0..5 {
+        let app = create_router(state.clone());
+        let tok = token.clone();
+        handles.push(tokio::spawn(async move {
+            let req = Request::builder()
+                .method("GET")
+                .uri("/api/v1/update/status?channel=preview")
+                .header(header::AUTHORIZATION, format!("Bearer {tok}"))
+                .body(Body::empty())
+                .unwrap();
+            let res = app.oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    // Must coalesce to exactly 1 upstream fetch due to FETCH_LOCK
+    assert_eq!(
+        counting_source
+            .count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    michi_api::routes::v1::update::set_test_release_source(None).await;
+    michi_api::routes::v1::update::clear_releases_cache().await;
     let _ = std::fs::remove_file(db_path);
 }

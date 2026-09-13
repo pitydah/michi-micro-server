@@ -112,6 +112,7 @@ impl ReleaseSource for GitHubReleaseSource {
 lazy_static::lazy_static! {
     static ref RELEASES_CACHE: Arc<RwLock<Option<CachedReleases>>> = Arc::new(RwLock::new(None));
     static ref GLOBAL_RELEASE_SOURCE: Arc<RwLock<Option<Arc<dyn ReleaseSource>>>> = Arc::new(RwLock::new(None));
+    static ref FETCH_LOCK: Arc<tokio::sync::Mutex<()>> = Arc::new(tokio::sync::Mutex::new(()));
 }
 
 pub async fn set_test_release_source(source: Option<Arc<dyn ReleaseSource>>) {
@@ -185,6 +186,26 @@ pub fn compute_update_info(
         .map(|c| c.trim().to_lowercase())
         .filter(|c| c == "stable" || c == "preview")
         .unwrap_or_else(|| default_channel.to_string());
+
+    // Fail-closed if current_version is not a valid semver
+    if current_semver.is_none() {
+        return UpdateInfo {
+            status: UpdateStatus::CheckFailed,
+            current_version: current_version_str.to_string(),
+            latest_version: None,
+            update_available: None,
+            channel,
+            release_url: None,
+            release_name: None,
+            release_notes: None,
+            published_at: None,
+            last_checked_at: cached_iso,
+            last_successful_check_at: last_successful_iso,
+            deployment_platform: platform.to_string(),
+            instructions: platform_instructions(platform),
+            error: Some("invalid_current_version".to_string()),
+        };
+    }
 
     if fetch_failed && releases.is_empty() {
         return UpdateInfo {
@@ -302,6 +323,28 @@ pub async fn update_status_handler(
         }
     }
 
+    // Coalesce concurrent cache refreshes using FETCH_LOCK
+    let _fetch_guard = FETCH_LOCK.lock().await;
+
+    // Double check if another thread refreshed the cache while we were waiting
+    {
+        let cache_read = RELEASES_CACHE.read().await;
+        if let Some(ref entry) = *cache_read {
+            if Instant::now().duration_since(entry.checked_at) < CACHE_TTL_STATUS {
+                let info = compute_update_info(
+                    current_version,
+                    platform,
+                    query.channel.as_deref(),
+                    Some(entry.checked_at_iso.clone()),
+                    Some(entry.checked_at_iso.clone()),
+                    &entry.releases,
+                    false,
+                );
+                return (StatusCode::OK, Json(info)).into_response();
+            }
+        }
+    }
+
     let source = get_release_source().await;
     let fetch_result = source.fetch_releases().await;
     let mut cache_write = RELEASES_CACHE.write().await;
@@ -310,7 +353,7 @@ pub async fn update_status_handler(
         Ok(releases) => {
             let iso = Utc::now().to_rfc3339();
             *cache_write = Some(CachedReleases {
-                checked_at: now,
+                checked_at: Instant::now(),
                 checked_at_iso: iso.clone(),
                 releases: releases.clone(),
             });
@@ -383,6 +426,28 @@ pub async fn update_check_handler(
         }
     }
 
+    // Coalesce concurrent check requests using FETCH_LOCK
+    let _fetch_guard = FETCH_LOCK.lock().await;
+
+    // Double check if another request checked upstream while waiting
+    {
+        let cache_read = RELEASES_CACHE.read().await;
+        if let Some(ref entry) = *cache_read {
+            if Instant::now().duration_since(entry.checked_at) < MIN_CHECK_INTERVAL {
+                let info = compute_update_info(
+                    current_version,
+                    platform,
+                    channel_param,
+                    Some(entry.checked_at_iso.clone()),
+                    Some(entry.checked_at_iso.clone()),
+                    &entry.releases,
+                    false,
+                );
+                return (StatusCode::OK, Json(info)).into_response();
+            }
+        }
+    }
+
     let source = get_release_source().await;
     let fetch_result = source.fetch_releases().await;
     let mut cache_write = RELEASES_CACHE.write().await;
@@ -391,7 +456,7 @@ pub async fn update_check_handler(
         Ok(releases) => {
             let iso = Utc::now().to_rfc3339();
             *cache_write = Some(CachedReleases {
-                checked_at: now,
+                checked_at: Instant::now(),
                 checked_at_iso: iso.clone(),
                 releases: releases.clone(),
             });
