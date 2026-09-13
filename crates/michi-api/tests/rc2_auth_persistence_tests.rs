@@ -177,9 +177,44 @@ async fn test_session_persistence_across_restarts() {
 
     let _ = std::fs::remove_file(db_path);
 }
+static UPDATE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[derive(Clone)]
+struct MockReleaseSource {
+    releases: Result<Vec<michi_api::routes::v1::update::GitHubRelease>, String>,
+}
+
+#[async_trait::async_trait]
+impl michi_api::routes::v1::update::ReleaseSource for MockReleaseSource {
+    async fn fetch_releases(
+        &self,
+    ) -> Result<Vec<michi_api::routes::v1::update::GitHubRelease>, String> {
+        self.releases.clone()
+    }
+}
+
+fn mock_release(tag: &str, prerelease: bool) -> michi_api::routes::v1::update::GitHubRelease {
+    michi_api::routes::v1::update::GitHubRelease {
+        tag_name: tag.to_string(),
+        name: Some(tag.to_string()),
+        html_url: format!("https://github.com/pitydah/michi-micro-server/releases/tag/{tag}"),
+        published_at: Some("2026-09-12T00:00:00Z".to_string()),
+        prerelease,
+        body: Some("Test release body".to_string()),
+    }
+}
 
 #[tokio::test]
 async fn test_update_status_and_check_contract() {
+    let _lock = UPDATE_TEST_LOCK.lock().await;
+    michi_api::routes::v1::update::clear_releases_cache().await;
+    michi_api::routes::v1::update::set_test_release_source(Some(std::sync::Arc::new(
+        MockReleaseSource {
+            releases: Ok(vec![mock_release("v1.0.0-rc.3", true)]),
+        },
+    )))
+    .await;
+
     let (pool, db_path) = test_db_file().await;
     let cfg = test_config_for_db(&db_path, "admin", "supersecret123");
     let admin_id = init_admin_user(&cfg, &pool)
@@ -233,6 +268,8 @@ async fn test_update_status_and_check_contract() {
     assert_eq!(check_json["current_version"], "1.0.0-rc.2");
     assert_eq!(check_json["deployment_platform"], "zimaos");
 
+    michi_api::routes::v1::update::set_test_release_source(None).await;
+    michi_api::routes::v1::update::clear_releases_cache().await;
     let _ = std::fs::remove_file(db_path);
 }
 
@@ -250,31 +287,6 @@ fn extract_cookie_token(res: &axum::response::Response) -> Option<String> {
         }
     }
     None
-}
-
-#[derive(Clone)]
-struct MockReleaseSource {
-    releases: Result<Vec<michi_api::routes::v1::update::GitHubRelease>, String>,
-}
-
-#[async_trait::async_trait]
-impl michi_api::routes::v1::update::ReleaseSource for MockReleaseSource {
-    async fn fetch_releases(
-        &self,
-    ) -> Result<Vec<michi_api::routes::v1::update::GitHubRelease>, String> {
-        self.releases.clone()
-    }
-}
-
-fn mock_release(tag: &str, prerelease: bool) -> michi_api::routes::v1::update::GitHubRelease {
-    michi_api::routes::v1::update::GitHubRelease {
-        tag_name: tag.to_string(),
-        name: Some(tag.to_string()),
-        html_url: format!("https://github.com/pitydah/michi-micro-server/releases/tag/{tag}"),
-        published_at: Some("2026-09-12T00:00:00Z".to_string()),
-        prerelease,
-        body: Some(format!("Release notes for {tag}")),
-    }
 }
 
 #[tokio::test]
@@ -691,6 +703,7 @@ async fn test_session_fail_closed_orphan_user() {
 
 #[tokio::test]
 async fn test_update_status_matrix_with_mock_source() {
+    let _lock = UPDATE_TEST_LOCK.lock().await;
     let (pool, db_path) = test_db_file().await;
     let cfg = test_config_for_db(&db_path, "admin", "password123");
     let admin_id = init_admin_user(&cfg, &pool).await.unwrap();
@@ -881,6 +894,7 @@ async fn test_update_status_matrix_with_mock_source() {
 
 #[tokio::test]
 async fn test_update_invalid_version_fail_closed() {
+    let _lock = UPDATE_TEST_LOCK.lock().await;
     let (pool, db_path) = test_db_file().await;
     let mut cfg = test_config_for_db(&db_path, "admin", "adminpass123");
     cfg.version = "banana"; // invalid semver
@@ -940,6 +954,7 @@ impl michi_api::routes::v1::update::ReleaseSource for CountingReleaseSource {
 
 #[tokio::test]
 async fn test_update_concurrent_refresh_coalescing() {
+    let _lock = UPDATE_TEST_LOCK.lock().await;
     let (pool, db_path) = test_db_file().await;
     let cfg = test_config_for_db(&db_path, "admin", "adminpass123");
     let admin_id = init_admin_user(&cfg, &pool).await.unwrap();
