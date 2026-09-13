@@ -1001,3 +1001,63 @@ async fn test_update_concurrent_refresh_coalescing() {
     michi_api::routes::v1::update::clear_releases_cache().await;
     let _ = std::fs::remove_file(db_path);
 }
+
+#[tokio::test]
+async fn test_logout_sanitized_500_on_persistence_failure() {
+    let (pool, db_path) = test_db_file().await;
+    let cfg = test_config_for_db(&db_path, "admin", "adminpass123");
+    let admin_id = init_admin_user(&cfg, &pool).await.unwrap();
+    let state = AppState::new(cfg, pool.clone(), Some(admin_id));
+    let token = state.auth_sessions.create_session(admin_id).await.unwrap();
+
+    let app = create_router(state.clone());
+
+    // Force database failure on session invalidation by dropping auth_sessions table
+    sqlx::query("DROP TABLE auth_sessions")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let logout_req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/logout")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.oneshot(logout_req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    // Verify clearing cookie was still set
+    let cookie_header = res
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("must include Set-Cookie")
+        .to_str()
+        .unwrap();
+    assert!(cookie_header.contains("Max-Age=0"));
+
+    // Verify cache control
+    assert_eq!(
+        res.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+
+    // Verify sanitized error JSON
+    let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "SESSION_REVOCATION_FAILED");
+    assert_eq!(json["message"], "Unable to revoke the session securely.");
+
+    // Ensure raw sqlite / internal error details are NOT leaked in response
+    let raw_body = String::from_utf8_lossy(&body_bytes);
+    assert!(!raw_body.contains("sqlite"));
+    assert!(!raw_body.contains("table"));
+    assert!(!raw_body.contains("DROP"));
+
+    let _ = std::fs::remove_file(db_path);
+}

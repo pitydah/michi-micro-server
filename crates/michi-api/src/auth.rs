@@ -752,11 +752,11 @@ pub(crate) async fn logout_handler(
     headers: axum::http::HeaderMap,
     request: Request,
 ) -> impl IntoResponse {
-    let mut revocation_error = None;
+    let mut revocation_failed = false;
     if let Some(token) = extract_token(&request) {
         if let Err(e) = state.auth_sessions.invalidate(&token).await {
             tracing::error!("durable session revocation failed on logout: {e}");
-            revocation_error = Some(e);
+            revocation_failed = true;
         }
     }
     let secure = is_secure_request(connect_info, &headers, &state.config);
@@ -770,13 +770,15 @@ pub(crate) async fn logout_handler(
         axum::http::HeaderValue::from_static("no-store"),
     );
 
-    if let Some(err) = revocation_error {
+    if revocation_failed {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             resp_headers,
-            Json(
-                json!({"status": "error", "message": format!("session revocation failed: {err}")}),
-            ),
+            Json(json!({
+                "status": "error",
+                "code": "SESSION_REVOCATION_FAILED",
+                "message": "Unable to revoke the session securely."
+            })),
         );
     }
 

@@ -940,18 +940,26 @@ function reevaluateCurrentSectionAccess() {
   var isAuthRequired = policy === 'protected' && AuthSession.state !== 'authenticated';
 
   if (isAuthRequired) {
+    var isDisabled = AuthSession.state === 'disabled';
+    var gateHtml = isDisabled
+      ? '<div class="empty-state mascot" style="padding:48px 16px;text-align:center">' +
+        '<div class="icon" style="font-size:2.5rem;margin-bottom:12px">🔒</div>' +
+        '<p><strong style="font-size:1.1rem">' + (t('auth.disabled_title') || 'Administrative access unavailable') + '</strong></p>' +
+        '<p style="color:var(--text-3);font-size:.85rem;margin:6px 0 16px 0">' + (t('auth.disabled_explanation') || 'Administrative access is unavailable because authentication is disabled for this deployment.') + '</p>' +
+        '</div>'
+      : '<div class="empty-state mascot" style="padding:48px 16px;text-align:center">' +
+        '<div class="icon" style="font-size:2.5rem;margin-bottom:12px">🔒</div>' +
+        '<p><strong style="font-size:1.1rem">' + (t('auth.signin_required_title') || 'Sign in required') + '</strong></p>' +
+        '<p style="color:var(--text-3);font-size:.85rem;margin:6px 0 16px 0">' + (t('auth.signin_required_desc') || 'Authentication is enabled on this server. Please sign in to view and manage this section.') + '</p>' +
+        '<button class="btn btn-primary" onclick="openAuthModal()">' + (t('auth.signin_action') || 'Sign in to Michi') + '</button>' +
+        '</div>';
+
     if (!existingAuthGate) {
       existingAuthGate = document.createElement('div');
       existingAuthGate.className = 'auth-required-gate';
-      existingAuthGate.innerHTML =
-        '<div class="empty-state mascot" style="padding:48px 16px;text-align:center">' +
-        '<div class="icon" style="font-size:2.5rem;margin-bottom:12px">🔒</div>' +
-        '<p><strong style="font-size:1.1rem">' + (t('auth.signin_required') || 'Sign in required') + '</strong></p>' +
-        '<p style="color:var(--text-3);font-size:.85rem;margin:6px 0 16px 0">Authentication is enabled on this server. Please sign in to view and manage this section.</p>' +
-        '<button class="btn btn-primary" onclick="openAuthModal()">Sign in to Michi</button>' +
-        '</div>';
       page.prepend(existingAuthGate);
     }
+    existingAuthGate.innerHTML = gateHtml;
     existingAuthGate.style.display = '';
     Array.from(page.children).forEach(function(child) {
       if (child !== existingAuthGate) {
@@ -1383,6 +1391,9 @@ function renderTracks(tracks, tableId) {
 }
 
 async function toggleStar(idx) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   const t = State.tracks[idx];
   if (!t) return;
   const next = !t.starred;
@@ -1403,6 +1414,9 @@ function isAdvancedQuery(q) {
 }
 
 async function handleSearch() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   const q = $('#search-input')?.value.trim();
   if (!q) {
     State.tracks = State.allTracks;
@@ -1553,6 +1567,9 @@ function selectLocalBrowserOutput() {
 }
 
 async function selectServerOutputTarget(kind, id, name) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   try {
     await MichiAPI.setPlaybackOutput({ kind: kind, id: id });
     ServerPlayback.outputTarget = 'server';
@@ -1762,6 +1779,10 @@ async function playTrack(idx) {
     return;
   }
 
+  if (!canPerformProtectedAction()) {
+    return;
+  }
+
   // Canonical server playback
   try {
     await MichiAPI.playbackControl({
@@ -1800,6 +1821,10 @@ async function playPause() {
     return;
   }
 
+  if (!canPerformProtectedAction()) {
+    return;
+  }
+
   // Canonical server toggle
   try {
     await MichiAPI.playbackControl({ command: 'toggle' });
@@ -1817,6 +1842,9 @@ async function toggleShuffle() {
     BrowserPlayback.toggleShuffle();
     return;
   }
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   try {
     var nextVal = !ServerPlayback.shuffle;
     var resp = await MichiAPI.playbackControl({ command: 'shuffle', value: nextVal });
@@ -1831,6 +1859,9 @@ async function toggleShuffle() {
 async function toggleRepeat() {
   if (ServerPlayback.outputTarget === 'browser') {
     BrowserPlayback.toggleRepeat();
+    return;
+  }
+  if (!canPerformProtectedAction()) {
     return;
   }
   try {
@@ -1873,6 +1904,10 @@ async function addToQueue(idx) {
   if (ServerPlayback.outputTarget === 'browser') {
     BrowserPlayback.addToQueue(t);
     showToast('Added to Browser Up Next');
+    return;
+  }
+
+  if (!canPerformProtectedAction()) {
     return;
   }
 
@@ -1925,6 +1960,9 @@ function renderQueue(items, currentIndex) {
 async function jumpToQueueItem(pos) {
   if (ServerPlayback.outputTarget === 'browser') {
     BrowserPlayback.jumpToIndex(pos);
+    return;
+  }
+  if (!canPerformProtectedAction()) {
     return;
   }
   try {
@@ -3293,14 +3331,29 @@ function switchSettingsTab(tab) {
   }
 }
 
+async function getCanonicalServerVersion() {
+  if (State.serverInfo && State.serverInfo.version) {
+    return State.serverInfo.version;
+  }
+  try {
+    var info = await MichiAPI.serverInfo();
+    State.serverInfo = info;
+    return (info && info.version) ? info.version : 'Unavailable';
+  } catch (e) {
+    return 'Unavailable';
+  }
+}
+window.getCanonicalServerVersion = getCanonicalServerVersion;
+
 async function loadSettings() {
   if (AuthSession.state !== 'authenticated') return;
   try {
     var s = await MichiAPI.settings();
     if (!$('#settings-port')) return;
     $('#settings-port').textContent = s.port;
-    if ($('#settings-version')) $('#settings-version').textContent = s.version || State.serverInfo?.version || '?';
-    if ($('#update-current-version')) $('#update-current-version').textContent = s.version || State.serverInfo?.version || '--';
+    var canonicalVersion = await getCanonicalServerVersion();
+    if ($('#settings-version')) $('#settings-version').textContent = canonicalVersion;
+    if ($('#update-current-version')) $('#update-current-version').textContent = canonicalVersion;
     if ($('#settings-ffmpeg')) $('#settings-ffmpeg').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
     if ($('#settings-ffmpeg-avail')) $('#settings-ffmpeg-avail').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
     if ($('#settings-resource-profile')) $('#settings-resource-profile').value = s.resource_profile;
@@ -3337,12 +3390,15 @@ async function loadSettings() {
       try {
         var modRes = await MichiAPI.modules();
         var scanMod = (modRes.modules || []).find(function(m) { return m.name === 'scan'; });
-        if (scanMod && !scanMod.enabled) {
+        if (!scanMod) {
           watcherEl.className = 'badge disabled';
-          watcherEl.textContent = '○ Paused (Scan Module Disabled)';
+          watcherEl.textContent = '⚠ Status Unavailable';
+        } else if (!scanMod.enabled) {
+          watcherEl.className = 'badge disabled';
+          watcherEl.textContent = '○ Paused';
         } else {
           watcherEl.className = 'badge stable';
-          watcherEl.textContent = '● Active (5s Polling)';
+          watcherEl.textContent = '● Active';
         }
       } catch (e) {
         watcherEl.className = 'badge disabled';
@@ -3835,8 +3891,18 @@ async function loadDiagnostics() {
       statusEl.className = isOk ? 'badge stable' : 'badge disabled';
     }
     if (ffmpegEl) ffmpegEl.textContent = settings.ffmpeg_available ? 'Available (Transcoding ready)' : 'Unavailable (Direct play only)';
-    if (transEl) transEl.textContent = 'Capacity: ' + (settings.effective_transcode_workers || 0) + ' worker slots';
-    if (poolEl) poolEl.textContent = (settings.effective_db_pool || 8) + ' connections (Tracks: ' + (diag.db?.total_tracks || 0) + ')';
+    if (transEl) transEl.textContent = (settings.effective_transcode_workers !== undefined && settings.effective_transcode_workers !== null)
+      ? 'Capacity: ' + settings.effective_transcode_workers + ' worker slots'
+      : 'Capacity: Unavailable';
+    if (poolEl) {
+      var poolVal = (settings.effective_db_pool !== undefined && settings.effective_db_pool !== null)
+        ? settings.effective_db_pool + ' connections'
+        : 'Unavailable';
+      var trackCount = (diag.db && diag.db.total_tracks !== undefined && diag.db.total_tracks !== null)
+        ? diag.db.total_tracks
+        : 'Unavailable';
+      poolEl.textContent = poolVal + ' (Tracks: ' + trackCount + ')';
+    }
 
     if (capsEl && diag.player_compatibility) {
       var pc = diag.player_compatibility;
@@ -3858,7 +3924,9 @@ async function loadJobs() {
     var settings = await MichiAPI.settings();
     var jobsData = await MichiAPI.jobs();
 
-    if (maxEl) maxEl.textContent = (settings.job_max_concurrent || 2) + ' concurrent workers';
+    if (maxEl) maxEl.textContent = (settings.job_max_concurrent !== undefined && settings.job_max_concurrent !== null)
+      ? settings.job_max_concurrent + ' concurrent workers'
+      : 'Unavailable';
     if (listEl) {
       var jobs = jobsData.jobs || [];
       if (jobs.length === 0) {
@@ -3929,7 +3997,9 @@ async function loadIntegrations() {
     }
 
     if (peersEl) peersEl.textContent = (settings.sync_peers || []).join(', ') || 'No mesh peers configured';
-    if (delayEl) delayEl.textContent = (settings.reconnect_delay_max || 300) + ' seconds backoff cap';
+    if (delayEl) delayEl.textContent = (settings.reconnect_delay_max !== undefined && settings.reconnect_delay_max !== null)
+      ? settings.reconnect_delay_max + ' seconds backoff cap'
+      : 'Unavailable';
   } catch (e) {
     console.warn('integrations failed:', e.message);
   }
@@ -4273,7 +4343,7 @@ async function checkForUpdates() {
   }
   if (badgeEl) {
     badgeEl.className = 'badge';
-    badgeEl.textContent = 'Checking upstream...';
+    badgeEl.textContent = t('update.checking') || 'Checking for updates...';
   }
 
   try {

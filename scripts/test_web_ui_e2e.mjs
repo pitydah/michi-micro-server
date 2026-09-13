@@ -21,6 +21,7 @@ const htmlPath = path.join(rootDir, 'crates/michi-api/static/index.html');
 const jsPath = path.join(rootDir, 'crates/michi-api/static/app.js');
 
 const rawJsContent = fs.readFileSync(jsPath, 'utf8');
+const enDict = JSON.parse(fs.readFileSync(path.join(rootDir, 'crates/michi-api/static/i18n/en.json'), 'utf8'));
 
 // Wrap app.js in an IIFE that receives all browser globals from the sandbox,
 // then exports the symbols that tests need to reach via window.*
@@ -50,6 +51,14 @@ window.computeBytesSha256 = computeBytesSha256;
 window.toggleShuffle    = toggleShuffle;
 window.toggleRepeat     = toggleRepeat;
 window.discoverDevices  = discoverDevices;
+window.handleSearch     = handleSearch;
+window.toggleStar       = toggleStar;
+window.reevaluateCurrentSectionAccess = reevaluateCurrentSectionAccess;
+window.canPerformProtectedAction = canPerformProtectedAction;
+window.getCanonicalServerVersion = getCanonicalServerVersion;
+window.checkForUpdates  = checkForUpdates;
+window.showSection      = showSection;
+_i18n = Object.assign({}, window._initialI18n || {});
 })(window, document, window.navigator, window.localStorage, window.sessionStorage,
    window.fetch,
    globalThis.setTimeout, globalThis.clearTimeout,
@@ -115,6 +124,12 @@ class MockElement {
   appendChild(child) {
     child.parentNode = this;
     this.children.push(child);
+    return child;
+  }
+
+  prepend(child) {
+    child.parentNode = this;
+    this.children.unshift(child);
     return child;
   }
 
@@ -250,8 +265,11 @@ function createDOM() {
     'settings-music-paths', 'settings-sync-name', 'settings-cors', 'settings-sync-peers',
     'settings-auth', 'settings-dev-mode', 'settings-scrobble',
     'settings-scan-concurrency', 'settings-max-transcodes', 'settings-db-pool',
+    'settings-watcher-status',
     'ha-discovery-status', 'integ-sync-peers', 'integ-reconnect-max',
     'diag-status', 'diag-ffmpeg', 'diag-transcodes', 'diag-db-pool', 'diag-caps-list',
+    'jobs-max-concurrent', 'jobs-list',
+    'update-status-badge', 'update-current-version',
     'handoff-track-id', 'handoff-position', 'handoff-playing', 'handoff-result', 'handoff-current-state',
     'discover-result'
   ];
@@ -261,6 +279,13 @@ function createDOM() {
 
   doc.body.appendChild(toast);
   doc.body.appendChild(npTargetBadge);
+
+  const searchInput = el('input', 'search-input');
+  const authOverlay = el('div', 'auth-overlay');
+  authOverlay.classList.add('hidden');
+  doc.body.appendChild(searchInput);
+  doc.body.appendChild(authOverlay);
+
   doc.body.appendChild(pageSettings);
 
   const localStorage = {
@@ -305,6 +330,7 @@ function makeSandbox({ window, document, fetchImpl = null, showToastImpl = null 
   }
   const effectiveFetch = fetchImpl || (async () => ({ ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) }));
   window.fetch = effectiveFetch;
+  window._initialI18n = enDict;
 
   const sandbox = {
     window,
@@ -315,7 +341,15 @@ function makeSandbox({ window, document, fetchImpl = null, showToastImpl = null 
     console: { warn: () => {}, error: () => {}, log: () => {} },
     $:  (s) => document.querySelector(s),
     $$: (s) => document.querySelectorAll(s),
-    t:       (k) => k,
+    t:       (k, vars) => {
+      let str = enDict[k] || k;
+      if (vars) {
+        for (const [vKey, val] of Object.entries(vars)) {
+          str = str.replace(new RegExp('\\{' + vKey + '\\}', 'g'), val);
+        }
+      }
+      return str;
+    },
     esc:     (s) => s,
     fmtDur:  () => '3:00',
     fmtDate: () => '2024-01-01',
@@ -379,6 +413,7 @@ async function runE2E() {
     assert(badge !== null, 'Now Playing target badge exists in DOM');
     assert(window.ServerPlayback.outputTarget === 'browser', 'Default output target is browser local');
 
+    window.AuthSession.state = 'authenticated';
     await window.selectServerOutputTarget('receiver', 'rec-living-room', 'Living Room');
     assert(window.ServerPlayback.outputTarget === 'server', 'Selecting server output target switches outputTarget to server');
     assert(badge.textContent.includes('Living Room'), 'Badge reflects Living Room output truth');
@@ -412,6 +447,7 @@ async function runE2E() {
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
+    window.AuthSession.state = 'authenticated';
     window.ServerPlayback.outputTarget = 'server';
     window.State.tracks = [{ id: 'track-1', title: 'Song 1', duration_ms: 180000 }];
     window.State.queue  = [];
@@ -820,6 +856,258 @@ async function runE2E() {
     await window.addToQueue(0);
     assert(!serverQueueCalled,
       'REGRESSION: addToQueue in browser output mode called server /api/v1/queue, violating authority separation');
+  }
+
+  // ── Auth Perimeter Test 1: Search blocked when anonymous ──
+  {
+    let searchCalled = false;
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/search')) searchCalled = true;
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ tracks: [] }) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.AuthSession.state = 'anonymous';
+    const searchInput = document.querySelector('#search-input');
+    if (searchInput) searchInput.value = 'Radiohead';
+
+    await window.handleSearch();
+    assert(!searchCalled, 'PERIMETER: Anonymous search must not call /api/v1/search');
+    const toastEl = document.getElementById('toast');
+    assert(toastEl && toastEl.textContent.includes('Sign in required'), 'PERIMETER: Anonymous search displays sign-in required toast');
+    const authOverlay = document.querySelector('#auth-overlay');
+    assert(authOverlay && !authOverlay.classList.contains('hidden'), 'PERIMETER: Anonymous search opens auth modal');
+  }
+
+  // ── Auth Perimeter Test 2: Search blocked when auth disabled ──
+  {
+    let searchCalled = false;
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/search')) searchCalled = true;
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ tracks: [] }) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.AuthSession.state = 'disabled';
+    const searchInput = document.querySelector('#search-input');
+    if (searchInput) searchInput.value = 'Radiohead';
+
+    await window.handleSearch();
+    assert(!searchCalled, 'PERIMETER: Disabled auth search must not call /api/v1/search');
+    const toastEl = document.getElementById('toast');
+    assert(toastEl && toastEl.textContent.includes('Administrative actions are unavailable'),
+      'PERIMETER: Disabled auth search displays disabled notice toast');
+    const authOverlay = document.querySelector('#auth-overlay');
+    assert(authOverlay && authOverlay.classList.contains('hidden'),
+      'PERIMETER: Disabled auth search does NOT open auth modal');
+  }
+
+  // ── Auth Perimeter Test 3: Star track blocked when anonymous ──
+  {
+    let starCalled = false;
+    const fetchImpl = async (url) => {
+      if (url.includes('/star')) starCalled = true;
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ status: 'ok' }) };
+    };
+    const { sandbox, window } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.AuthSession.state = 'anonymous';
+    window.State.tracks = [{ id: 't-1', title: 'Song 1', starred: false }];
+
+    await window.toggleStar(0);
+    assert(!starCalled, 'PERIMETER: Anonymous star track must not call /star');
+    assert(window.State.tracks[0].starred === false, 'PERIMETER: Track star state unchanged');
+  }
+
+  // ── Truthful UX Test 4: Section gating renders disabled notice without sign-in button ──
+  {
+    const { sandbox, window, document } = makeSandbox();
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.AuthSession.state = 'disabled';
+    const settingsPage = document.querySelector('#page-settings');
+    assert(settingsPage !== null, 'Settings page exists in DOM');
+
+    window.showSection('settings');
+
+    const gate = settingsPage.querySelector('.auth-required-gate');
+    assert(gate !== null, 'Auth gate element injected into settings page');
+    assert(gate.textContent.includes('Administrative access unavailable'),
+      'TRUTHFUL UX: Disabled gate renders "Administrative access unavailable" title');
+    assert(!gate.innerHTML.includes('<button'),
+      'TRUTHFUL UX: Disabled gate contains NO sign-in button');
+  }
+
+  // ── Truthful UX Test 5: Section gating renders sign-in button when anonymous ──
+  {
+    const { sandbox, window, document } = makeSandbox();
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.AuthSession.state = 'anonymous';
+    const settingsPage = document.querySelector('#page-settings');
+    window.showSection('settings');
+
+    const gate = settingsPage.querySelector('.auth-required-gate');
+    assert(gate !== null, 'Auth gate element injected into settings page');
+    assert(gate.textContent.includes('Sign in required'),
+      'TRUTHFUL UX: Anonymous gate renders "Sign in required"');
+    assert(gate.innerHTML.includes('<button') && gate.innerHTML.includes('Sign in to Michi'),
+      'TRUTHFUL UX: Anonymous gate contains "Sign in to Michi" button');
+  }
+
+  // ── Truthful UX Test 6: Removal of magic defaults across diagnostics, jobs, integrations ──
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/diagnostics')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ healthy: true, degraded: false })
+        };
+      }
+      if (url.includes('/api/v1/settings')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({}) // Empty settings object without workers/pool/jobs/reconnect
+        };
+      }
+      if (url.includes('/api/v1/jobs')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ jobs: [] })
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    await window.loadDiagnostics();
+    const transEl = document.querySelector('#diag-transcodes');
+    assert(transEl && transEl.textContent === 'Capacity: Unavailable',
+      'TRUTHFUL UX: Missing effective_transcode_workers renders Capacity: Unavailable (not 0)');
+
+    const poolEl = document.querySelector('#diag-db-pool');
+    assert(poolEl && poolEl.textContent.includes('Unavailable'),
+      'TRUTHFUL UX: Missing effective_db_pool renders Unavailable (not 8)');
+
+    await window.loadJobs();
+    const maxEl = document.querySelector('#jobs-max-concurrent');
+    assert(maxEl && maxEl.textContent === 'Unavailable',
+      'TRUTHFUL UX: Missing job_max_concurrent renders Unavailable (not 2)');
+
+    await window.loadIntegrations();
+    const delayEl = document.querySelector('#integ-reconnect-max');
+    assert(delayEl && delayEl.textContent === 'Unavailable',
+      'TRUTHFUL UX: Missing reconnect_delay_max renders Unavailable (not 300)');
+  }
+
+  // ── Truthful UX Test 7: Canonical Version authority and Watcher truth in loadSettings ──
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/server/info')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ version: '1.0.0-rc.2' })
+        };
+      }
+      if (url.includes('/api/v1/modules')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ modules: [] }) // scan module missing
+        };
+      }
+      if (url.includes('/api/v1/settings')) {
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ port: 9090 })
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.AuthSession.state = 'authenticated';
+    await window.loadSettings();
+
+    const verEl = document.querySelector('#settings-version');
+    assert(verEl && verEl.textContent === '1.0.0-rc.2',
+      'TRUTHFUL UX: Canonical server version authority hydrates into #settings-version');
+
+    const watcherEl = document.querySelector('#settings-watcher-status');
+    assert(watcherEl && watcherEl.textContent.includes('Status Unavailable'),
+      'TRUTHFUL UX: Missing scan module displays Status Unavailable');
+  }
+
+  // ── Truthful UX Test 8: Updater check displays neutral update.checking string ──
+  {
+    let resolveCheck;
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/update/check')) {
+        await new Promise((r) => { resolveCheck = r; });
+        return {
+          ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ status: 'up_to_date' })
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    const checkPromise = window.checkForUpdates();
+    const badgeEl = document.querySelector('#update-status-badge');
+    assert(badgeEl && badgeEl.textContent === 'Checking for updates...',
+      'TRUTHFUL UX: Update check badge uses neutral string, never "Checking upstream..."');
+    if (resolveCheck) resolveCheck();
+    await checkPromise;
+  }
+
+  // ── I18n Completeness Test 9: Parity between en.json and es.json ──
+  {
+    const enPath = path.join(rootDir, 'crates/michi-api/static/i18n/en.json');
+    const esPath = path.join(rootDir, 'crates/michi-api/static/i18n/es.json');
+    const enKeys = Object.keys(JSON.parse(fs.readFileSync(enPath, 'utf8'))).sort();
+    const esKeys = Object.keys(JSON.parse(fs.readFileSync(esPath, 'utf8'))).sort();
+
+    const missingInEs = enKeys.filter(k => !esKeys.includes(k));
+    const missingInEn = esKeys.filter(k => !enKeys.includes(k));
+
+    assert(missingInEs.length === 0, `I18N PARITY: Keys present in en.json missing in es.json: ${missingInEs.join(', ')}`);
+    assert(missingInEn.length === 0, `I18N PARITY: Keys present in es.json missing in en.json: ${missingInEn.join(', ')}`);
+
+    const requiredKeys = [
+      'auth.disabled_title',
+      'auth.disabled_explanation',
+      'auth.signin_required_title',
+      'auth.signin_required_desc',
+      'auth.signin_action',
+      'update.checking'
+    ];
+    for (const k of requiredKeys) {
+      assert(enKeys.includes(k), `I18N PARITY: Required key '${k}' must exist in en.json`);
+      assert(esKeys.includes(k), `I18N PARITY: Required key '${k}' must exist in es.json`);
+    }
   }
 
   console.log('======================================================================');

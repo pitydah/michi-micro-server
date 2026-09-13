@@ -1184,28 +1184,35 @@ jobs:
       image_digest: ${{ needs.release-ghcr.outputs.image_digest }}
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve Release Metadata
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "ERROR: Invalid release tag: ${TAG}" >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          if [ -z "${VERSION}" ]; then
+            echo "ERROR: VERSION cannot be empty" >&2
+            exit 1
+          fi
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY}:${VERSION}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Verify Anonymous Pull and Multi-Arch Runtime
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY}:${VERSION}"
-          echo "Verifying public accessibility for image: ${IMAGE}"
-          ./scripts/verify_public_release_image.sh "${IMAGE}" 9090
-      - name: Record GHCR public release evidence
-        run: |
-          mkdir -p target/release-evidence
-          cat <<EOF > target/release-evidence/ghcr-public-release-evidence.json
-          {
-            "gate": "ghcr-public-release",
-            "tag": "${GITHUB_REF_NAME}",
-            "image": "ghcr.io/${GITHUB_REPOSITORY}:${VERSION}",
-            "digest": "${{ needs.release-ghcr.outputs.image_digest }}",
-            "verified_anonymous_pull": true,
-            "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          }
-          EOF
+          IMAGE="${{ steps.release_meta.outputs.image }}"
+          EXPECTED_DIGEST="${{ needs.release-ghcr.outputs.image_digest }}"
+          EVIDENCE_FILE="target/release-evidence/ghcr-public-release-evidence.json"
+          echo "Verifying public accessibility and digest match for image: ${IMAGE}"
+          ./scripts/verify_public_release_image.sh "${IMAGE}" "${EXPECTED_DIGEST}" 9090 "${EVIDENCE_FILE}"
       - name: Upload GHCR release evidence
         uses: actions/upload-artifact@v4
         with:
@@ -1222,16 +1229,37 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Generate and Validate Release Manifest
+      - name: Resolve Release Metadata
+        id: release_meta
+        shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY}:${VERSION}"
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "ERROR: Invalid release tag: ${TAG}" >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          if [ -z "${VERSION}" ]; then
+            echo "ERROR: VERSION cannot be empty" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY}:${VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Download GHCR Public Release Evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: release-evidence-ghcr-public-release
+          path: target/release-evidence
+      - name: Generate and Validate Release Manifest from Verified Evidence
+        run: |
           python3 scripts/verify_release_manifest.py \
             --generate \
-            --tag "${GITHUB_REF_NAME}" \
+            --from-evidence target/release-evidence/ghcr-public-release-evidence.json \
+            --tag "${{ steps.release_meta.outputs.tag }}" \
             --commit "${GITHUB_SHA}" \
-            --image "${IMAGE}" \
-            --digest "${{ needs.ci-ghcr-public-release.outputs.image_digest }}" \
+            --image "${{ steps.release_meta.outputs.image }}" \
             --manifest target/release-manifest.json
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
