@@ -51,6 +51,8 @@ ALLOWED_UI_HELPERS = {
     "stopPropagation",
     "setLanguage",
     "setTheme",
+    "checkForUpdates",
+    "checkUpdateStatus",
 }
 
 
