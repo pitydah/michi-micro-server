@@ -58,12 +58,23 @@ const MichiAPI = {
       if (res.status === 401 && !path.startsWith('/api/auth/')) {
         AuthSession.setUnauthenticated();
         teardownProtected();
-        ConnectionStatus.setAuthRequired();
       }
 
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
-        const msg = errBody?.error?.message || errBody?.message || errBody?.error?.code || `HTTP ${res.status}`;
+        let rawMsg = errBody?.error?.message || errBody?.message || errBody?.error?.code;
+        let msg = rawMsg;
+        if (res.status === 401) {
+          if (path === '/api/auth/login' && rawMsg) {
+            msg = rawMsg;
+          } else {
+            msg = 'Sign in to continue.';
+          }
+        } else if (res.status === 403) {
+          msg = 'You do not have permission to perform this action.';
+        } else if (!msg) {
+          msg = `HTTP ${res.status}`;
+        }
         const err = new Error(msg);
         err.status = res.status;
         err.details = errBody?.error?.details || errBody;
@@ -369,6 +380,14 @@ const MichiAPI = {
   // Settings & Webhooks
   settings() { return this.request('/api/v1/settings'); },
   updateSettings(body) { return this.request('/api/v1/settings', { method: 'PUT', body }); },
+  updateStatus(channel) {
+    var url = '/api/v1/update/status';
+    if (channel) url += '?channel=' + encodeURIComponent(channel);
+    return this.request(url);
+  },
+  updateCheck(body) {
+    return this.request('/api/v1/update/check', { method: 'POST', body: body || {} });
+  },
   setWebhook(url) { return this.request('/api/v1/webhook', { method: 'POST', body: { url } }); },
   testWebhook() { return this.request('/api/v1/webhook/test', { method: 'POST', timeout: 10000 }); },
   deleteWebhook() { return this.request('/api/v1/webhook', { method: 'DELETE' }); },
@@ -421,7 +440,7 @@ const MichiAPI = {
 
 // ── Connection Status State Machine ──────────────────────────────
 const ConnectionStatus = {
-  state: 'checking', // 'checking' | 'online' | 'degraded' | 'auth_required' | 'offline'
+  state: 'checking', // 'checking' | 'online' | 'degraded' | 'offline'
 
   update(statusData) {
     if (!statusData) {
@@ -435,11 +454,6 @@ const ConnectionStatus = {
     } else {
       this.state = 'degraded';
     }
-    this.render();
-  },
-
-  setAuthRequired() {
-    this.state = 'auth_required';
     this.render();
   },
 
@@ -458,7 +472,6 @@ const ConnectionStatus = {
       checking: 'Checking...',
       online: 'Online',
       degraded: 'Degraded',
-      auth_required: 'Auth Required',
       offline: 'Offline',
     };
 
@@ -466,7 +479,6 @@ const ConnectionStatus = {
       checking: 'checking',
       online: 'online',
       degraded: 'degraded',
-      auth_required: 'auth-required',
       offline: 'offline',
     }[this.state] || 'offline';
 
@@ -729,6 +741,18 @@ function closeModal() {
   _modalPreviousFocus = null;
 }
 
+function withAuthenticatedAction(fn, actionName) {
+  return async function(...args) {
+    if (AuthSession.state !== 'authenticated' && AuthSession.state !== 'disabled') {
+      showToast(t('auth.signin_required') || 'Sign in required to perform this action.', true);
+      openAuthModal();
+      return;
+    }
+    return await fn.apply(this, args);
+  };
+}
+window.withAuthenticatedAction = withAuthenticatedAction;
+
 function openAuthModal() {
   var overlay = $('#auth-overlay');
   if (overlay) overlay.classList.remove('hidden');
@@ -878,7 +902,20 @@ function toggleNavigation(force) {
   if (button) button.setAttribute('aria-expanded', String(open));
 }
 
-// ── Navigation ──────────────────────────────────────────────────
+// ── Navigation & Section Policy ─────────────────────────────────
+const SECTION_POLICY = {
+  dashboard: 'public',
+  status: 'public',
+  library: 'protected',
+  playlists: 'protected',
+  broadcast: 'protected',
+  scan: 'protected',
+  michilink: 'protected',
+  settings: 'protected',
+  history: 'protected',
+  chains: 'protected',
+};
+
 function showSection(section) {
   $$('.nav-item').forEach(n => {
     n.classList.remove('active');
@@ -903,6 +940,43 @@ function showSection(section) {
     page.classList.add('fade-in');
   }
   toggleNavigation(false);
+
+  // Check access policy for section
+  var policy = SECTION_POLICY[section] || 'protected';
+  if (page) {
+    var existingAuthGate = page.querySelector('.auth-required-gate');
+    var isAuthRequired = policy === 'protected' && AuthSession.state !== 'authenticated';
+    if (isAuthRequired) {
+      if (!existingAuthGate) {
+        existingAuthGate = document.createElement('div');
+        existingAuthGate.className = 'auth-required-gate';
+        existingAuthGate.innerHTML =
+          '<div class="empty-state mascot" style="padding:48px 16px;text-align:center">' +
+          '<div class="icon" style="font-size:2.5rem;margin-bottom:12px">🔒</div>' +
+          '<p><strong style="font-size:1.1rem">Sign in required</strong></p>' +
+          '<p style="color:var(--text-3);font-size:.85rem;margin:6px 0 16px 0">Authentication is enabled on this server. Please sign in to view and manage this section.</p>' +
+          '<button class="btn btn-primary" onclick="openAuthModal()">Sign in to Michi</button>' +
+          '</div>';
+        page.prepend(existingAuthGate);
+      }
+      existingAuthGate.style.display = '';
+      Array.from(page.children).forEach(function(child) {
+        if (child !== existingAuthGate) {
+          child.dataset.authHidden = 'true';
+          child.style.display = 'none';
+        }
+      });
+      return;
+    } else {
+      if (existingAuthGate) existingAuthGate.remove();
+      Array.from(page.children).forEach(function(child) {
+        if (child.dataset.authHidden === 'true') {
+          delete child.dataset.authHidden;
+          child.style.display = '';
+        }
+      });
+    }
+  }
 
   if (AuthSession.state !== 'authenticated') return;
 
@@ -1205,7 +1279,6 @@ function renderDashboard() {
     var statusText = {
       online: '● Online',
       degraded: '▲ Degraded',
-      auth_required: '🔒 Auth Required',
       checking: '◌ Checking...',
       offline: '● Offline',
     }[ConnectionStatus.state] || '● Offline';
@@ -1328,6 +1401,11 @@ document.addEventListener('keydown', (e) => {
 
 // ── Scan ────────────────────────────────────────────────────────
 async function handleScan() {
+  if (AuthSession.state !== 'authenticated' && AuthSession.state !== 'disabled') {
+    showToast(t('auth.signin_required') || 'Sign in required to perform this action.', true);
+    openAuthModal();
+    return;
+  }
   try {
     const r = await MichiAPI.scan();
     showToast(t('toast.scanned', {n: r.scanned, s: r.saved}));
@@ -1988,6 +2066,11 @@ function updateMiniPlayer(t) {
 
 // ── Michi Link & Ecosystem ──────────────────────────────────────
 async function testMichiLink() {
+  if (AuthSession.state !== 'authenticated' && AuthSession.state !== 'disabled') {
+    showToast(t('auth.signin_required') || 'Sign in required to perform this action.', true);
+    openAuthModal();
+    return;
+  }
   const btn = $('#page-michilink button[onclick="testMichiLink()"]');
   if (btn) { btn.disabled = true; btn.textContent = 'Testing...'; }
   try {
@@ -3121,31 +3204,67 @@ async function discoverDevices() {
 }
 
 // ── Settings ─────────────────────────────────────────────────────
+const SETTINGS_TAB_ALIASES = {
+  overview: 'overview',
+  general: 'general',
+  library: 'library',
+  streaming: 'streaming',
+  devices: 'devices',
+  integrations: 'integrations',
+  maintenance: 'maintenance',
+  advanced: 'advanced',
+  // Legacy aliases
+  diagnostics: 'advanced',
+  jobs: 'advanced',
+  network: 'advanced',
+  sync: 'library',
+  audio: 'integrations',
+  webhook: 'integrations',
+  receivers: 'devices',
+  handoff: 'streaming',
+  backup: 'maintenance',
+  updates: 'maintenance'
+};
+
 function switchSettingsTab(tab) {
-  $$('.tab[data-stab]').forEach(function (b) {
-    b.classList.remove('active');
-    b.setAttribute('aria-selected', 'false');
-    b.setAttribute('tabindex', '-1');
+  var target = SETTINGS_TAB_ALIASES[tab] || tab || 'overview';
+
+  // 1. Update rail navigation items (both legacy .tab[data-stab] and .settings-rail-item)
+  $$('.tab[data-stab], .settings-rail-item[data-stab]').forEach(function (b) {
+    var isTarget = b.getAttribute('data-stab') === target;
+    b.classList.toggle('active', isTarget);
+    b.setAttribute('aria-selected', isTarget ? 'true' : 'false');
+    b.setAttribute('tabindex', isTarget ? '0' : '-1');
   });
-  var btn = $('.tab[data-stab="' + tab + '"]');
-  if (btn) {
-    btn.classList.add('active');
-    btn.setAttribute('aria-selected', 'true');
-    btn.setAttribute('tabindex', '0');
+
+  // 2. Sync mobile select dropdown if present
+  var mobSel = $('#settings-rail-mobile');
+  if (mobSel && mobSel.value !== target) {
+    mobSel.value = target;
   }
+
+  // 3. Toggle content panels
   $$('[id^="stab-"]').forEach(function (t) {
     t.classList.add('hidden');
     t.setAttribute('aria-hidden', 'true');
   });
-  var pane = $('#stab-' + tab);
+  var pane = $('#stab-' + target);
   if (pane) {
     pane.classList.remove('hidden');
     pane.setAttribute('aria-hidden', 'false');
   }
 
-  if (tab === 'diagnostics') loadDiagnostics();
-  if (tab === 'jobs') loadJobs();
-  if (tab === 'integrations') loadIntegrations();
+  // 4. Trigger target-specific loaders
+  if (target === 'advanced') {
+    loadDiagnostics();
+    loadJobs();
+  } else if (target === 'integrations') {
+    loadIntegrations();
+  } else if (target === 'devices') {
+    loadRoomGroups();
+  } else if (target === 'maintenance') {
+    checkUpdateStatus();
+  }
 }
 
 async function loadSettings() {
@@ -3155,6 +3274,7 @@ async function loadSettings() {
     if (!$('#settings-port')) return;
     $('#settings-port').textContent = s.port;
     if ($('#settings-version')) $('#settings-version').textContent = s.version || State.serverInfo?.version || '?';
+    if ($('#update-current-version')) $('#update-current-version').textContent = s.version || State.serverInfo?.version || '--';
     if ($('#settings-ffmpeg')) $('#settings-ffmpeg').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
     if ($('#settings-ffmpeg-avail')) $('#settings-ffmpeg-avail').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
     if ($('#settings-resource-profile')) $('#settings-resource-profile').value = s.resource_profile;
@@ -3241,6 +3361,10 @@ async function loadSettings() {
     Object.keys(controlMap).forEach(function(field) {
       var el = $(controlMap[field]);
       if (el) {
+        if (el.tagName === 'SELECT') {
+          var placeholder = el.querySelector('option[value=""]');
+          if (placeholder) placeholder.remove();
+        }
         if (src[field] === 'environment') {
           el.disabled = true;
           el.title = '🔒 Controlled by environment variable (MICHI_' + field.toUpperCase() + ')';
@@ -3265,7 +3389,10 @@ async function loadSettings() {
       if (banner) banner.remove();
       localStorage.removeItem('michi_restart_required');
     }
-  } catch (e) { console.warn('settings:', e.message); }
+  } catch (e) {
+    console.warn('settings:', e.message);
+    showToast(t('settings.unable_load') || 'Unable to load settings from server', true);
+  }
 }
 
 function applyCoverArtPreference(enabled) {
@@ -4001,3 +4128,143 @@ document.addEventListener('keydown', function (e) {
     playPause();
   }
 });
+
+// ── Update Subsystem ───────────────────────────────────────────
+function renderUpdateStatus(info) {
+  if (!info) return;
+
+  var currentVerEl = $('#update-current-version');
+  if (currentVerEl && info.current_version) {
+    currentVerEl.textContent = info.current_version;
+  }
+
+  var sel = $('#update-channel-select');
+  if (sel && info.channel && !sel.dataset.userChanged) {
+    sel.value = info.channel;
+  }
+
+  var badgeEl = $('#update-status-badge');
+  if (badgeEl) {
+    if (info.status === 'check_failed') {
+      badgeEl.className = 'badge disabled';
+      badgeEl.textContent = '✕ ' + (t('update.check_failed') || 'Check failed: upstream unavailable');
+    } else if (info.status === 'stale_cache') {
+      badgeEl.className = 'badge warning';
+      badgeEl.textContent = '▲ ' + (t('update.stale_cache') || 'Stale cache (upstream unreachable)');
+    } else if (info.update_available || info.status === 'update_available') {
+      badgeEl.className = 'badge warning';
+      badgeEl.textContent = '● ' + (t('update.available') || 'Update Available') + ': ' + (info.latest_version || 'New version');
+    } else {
+      badgeEl.className = 'badge stable';
+      badgeEl.textContent = '✓ ' + (t('update.up_to_date') || 'Up to date');
+    }
+  }
+
+  var detailsEl = $('#update-details');
+  var latestVerEl = $('#update-latest-version');
+  var publishedEl = $('#update-published-date');
+  var linkEl = $('#update-release-link');
+
+  if (detailsEl && latestVerEl) {
+    if (info.latest_version && info.status !== 'check_failed') {
+      detailsEl.style.display = 'flex';
+      var suffix = info.status === 'stale_cache' ? ' (cached)' : (info.channel === 'preview' ? ' (Preview)' : '');
+      latestVerEl.textContent = (info.release_name || info.latest_version) + suffix;
+      if (publishedEl) {
+        var dateStr = info.published_at ? new Date(info.published_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+        publishedEl.textContent = dateStr ? 'Published: ' + dateStr : '';
+      }
+    } else {
+      detailsEl.style.display = 'none';
+    }
+  }
+
+  if (linkEl) {
+    if (info.release_url && info.status !== 'check_failed') {
+      linkEl.href = info.release_url;
+      linkEl.style.display = 'inline-flex';
+    } else {
+      linkEl.style.display = 'none';
+    }
+  }
+
+  var guidanceRow = $('#update-guidance-row');
+  var guidanceEl = $('#update-guidance');
+  if (guidanceRow && guidanceEl) {
+    if (info.instructions) {
+      guidanceRow.style.display = 'flex';
+      guidanceEl.textContent = info.instructions;
+    } else {
+      guidanceRow.style.display = 'none';
+    }
+  }
+}
+
+async function checkUpdateStatus(channel) {
+  var sel = $('#update-channel-select');
+  if (channel && sel) {
+    sel.dataset.userChanged = 'true';
+  }
+  var ch = channel || (sel && sel.dataset.userChanged ? sel.value : undefined);
+  var badgeEl = $('#update-status-badge');
+  if (badgeEl) {
+    badgeEl.className = 'badge';
+    badgeEl.textContent = 'Checking...';
+  }
+
+  try {
+    var res = await MichiAPI.updateStatus(ch);
+    if (sel && res.channel && !sel.dataset.userChanged) {
+      sel.value = res.channel;
+    }
+    renderUpdateStatus(res);
+  } catch (e) {
+    if (badgeEl) {
+      badgeEl.className = 'badge disabled';
+      badgeEl.textContent = 'Check failed: ' + (e.message || 'Error');
+    }
+  }
+}
+
+async function checkForUpdates() {
+  var sel = $('#update-channel-select');
+  var ch = sel ? sel.value : 'stable';
+  var btn = $('#update-check-btn');
+  var badgeEl = $('#update-status-badge');
+
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Checking...';
+  }
+  if (badgeEl) {
+    badgeEl.className = 'badge';
+    badgeEl.textContent = 'Checking upstream...';
+  }
+
+  try {
+    var res = await MichiAPI.updateCheck({ channel: ch });
+    renderUpdateStatus(res);
+    if (res.update_available) {
+      showToast('Update available: ' + (res.latest_version || 'New version'));
+    } else {
+      showToast('Michi Micro Server is up to date');
+    }
+  } catch (e) {
+    if (badgeEl) {
+      badgeEl.className = 'badge disabled';
+      badgeEl.textContent = 'Check failed: ' + (e.message || 'Error');
+    }
+    showToast('Failed to check for updates: ' + e.message, true);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = t('settings.check_updates') || 'Check for Updates';
+    }
+  }
+}
+
+// Window exports for HTML event handlers and testing
+window.switchSettingsTab = switchSettingsTab;
+window.checkUpdateStatus = checkUpdateStatus;
+window.checkForUpdates = checkForUpdates;
+window.renderUpdateStatus = renderUpdateStatus;

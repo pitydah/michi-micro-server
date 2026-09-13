@@ -42,19 +42,19 @@
                     </svg>
                     <span data-i18n="nav.dashboard">Dashboard</span>
                 </button>
-                <button class="nav-item" data-section="library" onclick="showSection('library')">
+                <button class="nav-item" data-section="library" data-requires-auth="true" onclick="showSection('library')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
                     </svg>
                     <span data-i18n="nav.library">Library</span>
                 </button>
-                <button class="nav-item" data-section="playlists" onclick="showSection('playlists')">
+                <button class="nav-item" data-section="playlists" data-requires-auth="true" onclick="showSection('playlists')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
                     </svg>
                     <span data-i18n="nav.playlists">Playlists</span>
                 </button>
-                <button class="nav-item" data-section="broadcast" onclick="showSection('broadcast')">
+                <button class="nav-item" data-section="broadcast" data-requires-auth="true" onclick="showSection('broadcast')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M12 2a14.5 14.5 0 0 0 0 20"/><path d="M12 6a10.5 10.5 0 0 0 0 12"/>
                         <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>
@@ -64,13 +64,13 @@
             </div>
             <div class="nav-section">
                 <h3 data-i18n="nav_section.server">Server</h3>
-                <button class="nav-item" data-section="scan" onclick="showSection('scan')">
+                <button class="nav-item" data-section="scan" data-requires-auth="true" onclick="showSection('scan')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/>
                     </svg>
                     <span data-i18n="nav.scan">Scan</span>
                 </button>
-                <button class="nav-item" data-section="michilink" onclick="showSection('michilink')">
+                <button class="nav-item" data-section="michilink" data-requires-auth="true" onclick="showSection('michilink')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
                         <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
@@ -86,19 +86,19 @@
             </div>
             <div class="nav-section">
                 <h3 data-i18n="nav_section.system">System</h3>
-                <button class="nav-item" data-section="settings" onclick="showSection('settings')">
+                <button class="nav-item" data-section="settings" data-requires-auth="true" onclick="showSection('settings')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                     </svg>
                     <span data-i18n="nav.settings">Settings</span>
                 </button>
-                <button class="nav-item" data-section="history" onclick="showSection('history')">
+                <button class="nav-item" data-section="history" data-requires-auth="true" onclick="showSection('history')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
                     </svg>
                     <span data-i18n="nav.history">History</span>
                 </button>
-                <button class="nav-item" data-section="chains" onclick="showSection('chains')">
+                <button class="nav-item" data-section="chains" data-requires-auth="true" onclick="showSection('chains')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <circle cx="6" cy="12" r="2" fill="currentColor" stroke="none"/>
                         <path d="M10 8l6 4-6 4" fill="none"/><path d="M16 8l6 4-6 4" fill="none"/><path d="M10 12h12" fill="none"/>
@@ -363,409 +363,473 @@
         <!-- Settings -->
         <section class="section-page hidden" id="page-settings">
             <div class="hero"><h2>Settings</h2><p>Configure all aspects of your Michi Micro Server</p></div>
-            <div class="tabs" role="tablist" aria-label="Settings categories">
-                <button class="tab active" role="tab" aria-selected="true" data-stab="general" onclick="switchSettingsTab('general')">General</button>
-                <button class="tab" role="tab" aria-selected="false" data-stab="library" onclick="switchSettingsTab('library')">Library</button>
-                <button class="tab" role="tab" aria-selected="false" data-stab="streaming" onclick="switchSettingsTab('streaming')">Streaming</button>
-                <button class="tab" role="tab" aria-selected="false" data-stab="audio" onclick="switchSettingsTab('audio')">Audio</button>
-                <button class="tab" role="tab" aria-selected="false" data-stab="sync" onclick="switchSettingsTab('sync')">Sync</button>
-                <button class="tab" role="tab" aria-selected="false" data-stab="handoff" onclick="switchSettingsTab('handoff')">Handoff</button>
-                <button class="tab" role="tab" aria-selected="false" data-stab="network" onclick="switchSettingsTab('network')">Network</button>
-                <button class="tab" role="tab" aria-selected="false" data-stab="receivers" onclick="switchSettingsTab('receivers')">Receivers</button>
-                <button class="tab" role="tab" aria-selected="false" data-stab="webhook" onclick="switchSettingsTab('webhook')">Webhook</button>
-                <button class="tab" role="tab" aria-selected="false" data-stab="backup" onclick="switchSettingsTab('backup')">Backup</button>
-                <button class="tab" role="tab" aria-selected="false" data-stab="diagnostics" onclick="switchSettingsTab('diagnostics')">Diagnostics</button>
-                <button class="tab" role="tab" aria-selected="false" data-stab="jobs" onclick="switchSettingsTab('jobs')">Jobs</button>
-                <button class="tab" role="tab" aria-selected="false" data-stab="integrations" onclick="switchSettingsTab('integrations')">Integrations</button>
-            </div>
 
-            <!-- General -->
-            <div class="stab-content active" id="stab-general">
-                <div class="panel">
-                    <div class="panel-header">Server</div>
-                    <div class="panel-row"><span class="panel-label">Port</span><span class="panel-mono" style="flex:1" id="settings-port">--</span></div>
-                    <div class="panel-row"><span class="panel-label">Version</span><span class="panel-mono" style="flex:1" id="settings-version">--</span></div>
-                    <div class="panel-row"><span class="panel-label">FFmpeg</span><span id="settings-ffmpeg" style="flex:1">--</span></div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">Resource Profile</div>
-                    <div class="panel-row">
-                        <span class="panel-label">Profile</span>
-                        <select id="settings-resource-profile" class="panel-input" style="max-width:200px" onchange="saveSetting('resource_profile', this.value)">
-                            <option value="eco">🌱 Eco</option>
-                            <option value="balanced">⚖️ Balanced</option>
-                            <option value="performance">🚀 Performance</option>
+            <div class="settings-layout">
+                <!-- Secondary Navigation Rail -->
+                <aside class="settings-rail" aria-label="Settings Categories">
+                    <div class="settings-rail-mobile-wrap">
+                        <select id="settings-rail-mobile" class="panel-input settings-mobile-select" onchange="switchSettingsTab(this.value)">
+                            <option value="overview">📊 Overview</option>
+                            <option value="general">⚙️ General</option>
+                            <option value="library">📚 Library</option>
+                            <option value="streaming">🎵 Playback & Streaming</option>
+                            <option value="devices">📻 Devices & Multiroom</option>
+                            <option value="integrations">🔌 Integrations</option>
+                            <option value="maintenance">🛡️ Maintenance & Updates</option>
+                            <option value="advanced">🧪 Advanced</option>
                         </select>
                     </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Scan</span>
-                        <span class="panel-mono" id="settings-scan-concurrency">--</span>
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Transcodes</span>
-                        <span class="panel-mono" id="settings-max-transcodes">--</span>
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">DB Pool</span>
-                        <span class="panel-mono" id="settings-db-pool">--</span>
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Job Workers</span>
-                        <input type="number" id="settings-job-max-concurrent" class="panel-input" min="1" max="32" style="max-width:120px" onchange="saveSetting('job_max_concurrent', parseInt(this.value, 10))">
-                    </div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">Language</div>
-                    <div class="panel-row">
-                        <span class="panel-label">UI Language</span>
-                        <select id="lang-select" class="panel-input" style="max-width:240px" onchange="setLanguage(this.value)">
-                            <option value="en">🇬🇧 English</option>
-                            <option value="es">🇪🇸 Español</option>
-                            <option value="pt">🇧🇷 Português</option>
-                            <option value="de">🇩🇪 Deutsch</option>
-                            <option value="fr">🇫🇷 Français</option>
-                            <option value="it">🇮🇹 Italiano</option>
-                            <option value="ru">🇷🇺 Русский</option>
-                            <option value="zh">🇨🇳 中文</option>
-                            <option value="ja">🇯🇵 日本語</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">Appearance</div>
-                    <div class="panel-row">
-                        <span class="panel-label">Theme</span>
-                        <div class="theme-options" role="group" aria-label="Color theme">
-                            <button type="button" data-theme-option="dark" onclick="setTheme('dark', true)">Dark</button>
-                            <button type="button" data-theme-option="light" onclick="setTheme('light', true)">Light</button>
-                            <button type="button" data-theme-option="system" onclick="setTheme('system', true)">System</button>
+                    <nav class="settings-rail-nav" role="tablist" aria-label="Settings categories">
+                        <button class="settings-rail-item active" role="tab" aria-selected="true" data-stab="overview" onclick="switchSettingsTab('overview')">
+                            <span class="rail-icon">📊</span>
+                            <span data-i18n="settings.rail_overview">Overview</span>
+                        </button>
+                        <button class="settings-rail-item" role="tab" aria-selected="false" data-stab="general" onclick="switchSettingsTab('general')">
+                            <span class="rail-icon">⚙️</span>
+                            <span data-i18n="settings.rail_general">General</span>
+                        </button>
+                        <button class="settings-rail-item" role="tab" aria-selected="false" data-stab="library" onclick="switchSettingsTab('library')">
+                            <span class="rail-icon">📚</span>
+                            <span data-i18n="settings.rail_library">Library</span>
+                        </button>
+                        <button class="settings-rail-item" role="tab" aria-selected="false" data-stab="streaming" onclick="switchSettingsTab('streaming')">
+                            <span class="rail-icon">🎵</span>
+                            <span data-i18n="settings.rail_streaming">Playback & Streaming</span>
+                        </button>
+                        <button class="settings-rail-item" role="tab" aria-selected="false" data-stab="devices" onclick="switchSettingsTab('devices')">
+                            <span class="rail-icon">📻</span>
+                            <span data-i18n="settings.rail_devices">Devices & Multiroom</span>
+                        </button>
+                        <button class="settings-rail-item" role="tab" aria-selected="false" data-stab="integrations" onclick="switchSettingsTab('integrations')">
+                            <span class="rail-icon">🔌</span>
+                            <span data-i18n="settings.rail_integrations">Integrations</span>
+                        </button>
+                        <button class="settings-rail-item" role="tab" aria-selected="false" data-stab="maintenance" onclick="switchSettingsTab('maintenance')">
+                            <span class="rail-icon">🛡️</span>
+                            <span data-i18n="settings.rail_maintenance">Maintenance</span>
+                        </button>
+                        <button class="settings-rail-item" role="tab" aria-selected="false" data-stab="advanced" onclick="switchSettingsTab('advanced')">
+                            <span class="rail-icon">🧪</span>
+                            <span data-i18n="settings.rail_advanced">Advanced</span>
+                        </button>
+                    </nav>
+                </aside>
+
+                <!-- Content Panes -->
+                <div class="settings-content">
+                    <!-- 1. Overview -->
+                    <div class="stab-content active" id="stab-overview">
+                        <div class="panel">
+                            <div class="panel-header">Server Identity</div>
+                            <div class="panel-row"><span class="panel-label">Version</span><span class="panel-mono" style="flex:1" id="settings-version">--</span></div>
+                            <div class="panel-row"><span class="panel-label">Port</span><span class="panel-mono" style="flex:1" id="settings-port">--</span></div>
+                            <div class="panel-row"><span class="panel-label">FFmpeg</span><span id="settings-ffmpeg" style="flex:1">--</span></div>
+                            <div class="panel-row"><span class="panel-label">Auth</span><span id="settings-auth" class="badge disabled">--</span></div>
                         </div>
                     </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Cover Art</span>
-                        <select id="settings-cover-art" class="panel-input" style="max-width:200px" onchange="saveSetting('cover_art_enabled', this.value === 'true')">
-                            <option value="true">Enabled</option>
-                            <option value="false">Disabled</option>
-                        </select>
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Sidebar Default</span>
-                        <select id="settings-sidebar-collapsed" class="panel-input" style="max-width:200px" onchange="saveSetting('sidebar_collapsed', this.value === 'true')">
-                            <option value="false">Expanded</option>
-                            <option value="true">Collapsed</option>
-                        </select>
-                    </div>
-                </div>
-            </div>
 
-            <!-- Library -->
-            <div class="stab-content hidden" id="stab-library">
-                <div class="panel">
-                    <div class="panel-header">Music Paths</div>
-                    <div id="settings-music-paths" class="panel-mono">--</div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">Scan</div>
-                    <div class="panel-row"><span class="panel-label">Watcher</span><span id="settings-watcher-status" class="badge stable">● Active (5s Polling)</span></div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="handleScan()">Start Scan Now</button></div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">Supported Formats</div>
-                    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
-                        <span class="badge format" data-format="flac">FLAC</span>
-                        <span class="badge format" data-format="wav">WAV</span>
-                        <span class="badge format" data-format="mp3">MP3</span>
-                        <span class="badge format" data-format="aac">AAC</span>
-                        <span class="badge format" data-format="ogg">OGG</span>
-                        <span class="badge format" data-format="opus">OPUS</span>
-                        <span class="badge format" data-format="m4a">M4A</span>
-                        <span class="badge disabled" style="text-decoration:line-through">AIFF</span>
-                        <span class="badge disabled" style="text-decoration:line-through">DSF</span>
-                        <span class="badge disabled" style="text-decoration:line-through">DFF</span>
-                    </div>
-                    <p style="color:var(--text-dim);font-size:.72rem;margin-top:8px">AIFF, DSF and DFF are excluded. Use Michi Big Server for those formats.</p>
-                </div>
-            </div>
-
-            <!-- Streaming -->
-            <div class="stab-content hidden" id="stab-streaming">
-                <div class="panel">
-                    <div class="panel-header">Stream Configuration</div>
-                    <div class="panel-row">
-                        <span class="panel-label">Profile</span>
-                        <select id="settings-stream-profile" class="panel-input" style="max-width:200px" onchange="saveSetting('stream_profile', this.value)">
-                            <option value="original">🎵 Original</option>
-                            <option value="lossless">💎 Lossless</option>
-                            <option value="opus96">🎧 Opus 96k</option>
-                            <option value="opus160">🎧 Opus 160k</option>
-                            <option value="mp3192">🎧 MP3 192k</option>
-                            <option value="mp3320">🎧 MP3 320k</option>
-                        </select>
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Format Policy</span>
-                        <select id="settings-format-policy" class="panel-input" style="max-width:200px" onchange="saveSetting('format_policy', this.value)">
-                            <option value="lossless">💎 Lossless (max FLAC/WAV)</option>
-                            <option value="standard">📦 Standard only</option>
-                            <option value="direct">🔗 Direct play only</option>
-                        </select>
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Remote Bitrate Ceiling</span>
-                        <select id="settings-max-remote-bitrate" class="panel-input" style="max-width:200px" onchange="saveSetting('max_remote_bitrate', parseInt(this.value, 10))">
-                            <option value="64000">64 kbps (Mobile Saver)</option>
-                            <option value="96000">96 kbps (Eco Opus)</option>
-                            <option value="128000">128 kbps (Standard)</option>
-                            <option value="192000">192 kbps (High Quality)</option>
-                            <option value="320000">320 kbps (Maximum MP3)</option>
-                            <option value="20000000">Lossless / Unlimited</option>
-                        </select>
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">FFmpeg</span>
-                        <span id="settings-ffmpeg-avail" class="badge stable">Available</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Audio -->
-            <div class="stab-content hidden" id="stab-audio">
-                <div class="panel">
-                    <div class="panel-header">Audio Settings</div>
-                    <div class="panel-row">
-                        <span class="panel-label">Scrobbling</span>
-                        <select id="settings-scrobble-toggle" class="panel-input" style="max-width:200px" onchange="saveSetting('scrobble_enabled', this.value === 'true')">
-                            <option value="false">Disabled</option>
-                            <option value="true">Enabled</option>
-                        </select>
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Sync Node Name</span>
-                        <input type="text" id="settings-sync-name-input" class="panel-input" style="max-width:200px" onchange="saveSetting('sync_name', this.value.trim())">
-                    </div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">ListenBrainz Integration</div>
-                    <div class="panel-row">
-                        <span class="panel-label">Status</span>
-                        <span id="settings-lb-status" class="badge disabled">Not Configured</span>
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">User Token</span>
-                        <input type="password" id="settings-lb-token" class="panel-input" placeholder="ListenBrainz user token" autocomplete="off" style="max-width:280px">
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label"></span>
-                        <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
-                            <button class="btn btn-primary btn-sm" onclick="saveListenBrainzToken()">Connect ListenBrainz</button>
-                            <button class="btn btn-ghost btn-sm" onclick="testListenBrainz()">Test Connection</button>
-                            <button id="settings-lb-disconnect" class="btn btn-danger btn-sm" onclick="disconnectListenBrainz()">Disconnect</button>
+                    <!-- 2. General -->
+                    <div class="stab-content hidden" id="stab-general">
+                        <div class="panel">
+                            <div class="panel-header">Language</div>
+                            <div class="panel-row">
+                                <span class="panel-label">UI Language</span>
+                                <select id="lang-select" class="panel-input" style="max-width:240px" onchange="setLanguage(this.value)">
+                                    <option value="en">🇬🇧 English</option>
+                                    <option value="es">🇪🇸 Español</option>
+                                    <option value="pt">🇧🇷 Português</option>
+                                    <option value="de">🇩🇪 Deutsch</option>
+                                    <option value="fr">🇫🇷 Français</option>
+                                    <option value="it">🇮🇹 Italiano</option>
+                                    <option value="ru">🇷🇺 Русский</option>
+                                    <option value="zh">🇨🇳 中文</option>
+                                    <option value="ja">🇯🇵 日本語</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Appearance</div>
+                            <div class="panel-row">
+                                <span class="panel-label">Theme</span>
+                                <div class="theme-options" role="group" aria-label="Color theme">
+                                    <button type="button" data-theme-option="dark" onclick="setTheme('dark', true)">Dark</button>
+                                    <button type="button" data-theme-option="light" onclick="setTheme('light', true)">Light</button>
+                                    <button type="button" data-theme-option="system" onclick="setTheme('system', true)">System</button>
+                                </div>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Cover Art</span>
+                                <select id="settings-cover-art" class="panel-input" style="max-width:200px" onchange="saveSetting('cover_art_enabled', this.value === 'true')">
+                                    <option value="true">Enabled</option>
+                                    <option value="false">Disabled</option>
+                                </select>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Sidebar Default</span>
+                                <select id="settings-sidebar-collapsed" class="panel-input" style="max-width:200px" onchange="saveSetting('sidebar_collapsed', this.value === 'true')">
+                                    <option value="false">Expanded</option>
+                                    <option value="true">Collapsed</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
-                    <div id="settings-lb-result" class="panel-result"></div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">Last.fm Integration (Beta)</div>
-                    <div class="panel-row">
-                        <span class="panel-label">Status</span>
-                        <span id="settings-lfm-status" class="badge disabled">Not Configured</span>
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Session Key</span>
-                        <input type="password" id="settings-lfm-token" class="panel-input" placeholder="32-character session key" autocomplete="off" style="max-width:280px">
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label"></span>
-                        <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
-                            <button class="btn btn-primary btn-sm" onclick="saveLastFmToken()">Save Last.fm Session</button>
-                            <button class="btn btn-ghost btn-sm" onclick="testLastFm()">Test Connection</button>
-                            <button id="settings-lfm-disconnect" class="btn btn-danger btn-sm" onclick="disconnectLastFm()">Disconnect</button>
+
+                    <!-- 3. Library -->
+                    <div class="stab-content hidden" id="stab-library">
+                        <div class="panel">
+                            <div class="panel-header">Music Paths</div>
+                            <div id="settings-music-paths" class="panel-mono">--</div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Scan</div>
+                            <div class="panel-row"><span class="panel-label">Watcher</span><span id="settings-watcher-status" class="badge">--</span></div>
+                            <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="handleScan()">Start Scan Now</button></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Supported Formats</div>
+                            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+                                <span class="badge format" data-format="flac">FLAC</span>
+                                <span class="badge format" data-format="wav">WAV</span>
+                                <span class="badge format" data-format="mp3">MP3</span>
+                                <span class="badge format" data-format="aac">AAC</span>
+                                <span class="badge format" data-format="ogg">OGG</span>
+                                <span class="badge format" data-format="opus">OPUS</span>
+                                <span class="badge format" data-format="m4a">M4A</span>
+                                <span class="badge disabled" style="text-decoration:line-through">AIFF</span>
+                                <span class="badge disabled" style="text-decoration:line-through">DSF</span>
+                                <span class="badge disabled" style="text-decoration:line-through">DFF</span>
+                            </div>
+                            <p style="color:var(--text-dim);font-size:.72rem;margin-top:8px">AIFF, DSF and DFF are excluded. Use Michi Big Server for those formats.</p>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Upload File</div>
+                            <div class="panel-row"><span class="panel-label">File</span><input type="file" id="settings-file-input" class="panel-input"></div>
+                            <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="uploadFile()">Upload</button></div>
+                            <div id="upload-progress-wrap" class="settings-progress-wrap hidden">
+                                <div class="progress-bar"><div class="fill" id="upload-progress-fill"></div></div>
+                                <span class="settings-progress-text" id="upload-progress-text"></span>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Sync Playlist</div>
+                            <div class="panel-row"><span class="panel-label">Name</span><input type="text" id="sync-playlist-name" class="panel-input" placeholder="Playlist name"></div>
+                            <div class="panel-row"><span class="panel-label">Track IDs</span><textarea id="sync-playlist-tracks" class="panel-input" placeholder="One UUID per line" rows="3" style="resize:vertical;min-height:60px;font-family:var(--font-mono);font-size:.72rem"></textarea></div>
+                            <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="syncPlaylist()">Sync</button></div>
+                            <div id="sync-playlist-result" class="panel-result"></div>
                         </div>
                     </div>
-                    <div class="panel-row" style="font-size:0.75rem;color:var(--text-muted)">
-                        <span>Requires server MICHI_LASTFM_API_KEY and MICHI_LASTFM_SHARED_SECRET.</span>
-                    </div>
-                    <div id="settings-lfm-result" class="panel-result"></div>
-                </div>
-            </div>
 
-            <!-- Sync -->
-            <div class="stab-content hidden" id="stab-sync">
-                <div class="panel">
-                    <div class="panel-header">Upload File</div>
-                    <div class="panel-row"><span class="panel-label">File</span><input type="file" id="settings-file-input" class="panel-input"></div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="uploadFile()">Upload</button></div>
-                    <div id="upload-progress-wrap" class="settings-progress-wrap hidden">
-                        <div class="progress-bar"><div class="fill" id="upload-progress-fill"></div></div>
-                        <span class="settings-progress-text" id="upload-progress-text"></span>
-                    </div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">Sync Playlist</div>
-                    <div class="panel-row"><span class="panel-label">Name</span><input type="text" id="sync-playlist-name" class="panel-input" placeholder="Playlist name"></div>
-                    <div class="panel-row"><span class="panel-label">Track IDs</span><textarea id="sync-playlist-tracks" class="panel-input" placeholder="One UUID per line" rows="3" style="resize:vertical;min-height:60px;font-family:var(--font-mono);font-size:.72rem"></textarea></div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="syncPlaylist()">Sync</button></div>
-                    <div id="sync-playlist-result" class="panel-result"></div>
-                </div>
-            </div>
-
-            <!-- Handoff -->
-            <div class="stab-content hidden" id="stab-handoff">
-                <div class="panel">
-                    <div class="panel-header">Transfer Playback State</div>
-                    <div class="panel-row"><span class="panel-label">Track ID</span><input type="text" id="handoff-track-id" class="panel-input" placeholder="UUID"></div>
-                    <div class="panel-row"><span class="panel-label">Position</span><input type="number" id="handoff-position" class="panel-input" value="0" style="width:120px"></div>
-                    <div class="panel-row"><span class="panel-label">Playing</span><input type="checkbox" id="handoff-playing" checked style="accent-color:var(--primary);width:18px;height:18px"></div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="transferHandoff()">Transfer State to Server</button></div>
-                    <div id="handoff-result" class="panel-result"></div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">Current State</div>
-                    <div id="handoff-current-state" class="panel-mono">--</div>
-                </div>
-            </div>
-
-            <!-- Network -->
-            <div class="stab-content hidden" id="stab-network">
-                <div class="panel">
-                    <div class="panel-header">Network Policy</div>
-                    <div class="panel-row">
-                        <span class="panel-label">Remote Sync</span>
-                        <select id="settings-remote-sync" class="panel-input" style="max-width:200px" onchange="saveSetting('remote_sync', this.value === 'true')">
-                            <option value="false">🔒 LAN Only (Strict)</option>
-                            <option value="true">🌐 Allow External Peers</option>
-                        </select>
-                    </div>
-                    <div class="panel-row"><span class="panel-label">CORS Origin</span><span class="panel-mono" id="settings-cors" style="flex:1">--</span></div>
-                    <div class="panel-row"><span class="panel-label">Auth</span><span id="settings-auth" class="badge disabled">Disabled</span></div>
-                    <div class="panel-row">
-                        <span class="panel-label">Development CORS</span>
-                        <select id="settings-dev-mode-select" class="panel-input" style="max-width:200px" onchange="saveSetting('dev_mode', this.value === 'true')">
-                            <option value="false">Restricted (Production Security)</option>
-                            <option value="true">Permissive (Development CORS)</option>
-                        </select>
-                    </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Add Peer</span>
-                        <div style="display:flex;gap:6px;flex:1">
-                            <input type="text" id="settings-new-peer" class="panel-input" placeholder="http://192.168.1.50:9090">
-                            <button class="btn btn-primary btn-sm" type="button" onclick="addSyncPeer()">Add Peer</button>
+                    <!-- 4. Playback & Streaming -->
+                    <div class="stab-content hidden" id="stab-streaming">
+                        <div class="panel">
+                            <div class="panel-header">Stream Configuration</div>
+                            <div class="panel-row">
+                                <span class="panel-label">Profile</span>
+                                <select id="settings-stream-profile" class="panel-input" style="max-width:200px" onchange="saveSetting('stream_profile', this.value)" disabled>
+                                    <option value="" disabled selected>Loading...</option>
+                                    <option value="original">🎵 Original</option>
+                                    <option value="lossless">💎 Lossless</option>
+                                    <option value="opus96">🎧 Opus 96k</option>
+                                    <option value="opus160">🎧 Opus 160k</option>
+                                    <option value="mp3192">🎧 MP3 192k</option>
+                                    <option value="mp3320">🎧 MP3 320k</option>
+                                </select>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Format Policy</span>
+                                <select id="settings-format-policy" class="panel-input" style="max-width:200px" onchange="saveSetting('format_policy', this.value)" disabled>
+                                    <option value="" disabled selected>Loading...</option>
+                                    <option value="lossless">💎 Lossless (max FLAC/WAV)</option>
+                                    <option value="standard">📦 Standard only</option>
+                                    <option value="direct">🔗 Direct play only</option>
+                                </select>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Remote Bitrate Ceiling</span>
+                                <select id="settings-max-remote-bitrate" class="panel-input" style="max-width:200px" onchange="saveSetting('max_remote_bitrate', parseInt(this.value, 10))" disabled>
+                                    <option value="" disabled selected>Loading...</option>
+                                    <option value="64000">64 kbps (Mobile Saver)</option>
+                                    <option value="96000">96 kbps (Eco Opus)</option>
+                                    <option value="128000">128 kbps (Standard)</option>
+                                    <option value="192000">192 kbps (High Quality)</option>
+                                    <option value="320000">320 kbps (Maximum MP3)</option>
+                                    <option value="20000000">Lossless / Unlimited</option>
+                                </select>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">FFmpeg</span>
+                                <span id="settings-ffmpeg-avail" class="badge">--</span>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Transfer Playback State</div>
+                            <div class="panel-row"><span class="panel-label">Track ID</span><input type="text" id="handoff-track-id" class="panel-input" placeholder="UUID"></div>
+                            <div class="panel-row"><span class="panel-label">Position</span><input type="number" id="handoff-position" class="panel-input" value="0" style="width:120px"></div>
+                            <div class="panel-row"><span class="panel-label">Playing</span><input type="checkbox" id="handoff-playing" checked style="accent-color:var(--primary);width:18px;height:18px"></div>
+                            <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="transferHandoff()">Transfer State to Server</button></div>
+                            <div id="handoff-result" class="panel-result"></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Current State</div>
+                            <div id="handoff-current-state" class="panel-mono">--</div>
                         </div>
                     </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Active Peers</span>
-                        <div id="settings-peers-list" style="flex:1;display:flex;flex-direction:column;gap:4px"></div>
+
+                    <!-- 5. Devices & Multiroom -->
+                    <div class="stab-content hidden" id="stab-devices">
+                        <div class="panel">
+                            <div class="panel-header">Discovery</div>
+                            <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="discoverDevices()">Scan Network</button></div>
+                            <div id="discover-result" class="panel-result"></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Room Groups</div>
+                            <div class="panel-row"><span class="panel-label">Name</span><input type="text" id="rg-name" class="panel-input" placeholder="Downstairs"></div>
+                            <div class="panel-row"><span class="panel-label">Mode</span><select id="rg-mode" class="panel-input"><option value="relax">Relax</option><option value="party">Party</option><option value="custom">Custom</option></select></div>
+                            <div class="panel-row"><span class="panel-label">Receivers</span><input type="text" id="rg-receivers" class="panel-input" placeholder="comma-separated IDs"></div>
+                            <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="createRoomGroup()">Create Room Group</button></div>
+                        </div>
+                        <div class="section">
+                            <div class="section-header"><h3>Room Groups</h3></div>
+                            <div id="room-groups-list"></div>
+                        </div>
                     </div>
-                </div>
-            </div>
 
-            <!-- Receivers -->
-            <div class="stab-content hidden" id="stab-receivers">
-                <div class="panel">
-                    <div class="panel-header">Discovery</div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="discoverDevices()">Scan Network</button></div>
-                    <div id="discover-result" class="panel-result"></div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">Room Groups</div>
-                    <div class="panel-row"><span class="panel-label">Name</span><input type="text" id="rg-name" class="panel-input" placeholder="Downstairs"></div>
-                    <div class="panel-row"><span class="panel-label">Mode</span><select id="rg-mode" class="panel-input"><option value="relax">Relax</option><option value="party">Party</option><option value="custom">Custom</option></select></div>
-                    <div class="panel-row"><span class="panel-label">Receivers</span><input type="text" id="rg-receivers" class="panel-input" placeholder="comma-separated IDs"></div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="createRoomGroup()">Create Room Group</button></div>
-                </div>
-                <div class="section">
-                    <div class="section-header"><h3>Room Groups</h3></div>
-                    <div id="room-groups-list"></div>
-                </div>
-            </div>
-
-            <!-- Webhook -->
-            <div class="stab-content hidden" id="stab-webhook">
-                <div class="panel">
-                    <div class="panel-header">Webhook Configuration</div>
-                    <div class="panel-row"><span class="panel-label">URL</span><input type="url" id="webhook-url" class="panel-input" placeholder="https://example.com/hook"></div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="setWebhook()">Set</button><button class="btn btn-ghost btn-sm" onclick="testWebhook()">Test</button><button class="btn btn-ghost btn-sm" onclick="deleteWebhook()">Clear</button></div>
-                    <div id="webhook-status" class="panel-result"></div>
-                </div>
-            </div>
-
-            <!-- Backup -->
-            <div class="stab-content hidden" id="stab-backup">
-                <div class="panel">
-                    <div class="panel-header">Automatic Backup Scheduler</div>
-                    <div class="panel-row">
-                        <span class="panel-label">Auto Backup</span>
-                        <select id="settings-auto-backup" class="panel-input" style="max-width:200px" onchange="saveSetting('auto_backup_enabled', this.value === 'true')">
-                            <option value="false">Disabled</option>
-                            <option value="true">Enabled (Automatic)</option>
-                        </select>
+                    <!-- 6. Integrations -->
+                    <div class="stab-content hidden" id="stab-integrations">
+                        <div class="panel">
+                            <div class="panel-header">Audio Scrobbling</div>
+                            <div class="panel-row">
+                                <span class="panel-label">Scrobbling</span>
+                                <select id="settings-scrobble-toggle" class="panel-input" style="max-width:200px" onchange="saveSetting('scrobble_enabled', this.value === 'true')" disabled>
+                                    <option value="" disabled selected>Loading...</option>
+                                    <option value="false">Disabled</option>
+                                    <option value="true">Enabled</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">ListenBrainz Integration</div>
+                            <div class="panel-row">
+                                <span class="panel-label">Status</span>
+                                <span id="settings-lb-status" class="badge disabled">Not Configured</span>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">User Token</span>
+                                <input type="password" id="settings-lb-token" class="panel-input" placeholder="ListenBrainz user token" autocomplete="off" style="max-width:280px">
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label"></span>
+                                <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                                    <button class="btn btn-primary btn-sm" onclick="saveListenBrainzToken()">Connect ListenBrainz</button>
+                                    <button class="btn btn-ghost btn-sm" onclick="testListenBrainz()">Test Connection</button>
+                                    <button id="settings-lb-disconnect" class="btn btn-danger btn-sm" onclick="disconnectListenBrainz()">Disconnect</button>
+                                </div>
+                            </div>
+                            <div id="settings-lb-result" class="panel-result"></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Last.fm Integration (Beta)</div>
+                            <div class="panel-row">
+                                <span class="panel-label">Status</span>
+                                <span id="settings-lfm-status" class="badge disabled">Not Configured</span>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Session Key</span>
+                                <input type="password" id="settings-lfm-token" class="panel-input" placeholder="32-character session key" autocomplete="off" style="max-width:280px">
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label"></span>
+                                <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                                    <button class="btn btn-primary btn-sm" onclick="saveLastFmToken()">Save Last.fm Session</button>
+                                    <button class="btn btn-ghost btn-sm" onclick="testLastFm()">Test Connection</button>
+                                    <button id="settings-lfm-disconnect" class="btn btn-danger btn-sm" onclick="disconnectLastFm()">Disconnect</button>
+                                </div>
+                            </div>
+                            <div class="panel-row" style="font-size:0.75rem;color:var(--text-muted)">
+                                <span>Requires server MICHI_LASTFM_API_KEY and MICHI_LASTFM_SHARED_SECRET.</span>
+                            </div>
+                            <div id="settings-lfm-result" class="panel-result"></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Webhook Configuration</div>
+                            <div class="panel-row"><span class="panel-label">URL</span><input type="url" id="webhook-url" class="panel-input" placeholder="https://example.com/hook"></div>
+                            <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="setWebhook()">Set</button><button class="btn btn-ghost btn-sm" onclick="testWebhook()">Test</button><button class="btn btn-ghost btn-sm" onclick="deleteWebhook()">Clear</button></div>
+                            <div id="webhook-status" class="panel-result"></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Home Assistant (MQTT)</div>
+                            <div class="panel-row"><span class="panel-label">Auto-Discovery</span><span id="ha-discovery-status" class="badge">Checking...</span></div>
+                            <div class="panel-row"><span class="panel-label">Prefix</span><span class="panel-mono">homeassistant/ / michi/</span></div>
+                        </div>
                     </div>
-                    <div class="panel-row">
-                        <span class="panel-label">Retention Keep</span>
-                        <input type="number" id="settings-backup-max-keep" class="panel-input" min="1" max="100" style="max-width:120px" onchange="saveSetting('backup_max_keep', parseInt(this.value, 10))">
+
+                    <!-- 7. Maintenance & Updates -->
+                    <div class="stab-content hidden" id="stab-maintenance">
+                        <div class="panel">
+                            <div class="panel-header" data-i18n="settings.updates">Updates & System</div>
+                            <div class="panel-row">
+                                <span class="panel-label">Installed Version</span>
+                                <span class="panel-mono" id="update-current-version">--</span>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Update Channel</span>
+                                <select id="update-channel-select" class="panel-input" style="max-width:200px" onchange="checkUpdateStatus(this.value)">
+                                    <option value="stable">Stable (Releases)</option>
+                                    <option value="preview">Preview (RC & Betas)</option>
+                                </select>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Update Status</span>
+                                <span id="update-status-badge" class="badge">Checking...</span>
+                            </div>
+                            <div class="panel-row" id="update-details" style="font-size:0.8125rem;color:var(--text-2);display:none">
+                                <span class="panel-label">Latest Release</span>
+                                <div style="flex:1">
+                                    <div id="update-latest-version" style="font-weight:600;color:var(--primary)">--</div>
+                                    <div id="update-published-date" style="font-size:0.75rem;color:var(--text-3);margin-top:2px">--</div>
+                                </div>
+                            </div>
+                            <div class="panel-row" id="update-guidance-row" style="font-size:0.8125rem;color:var(--text-2);display:none">
+                                <span class="panel-label">Instructions</span>
+                                <div id="update-guidance" style="flex:1;background:var(--surface-3);padding:8px 12px;border-radius:6px;border:1px solid var(--border)">--</div>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label"></span>
+                                <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                                    <button class="btn btn-primary btn-sm" id="update-check-btn" onclick="checkForUpdates()" data-i18n="settings.check_updates">Check for Updates</button>
+                                    <a id="update-release-link" class="btn btn-ghost btn-sm" href="#" target="_blank" rel="noopener noreferrer" style="display:none">View Release Notes ↗</a>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Automatic Backup Scheduler</div>
+                            <div class="panel-row">
+                                <span class="panel-label">Auto Backup</span>
+                                <select id="settings-auto-backup" class="panel-input" style="max-width:200px" onchange="saveSetting('auto_backup_enabled', this.value === 'true')" disabled>
+                                    <option value="" disabled selected>Loading...</option>
+                                    <option value="false">Disabled</option>
+                                    <option value="true">Enabled (Automatic)</option>
+                                </select>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Retention Keep</span>
+                                <input type="number" id="settings-backup-max-keep" class="panel-input" min="1" max="100" style="max-width:120px" onchange="saveSetting('backup_max_keep', parseInt(this.value, 10))">
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Library Snapshot & Export</div>
+                            <p style="color:var(--text-3);font-size:.78rem;margin-bottom:8px">Records catalog statistics snapshot or downloads the complete canonical JSON backup payload.</p>
+                            <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="createSnapshot()">Create Library Snapshot</button><button class="btn btn-ghost btn-sm" onclick="downloadBackup()">Download Full Backup</button></div>
+                            <div id="snapshot-result" class="panel-result"></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Restore Backup</div>
+                            <p style="color:var(--text-3);font-size:.78rem;margin-bottom:8px">Restore database playlists, favorites, and listening history from a canonical backup file.</p>
+                            <div class="panel-row"><span class="panel-label">Backup JSON</span><input type="file" id="backup-restore-file" class="panel-input" accept=".json"></div>
+                            <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="restoreBackup()">Restore Database</button></div>
+                            <div id="backup-restore-result" class="panel-result"></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">File Availability Check</div>
+                            <p style="color:var(--text-3);font-size:.78rem;margin-bottom:8px">Checks track file existence on local storage.</p>
+                            <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="verifyIntegrity()">Check Files</button></div>
+                            <div id="integrity-result" class="panel-result"></div>
+                        </div>
                     </div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">Library Snapshot & Export</div>
-                    <p style="color:var(--text-3);font-size:.78rem;margin-bottom:8px">Records catalog statistics snapshot or downloads the complete canonical JSON backup payload.</p>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="createSnapshot()">Create Library Snapshot</button><button class="btn btn-ghost btn-sm" onclick="downloadBackup()">Download Full Backup</button></div>
-                    <div id="snapshot-result" class="panel-result"></div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">Restore Backup</div>
-                    <p style="color:var(--text-3);font-size:.78rem;margin-bottom:8px">Restore database playlists, favorites, and listening history from a canonical backup file.</p>
-                    <div class="panel-row"><span class="panel-label">Backup JSON</span><input type="file" id="backup-restore-file" class="panel-input" accept=".json"></div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="restoreBackup()">Restore Database</button></div>
-                    <div id="backup-restore-result" class="panel-result"></div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">File Availability Check</div>
-                    <p style="color:var(--text-3);font-size:.78rem;margin-bottom:8px">Checks track file existence on local storage.</p>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-primary btn-sm" onclick="verifyIntegrity()">Check Files</button></div>
-                    <div id="integrity-result" class="panel-result"></div>
-                </div>
-            </div>
 
-            <!-- Diagnostics -->
-            <div class="stab-content hidden" id="stab-diagnostics">
-                <div class="panel">
-                    <div class="panel-header">Server Health & Capabilities</div>
-                    <div class="panel-row"><span class="panel-label">Status</span><span id="diag-status" class="badge stable">Checking...</span></div>
-                    <div class="panel-row"><span class="panel-label">FFmpeg Audio Core</span><span id="diag-ffmpeg" class="panel-mono">--</span></div>
-                    <div class="panel-row"><span class="panel-label">Active Transcodes</span><span id="diag-transcodes" class="panel-mono">--</span></div>
-                    <div class="panel-row"><span class="panel-label">Database Pool</span><span id="diag-db-pool" class="panel-mono">--</span></div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-ghost btn-sm" onclick="loadDiagnostics()">Refresh Diagnostics</button></div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">Capability Flags</div>
-                    <div id="diag-caps-list" class="panel-mono" style="font-size:0.75rem;line-height:1.4">Loading capabilities...</div>
-                </div>
-            </div>
-
-            <!-- Jobs -->
-            <div class="stab-content hidden" id="stab-jobs">
-                <div class="panel">
-                    <div class="panel-header">Job Queue & Workers</div>
-                    <div class="panel-row"><span class="panel-label">Max Concurrency</span><span id="jobs-max-concurrent" class="panel-mono">--</span></div>
-                    <div class="panel-row"><span class="panel-label"></span><button class="btn btn-ghost btn-sm" onclick="loadJobs()">Refresh Jobs</button></div>
-                </div>
-                <div class="section">
-                    <div class="section-header"><h3>Active & Recent Jobs</h3></div>
-                    <div id="jobs-list" style="margin-top:8px">Loading jobs...</div>
-                </div>
-            </div>
-
-            <!-- Integrations -->
-            <div class="stab-content hidden" id="stab-integrations">
-                <div class="panel">
-                    <div class="panel-header">Home Assistant (MQTT)</div>
-                    <div class="panel-row"><span class="panel-label">Auto-Discovery</span><span id="ha-discovery-status" class="badge">Checking...</span></div>
-                    <div class="panel-row"><span class="panel-label">Prefix</span><span class="panel-mono">homeassistant/ / michi/</span></div>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">Sync Mesh Peers & Connectivity</div>
-                    <div class="panel-row"><span class="panel-label">Configured Peers</span><span id="integ-sync-peers" class="panel-mono">--</span></div>
-                    <div class="panel-row"><span class="panel-label">Auto-Reconnect Max (s)</span><input type="number" id="settings-reconnect-delay-max" class="panel-input" min="5" max="3600" style="max-width:120px" onchange="saveSetting('reconnect_delay_max', parseInt(this.value, 10))"></div>
+                    <!-- 8. Advanced -->
+                    <div class="stab-content hidden" id="stab-advanced">
+                        <div class="panel">
+                            <div class="panel-header">Resource Profile & Concurrency</div>
+                            <div class="panel-row">
+                                <span class="panel-label">Profile</span>
+                                <select id="settings-resource-profile" class="panel-input" style="max-width:200px" onchange="saveSetting('resource_profile', this.value)" disabled>
+                                    <option value="" disabled selected>Loading...</option>
+                                    <option value="eco">🌱 Eco</option>
+                                    <option value="balanced">⚖️ Balanced</option>
+                                    <option value="performance">🚀 Performance</option>
+                                </select>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Scan</span>
+                                <span class="panel-mono" id="settings-scan-concurrency">--</span>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Transcodes</span>
+                                <span class="panel-mono" id="settings-max-transcodes">--</span>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">DB Pool</span>
+                                <span class="panel-mono" id="settings-db-pool">--</span>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Job Workers</span>
+                                <input type="number" id="settings-job-max-concurrent" class="panel-input" min="1" max="32" style="max-width:120px" onchange="saveSetting('job_max_concurrent', parseInt(this.value, 10))">
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Network Policy</div>
+                            <div class="panel-row">
+                                <span class="panel-label">Remote Sync</span>
+                                <select id="settings-remote-sync" class="panel-input" style="max-width:200px" onchange="saveSetting('remote_sync', this.value === 'true')" disabled>
+                                    <option value="" disabled selected>Loading...</option>
+                                    <option value="false">🔒 LAN Only (Strict)</option>
+                                    <option value="true">🌐 Allow External Peers</option>
+                                </select>
+                            </div>
+                            <div class="panel-row"><span class="panel-label">CORS Origin</span><span class="panel-mono" id="settings-cors" style="flex:1">--</span></div>
+                            <div class="panel-row">
+                                <span class="panel-label">Development CORS</span>
+                                <select id="settings-dev-mode-select" class="panel-input" style="max-width:200px" onchange="saveSetting('dev_mode', this.value === 'true')" disabled>
+                                    <option value="" disabled selected>Loading...</option>
+                                    <option value="false">Restricted (Production Security)</option>
+                                    <option value="true">Permissive (Development CORS)</option>
+                                </select>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Sync Node Name</span>
+                                <input type="text" id="settings-sync-name-input" class="panel-input" style="max-width:200px" onchange="saveSetting('sync_name', this.value.trim())">
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Add Peer</span>
+                                <div style="display:flex;gap:6px;flex-1">
+                                    <input type="text" id="settings-new-peer" class="panel-input" placeholder="http://192.168.1.50:9090">
+                                    <button class="btn btn-primary btn-sm" type="button" onclick="addSyncPeer()">Add Peer</button>
+                                </div>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Active Peers</span>
+                                <div id="settings-peers-list" style="flex:1;display:flex;flex-direction:column;gap:4px"></div>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Sync Mesh Peers & Connectivity</div>
+                            <div class="panel-row"><span class="panel-label">Configured Peers</span><span id="integ-sync-peers" class="panel-mono">--</span></div>
+                            <div class="panel-row"><span class="panel-label">Auto-Reconnect Max (s)</span><input type="number" id="settings-reconnect-delay-max" class="panel-input" min="5" max="3600" style="max-width:120px" onchange="saveSetting('reconnect_delay_max', parseInt(this.value, 10))"></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Server Health & Capabilities</div>
+                            <div class="panel-row"><span class="panel-label">Status</span><span id="diag-status" class="badge">Checking...</span></div>
+                            <div class="panel-row"><span class="panel-label">FFmpeg Audio Core</span><span id="diag-ffmpeg" class="panel-mono">--</span></div>
+                            <div class="panel-row"><span class="panel-label">Active Transcodes</span><span id="diag-transcodes" class="panel-mono">--</span></div>
+                            <div class="panel-row"><span class="panel-label">Database Pool</span><span id="diag-db-pool" class="panel-mono">--</span></div>
+                            <div class="panel-row"><span class="panel-label"></span><button class="btn btn-ghost btn-sm" onclick="loadDiagnostics()">Refresh Diagnostics</button></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Capability Flags</div>
+                            <div id="diag-caps-list" class="panel-mono" style="font-size:0.75rem;line-height:1.4">Loading capabilities...</div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header">Job Queue & Workers</div>
+                            <div class="panel-row"><span class="panel-label">Max Concurrency</span><span id="jobs-max-concurrent" class="panel-mono">--</span></div>
+                            <div class="panel-row"><span class="panel-label"></span><button class="btn btn-ghost btn-sm" onclick="loadJobs()">Refresh Jobs</button></div>
+                        </div>
+                        <div class="section">
+                            <div class="section-header"><h3>Active & Recent Jobs</h3></div>
+                            <div id="jobs-list" style="margin-top:8px">Loading jobs...</div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </section>

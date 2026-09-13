@@ -71,6 +71,7 @@ fn test_config_with_url(db_url: String) -> Config {
         opensubsonic_enabled: false,
         trust_proxy: false,
         trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
+        deployment_platform: "unknown".into(),
     }
 }
 
@@ -89,7 +90,7 @@ async fn make_raw_app() -> (axum::Router, SqlitePool, michi_api::AppState, Strin
     )
     .await
     .unwrap();
-    let token = state.auth_sessions.create_session(admin_id).await;
+    let token = state.auth_sessions.create_session(admin_id).await.unwrap();
 
     let router = create_router(state.clone());
     (router, pool, state, token)

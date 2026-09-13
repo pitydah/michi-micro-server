@@ -20,6 +20,7 @@ services:
       - MICHI_DATABASE=sqlite:///config/michi.db
       - MICHI_AUTH_USERNAME=${MICHI_AUTH_USERNAME:-admin}
       - MICHI_AUTH_PASSWORD=${MICHI_AUTH_PASSWORD:?A strong Michi administrator password is required}
+      - MICHI_DEPLOYMENT_PLATFORM=casaos
     restart: unless-stopped
     labels:
       icon: https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server.svg

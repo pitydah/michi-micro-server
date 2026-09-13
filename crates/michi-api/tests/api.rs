@@ -73,6 +73,7 @@ fn test_config_with_url(db_url: String) -> Config {
         opensubsonic_enabled: false,
         trust_proxy: false,
         trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
+        deployment_platform: "unknown".into(),
     }
 }
 
@@ -103,7 +104,7 @@ async fn router_with_test_admin(state: michi_api::AppState, pool: &SqlitePool) -
     )
     .await
     .unwrap();
-    let token = state.auth_sessions.create_session(admin_id).await;
+    let token = state.auth_sessions.create_session(admin_id).await.unwrap();
     create_router(state).layer(axum::middleware::from_fn_with_state(
         token,
         inject_test_authorization,
@@ -482,6 +483,7 @@ async fn make_streaming_app() -> (axum::Router, SqlitePool, tempfile::TempDir, U
         opensubsonic_enabled: false,
         trust_proxy: false,
         trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
+        deployment_platform: "unknown".into(),
     };
     let id = michi_core::track_id_from_library_path(&music_dir, &canonical_file);
     let track = Track {
@@ -710,6 +712,7 @@ async fn test_stream_file_not_on_disk() {
         opensubsonic_enabled: false,
         trust_proxy: false,
         trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
+        deployment_platform: "unknown".into(),
     };
 
     let id = track_id_from_path("/nonexistent/path/file.flac");
@@ -1475,6 +1478,7 @@ async fn test_full_pipeline_scan_and_stream() {
         opensubsonic_enabled: false,
         trust_proxy: false,
         trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
+        deployment_platform: "unknown".into(),
     };
     let state = michi_api::AppState::new(config, pool.clone(), None);
     let test_app = create_router(state);
@@ -1942,6 +1946,7 @@ async fn test_v1_stream_range_not_satisfiable() {
         opensubsonic_enabled: false,
         trust_proxy: false,
         trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
+        deployment_platform: "unknown".into(),
     };
     let state = michi_api::AppState::new(config, pool.clone(), None);
     let app = router_with_test_admin(state, &pool).await;
