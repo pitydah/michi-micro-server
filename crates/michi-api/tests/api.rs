@@ -104,7 +104,7 @@ async fn router_with_test_admin(state: michi_api::AppState, pool: &SqlitePool) -
     )
     .await
     .unwrap();
-    let token = state.auth_sessions.create_session(admin_id).await;
+    let token = state.auth_sessions.create_session(admin_id).await.unwrap();
     create_router(state).layer(axum::middleware::from_fn_with_state(
         token,
         inject_test_authorization,

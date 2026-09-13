@@ -1791,6 +1791,43 @@ pub async fn update_user_password_and_admin(
     Ok(())
 }
 
+pub async fn update_user_password_and_revoke_sessions(
+    pool: &SqlitePool,
+    id: &Uuid,
+    password_hash: &str,
+    is_admin: bool,
+) -> Result<(), DbError> {
+    let id_str = id.to_string();
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("UPDATE users SET password_hash = ?, is_admin = ? WHERE id = ?")
+        .bind(password_hash)
+        .bind(is_admin as i64)
+        .bind(&id_str)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query("DELETE FROM auth_sessions WHERE user_id = ?")
+        .bind(&id_str)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn delete_auth_sessions_for_user(
+    pool: &SqlitePool,
+    user_id: &Uuid,
+) -> Result<u64, DbError> {
+    let id_str = user_id.to_string();
+    let res = sqlx::query("DELETE FROM auth_sessions WHERE user_id = ?")
+        .bind(&id_str)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
 pub async fn create_auth_session(
     pool: &SqlitePool,
     token_hash: &str,
@@ -1822,12 +1859,22 @@ pub async fn get_auth_session(
         .fetch_optional(pool)
         .await?;
 
-    Ok(row.map(|r| {
-        let uid_str: &str = r.get("user_id");
-        let user_id = Uuid::parse_str(uid_str).unwrap_or(Uuid::nil());
-        let expires_at: &str = r.get("expires_at");
-        (user_id, expires_at.to_string())
-    }))
+    match row {
+        Some(r) => {
+            let uid_str: &str = r.get("user_id");
+            match Uuid::parse_str(uid_str) {
+                Ok(user_id) => {
+                    let expires_at: &str = r.get("expires_at");
+                    Ok(Some((user_id, expires_at.to_string())))
+                }
+                Err(err) => {
+                    tracing::warn!("corrupt user_id in auth_sessions for token_hash: {err}");
+                    Ok(None)
+                }
+            }
+        }
+        None => Ok(None),
+    }
 }
 
 pub async fn touch_auth_session(

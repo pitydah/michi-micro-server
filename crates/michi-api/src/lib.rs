@@ -983,19 +983,28 @@ pub async fn init_admin_user(config: &Config, db: &SqlitePool) -> Option<Uuid> {
                 } else {
                     password_hash
                 };
-                if let Err(e) =
+                if !password_matches {
+                    if let Err(e) = michi_db::update_user_password_and_revoke_sessions(
+                        db,
+                        &id,
+                        &target_hash,
+                        true,
+                    )
+                    .await
+                    {
+                        warn!("failed to reconcile admin credentials and revoke sessions in database: {e}");
+                        return None;
+                    }
+                    info!(
+                        "configured administrator credentials changed; existing sessions revoked"
+                    );
+                } else if let Err(e) =
                     michi_db::update_user_password_and_admin(db, &id, &target_hash, true).await
                 {
-                    warn!("failed to reconcile admin credentials in database: {e}");
+                    warn!("failed to promote administrator in database: {e}");
                     return None;
                 }
-                if !password_matches {
-                    info!(
-                        "reconciled and updated configured admin user password for '{}'",
-                        username
-                    );
-                }
-                if !is_admin {
+                if !is_admin && password_matches {
                     info!("promoted configured user '{}' to administrator", username);
                 }
             }

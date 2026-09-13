@@ -525,7 +525,8 @@
                             <div class="panel-header">Stream Configuration</div>
                             <div class="panel-row">
                                 <span class="panel-label">Profile</span>
-                                <select id="settings-stream-profile" class="panel-input" style="max-width:200px" onchange="saveSetting('stream_profile', this.value)">
+                                <select id="settings-stream-profile" class="panel-input" style="max-width:200px" onchange="saveSetting('stream_profile', this.value)" disabled>
+                                    <option value="" disabled selected>Loading...</option>
                                     <option value="original">🎵 Original</option>
                                     <option value="lossless">💎 Lossless</option>
                                     <option value="opus96">🎧 Opus 96k</option>
@@ -536,7 +537,8 @@
                             </div>
                             <div class="panel-row">
                                 <span class="panel-label">Format Policy</span>
-                                <select id="settings-format-policy" class="panel-input" style="max-width:200px" onchange="saveSetting('format_policy', this.value)">
+                                <select id="settings-format-policy" class="panel-input" style="max-width:200px" onchange="saveSetting('format_policy', this.value)" disabled>
+                                    <option value="" disabled selected>Loading...</option>
                                     <option value="lossless">💎 Lossless (max FLAC/WAV)</option>
                                     <option value="standard">📦 Standard only</option>
                                     <option value="direct">🔗 Direct play only</option>
@@ -544,7 +546,8 @@
                             </div>
                             <div class="panel-row">
                                 <span class="panel-label">Remote Bitrate Ceiling</span>
-                                <select id="settings-max-remote-bitrate" class="panel-input" style="max-width:200px" onchange="saveSetting('max_remote_bitrate', parseInt(this.value, 10))">
+                                <select id="settings-max-remote-bitrate" class="panel-input" style="max-width:200px" onchange="saveSetting('max_remote_bitrate', parseInt(this.value, 10))" disabled>
+                                    <option value="" disabled selected>Loading...</option>
                                     <option value="64000">64 kbps (Mobile Saver)</option>
                                     <option value="96000">96 kbps (Eco Opus)</option>
                                     <option value="128000">128 kbps (Standard)</option>
@@ -598,7 +601,8 @@
                             <div class="panel-header">Audio Scrobbling</div>
                             <div class="panel-row">
                                 <span class="panel-label">Scrobbling</span>
-                                <select id="settings-scrobble-toggle" class="panel-input" style="max-width:200px" onchange="saveSetting('scrobble_enabled', this.value === 'true')">
+                                <select id="settings-scrobble-toggle" class="panel-input" style="max-width:200px" onchange="saveSetting('scrobble_enabled', this.value === 'true')" disabled>
+                                    <option value="" disabled selected>Loading...</option>
                                     <option value="false">Disabled</option>
                                     <option value="true">Enabled</option>
                                 </select>
@@ -702,7 +706,8 @@
                             <div class="panel-header">Automatic Backup Scheduler</div>
                             <div class="panel-row">
                                 <span class="panel-label">Auto Backup</span>
-                                <select id="settings-auto-backup" class="panel-input" style="max-width:200px" onchange="saveSetting('auto_backup_enabled', this.value === 'true')">
+                                <select id="settings-auto-backup" class="panel-input" style="max-width:200px" onchange="saveSetting('auto_backup_enabled', this.value === 'true')" disabled>
+                                    <option value="" disabled selected>Loading...</option>
                                     <option value="false">Disabled</option>
                                     <option value="true">Enabled (Automatic)</option>
                                 </select>
@@ -739,7 +744,8 @@
                             <div class="panel-header">Resource Profile & Concurrency</div>
                             <div class="panel-row">
                                 <span class="panel-label">Profile</span>
-                                <select id="settings-resource-profile" class="panel-input" style="max-width:200px" onchange="saveSetting('resource_profile', this.value)">
+                                <select id="settings-resource-profile" class="panel-input" style="max-width:200px" onchange="saveSetting('resource_profile', this.value)" disabled>
+                                    <option value="" disabled selected>Loading...</option>
                                     <option value="eco">🌱 Eco</option>
                                     <option value="balanced">⚖️ Balanced</option>
                                     <option value="performance">🚀 Performance</option>
@@ -766,7 +772,8 @@
                             <div class="panel-header">Network Policy</div>
                             <div class="panel-row">
                                 <span class="panel-label">Remote Sync</span>
-                                <select id="settings-remote-sync" class="panel-input" style="max-width:200px" onchange="saveSetting('remote_sync', this.value === 'true')">
+                                <select id="settings-remote-sync" class="panel-input" style="max-width:200px" onchange="saveSetting('remote_sync', this.value === 'true')" disabled>
+                                    <option value="" disabled selected>Loading...</option>
                                     <option value="false">🔒 LAN Only (Strict)</option>
                                     <option value="true">🌐 Allow External Peers</option>
                                 </select>
@@ -774,7 +781,8 @@
                             <div class="panel-row"><span class="panel-label">CORS Origin</span><span class="panel-mono" id="settings-cors" style="flex:1">--</span></div>
                             <div class="panel-row">
                                 <span class="panel-label">Development CORS</span>
-                                <select id="settings-dev-mode-select" class="panel-input" style="max-width:200px" onchange="saveSetting('dev_mode', this.value === 'true')">
+                                <select id="settings-dev-mode-select" class="panel-input" style="max-width:200px" onchange="saveSetting('dev_mode', this.value === 'true')" disabled>
+                                    <option value="" disabled selected>Loading...</option>
                                     <option value="false">Restricted (Production Security)</option>
                                     <option value="true">Permissive (Development CORS)</option>
                                 </select>

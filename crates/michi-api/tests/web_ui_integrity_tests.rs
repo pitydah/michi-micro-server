@@ -90,7 +90,7 @@ async fn make_raw_app() -> (axum::Router, SqlitePool, michi_api::AppState, Strin
     )
     .await
     .unwrap();
-    let token = state.auth_sessions.create_session(admin_id).await;
+    let token = state.auth_sessions.create_session(admin_id).await.unwrap();
 
     let router = create_router(state.clone());
     (router, pool, state, token)

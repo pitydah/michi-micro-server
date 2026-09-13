@@ -1075,6 +1075,21 @@ jobs:
         run: python3 scripts/check_version_consistency.py
       - name: Verify Product Truth Synchronization
         run: python3 scripts/generate_product_truth.py --check
+      - name: Verify Release Manifest Tooling
+        run: |
+          python3 scripts/verify_release_manifest.py \
+            --generate \
+            --tag "v1.0.0-rc.2" \
+            --commit "${{ github.sha }}" \
+            --image "ghcr.io/${{ github.repository }}:1.0.0-rc.2" \
+            --manifest target/test-release-manifest.json
+          python3 scripts/verify_release_manifest.py \
+            --verify \
+            --tag "v1.0.0-rc.2" \
+            --commit "${{ github.sha }}" \
+            --image "ghcr.io/${{ github.repository }}:1.0.0-rc.2" \
+            --manifest target/test-release-manifest.json
+          rm -f target/test-release-manifest.json
       - name: Download release evidence
         uses: actions/download-artifact@v4
         with:
@@ -1180,6 +1195,16 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: Generate and Validate Release Manifest
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY}:${VERSION}"
+          python3 scripts/verify_release_manifest.py \
+            --generate \
+            --tag "${GITHUB_REF_NAME}" \
+            --commit "${GITHUB_SHA}" \
+            --image "${IMAGE}" \
+            --manifest target/release-manifest.json
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -1188,4 +1213,6 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           draft: false
+          files: |
+            target/release-manifest.json
 

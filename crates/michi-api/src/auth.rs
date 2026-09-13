@@ -19,6 +19,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
+use base64::Engine;
 
 const SESSION_DURATION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
@@ -155,8 +156,10 @@ impl AuthState {
         }
     }
 
-    pub async fn create_session(&self, user_id: Uuid) -> String {
-        let token = uuid::Uuid::new_v4().to_string();
+    pub async fn create_session(&self, user_id: Uuid) -> Result<String, String> {
+        let mut random_bytes = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut random_bytes);
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes);
         let token_hash = hash_token(&token);
         let now = chrono::Utc::now();
         let expires_at_dt = now
@@ -166,12 +169,9 @@ impl AuthState {
         let expires_at = expires_at_dt.to_rfc3339();
 
         if let Some(ref db) = self.db {
-            if let Err(e) =
-                michi_db::create_auth_session(db, &token_hash, &user_id, &created_at, &expires_at)
-                    .await
-            {
-                tracing::warn!("failed to persist session to database: {e}");
-            }
+            michi_db::create_auth_session(db, &token_hash, &user_id, &created_at, &expires_at)
+                .await
+                .map_err(|e| format!("failed to persist session to database: {e}"))?;
         }
 
         let mut sessions = self.sessions.write().await;
@@ -182,7 +182,7 @@ impl AuthState {
                 user_id,
             },
         );
-        token
+        Ok(token)
     }
 
     pub async fn validate(&self, token: &str) -> bool {
@@ -191,12 +191,35 @@ impl AuthState {
 
     pub async fn extract_user_id(&self, token: &str) -> Option<Uuid> {
         // 1. Check in-memory session cache first
-        {
+        let cached_user_id = {
             let sessions = self.sessions.read().await;
             if let Some(data) = sessions.get(token) {
                 if data.expiry > std::time::Instant::now() {
-                    return Some(data.user_id);
+                    Some(data.user_id)
+                } else {
+                    None
                 }
+            } else {
+                None
+            }
+        };
+
+        if let Some(user_id) = cached_user_id {
+            // Verify user still exists in database if DB is configured
+            if let Some(ref db) = self.db {
+                if let Ok(Some(_)) = michi_db::get_user_by_id(db, &user_id).await {
+                    return Some(user_id);
+                } else {
+                    // Orphaned session whose user no longer exists - invalidate immediately
+                    let token_clone = token.to_string();
+                    let auth_clone = self.clone();
+                    tokio::spawn(async move {
+                        auth_clone.invalidate(&token_clone).await;
+                    });
+                    return None;
+                }
+            } else {
+                return Some(user_id);
             }
         }
 
@@ -209,26 +232,38 @@ impl AuthState {
                 if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(&expires_at_str) {
                     let now = chrono::Utc::now();
                     if exp > now {
-                        let remaining = exp
-                            .signed_duration_since(now)
-                            .to_std()
-                            .unwrap_or(std::time::Duration::from_secs(60));
-                        let now_str = now.to_rfc3339();
-                        let db_clone = db.clone();
-                        let th = token_hash.clone();
-                        tokio::spawn(async move {
-                            let _ = michi_db::touch_auth_session(&db_clone, &th, &now_str).await;
-                        });
+                        // Check if user still exists in database
+                        if let Ok(Some(_)) = michi_db::get_user_by_id(db, &user_id).await {
+                            let remaining = exp
+                                .signed_duration_since(now)
+                                .to_std()
+                                .unwrap_or(std::time::Duration::from_secs(60));
+                            let now_str = now.to_rfc3339();
+                            let db_clone = db.clone();
+                            let th = token_hash.clone();
+                            tokio::spawn(async move {
+                                let _ =
+                                    michi_db::touch_auth_session(&db_clone, &th, &now_str).await;
+                            });
 
-                        let mut sessions = self.sessions.write().await;
-                        sessions.insert(
-                            token.to_string(),
-                            SessionData {
-                                expiry: std::time::Instant::now() + remaining,
-                                user_id,
-                            },
-                        );
-                        return Some(user_id);
+                            let mut sessions = self.sessions.write().await;
+                            sessions.insert(
+                                token.to_string(),
+                                SessionData {
+                                    expiry: std::time::Instant::now() + remaining,
+                                    user_id,
+                                },
+                            );
+                            return Some(user_id);
+                        } else {
+                            // User deleted, remove orphaned session record
+                            let db_clone = db.clone();
+                            let th = token_hash.clone();
+                            tokio::spawn(async move {
+                                let _ = michi_db::delete_auth_session(&db_clone, &th).await;
+                            });
+                            return None;
+                        }
                     }
                 }
             }
@@ -245,6 +280,16 @@ impl AuthState {
         if let Some(ref db) = self.db {
             let token_hash = hash_token(token);
             let _ = michi_db::delete_auth_session(db, &token_hash).await;
+        }
+    }
+
+    pub async fn invalidate_user_sessions(&self, user_id: &Uuid) {
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.retain(|_, data| data.user_id != *user_id);
+        }
+        if let Some(ref db) = self.db {
+            let _ = michi_db::delete_auth_sessions_for_user(db, user_id).await;
         }
     }
 
@@ -516,7 +561,13 @@ pub(crate) async fn login_handler(
         ));
     }
 
-    let token = state.auth_sessions.create_session(id).await;
+    let token = state.auth_sessions.create_session(id).await.map_err(|e| {
+        tracing::error!("failed to create persistent session: {e}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"status": "error", "message": "failed to initialize session"})),
+        )
+    })?;
     let secure = is_secure_request(connect_info, &headers, &state.config);
     let cookie_val = make_session_cookie(&token, 86400, secure);
 
@@ -641,7 +692,17 @@ pub(crate) async fn register_handler(
             )
         })?;
 
-    let token = state.auth_sessions.create_session(user_id).await;
+    let token = state
+        .auth_sessions
+        .create_session(user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("failed to create persistent session on register: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"status": "error", "message": "failed to initialize session"})),
+            )
+        })?;
     let secure = is_secure_request(connect_info, &headers, &state.config);
     let cookie_val = make_session_cookie(&token, 86400, secure);
 
@@ -726,7 +787,8 @@ pub(crate) async fn check_handler(
                 {
                     (true, Some(id), Some(uname), Some(admin))
                 } else {
-                    (true, None, None, None)
+                    state.auth_sessions.invalidate(&t).await;
+                    (false, None, None, None)
                 }
             } else {
                 (false, None, None, None)

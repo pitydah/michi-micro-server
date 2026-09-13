@@ -171,5 +171,12 @@
   "queue_empty": "Queue empty",
   "now_playing": "Now Playing",
   "keyboard.play_pause": "Space",
-  "keyboard.search": "Ctrl+K"
+  "keyboard.search": "Ctrl+K",
+  "auth.signin_required": "Sign in required to perform this action.",
+  "settings.unable_load": "Unable to load settings from server",
+  "settings.managed_by_env": "Controlled by environment variable",
+  "update.stale_cache": "Stale cache (upstream unreachable)",
+  "update.check_failed": "Check failed: upstream unavailable",
+  "update.up_to_date": "Up to date",
+  "update.available": "Update Available"
 }
