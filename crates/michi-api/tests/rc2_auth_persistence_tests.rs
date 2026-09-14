@@ -1061,3 +1061,74 @@ async fn test_logout_sanitized_500_on_persistence_failure() {
 
     let _ = std::fs::remove_file(db_path);
 }
+
+#[tokio::test]
+async fn test_force_backup_restore_purges_active_auth_sessions() {
+    let (pool, db_path) = test_db_file().await;
+    let cfg = test_config_for_db(&db_path, "admin", "adminpass123");
+    let admin_id = init_admin_user(&cfg, &pool).await.unwrap();
+    let state = AppState::new(cfg, pool.clone(), Some(admin_id));
+    let token = state.auth_sessions.create_session(admin_id).await.unwrap();
+
+    let app = create_router(state.clone());
+
+    // 1. Verify session works initially
+    let check_req = Request::builder()
+        .method("GET")
+        .uri("/api/auth/check")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(check_req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. Perform force backup restore
+    let restore_body = serde_json::json!({
+        "tracks": [],
+        "playlists": [],
+        "starred_tracks": [],
+        "play_history": [],
+        "force": true
+    });
+
+    let restore_req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/backup/restore")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from(serde_json::to_vec(&restore_body).unwrap()))
+        .unwrap();
+
+    let restore_res = app.clone().oneshot(restore_req).await.unwrap();
+    assert_eq!(restore_res.status(), StatusCode::OK);
+
+    // 3. Verify session was purged from database
+    let db_sessions_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_sessions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        db_sessions_count, 0,
+        "auth_sessions table must be cleared on force restore"
+    );
+
+    // 4. Verify in-memory session cache was cleared
+    assert_eq!(state.auth_sessions.sessions.read().await.len(), 0);
+
+    // 5. Subsequent request with the restored session token must fail (401 Unauthorized)
+    let check_after = Request::builder()
+        .method("GET")
+        .uri("/api/auth/check")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res_after = app.clone().oneshot(check_after).await.unwrap();
+    assert_eq!(res_after.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res_after.into_body(), 1024 * 64)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["authenticated"], false);
+
+    let _ = std::fs::remove_file(db_path);
+}

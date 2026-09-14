@@ -305,6 +305,23 @@ impl AuthState {
         Ok(())
     }
 
+    pub async fn clear_all_sessions(&self) -> Result<(), String> {
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.clear();
+        }
+        if let Some(ref db) = self.db {
+            sqlx::query("DELETE FROM auth_sessions")
+                .execute(db)
+                .await
+                .map_err(|e| {
+                    tracing::error!("failed to clear all auth sessions from database: {e}");
+                    format!("database deletion error: {e}")
+                })?;
+        }
+        Ok(())
+    }
+
     pub async fn cleanup(&self) {
         {
             let mut sessions = self.sessions.write().await;

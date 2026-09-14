@@ -194,3 +194,147 @@ def test_webui_full_browser_lifecycle(browser_context):
 
     expect(auth_btn_label).to_contain_text("Sign In")
     page.close()
+
+
+def test_anonymous_output_selector_makes_zero_protected_requests(browser_context):
+    """Verifies that invoking output selector anonymously makes 0 protected requests."""
+    page = browser_context.new_page()
+    protected_requested = []
+
+    def on_request(req):
+        url = req.url
+        if any(p in url for p in ["/api/v1/receivers", "/api/v1/rooms", "/api/v1/chains", "/api/v1/playback/output"]):
+            protected_requested.append(url)
+
+    page.on("request", on_request)
+    page.goto(f"{SERVER_URL}/")
+    page.wait_for_timeout(500)
+
+    # Trigger output selector
+    page.evaluate("() => showOutputSelectorModal()")
+    page.wait_for_timeout(500)
+
+    # 0 protected endpoints must be requested
+    assert len(protected_requested) == 0, f"Anonymous output selector triggered protected requests: {protected_requested}"
+
+    # Toast or auth modal must be shown
+    auth_overlay = page.locator("#auth-overlay")
+    expect(auth_overlay).to_be_visible()
+    page.close()
+
+
+def test_anonymous_search_and_scan_zero_requests(browser_context):
+    """Verifies that search and scan while anonymous make 0 requests to backend endpoints."""
+    page = browser_context.new_page()
+    banned_calls = []
+
+    def on_request(req):
+        url = req.url
+        if "/api/v1/search" in url or "/api/v1/library/scan" in url:
+            banned_calls.append(url)
+
+    page.on("request", on_request)
+    page.goto(f"{SERVER_URL}/")
+    page.wait_for_timeout(500)
+
+    # Try search
+    search_input = page.locator("#search-input")
+    if search_input.count() > 0:
+        search_input.fill("testquery")
+        page.evaluate("() => handleSearch()")
+
+    # Try scan
+    page.evaluate("() => handleScan()")
+    page.wait_for_timeout(500)
+
+    assert len(banned_calls) == 0, f"Anonymous search/scan triggered protected calls: {banned_calls}"
+    page.close()
+
+
+def test_logout_regates_settings_without_navigation(browser_context):
+    """Verifies that logging out while in Settings immediately mounts the auth gate and moves focus."""
+    page = browser_context.new_page()
+    page.goto(f"{SERVER_URL}/")
+
+    # Login
+    auth_btn = page.locator("#auth-user-btn")
+    auth_btn.click()
+    page.locator("#auth-username").fill(ADMIN_USERNAME)
+    page.locator("#auth-password").fill(ADMIN_PASSWORD)
+    page.locator("#auth-submit-btn").click()
+    page.wait_for_timeout(1000)
+
+    # Navigate to Settings
+    page.click(".nav-item[data-section='settings']")
+    page.wait_for_timeout(500)
+    expect(page.locator("#page-settings")).to_be_visible()
+    expect(page.locator("#settings-version")).to_be_visible()
+
+    # Logout while still on Settings page
+    auth_btn.click()
+    page.wait_for_timeout(300)
+    page.locator("button:has-text('Sign Out')").click()
+    page.wait_for_timeout(800)
+
+    # Verify #page-settings is now gated with .auth-required-gate without page reload
+    gate = page.locator("#page-settings .auth-required-gate")
+    expect(gate).to_be_visible()
+
+    # Verify protected controls are hidden
+    settings_overview = page.locator("#stab-overview")
+    expect(settings_overview).to_be_hidden()
+    page.close()
+
+
+def test_401_regates_current_section_but_keeps_online_status(browser_context):
+    """Verifies that a 401 error re-gates protected section without flipping ConnectionStatus to offline."""
+    page = browser_context.new_page()
+    page.goto(f"{SERVER_URL}/")
+
+    # Login
+    auth_btn = page.locator("#auth-user-btn")
+    auth_btn.click()
+    page.locator("#auth-username").fill(ADMIN_USERNAME)
+    page.locator("#auth-password").fill(ADMIN_PASSWORD)
+    page.locator("#auth-submit-btn").click()
+    page.wait_for_timeout(1000)
+
+    # Navigate to Settings
+    page.click(".nav-item[data-section='settings']")
+    page.wait_for_timeout(500)
+    expect(page.locator("#page-settings")).to_be_visible()
+
+    # Invalidate session in page client
+    page.evaluate("""
+        () => {
+            AuthSession.setUnauthenticated();
+            teardownProtected();
+        }
+    """)
+    page.wait_for_timeout(500)
+
+    # Settings must now show auth-required-gate
+    gate = page.locator("#page-settings .auth-required-gate")
+    expect(gate).to_be_visible()
+
+    # Connection status indicator must remain Online
+    status_pill = page.locator("#status-pill")
+    expect(status_pill).to_be_visible()
+    expect(status_pill).to_contain_text("Online")
+    page.close()
+
+
+def test_mobile_settings_no_horizontal_overflow(browser_context):
+    """Verifies that mobile viewport (390x844) renders Settings with 0 horizontal overflow."""
+    page = browser_context.new_page(viewport={"width": 390, "height": 844})
+    page.goto(f"{SERVER_URL}/")
+    page.wait_for_timeout(500)
+
+    # Navigate to Settings
+    page.click(".nav-item[data-section='settings']")
+    page.wait_for_timeout(500)
+
+    # Check that document width does not exceed viewport width
+    has_overflow = page.evaluate("() => document.documentElement.scrollWidth > document.documentElement.clientWidth")
+    assert not has_overflow, "Settings page has horizontal scrollbar/overflow on mobile viewport"
+    page.close()

@@ -1110,6 +1110,29 @@ async function runE2E() {
     }
   }
 
+  // ── Test K: Output Selector Zero-Request Perimeter ────────────
+  {
+    let outputCalls = [];
+    const trackingFetch = async (url, opts) => {
+      if (url.includes('/receivers') || url.includes('/rooms') || url.includes('/chains') || url.includes('/playback/output')) {
+        outputCalls.push(url);
+      }
+      return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+
+    const { sandbox, window, document } = makeSandbox({ fetchImpl: trackingFetch });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    // Initial state is anonymous
+    window.AuthSession.state = 'anonymous';
+    await window.showOutputSelectorModal();
+
+    assert(outputCalls.length === 0, 'PERIMETER: Anonymous showOutputSelectorModal must not issue protected network requests');
+    const authOverlay = document.getElementById('auth-overlay');
+    assert(authOverlay && !authOverlay.classList.contains('hidden'), 'PERIMETER: Anonymous showOutputSelectorModal opens auth modal');
+  }
+
   console.log('======================================================================');
   console.log(`BROWSER E2E GATE: ${passed} passed, ${failed} failed`);
   console.log('======================================================================');

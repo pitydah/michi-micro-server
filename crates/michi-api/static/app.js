@@ -1491,13 +1491,16 @@ function updateOutputRoutingBadge() {
 }
 
 async function showOutputSelectorModal() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   closeOutputSelectorModal();
   try {
     var [recResp, groupResp, chainResp, curOut] = await Promise.all([
-      MichiAPI.getReceivers().catch(function() { return { receivers: [] }; }),
-      MichiAPI.getRoomGroups().catch(function() { return { groups: [] }; }),
-      MichiAPI.getChains().catch(function() { return { chains: [] }; }),
-      MichiAPI.getPlaybackOutput().catch(function() { return { output: null }; }),
+      MichiAPI.getReceivers(),
+      MichiAPI.getRoomGroups(),
+      MichiAPI.getChains(),
+      MichiAPI.getPlaybackOutput(),
     ]);
 
     var receivers = recResp.receivers || [];
@@ -4377,3 +4380,6 @@ window.switchSettingsTab = switchSettingsTab;
 window.checkUpdateStatus = checkUpdateStatus;
 window.checkForUpdates = checkForUpdates;
 window.renderUpdateStatus = renderUpdateStatus;
+window.showOutputSelectorModal = showOutputSelectorModal;
+window.toggleOutputTarget = toggleOutputTarget;
+window.closeOutputSelectorModal = closeOutputSelectorModal;
