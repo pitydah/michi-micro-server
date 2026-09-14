@@ -326,7 +326,8 @@ def test_401_regates_current_section_but_keeps_online_status(browser_context):
 
 def test_mobile_settings_no_horizontal_overflow(browser_context):
     """Verifies that mobile viewport (390x844) renders Settings with 0 horizontal overflow."""
-    page = browser_context.new_page(viewport={"width": 390, "height": 844})
+    page = browser_context.new_page()
+    page.set_viewport_size({"width": 390, "height": 844})
     page.goto(f"{SERVER_URL}/")
     page.wait_for_timeout(500)
 
