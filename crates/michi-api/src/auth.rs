@@ -273,10 +273,6 @@ impl AuthState {
     }
 
     pub async fn invalidate(&self, token: &str) -> Result<(), String> {
-        {
-            let mut sessions = self.sessions.write().await;
-            sessions.remove(token);
-        }
         if let Some(ref db) = self.db {
             let token_hash = hash_token(token);
             michi_db::delete_auth_session(db, &token_hash)
@@ -286,14 +282,14 @@ impl AuthState {
                     format!("database deletion error: {e}")
                 })?;
         }
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.remove(token);
+        }
         Ok(())
     }
 
     pub async fn invalidate_user_sessions(&self, user_id: &Uuid) -> Result<(), String> {
-        {
-            let mut sessions = self.sessions.write().await;
-            sessions.retain(|_, data| data.user_id != *user_id);
-        }
         if let Some(ref db) = self.db {
             michi_db::delete_auth_sessions_for_user(db, user_id)
                 .await
@@ -302,14 +298,14 @@ impl AuthState {
                     format!("database deletion error: {e}")
                 })?;
         }
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.retain(|_, data| data.user_id != *user_id);
+        }
         Ok(())
     }
 
     pub async fn clear_all_sessions(&self) -> Result<(), String> {
-        {
-            let mut sessions = self.sessions.write().await;
-            sessions.clear();
-        }
         if let Some(ref db) = self.db {
             sqlx::query("DELETE FROM auth_sessions")
                 .execute(db)
@@ -318,6 +314,10 @@ impl AuthState {
                     tracing::error!("failed to clear all auth sessions from database: {e}");
                     format!("database deletion error: {e}")
                 })?;
+        }
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.clear();
         }
         Ok(())
     }
@@ -487,17 +487,14 @@ pub(crate) struct AuthStatusResponse {
     registration_allowed: bool,
 }
 
-pub(crate) fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
+pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
     let salt = SaltString::generate(&mut OsRng);
     Ok(Argon2::default()
         .hash_password(password.as_bytes(), &salt)?
         .to_string())
 }
 
-pub(crate) fn verify_password(
-    password: &str,
-    hash: &str,
-) -> Result<bool, argon2::password_hash::Error> {
+pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::password_hash::Error> {
     let parsed = PasswordHash::new(hash)?;
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed)

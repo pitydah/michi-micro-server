@@ -14,7 +14,8 @@
         "path": "/api/auth/login"
       },
       "effect": "Session token created, AuthSession updated to authenticated, UI reflects account status",
-      "test": "WEBUI-ACT-AUTH-001"
+      "test": "WEBUI-ACT-AUTH-001",
+      "auth": "public"
     },
     {
       "id": "auth.register",
@@ -27,7 +28,8 @@
         "path": "/api/auth/register"
       },
       "effect": "User registered, session created and UI enters authenticated state",
-      "test": "WEBUI-ACT-AUTH-002"
+      "test": "WEBUI-ACT-AUTH-002",
+      "auth": "public"
     },
     {
       "id": "auth.logout",
@@ -40,7 +42,8 @@
         "path": "/api/auth/logout"
       },
       "effect": "Session invalidated, AuthSession becomes anonymous, UI resets user state",
-      "test": "WEBUI-ACT-AUTH-003"
+      "test": "WEBUI-ACT-AUTH-003",
+      "auth": "public"
     },
     {
       "id": "navigation.section",
@@ -49,7 +52,8 @@
       "frontend_handler": "showSection",
       "authority": "local",
       "effect": "Active view switches in DOM, nav button highlights, corresponding data loads",
-      "test": "WEBUI-ACT-NAV-001"
+      "test": "WEBUI-ACT-NAV-001",
+      "auth": "local_only"
     },
     {
       "id": "navigation.toggle",
@@ -58,7 +62,8 @@
       "frontend_handler": "toggleNavigation",
       "authority": "local",
       "effect": "Sidebar drawer opens or closes with aria-expanded updated",
-      "test": "WEBUI-ACT-NAV-002"
+      "test": "WEBUI-ACT-NAV-002",
+      "auth": "local_only"
     },
     {
       "id": "navigation.theme",
@@ -67,7 +72,8 @@
       "frontend_handler": "toggleTheme",
       "authority": "local",
       "effect": "Document element data-theme toggles between light and dark, persisted to localStorage",
-      "test": "WEBUI-ACT-NAV-003"
+      "test": "WEBUI-ACT-NAV-003",
+      "auth": "local_only"
     },
     {
       "id": "library.scan",
@@ -80,7 +86,8 @@
         "path": "/api/v1/library/scan"
       },
       "effect": "Library scan job created, scan status renders scanning indicator",
-      "test": "WEBUI-ACT-LIB-001"
+      "test": "WEBUI-ACT-LIB-001",
+      "auth": "protected"
     },
     {
       "id": "library.search",
@@ -93,7 +100,8 @@
         "path": "/api/v1/search"
       },
       "effect": "Filtered tracks matching query are fetched and rendered in catalog table",
-      "test": "WEBUI-ACT-LIB-002"
+      "test": "WEBUI-ACT-LIB-002",
+      "auth": "protected"
     },
     {
       "id": "library.play",
@@ -102,7 +110,8 @@
       "frontend_handler": "playTrack",
       "authority": "active_target",
       "effect": "Plays track on currently selected output authority (Browser or Server)",
-      "test": "WEBUI-ACT-PB-001"
+      "test": "WEBUI-ACT-PB-001",
+      "auth": "protected"
     },
     {
       "id": "library.add_to_queue",
@@ -111,7 +120,8 @@
       "frontend_handler": "addToQueue",
       "authority": "active_target",
       "effect": "Appends track to the active playback authority queue without mutating other authorities",
-      "test": "WEBUI-ACT-PB-002"
+      "test": "WEBUI-ACT-PB-002",
+      "auth": "protected"
     },
     {
       "id": "library.star",
@@ -124,7 +134,8 @@
         "path": "/api/v1/star/:id"
       },
       "effect": "Track star state toggled in database, star icon updates visually",
-      "test": "WEBUI-ACT-LIB-003"
+      "test": "WEBUI-ACT-LIB-003",
+      "auth": "protected"
     },
     {
       "id": "library.rate",
@@ -137,7 +148,8 @@
         "path": "/api/v1/rate/:id"
       },
       "effect": "Track rating 0-5 saved to database and rendered in detail modal",
-      "test": "WEBUI-ACT-LIB-004"
+      "test": "WEBUI-ACT-LIB-004",
+      "auth": "protected"
     },
     {
       "id": "playback.play_pause",
@@ -146,7 +158,8 @@
       "frontend_handler": "playPause",
       "authority": "active_target",
       "effect": "Toggles play/pause on currently active output authority",
-      "test": "WEBUI-ACT-PB-003"
+      "test": "WEBUI-ACT-PB-003",
+      "auth": "local_only"
     },
     {
       "id": "playback.shuffle",
@@ -155,7 +168,8 @@
       "frontend_handler": "toggleShuffle",
       "authority": "active_target",
       "effect": "Toggles shuffle mode on active authority; reorders remaining playback items",
-      "test": "WEBUI-ACT-PB-004"
+      "test": "WEBUI-ACT-PB-004",
+      "auth": "local_only"
     },
     {
       "id": "playback.repeat",
@@ -164,7 +178,8 @@
       "frontend_handler": "toggleRepeat",
       "authority": "active_target",
       "effect": "Cycles repeat mode off->all->one->off on active authority and updates ended behavior",
-      "test": "WEBUI-ACT-PB-005"
+      "test": "WEBUI-ACT-PB-005",
+      "auth": "local_only"
     },
     {
       "id": "playback.jump_queue",
@@ -173,7 +188,8 @@
       "frontend_handler": "jumpToQueueItem",
       "authority": "active_target",
       "effect": "Jumps active playback to selected queue index on current authority",
-      "test": "WEBUI-ACT-PB-006"
+      "test": "WEBUI-ACT-PB-006",
+      "auth": "local_only"
     },
     {
       "id": "playback.output_target",
@@ -182,7 +198,8 @@
       "frontend_handler": "toggleOutputTarget",
       "authority": "local",
       "effect": "Opens output routing modal or switches routing target",
-      "test": "WEBUI-ACT-PB-007"
+      "test": "WEBUI-ACT-PB-007",
+      "auth": "local_only"
     },
     {
       "id": "playback.handoff",
@@ -195,7 +212,8 @@
         "path": "/api/v1/playback/handoff"
       },
       "effect": "Transfers selected track ID, position in ms, and playing state to server playback engine",
-      "test": "WEBUI-ACT-PB-008"
+      "test": "WEBUI-ACT-PB-008",
+      "auth": "protected"
     },
     {
       "id": "playlists.create",
@@ -208,7 +226,8 @@
         "path": "/api/v1/playlists"
       },
       "effect": "Creates new playlist in database and renders it in playlist list",
-      "test": "WEBUI-ACT-PL-001"
+      "test": "WEBUI-ACT-PL-001",
+      "auth": "protected"
     },
     {
       "id": "playlists.update",
@@ -221,7 +240,8 @@
         "path": "/api/v1/playlists/:id"
       },
       "effect": "Updates playlist metadata or track ordering in database",
-      "test": "WEBUI-ACT-PL-002"
+      "test": "WEBUI-ACT-PL-002",
+      "auth": "protected"
     },
     {
       "id": "playlists.delete",
@@ -234,7 +254,8 @@
         "path": "/api/v1/playlists/:id"
       },
       "effect": "Deletes playlist from database and removes it from DOM",
-      "test": "WEBUI-ACT-PL-003"
+      "test": "WEBUI-ACT-PL-003",
+      "auth": "protected"
     },
     {
       "id": "playlists.smart_create",
@@ -247,7 +268,8 @@
         "path": "/api/v1/playlists/smart"
       },
       "effect": "Evaluates smart playlist rules (e.g. favorites, most_played) and creates playlist",
-      "test": "WEBUI-ACT-PL-004"
+      "test": "WEBUI-ACT-PL-004",
+      "auth": "protected"
     },
     {
       "id": "playlists.export",
@@ -260,7 +282,8 @@
         "path": "/api/v1/playlists/:id/export/m3u"
       },
       "effect": "Downloads M3U formatted playlist file",
-      "test": "WEBUI-ACT-PL-005"
+      "test": "WEBUI-ACT-PL-005",
+      "auth": "protected"
     },
     {
       "id": "broadcast.source_add",
@@ -273,7 +296,8 @@
         "path": "/api/v1/sources"
       },
       "effect": "Adds audio broadcast or podcast feed source to database",
-      "test": "WEBUI-ACT-BC-001"
+      "test": "WEBUI-ACT-BC-001",
+      "auth": "protected"
     },
     {
       "id": "broadcast.source_delete",
@@ -286,7 +310,8 @@
         "path": "/api/v1/sources/:id"
       },
       "effect": "Deletes broadcast source and episodes from database",
-      "test": "WEBUI-ACT-BC-002"
+      "test": "WEBUI-ACT-BC-002",
+      "auth": "protected"
     },
     {
       "id": "broadcast.play_source",
@@ -295,7 +320,8 @@
       "frontend_handler": "playSource",
       "authority": "browser",
       "effect": "Streams broadcast source directly in local browser audio player",
-      "test": "WEBUI-ACT-BC-003"
+      "test": "WEBUI-ACT-BC-003",
+      "auth": "public"
     },
     {
       "id": "broadcast.play_episode",
@@ -304,7 +330,8 @@
       "frontend_handler": "playEpisode",
       "authority": "browser",
       "effect": "Loads podcast episode, restores saved position_ms and begins streaming",
-      "test": "WEBUI-ACT-BC-004"
+      "test": "WEBUI-ACT-BC-004",
+      "auth": "public"
     },
     {
       "id": "broadcast.episode_progress",
@@ -317,7 +344,8 @@
         "path": "/api/v1/sources/episodes/:id"
       },
       "effect": "Persists episode position_ms and played flag into database without silencing errors",
-      "test": "WEBUI-ACT-BC-005"
+      "test": "WEBUI-ACT-BC-005",
+      "auth": "protected"
     },
     {
       "id": "michilink.qr_generate",
@@ -330,7 +358,8 @@
         "path": "/api/v1/pair/qr"
       },
       "effect": "Generates QR claim code and renders SVG QR image",
-      "test": "WEBUI-ACT-ML-001"
+      "test": "WEBUI-ACT-ML-001",
+      "auth": "protected"
     },
     {
       "id": "michilink.self_test",
@@ -343,7 +372,8 @@
         "path": "/api/v1/link/self-test"
       },
       "effect": "Executes non-mutating self-test across subsystems and displays detailed check statuses",
-      "test": "WEBUI-ACT-ML-002"
+      "test": "WEBUI-ACT-ML-002",
+      "auth": "protected"
     },
     {
       "id": "michilink.device_revoke",
@@ -356,7 +386,8 @@
         "path": "/api/v1/devices/revoke"
       },
       "effect": "Revokes paired device certificate/token and removes it from active devices list",
-      "test": "WEBUI-ACT-ML-003"
+      "test": "WEBUI-ACT-ML-003",
+      "auth": "protected"
     },
     {
       "id": "receivers.discover",
@@ -369,7 +400,8 @@
         "path": "/api/v1/devices/discover"
       },
       "effect": "Triggers mDNS discovery, reads 'receivers' field from response and renders discovered units",
-      "test": "WEBUI-ACT-RX-001"
+      "test": "WEBUI-ACT-RX-001",
+      "auth": "protected"
     },
     {
       "id": "receivers.pair_start",
@@ -382,7 +414,8 @@
         "path": "/api/v1/receivers/pair/start"
       },
       "effect": "Starts pairing exchange with selected receiver and prompts for PIN confirmation",
-      "test": "WEBUI-ACT-RX-002"
+      "test": "WEBUI-ACT-RX-002",
+      "auth": "protected"
     },
     {
       "id": "receivers.pair_confirm",
@@ -395,7 +428,8 @@
         "path": "/api/v1/receivers/pair/confirm"
       },
       "effect": "Validates PIN, establishes secure shared credentials, and registers receiver",
-      "test": "WEBUI-ACT-RX-003"
+      "test": "WEBUI-ACT-RX-003",
+      "auth": "protected"
     },
     {
       "id": "rooms.create",
@@ -408,7 +442,8 @@
         "path": "/api/v1/rooms/groups"
       },
       "effect": "Creates multi-room audio group associating multiple receivers",
-      "test": "WEBUI-ACT-RM-001"
+      "test": "WEBUI-ACT-RM-001",
+      "auth": "protected"
     },
     {
       "id": "rooms.activate",
@@ -421,7 +456,8 @@
         "path": "/api/v1/rooms/groups/:id/activate"
       },
       "effect": "Activates synchronized stream dispatch to members of the room group",
-      "test": "WEBUI-ACT-RM-002"
+      "test": "WEBUI-ACT-RM-002",
+      "auth": "protected"
     },
     {
       "id": "rooms.deactivate",
@@ -434,7 +470,8 @@
         "path": "/api/v1/rooms/groups/:id/deactivate"
       },
       "effect": "Deactivates room group streaming",
-      "test": "WEBUI-ACT-RM-003"
+      "test": "WEBUI-ACT-RM-003",
+      "auth": "protected"
     },
     {
       "id": "rooms.delete",
@@ -447,7 +484,8 @@
         "path": "/api/v1/rooms/groups/:id"
       },
       "effect": "Removes room group definition from database",
-      "test": "WEBUI-ACT-RM-004"
+      "test": "WEBUI-ACT-RM-004",
+      "auth": "protected"
     },
     {
       "id": "chains.create",
@@ -460,7 +498,8 @@
         "path": "/api/v1/chains"
       },
       "effect": "Initializes audio processing chain and persists to database",
-      "test": "WEBUI-ACT-CH-001"
+      "test": "WEBUI-ACT-CH-001",
+      "auth": "protected"
     },
     {
       "id": "chains.set_track",
@@ -473,7 +512,8 @@
         "path": "/api/v1/chains/:id"
       },
       "effect": "Associates track with chain",
-      "test": "WEBUI-ACT-CH-002"
+      "test": "WEBUI-ACT-CH-002",
+      "auth": "protected"
     },
     {
       "id": "chains.add_link",
@@ -486,7 +526,8 @@
         "path": "/api/v1/chains/:id/links"
       },
       "effect": "Appends filter/sink node to processing chain",
-      "test": "WEBUI-ACT-CH-003"
+      "test": "WEBUI-ACT-CH-003",
+      "auth": "protected"
     },
     {
       "id": "chains.remove_link",
@@ -499,7 +540,8 @@
         "path": "/api/v1/chains/:chain_id/links/:link_id"
       },
       "effect": "Removes node from chain pipeline",
-      "test": "WEBUI-ACT-CH-004"
+      "test": "WEBUI-ACT-CH-004",
+      "auth": "protected"
     },
     {
       "id": "chains.play",
@@ -512,7 +554,8 @@
         "path": "/api/v1/chains/:id/play"
       },
       "effect": "Starts audio streaming through chain topology",
-      "test": "WEBUI-ACT-CH-005"
+      "test": "WEBUI-ACT-CH-005",
+      "auth": "protected"
     },
     {
       "id": "chains.stop",
@@ -525,7 +568,8 @@
         "path": "/api/v1/chains/:id/stop"
       },
       "effect": "Stops stream flow on chain",
-      "test": "WEBUI-ACT-CH-006"
+      "test": "WEBUI-ACT-CH-006",
+      "auth": "protected"
     },
     {
       "id": "chains.volume",
@@ -538,7 +582,8 @@
         "path": "/api/v1/chains/:id/volume"
       },
       "effect": "Adjusts output gain on chain sink",
-      "test": "WEBUI-ACT-CH-007"
+      "test": "WEBUI-ACT-CH-007",
+      "auth": "protected"
     },
     {
       "id": "sync.file_upload",
@@ -551,7 +596,8 @@
         "path": "/api/v1/sync/upload/init"
       },
       "effect": "Uploads track binary in chunked verifiable pipeline",
-      "test": "WEBUI-ACT-SY-001"
+      "test": "WEBUI-ACT-SY-001",
+      "auth": "protected"
     },
     {
       "id": "sync.playlist_sync",
@@ -564,7 +610,8 @@
         "path": "/api/v1/playlists"
       },
       "effect": "Reconciles playlist tracks across sync peers and reports partial or complete status",
-      "test": "WEBUI-ACT-SY-002"
+      "test": "WEBUI-ACT-SY-002",
+      "auth": "protected"
     },
     {
       "id": "sync.peer_add",
@@ -577,7 +624,8 @@
         "path": "/api/v1/settings"
       },
       "effect": "Validates and adds remote sync peer respecting LAN/WAN network policy",
-      "test": "WEBUI-ACT-SY-003"
+      "test": "WEBUI-ACT-SY-003",
+      "auth": "protected"
     },
     {
       "id": "sync.peer_remove",
@@ -590,7 +638,8 @@
         "path": "/api/v1/settings"
       },
       "effect": "Removes sync peer and discontinues reconciliation",
-      "test": "WEBUI-ACT-SY-004"
+      "test": "WEBUI-ACT-SY-004",
+      "auth": "protected"
     },
     {
       "id": "settings.resource_profile",
@@ -604,7 +653,8 @@
       },
       "apply_mode": "restart_required",
       "effect": "Saves profile, reports restart requirement, and determines runtime thread count on next boot",
-      "test": "WEBUI-SET-001"
+      "test": "WEBUI-SET-001",
+      "auth": "protected"
     },
     {
       "id": "settings.job_workers",
@@ -618,7 +668,8 @@
       },
       "apply_mode": "restart_required",
       "effect": "Validates integer within bounds and updates background scanner concurrency",
-      "test": "WEBUI-SET-002"
+      "test": "WEBUI-SET-002",
+      "auth": "protected"
     },
     {
       "id": "settings.language",
@@ -628,7 +679,8 @@
       "authority": "local",
       "apply_mode": "live",
       "effect": "Immediately translates UI elements across active view and persists preference",
-      "test": "WEBUI-SET-003"
+      "test": "WEBUI-SET-003",
+      "auth": "local_only"
     },
     {
       "id": "settings.theme",
@@ -638,7 +690,8 @@
       "authority": "local",
       "apply_mode": "live",
       "effect": "Immediately updates DOM theme and persists preference",
-      "test": "WEBUI-SET-004"
+      "test": "WEBUI-SET-004",
+      "auth": "local_only"
     },
     {
       "id": "settings.cover_art",
@@ -652,7 +705,8 @@
       },
       "apply_mode": "live",
       "effect": "Updates DOM data-cover-art attribute and hides/shows artwork",
-      "test": "WEBUI-SET-005"
+      "test": "WEBUI-SET-005",
+      "auth": "protected"
     },
     {
       "id": "settings.sidebar",
@@ -666,7 +720,8 @@
       },
       "apply_mode": "live",
       "effect": "Updates DOM data-sidebar-collapsed attribute and collapses/expands sidebar",
-      "test": "WEBUI-SET-006"
+      "test": "WEBUI-SET-006",
+      "auth": "protected"
     },
     {
       "id": "settings.stream_profile",
@@ -680,7 +735,8 @@
       },
       "apply_mode": "live",
       "effect": "Persists profile and influences transcoding plan decisions",
-      "test": "WEBUI-SET-007"
+      "test": "WEBUI-SET-007",
+      "auth": "protected"
     },
     {
       "id": "settings.format_policy",
@@ -694,7 +750,8 @@
       },
       "apply_mode": "live",
       "effect": "Enforces direct vs lossless vs standard format requirements",
-      "test": "WEBUI-SET-008"
+      "test": "WEBUI-SET-008",
+      "auth": "protected"
     },
     {
       "id": "settings.remote_bitrate",
@@ -708,7 +765,8 @@
       },
       "apply_mode": "live",
       "effect": "Clamps transcode bitrate for non-LAN clients",
-      "test": "WEBUI-SET-009"
+      "test": "WEBUI-SET-009",
+      "auth": "protected"
     },
     {
       "id": "settings.scrobbling",
@@ -722,7 +780,8 @@
       },
       "apply_mode": "live",
       "effect": "Enables/disables external scrobble dispatch while preserving local history",
-      "test": "WEBUI-SET-010"
+      "test": "WEBUI-SET-010",
+      "auth": "protected"
     },
     {
       "id": "settings.sync_name",
@@ -736,7 +795,8 @@
       },
       "apply_mode": "restart_required",
       "effect": "Saves sync instance advertising name",
-      "test": "WEBUI-SET-011"
+      "test": "WEBUI-SET-011",
+      "auth": "protected"
     },
     {
       "id": "settings.remote_sync",
@@ -750,7 +810,8 @@
       },
       "apply_mode": "restart_required",
       "effect": "Restricts sync endpoints strictly to trusted private LAN CIDRs when disabled",
-      "test": "WEBUI-SET-012"
+      "test": "WEBUI-SET-012",
+      "auth": "protected"
     },
     {
       "id": "settings.dev_cors",
@@ -764,7 +825,8 @@
       },
       "apply_mode": "restart_required",
       "effect": "Enables permissive CORS header policy for local web development",
-      "test": "WEBUI-SET-013"
+      "test": "WEBUI-SET-013",
+      "auth": "protected"
     },
     {
       "id": "settings.auto_backup",
@@ -778,7 +840,8 @@
       },
       "apply_mode": "restart_required",
       "effect": "Enables background database backup scheduler",
-      "test": "WEBUI-SET-014"
+      "test": "WEBUI-SET-014",
+      "auth": "protected"
     },
     {
       "id": "settings.backup_retention",
@@ -792,7 +855,8 @@
       },
       "apply_mode": "live",
       "effect": "Controls number of historical snapshots retained during pruning",
-      "test": "WEBUI-SET-015"
+      "test": "WEBUI-SET-015",
+      "auth": "protected"
     },
     {
       "id": "settings.reconnect_max",
@@ -806,7 +870,8 @@
       },
       "apply_mode": "live",
       "effect": "Sets upper bound cap on exponential backoff delays",
-      "test": "WEBUI-SET-016"
+      "test": "WEBUI-SET-016",
+      "auth": "protected"
     },
     {
       "id": "webhook.set",
@@ -819,7 +884,8 @@
         "path": "/api/v1/webhook"
       },
       "effect": "Validates URL scheme and registers webhook URL propagating database errors fail-closed",
-      "test": "WEBUI-ACT-WH-001"
+      "test": "WEBUI-ACT-WH-001",
+      "auth": "protected"
     },
     {
       "id": "webhook.test",
@@ -832,7 +898,8 @@
         "path": "/api/v1/webhook/test"
       },
       "effect": "Sends test ping event to webhook recipient and reports status",
-      "test": "WEBUI-ACT-WH-002"
+      "test": "WEBUI-ACT-WH-002",
+      "auth": "protected"
     },
     {
       "id": "webhook.clear",
@@ -845,7 +912,8 @@
         "path": "/api/v1/webhook"
       },
       "effect": "Removes webhook configuration from server",
-      "test": "WEBUI-ACT-WH-003"
+      "test": "WEBUI-ACT-WH-003",
+      "auth": "protected"
     },
     {
       "id": "backup.snapshot",
@@ -858,7 +926,8 @@
         "path": "/api/v1/backup/snapshot"
       },
       "effect": "Generates point-in-time database snapshot",
-      "test": "WEBUI-ACT-BK-001"
+      "test": "WEBUI-ACT-BK-001",
+      "auth": "protected"
     },
     {
       "id": "backup.download",
@@ -871,7 +940,8 @@
         "path": "/api/v1/backup/download"
       },
       "effect": "Downloads encrypted or raw sqlite database backup file",
-      "test": "WEBUI-ACT-BK-002"
+      "test": "WEBUI-ACT-BK-002",
+      "auth": "protected"
     },
     {
       "id": "backup.restore",
@@ -884,7 +954,8 @@
         "path": "/api/v1/backup/restore"
       },
       "effect": "Restores database from uploaded backup file verifying PRAGMA integrity",
-      "test": "WEBUI-ACT-BK-003"
+      "test": "WEBUI-ACT-BK-003",
+      "auth": "protected"
     },
     {
       "id": "backup.verify",
@@ -897,7 +968,8 @@
         "path": "/api/v1/backup/verify"
       },
       "effect": "Runs SQLite PRAGMA quick_check/integrity_check and reports status",
-      "test": "WEBUI-ACT-BK-004"
+      "test": "WEBUI-ACT-BK-004",
+      "auth": "protected"
     },
     {
       "id": "diagnostics.refresh",
@@ -910,7 +982,8 @@
         "path": "/api/v1/diagnostics"
       },
       "effect": "Fetches disk, memory, threads, and receiver diagnostics",
-      "test": "WEBUI-ACT-DG-001"
+      "test": "WEBUI-ACT-DG-001",
+      "auth": "protected"
     },
     {
       "id": "jobs.refresh",
@@ -923,7 +996,8 @@
         "path": "/api/v1/jobs"
       },
       "effect": "Renders background jobs queue and statuses",
-      "test": "WEBUI-ACT-JB-001"
+      "test": "WEBUI-ACT-JB-001",
+      "auth": "protected"
     },
     {
       "id": "jobs.cancel",
@@ -936,7 +1010,8 @@
         "path": "/api/v1/jobs/:id/cancel"
       },
       "effect": "Cancels in-flight background job",
-      "test": "WEBUI-ACT-JB-002"
+      "test": "WEBUI-ACT-JB-002",
+      "auth": "protected"
     },
     {
       "id": "history.export",
@@ -949,7 +1024,8 @@
         "path": "/api/v1/history/export"
       },
       "effect": "Downloads play history as CSV/JSON file",
-      "test": "WEBUI-ACT-HS-001"
+      "test": "WEBUI-ACT-HS-001",
+      "auth": "protected"
     },
     {
       "id": "history.clear",
@@ -962,7 +1038,8 @@
         "path": "/api/v1/history"
       },
       "effect": "Purges play history records from database",
-      "test": "WEBUI-ACT-HS-002"
+      "test": "WEBUI-ACT-HS-002",
+      "auth": "protected"
     },
     {
       "id": "integrations.listenbrainz.connect",
@@ -975,7 +1052,8 @@
         "path": "/api/v1/integrations/listenbrainz"
       },
       "effect": "Validates ListenBrainz token against upstream API and persists in config",
-      "test": "WEBUI-ACT-INT-001"
+      "test": "WEBUI-ACT-INT-001",
+      "auth": "protected"
     },
     {
       "id": "integrations.listenbrainz.test",
@@ -988,7 +1066,8 @@
         "path": "/api/v1/integrations/listenbrainz/test"
       },
       "effect": "Tests configured ListenBrainz token with upstream validate-token endpoint",
-      "test": "WEBUI-ACT-INT-002"
+      "test": "WEBUI-ACT-INT-002",
+      "auth": "protected"
     },
     {
       "id": "integrations.listenbrainz.disconnect",
@@ -1001,7 +1080,8 @@
         "path": "/api/v1/integrations/listenbrainz"
       },
       "effect": "Removes ListenBrainz token from config and disables ListenBrainz scrobbling",
-      "test": "WEBUI-ACT-INT-003"
+      "test": "WEBUI-ACT-INT-003",
+      "auth": "protected"
     },
     {
       "id": "integrations.lastfm.connect",
@@ -1014,7 +1094,8 @@
         "path": "/api/v1/integrations/lastfm"
       },
       "effect": "Persists Last.fm session key in server configuration",
-      "test": "WEBUI-ACT-INT-004"
+      "test": "WEBUI-ACT-INT-004",
+      "auth": "protected"
     },
     {
       "id": "integrations.lastfm.test",
@@ -1027,7 +1108,8 @@
         "path": "/api/v1/integrations/lastfm/test"
       },
       "effect": "Tests configured Last.fm session key with upstream user.getInfo API",
-      "test": "WEBUI-ACT-INT-005"
+      "test": "WEBUI-ACT-INT-005",
+      "auth": "protected"
     },
     {
       "id": "integrations.lastfm.disconnect",
@@ -1040,7 +1122,8 @@
         "path": "/api/v1/integrations/lastfm"
       },
       "effect": "Removes Last.fm session key from config and disables Last.fm scrobbling",
-      "test": "WEBUI-ACT-INT-006"
+      "test": "WEBUI-ACT-INT-006",
+      "auth": "protected"
     }
   ]
 }

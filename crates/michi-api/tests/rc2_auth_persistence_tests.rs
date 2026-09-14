@@ -133,6 +133,140 @@ async fn test_credential_authority_reconciliation_on_restart() {
 }
 
 #[tokio::test]
+async fn test_admin_username_rotation_reconciles_managed_user_and_revokes_sessions() {
+    let (pool, db_path) = test_db_file().await;
+
+    // 1. First boot: admin user created as 'admin_alpha'
+    let cfg1 = test_config_for_db(&db_path, "admin_alpha", "alpha_secret_pw");
+    let admin_id1 = init_admin_user(&cfg1, &pool)
+        .await
+        .expect("admin user must be initialized");
+
+    let state1 = AppState::new(cfg1.clone(), pool.clone(), Some(admin_id1));
+    let token1 = state1
+        .auth_sessions
+        .create_session(admin_id1)
+        .await
+        .unwrap();
+    assert!(state1.auth_sessions.validate(&token1).await);
+
+    // Create a regular non-admin user to verify it is NOT overwritten or affected
+    let normal_user_id = Uuid::new_v4();
+    let normal_pw_hash = michi_api::auth::hash_password("normal_pass_123").unwrap();
+    michi_db::create_user(
+        &pool,
+        &normal_user_id,
+        "normal_user",
+        &normal_pw_hash,
+        false,
+    )
+    .await
+    .unwrap();
+
+    // 2. Second boot: MICHI_AUTH_USERNAME rotated to 'admin_beta' with new password
+    let cfg2 = test_config_for_db(&db_path, "admin_beta", "beta_secret_pw");
+    let admin_id2 = init_admin_user(&cfg2, &pool)
+        .await
+        .expect("admin user must be reconciled under new username");
+
+    // Must reconcile the SAME admin record (same UUID)
+    assert_eq!(
+        admin_id1, admin_id2,
+        "Admin ID must be preserved during username rotation"
+    );
+
+    // Total admin accounts in DB must be exactly 1 (no accumulation of stale admin accounts)
+    let admins = michi_db::list_admin_users(&pool).await.unwrap();
+    assert_eq!(admins.len(), 1, "Must have exactly 1 admin after rotation");
+    assert_eq!(admins[0].1, "admin_beta");
+
+    // Verify non-admin user still exists intact
+    let normal_user = michi_db::get_user_by_username(&pool, "normal_user")
+        .await
+        .unwrap();
+    assert!(normal_user.is_some(), "Non-admin users must be preserved");
+
+    // 3. Old session token for the rotated admin must be completely revoked
+    let state2 = AppState::new(cfg2.clone(), pool.clone(), Some(admin_id2));
+    assert!(
+        !state2.auth_sessions.validate(&token1).await,
+        "Prior session token must be invalidated following username rotation"
+    );
+
+    // 4. Old username login must fail
+    let app2 = create_router(state2.clone());
+    let old_login_req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "username": "admin_alpha",
+                "password": "alpha_secret_pw"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let old_res = app2.clone().oneshot(old_login_req).await.unwrap();
+    assert_eq!(old_res.status(), StatusCode::UNAUTHORIZED);
+
+    // 5. New username + new password login must succeed
+    let new_login_req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "username": "admin_beta",
+                "password": "beta_secret_pw"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let new_res = app2.oneshot(new_login_req).await.unwrap();
+    assert_eq!(new_res.status(), StatusCode::OK);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_clear_all_sessions_db_first_ordering() {
+    let (pool, db_path) = test_db_file().await;
+    let cfg = test_config_for_db(&db_path, "admin", "adminpass123");
+    let admin_id = init_admin_user(&cfg, &pool).await.unwrap();
+    let state = AppState::new(cfg, pool.clone(), Some(admin_id));
+
+    let token = state.auth_sessions.create_session(admin_id).await.unwrap();
+    assert!(state.auth_sessions.validate(&token).await);
+
+    // Drop auth_sessions table to force DB error during clear_all_sessions
+    sqlx::query("DROP TABLE auth_sessions")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // clear_all_sessions must fail with Err and NOT clear the in-memory cache if DB deletion fails
+    let res = state.auth_sessions.clear_all_sessions().await;
+    assert!(
+        res.is_err(),
+        "clear_all_sessions must fail closed when DB fails"
+    );
+
+    // In-memory cache must still have the session (fail closed, no inconsistency where DB failed but memory cleared)
+    assert!(
+        state
+            .auth_sessions
+            .sessions
+            .read()
+            .await
+            .contains_key(&token),
+        "In-memory session must not be cleared if database deletion failed"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn test_session_persistence_across_restarts() {
     let (pool, db_path) = test_db_file().await;
 

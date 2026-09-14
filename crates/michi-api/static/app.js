@@ -695,6 +695,33 @@ function renderError(container, message, retryFn) {
     '</div>';
 }
 
+function renderTruthfulBadge(val, trueLabel, falseLabel, unknownLabel) {
+  if (val === true) {
+    return '<span class="badge stable">' + esc(trueLabel || 'Enabled') + '</span>';
+  }
+  if (val === false) {
+    return '<span class="badge disabled">' + esc(falseLabel || 'Disabled') + '</span>';
+  }
+  return '<span class="badge disabled">' + esc(unknownLabel || 'Unavailable') + '</span>';
+}
+window.renderTruthfulBadge = renderTruthfulBadge;
+
+function renderTruthfulNumber(val, suffix, fallback) {
+  if (typeof val === 'number' && !isNaN(val)) {
+    return val + (suffix ? ' ' + suffix : '');
+  }
+  return fallback || 'Unavailable';
+}
+window.renderTruthfulNumber = renderTruthfulNumber;
+
+function renderTruthfulText(val, fallback) {
+  if (val !== null && val !== undefined && String(val).trim() !== '') {
+    return esc(String(val));
+  }
+  return esc(fallback || '--');
+}
+window.renderTruthfulText = renderTruthfulText;
+
 function showToast(msg, isErr) {
   const el = $('#toast');
   if (!el) return;
@@ -3357,19 +3384,19 @@ async function loadSettings() {
     var canonicalVersion = await getCanonicalServerVersion();
     if ($('#settings-version')) $('#settings-version').textContent = canonicalVersion;
     if ($('#update-current-version')) $('#update-current-version').textContent = canonicalVersion;
-    if ($('#settings-ffmpeg')) $('#settings-ffmpeg').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
-    if ($('#settings-ffmpeg-avail')) $('#settings-ffmpeg-avail').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
-    if ($('#settings-resource-profile')) $('#settings-resource-profile').value = s.resource_profile;
-    if ($('#settings-stream-profile')) $('#settings-stream-profile').value = s.stream_profile;
-    if ($('#settings-format-policy')) $('#settings-format-policy').value = s.format_policy;
-    if ($('#settings-job-max-concurrent')) $('#settings-job-max-concurrent').value = s.job_max_concurrent !== undefined ? s.job_max_concurrent : '';
-    if ($('#settings-max-remote-bitrate')) $('#settings-max-remote-bitrate').value = s.max_remote_bitrate !== undefined ? s.max_remote_bitrate : '';
+    if ($('#settings-ffmpeg')) $('#settings-ffmpeg').innerHTML = renderTruthfulBadge(s.ffmpeg_available, 'Available', 'Not found', 'Unavailable');
+    if ($('#settings-ffmpeg-avail')) $('#settings-ffmpeg-avail').innerHTML = renderTruthfulBadge(s.ffmpeg_available, 'Available', 'Not found', 'Unavailable');
+    if ($('#settings-resource-profile')) $('#settings-resource-profile').value = s.resource_profile || '';
+    if ($('#settings-stream-profile')) $('#settings-stream-profile').value = s.stream_profile || '';
+    if ($('#settings-format-policy')) $('#settings-format-policy').value = s.format_policy || '';
+    if ($('#settings-job-max-concurrent')) $('#settings-job-max-concurrent').value = s.job_max_concurrent !== undefined && s.job_max_concurrent !== null ? s.job_max_concurrent : '';
+    if ($('#settings-max-remote-bitrate')) $('#settings-max-remote-bitrate').value = s.max_remote_bitrate !== undefined && s.max_remote_bitrate !== null ? s.max_remote_bitrate : '';
     if ($('#settings-scrobble-toggle')) $('#settings-scrobble-toggle').value = s.scrobble_enabled ? 'true' : 'false';
     if ($('#settings-sync-name-input')) $('#settings-sync-name-input').value = s.sync_name || '';
     if ($('#settings-remote-sync')) $('#settings-remote-sync').value = s.remote_sync ? 'true' : 'false';
     if ($('#settings-auto-backup')) $('#settings-auto-backup').value = s.auto_backup_enabled ? 'true' : 'false';
-    if ($('#settings-backup-max-keep')) $('#settings-backup-max-keep').value = s.backup_max_keep !== undefined ? s.backup_max_keep : '';
-    if ($('#settings-reconnect-delay-max')) $('#settings-reconnect-delay-max').value = s.reconnect_delay_max !== undefined ? s.reconnect_delay_max : '';
+    if ($('#settings-backup-max-keep')) $('#settings-backup-max-keep').value = s.backup_max_keep !== undefined && s.backup_max_keep !== null ? s.backup_max_keep : '';
+    if ($('#settings-reconnect-delay-max')) $('#settings-reconnect-delay-max').value = s.reconnect_delay_max !== undefined && s.reconnect_delay_max !== null ? s.reconnect_delay_max : '';
     if ($('#settings-dev-mode-select')) $('#settings-dev-mode-select').value = s.dev_mode ? 'true' : 'false';
     if ($('#settings-cover-art')) $('#settings-cover-art').value = (s.cover_art_enabled !== false) ? 'true' : 'false';
     if ($('#settings-sidebar-collapsed')) $('#settings-sidebar-collapsed').value = s.sidebar_collapsed ? 'true' : 'false';
@@ -3412,16 +3439,16 @@ async function loadSettings() {
     renderSyncPeers(s.sync_peers || []);
 
     if ($('#settings-music-paths')) $('#settings-music-paths').textContent = (s.music_paths || []).join('\n') || 'No paths configured';
-    if ($('#settings-sync-name')) $('#settings-sync-name').textContent = s.sync_name || '--';
-    if ($('#settings-cors')) $('#settings-cors').textContent = s.cors_origin || 'Restrictive (default)';
-    if ($('#settings-auth')) $('#settings-auth').innerHTML = s.auth_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
-    if ($('#settings-dev-mode')) $('#settings-dev-mode').innerHTML = s.dev_mode ? '<span class="badge stable">On</span>' : '<span class="badge disabled">Off</span>';
-    if ($('#settings-scrobble')) $('#settings-scrobble').innerHTML = s.scrobble_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
+    if ($('#settings-sync-name')) $('#settings-sync-name').textContent = renderTruthfulText(s.sync_name, '--');
+    if ($('#settings-cors')) $('#settings-cors').textContent = renderTruthfulText(s.cors_origin, 'Restrictive (default)');
+    if ($('#settings-auth')) $('#settings-auth').innerHTML = renderTruthfulBadge(s.auth_enabled, 'Enabled', 'Disabled', 'Unavailable');
+    if ($('#settings-dev-mode')) $('#settings-dev-mode').innerHTML = renderTruthfulBadge(s.dev_mode, 'On', 'Off', 'Unavailable');
+    if ($('#settings-scrobble')) $('#settings-scrobble').innerHTML = renderTruthfulBadge(s.scrobble_enabled, 'Enabled', 'Disabled', 'Unavailable');
     updateScrobbleStatusUI();
 
-    var scanWorkers = s.effective_scan_workers !== undefined ? (s.effective_scan_workers + ' worker(s)') : 'Unavailable';
-    var maxTc = s.effective_transcode_workers !== undefined ? (s.effective_transcode_workers + ' simultaneous') : 'Unavailable';
-    var dbPool = s.effective_db_pool !== undefined ? (s.effective_db_pool + ' connections') : 'Unavailable';
+    var scanWorkers = renderTruthfulNumber(s.effective_scan_workers, 'worker(s)', 'Unavailable');
+    var maxTc = renderTruthfulNumber(s.effective_transcode_workers, 'simultaneous', 'Unavailable');
+    var dbPool = renderTruthfulNumber(s.effective_db_pool, 'connections', 'Unavailable');
     if ($('#settings-scan-concurrency')) $('#settings-scan-concurrency').textContent = scanWorkers;
     if ($('#settings-max-transcodes')) $('#settings-max-transcodes').textContent = maxTc;
     if ($('#settings-db-pool')) $('#settings-db-pool').textContent = dbPool;

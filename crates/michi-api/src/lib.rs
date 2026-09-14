@@ -26,7 +26,7 @@ use tracing::{info, warn};
 use utoipa::OpenApi;
 use uuid::Uuid;
 
-mod auth;
+pub mod auth;
 mod library;
 mod openapi;
 mod players;
@@ -964,11 +964,15 @@ pub async fn init_admin_user(config: &Config, db: &SqlitePool) -> Option<Uuid> {
         .map(|s| s.trim())
         .filter(|s| s.len() >= 8)?;
 
-    match michi_db::get_user_by_username(db, username)
-        .await
-        .ok()
-        .flatten()
-    {
+    let user_opt = match michi_db::get_user_by_username(db, username).await {
+        Ok(u) => u,
+        Err(e) => {
+            warn!("failed to check user by username during admin initialization: {e}");
+            return None;
+        }
+    };
+
+    match user_opt {
         Some((id, _, password_hash, is_admin)) => {
             let password_matches = auth::verify_password(password, &password_hash).unwrap_or(false);
             if !password_matches || !is_admin {
@@ -1011,6 +1015,47 @@ pub async fn init_admin_user(config: &Config, db: &SqlitePool) -> Option<Uuid> {
             Some(id)
         }
         None => {
+            // Check if there is an existing single administrator account to reconcile/rename
+            let existing_admins = match michi_db::list_admin_users(db).await {
+                Ok(admins) => admins,
+                Err(e) => {
+                    warn!("failed to list admin users during admin reconciliation: {e}");
+                    return None;
+                }
+            };
+
+            if existing_admins.len() == 1 {
+                let (existing_id, old_username, _, _) = &existing_admins[0];
+                match auth::hash_password(password) {
+                    Ok(target_hash) => {
+                        if let Err(e) = michi_db::update_user_credentials_and_revoke_sessions(
+                            db,
+                            existing_id,
+                            username,
+                            &target_hash,
+                            true,
+                        )
+                        .await
+                        {
+                            warn!(
+                                "failed to rotate administrator username from '{}' to '{}': {e}",
+                                old_username, username
+                            );
+                            return None;
+                        }
+                        info!(
+                            "rotated administrator username from '{}' to '{}'; existing sessions revoked",
+                            old_username, username
+                        );
+                        return Some(*existing_id);
+                    }
+                    Err(e) => {
+                        warn!("failed to hash admin password for username rotation: {e}");
+                        return None;
+                    }
+                }
+            }
+
             let id = Uuid::new_v4();
             match auth::hash_password(password) {
                 Ok(hash) => match michi_db::create_user(db, &id, username, &hash, true).await {

@@ -1816,6 +1816,55 @@ pub async fn update_user_password_and_revoke_sessions(
     Ok(())
 }
 
+pub async fn list_admin_users(
+    pool: &SqlitePool,
+) -> Result<Vec<(Uuid, String, String, bool)>, DbError> {
+    let rows = sqlx::query("SELECT id, username, password_hash, is_admin FROM users WHERE is_admin != 0 ORDER BY created_at ASC")
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let id = Uuid::parse_str(r.get::<&str, _>("id")).unwrap_or(Uuid::nil());
+            let is_admin: bool = r.get::<i64, _>("is_admin") != 0;
+            (
+                id,
+                r.get::<&str, _>("username").to_string(),
+                r.get::<&str, _>("password_hash").to_string(),
+                is_admin,
+            )
+        })
+        .collect())
+}
+
+pub async fn update_user_credentials_and_revoke_sessions(
+    pool: &SqlitePool,
+    id: &Uuid,
+    username: &str,
+    password_hash: &str,
+    is_admin: bool,
+) -> Result<(), DbError> {
+    let id_str = id.to_string();
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("UPDATE users SET username = ?, password_hash = ?, is_admin = ? WHERE id = ?")
+        .bind(username)
+        .bind(password_hash)
+        .bind(is_admin as i64)
+        .bind(&id_str)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query("DELETE FROM auth_sessions WHERE user_id = ?")
+        .bind(&id_str)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn delete_auth_sessions_for_user(
     pool: &SqlitePool,
     user_id: &Uuid,

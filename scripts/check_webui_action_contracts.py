@@ -232,9 +232,16 @@ def main():
                 errors.append(f"Action '{aid}' references non-existent frontend_handler '{handler}'")
 
         # Verify authority
-        auth = action.get("authority")
-        if auth not in ("browser", "server", "shared", "local", "active_target"):
-            errors.append(f"Action '{aid}' has invalid authority '{auth}'")
+        auth_authority = action.get("authority")
+        if auth_authority not in ("browser", "server", "shared", "local", "active_target"):
+            errors.append(f"Action '{aid}' has invalid authority '{auth_authority}'")
+
+        # Verify auth dimension: must be explicitly 'public', 'protected', or 'local_only'
+        auth_level = action.get("auth")
+        if not auth_level:
+            errors.append(f"Action '{aid}' is missing required 'auth' field (must be 'public', 'protected', or 'local_only')")
+        elif auth_level not in ("public", "protected", "local_only"):
+            errors.append(f"Action '{aid}' has invalid auth value '{auth_level}' (expected 'public', 'protected', or 'local_only')")
 
         # Verify endpoint matches Axum router
         ep = action.get("endpoint")
@@ -263,10 +270,18 @@ def main():
     for v in catch_violations:
         errors.append(f"SILENT_CATCH: {v}")
 
+    # Count auth categories
+    public_count = sum(1 for a in actions if a.get("auth") == "public")
+    protected_count = sum(1 for a in actions if a.get("auth") == "protected")
+    local_only_count = sum(1 for a in actions if a.get("auth") == "local_only")
+
     # Output report
     report = {
         "actions_declared": len(actions),
         "actions_valid": len(action_ids) - len(errors),
+        "public_actions": public_count,
+        "protected_actions": protected_count,
+        "local_only_actions": local_only_count,
         "errors": errors,
         "html_violations": html_violations,
         "banned_violations": banned_violations,
