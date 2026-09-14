@@ -287,11 +287,11 @@ def test_logout_regates_settings_without_navigation(browser_context):
 
 
 def test_401_regates_current_section_but_keeps_online_status(browser_context):
-    """Verifies that a real server 401 error re-gates protected section without flipping ConnectionStatus to offline."""
+    """Verifies that an out-of-band invalidated session yields 401 on protected action, re-gating section without flipping ConnectionStatus to offline."""
     page = browser_context.new_page()
     page.goto(f"{SERVER_URL}/")
 
-    # Login
+    # 1. Login with valid credentials
     auth_btn = page.locator("#auth-user-btn")
     auth_btn.click()
     page.locator("#auth-username").fill(ADMIN_USERNAME)
@@ -299,35 +299,39 @@ def test_401_regates_current_section_but_keeps_online_status(browser_context):
     page.locator("#auth-submit-btn").click()
     page.wait_for_timeout(1000)
 
-    # Navigate to Settings
+    # 2. Navigate to Settings (protected)
     page.click(".nav-item[data-section='settings']")
     page.wait_for_timeout(500)
     expect(page.locator("#page-settings")).to_be_visible()
 
-    # Trigger a real server 401 response by making a request with an invalid/revoked token
-    # or by invalidating the session on the server side via an explicit unauthenticated call.
-    # The MichiAPI.request handler catches 401 and invokes AuthSession.setUnauthenticated() & teardownProtected().
-    page.evaluate("""
-        async () => {
-            try {
-                await fetch('/api/v1/settings', {
-                    headers: { 'Authorization': 'Bearer revoked_or_invalid_session_token_xyz' }
-                }).then(res => {
-                    if (res.status === 401) {
-                        AuthSession.setUnauthenticated();
-                        teardownProtected();
-                    }
-                });
-            } catch (e) {}
-        }
-    """)
+    # 3. Retrieve session cookie and invalidate it on the server out-of-band via HTTP client
+    cookies = browser_context.cookies(SERVER_URL)
+    session_cookie = next((c for c in cookies if c["name"] == "michi_web_session"), None)
+    assert session_cookie is not None, "michi_web_session cookie must exist"
+    token = session_cookie["value"]
+
+    import urllib.request
+    req = urllib.request.Request(
+        f"{SERVER_URL}/api/auth/logout",
+        data=b"{}",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}"
+        },
+        method="POST"
+    )
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+
+    # 4. Trigger a protected action that calls backend; browser still sends old cookie, server returns 401
+    page.evaluate("() => MichiAPI.settings().catch(() => {})")
     page.wait_for_timeout(500)
 
-    # Settings must now show auth-required-gate
+    # 5. Settings must now show auth-required-gate
     gate = page.locator("#page-settings .auth-required-gate")
     expect(gate).to_be_visible()
 
-    # Connection status indicator must remain Online (decoupled from 401)
+    # 6. Connection status indicator must remain Online (decoupled from 401)
     status_pill = page.locator("#status-pill")
     expect(status_pill).to_be_visible()
     expect(status_pill).to_contain_text("Online")
@@ -337,9 +341,19 @@ def test_401_regates_current_section_but_keeps_online_status(browser_context):
 def test_mobile_settings_real_navigation_and_rail_ux(browser_context):
     """Verifies real mobile UX flow at 390x844: drawer toggle, settings nav item click, and category select sync."""
     page = browser_context.new_page()
-    page.set_viewport_size({"width": 390, "height": 844})
+
+    # 0. Sign in first while desktop or via modal so settings can be accessed
     page.goto(f"{SERVER_URL}/")
-    page.wait_for_timeout(500)
+    auth_btn = page.locator("#auth-user-btn")
+    auth_btn.click()
+    page.locator("#auth-username").fill(ADMIN_USERNAME)
+    page.locator("#auth-password").fill(ADMIN_PASSWORD)
+    page.locator("#auth-submit-btn").click()
+    page.wait_for_timeout(1000)
+
+    # Switch to mobile viewport
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.wait_for_timeout(300)
 
     # 1. Click hamburger button to open drawer
     menu_btn = page.locator("#mobile-menu-btn")
@@ -421,3 +435,92 @@ def test_anonymous_matrix_triggers_zero_protected_requests(browser_context):
 
     assert len(protected_requested) == 0, f"Anonymous interactions triggered protected requests: {protected_requested}"
     page.close()
+
+
+def test_auth_disabled_real_server_zero_protected_requests(browser_context):
+    """Launch real server process with MICHI_AUTH_ENABLED=false, verify zero 401s and no login gate."""
+    import subprocess
+    import tempfile
+    import socket
+    import time
+    import urllib.request
+    import shutil
+
+    # Find a free port
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    server_bin = os.path.abspath("target/debug/michi-server")
+    if not os.path.exists(server_bin):
+        server_bin = "michi-server"
+
+    tmp_dir = tempfile.mkdtemp(prefix="michi_noauth_")
+    env = os.environ.copy()
+    env["MICHI_PORT"] = str(port)
+    env["MICHI_AUTH_ENABLED"] = "false"
+    env["MICHI_CONFIG_PATH"] = tmp_dir
+    env["MICHI_DATABASE_URL"] = f"sqlite://{tmp_dir}/michi.db?mode=rwc"
+
+    proc = subprocess.Popen(
+        [server_bin],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT
+    )
+
+    try:
+        ready = False
+        server_url = f"http://127.0.0.1:{port}"
+        for _ in range(40):
+            try:
+                with urllib.request.urlopen(f"{server_url}/health/live", timeout=0.5) as r:
+                    if r.status == 200:
+                        ready = True
+                        break
+            except Exception:
+                time.sleep(0.25)
+        assert ready, "Server with MICHI_AUTH_ENABLED=false failed to start"
+
+        page = browser_context.new_page()
+        recorded_401s = []
+
+        def on_response(response):
+            if response.status == 401:
+                recorded_401s.append(response.url)
+
+        page.on("response", on_response)
+        page.goto(f"{server_url}/")
+        expect(page).to_have_title("Michi Micro Server")
+
+        # When auth is disabled:
+        # 1. Header shows "Auth Disabled"
+        auth_btn = page.locator("#auth-user-btn")
+        expect(auth_btn).to_contain_text("Auth Disabled")
+
+        # 2. Navigate to Settings
+        page.click(".nav-item[data-section='settings']")
+        page.wait_for_timeout(500)
+        expect(page.locator("#page-settings")).to_be_visible()
+
+        # 3. Protected section shows disabled advisory without any login button/action
+        gate = page.locator("#page-settings .auth-required-gate")
+        expect(gate).to_be_visible()
+        expect(gate.locator("button")).to_be_hidden()
+
+        # 4. Auth user modal/overlay should not be active
+        auth_overlay = page.locator("#auth-overlay")
+        expect(auth_overlay).to_be_hidden()
+
+        # 3. Verify zero 401 responses occurred across interactions
+        assert len(recorded_401s) == 0, f"Encountered 401 responses with auth disabled: {recorded_401s}"
+        page.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            proc.kill()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+

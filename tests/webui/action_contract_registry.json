@@ -1,0 +1,671 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": 1,
+  "description": "Registry mapping WebUI manifest actions and test IDs to automated test functions",
+  "actions": {
+    "auth.login": {
+      "test_id": "WEBUI-ACT-AUTH-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_auth_actions_contract",
+      "auth": "public",
+      "auth_condition": null,
+      "frontend_handler": "submitAuth"
+    },
+    "auth.register": {
+      "test_id": "WEBUI-ACT-AUTH-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_auth_actions_contract",
+      "auth": "public",
+      "auth_condition": null,
+      "frontend_handler": "submitAuth"
+    },
+    "auth.logout": {
+      "test_id": "WEBUI-ACT-AUTH-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_auth_actions_contract",
+      "auth": "public",
+      "auth_condition": null,
+      "frontend_handler": "handleLogout"
+    },
+    "navigation.section": {
+      "test_id": "WEBUI-ACT-NAV-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_navigation_and_theme_actions_contract",
+      "auth": "local_only",
+      "auth_condition": null,
+      "frontend_handler": "showSection"
+    },
+    "navigation.toggle": {
+      "test_id": "WEBUI-ACT-NAV-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_navigation_and_theme_actions_contract",
+      "auth": "local_only",
+      "auth_condition": null,
+      "frontend_handler": "toggleNavigation"
+    },
+    "navigation.theme": {
+      "test_id": "WEBUI-ACT-NAV-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_navigation_and_theme_actions_contract",
+      "auth": "local_only",
+      "auth_condition": null,
+      "frontend_handler": "toggleTheme"
+    },
+    "library.scan": {
+      "test_id": "WEBUI-ACT-LIB-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_library_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "handleScan"
+    },
+    "library.search": {
+      "test_id": "WEBUI-ACT-LIB-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_library_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "handleSearch"
+    },
+    "library.play": {
+      "test_id": "WEBUI-ACT-PB-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_playback_actions_contract",
+      "auth": "conditional",
+      "auth_condition": "active_output_target == 'server'",
+      "frontend_handler": "playTrack"
+    },
+    "library.add_to_queue": {
+      "test_id": "WEBUI-ACT-PB-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_playback_actions_contract",
+      "auth": "conditional",
+      "auth_condition": "active_output_target == 'server'",
+      "frontend_handler": "addToQueue"
+    },
+    "library.star": {
+      "test_id": "WEBUI-ACT-LIB-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_library_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "toggleStar"
+    },
+    "library.rate": {
+      "test_id": "WEBUI-ACT-LIB-004",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_library_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "rateTrack"
+    },
+    "playback.play_pause": {
+      "test_id": "WEBUI-ACT-PB-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_playback_actions_contract",
+      "auth": "conditional",
+      "auth_condition": "active_output_target == 'server'",
+      "frontend_handler": "playPause"
+    },
+    "playback.shuffle": {
+      "test_id": "WEBUI-ACT-PB-004",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_playback_actions_contract",
+      "auth": "conditional",
+      "auth_condition": "active_output_target == 'server'",
+      "frontend_handler": "toggleShuffle"
+    },
+    "playback.repeat": {
+      "test_id": "WEBUI-ACT-PB-005",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_playback_actions_contract",
+      "auth": "conditional",
+      "auth_condition": "active_output_target == 'server'",
+      "frontend_handler": "toggleRepeat"
+    },
+    "playback.jump_queue": {
+      "test_id": "WEBUI-ACT-PB-006",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_playback_actions_contract",
+      "auth": "conditional",
+      "auth_condition": "active_output_target == 'server'",
+      "frontend_handler": "jumpToQueueItem"
+    },
+    "playback.output_target": {
+      "test_id": "WEBUI-ACT-PB-007",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_playback_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "toggleOutputTarget"
+    },
+    "playback.handoff": {
+      "test_id": "WEBUI-ACT-PB-008",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_playback_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "transferHandoff"
+    },
+    "playlists.create": {
+      "test_id": "WEBUI-ACT-PL-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_playlists_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "createPlaylist"
+    },
+    "playlists.update": {
+      "test_id": "WEBUI-ACT-PL-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_playlists_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "updatePlaylist"
+    },
+    "playlists.delete": {
+      "test_id": "WEBUI-ACT-PL-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_playlists_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "confirmDeletePlaylist"
+    },
+    "playlists.smart_create": {
+      "test_id": "WEBUI-ACT-PL-004",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_playlists_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "createSmartPlaylist"
+    },
+    "playlists.export": {
+      "test_id": "WEBUI-ACT-PL-005",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_playlists_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "exportPlaylistM3U"
+    },
+    "broadcast.source_add": {
+      "test_id": "WEBUI-ACT-BC-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_broadcast_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "addSource"
+    },
+    "broadcast.source_delete": {
+      "test_id": "WEBUI-ACT-BC-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_broadcast_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "deleteSource"
+    },
+    "broadcast.play_source": {
+      "test_id": "WEBUI-ACT-BC-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_broadcast_actions_contract",
+      "auth": "public",
+      "auth_condition": null,
+      "frontend_handler": "playSource"
+    },
+    "broadcast.play_episode": {
+      "test_id": "WEBUI-ACT-BC-004",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_broadcast_actions_contract",
+      "auth": "public",
+      "auth_condition": null,
+      "frontend_handler": "playEpisode"
+    },
+    "broadcast.episode_progress": {
+      "test_id": "WEBUI-ACT-BC-005",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_broadcast_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "updateEpisode"
+    },
+    "michilink.qr_generate": {
+      "test_id": "WEBUI-ACT-ML-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_link_and_receivers_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "generateQR"
+    },
+    "michilink.self_test": {
+      "test_id": "WEBUI-ACT-ML-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_link_and_receivers_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "testMichiLink"
+    },
+    "michilink.device_revoke": {
+      "test_id": "WEBUI-ACT-ML-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_link_and_receivers_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "revokeDevice"
+    },
+    "receivers.discover": {
+      "test_id": "WEBUI-ACT-RX-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_link_and_receivers_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "discoverDevices"
+    },
+    "receivers.pair_start": {
+      "test_id": "WEBUI-ACT-RX-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_link_and_receivers_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "startReceiverPair"
+    },
+    "receivers.pair_confirm": {
+      "test_id": "WEBUI-ACT-RX-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_link_and_receivers_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "confirmReceiverPair"
+    },
+    "rooms.create": {
+      "test_id": "WEBUI-ACT-RM-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_rooms_and_chains_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "createRoomGroup"
+    },
+    "rooms.activate": {
+      "test_id": "WEBUI-ACT-RM-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_rooms_and_chains_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "activateRoomGroup"
+    },
+    "rooms.deactivate": {
+      "test_id": "WEBUI-ACT-RM-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_rooms_and_chains_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "deactivateRoomGroup"
+    },
+    "rooms.delete": {
+      "test_id": "WEBUI-ACT-RM-004",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_rooms_and_chains_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "deleteRoomGroup"
+    },
+    "chains.create": {
+      "test_id": "WEBUI-ACT-CH-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_rooms_and_chains_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "createChain"
+    },
+    "chains.set_track": {
+      "test_id": "WEBUI-ACT-CH-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_rooms_and_chains_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "setChainTrack"
+    },
+    "chains.add_link": {
+      "test_id": "WEBUI-ACT-CH-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_rooms_and_chains_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "addLink"
+    },
+    "chains.remove_link": {
+      "test_id": "WEBUI-ACT-CH-004",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_rooms_and_chains_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "removeLink"
+    },
+    "chains.play": {
+      "test_id": "WEBUI-ACT-CH-005",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_rooms_and_chains_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "playChain"
+    },
+    "chains.stop": {
+      "test_id": "WEBUI-ACT-CH-006",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_rooms_and_chains_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "stopChain"
+    },
+    "chains.volume": {
+      "test_id": "WEBUI-ACT-CH-007",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_rooms_and_chains_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "setChainVolume"
+    },
+    "sync.file_upload": {
+      "test_id": "WEBUI-ACT-SY-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_sync_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "uploadFile"
+    },
+    "sync.playlist_sync": {
+      "test_id": "WEBUI-ACT-SY-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_sync_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "syncPlaylist"
+    },
+    "sync.peer_add": {
+      "test_id": "WEBUI-ACT-SY-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_sync_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "addSyncPeer"
+    },
+    "sync.peer_remove": {
+      "test_id": "WEBUI-ACT-SY-004",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_sync_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "removeSyncPeer"
+    },
+    "settings.resource_profile": {
+      "test_id": "WEBUI-SET-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "settings.job_workers": {
+      "test_id": "WEBUI-SET-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "settings.language": {
+      "test_id": "WEBUI-SET-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "local_only",
+      "auth_condition": null,
+      "frontend_handler": "setLanguage"
+    },
+    "settings.theme": {
+      "test_id": "WEBUI-SET-004",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "local_only",
+      "auth_condition": null,
+      "frontend_handler": "setTheme"
+    },
+    "settings.cover_art": {
+      "test_id": "WEBUI-SET-005",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "settings.sidebar": {
+      "test_id": "WEBUI-SET-006",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "settings.stream_profile": {
+      "test_id": "WEBUI-SET-007",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "settings.format_policy": {
+      "test_id": "WEBUI-SET-008",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "settings.remote_bitrate": {
+      "test_id": "WEBUI-SET-009",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "settings.scrobbling": {
+      "test_id": "WEBUI-SET-010",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "settings.sync_name": {
+      "test_id": "WEBUI-SET-011",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "settings.remote_sync": {
+      "test_id": "WEBUI-SET-012",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "settings.dev_cors": {
+      "test_id": "WEBUI-SET-013",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "settings.auto_backup": {
+      "test_id": "WEBUI-SET-014",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "settings.backup_retention": {
+      "test_id": "WEBUI-SET-015",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "settings.reconnect_max": {
+      "test_id": "WEBUI-SET-016",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_settings_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveSetting"
+    },
+    "webhook.set": {
+      "test_id": "WEBUI-ACT-WH-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_admin_and_diagnostics_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "setWebhook"
+    },
+    "webhook.test": {
+      "test_id": "WEBUI-ACT-WH-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_admin_and_diagnostics_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "testWebhook"
+    },
+    "webhook.clear": {
+      "test_id": "WEBUI-ACT-WH-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_admin_and_diagnostics_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "deleteWebhook"
+    },
+    "backup.snapshot": {
+      "test_id": "WEBUI-ACT-BK-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_admin_and_diagnostics_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "createSnapshot"
+    },
+    "backup.download": {
+      "test_id": "WEBUI-ACT-BK-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_admin_and_diagnostics_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "downloadBackup"
+    },
+    "backup.restore": {
+      "test_id": "WEBUI-ACT-BK-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_admin_and_diagnostics_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "restoreBackup"
+    },
+    "backup.verify": {
+      "test_id": "WEBUI-ACT-BK-004",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_admin_and_diagnostics_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "verifyIntegrity"
+    },
+    "diagnostics.refresh": {
+      "test_id": "WEBUI-ACT-DG-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_admin_and_diagnostics_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "loadDiagnostics"
+    },
+    "jobs.refresh": {
+      "test_id": "WEBUI-ACT-JB-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_admin_and_diagnostics_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "loadJobs"
+    },
+    "jobs.cancel": {
+      "test_id": "WEBUI-ACT-JB-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_admin_and_diagnostics_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "cancelJobAction"
+    },
+    "history.export": {
+      "test_id": "WEBUI-ACT-HS-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_admin_and_diagnostics_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "exportHistory"
+    },
+    "history.clear": {
+      "test_id": "WEBUI-ACT-HS-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_admin_and_diagnostics_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "clearHistory"
+    },
+    "integrations.listenbrainz.connect": {
+      "test_id": "WEBUI-ACT-INT-001",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_integration_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveListenBrainzToken"
+    },
+    "integrations.listenbrainz.test": {
+      "test_id": "WEBUI-ACT-INT-002",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_integration_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "testListenBrainz"
+    },
+    "integrations.listenbrainz.disconnect": {
+      "test_id": "WEBUI-ACT-INT-003",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_integration_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "disconnectListenBrainz"
+    },
+    "integrations.lastfm.connect": {
+      "test_id": "WEBUI-ACT-INT-004",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_integration_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "saveLastFmToken"
+    },
+    "integrations.lastfm.test": {
+      "test_id": "WEBUI-ACT-INT-005",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_integration_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "testLastFm"
+    },
+    "integrations.lastfm.disconnect": {
+      "test_id": "WEBUI-ACT-INT-006",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_integration_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "disconnectLastFm"
+    }
+  }
+}

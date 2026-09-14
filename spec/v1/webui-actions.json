@@ -111,7 +111,8 @@
       "authority": "active_target",
       "effect": "Plays track on currently selected output authority (Browser or Server)",
       "test": "WEBUI-ACT-PB-001",
-      "auth": "protected"
+      "auth": "conditional",
+      "auth_condition": "active_output_target == 'server'"
     },
     {
       "id": "library.add_to_queue",
@@ -121,7 +122,8 @@
       "authority": "active_target",
       "effect": "Appends track to the active playback authority queue without mutating other authorities",
       "test": "WEBUI-ACT-PB-002",
-      "auth": "protected"
+      "auth": "conditional",
+      "auth_condition": "active_output_target == 'server'"
     },
     {
       "id": "library.star",
@@ -159,7 +161,8 @@
       "authority": "active_target",
       "effect": "Toggles play/pause on currently active output authority",
       "test": "WEBUI-ACT-PB-003",
-      "auth": "local_only"
+      "auth": "conditional",
+      "auth_condition": "active_output_target == 'server'"
     },
     {
       "id": "playback.shuffle",
@@ -169,7 +172,8 @@
       "authority": "active_target",
       "effect": "Toggles shuffle mode on active authority; reorders remaining playback items",
       "test": "WEBUI-ACT-PB-004",
-      "auth": "local_only"
+      "auth": "conditional",
+      "auth_condition": "active_output_target == 'server'"
     },
     {
       "id": "playback.repeat",
@@ -179,7 +183,8 @@
       "authority": "active_target",
       "effect": "Cycles repeat mode off->all->one->off on active authority and updates ended behavior",
       "test": "WEBUI-ACT-PB-005",
-      "auth": "local_only"
+      "auth": "conditional",
+      "auth_condition": "active_output_target == 'server'"
     },
     {
       "id": "playback.jump_queue",
@@ -189,7 +194,8 @@
       "authority": "active_target",
       "effect": "Jumps active playback to selected queue index on current authority",
       "test": "WEBUI-ACT-PB-006",
-      "auth": "local_only"
+      "auth": "conditional",
+      "auth_condition": "active_output_target == 'server'"
     },
     {
       "id": "playback.output_target",
@@ -199,7 +205,7 @@
       "authority": "local",
       "effect": "Opens output routing modal or switches routing target",
       "test": "WEBUI-ACT-PB-007",
-      "auth": "local_only"
+      "auth": "protected"
     },
     {
       "id": "playback.handoff",

@@ -65,7 +65,8 @@ async fn test_credential_authority_reconciliation_on_restart() {
     let cfg1 = test_config_for_db(&db_path, "admin", "initial_password_123");
     let admin_id1 = init_admin_user(&cfg1, &pool)
         .await
-        .expect("admin user must be initialized");
+        .expect("admin user must be initialized")
+        .unwrap();
 
     let state1 = AppState::new(cfg1.clone(), pool.clone(), Some(admin_id1));
     let app1 = create_router(state1);
@@ -90,7 +91,8 @@ async fn test_credential_authority_reconciliation_on_restart() {
     let cfg2 = test_config_for_db(&db_path, "admin", "new_rotated_password_456");
     let admin_id2 = init_admin_user(&cfg2, &pool)
         .await
-        .expect("admin user must be reconciled");
+        .expect("admin user must be reconciled")
+        .unwrap();
     assert_eq!(admin_id1, admin_id2, "admin ID must remain identical");
 
     let state2 = AppState::new(cfg2.clone(), pool.clone(), Some(admin_id2));
@@ -133,14 +135,15 @@ async fn test_credential_authority_reconciliation_on_restart() {
 }
 
 #[tokio::test]
-async fn test_admin_username_rotation_reconciles_managed_user_and_revokes_sessions() {
+async fn test_managed_admin_username_rotation_revokes_old_session() {
     let (pool, db_path) = test_db_file().await;
 
     // 1. First boot: admin user created as 'admin_alpha'
     let cfg1 = test_config_for_db(&db_path, "admin_alpha", "alpha_secret_pw");
     let admin_id1 = init_admin_user(&cfg1, &pool)
         .await
-        .expect("admin user must be initialized");
+        .expect("admin user must be initialized")
+        .unwrap();
 
     let state1 = AppState::new(cfg1.clone(), pool.clone(), Some(admin_id1));
     let token1 = state1
@@ -167,7 +170,8 @@ async fn test_admin_username_rotation_reconciles_managed_user_and_revokes_sessio
     let cfg2 = test_config_for_db(&db_path, "admin_beta", "beta_secret_pw");
     let admin_id2 = init_admin_user(&cfg2, &pool)
         .await
-        .expect("admin user must be reconciled under new username");
+        .expect("admin user must be reconciled under new username")
+        .unwrap();
 
     // Must reconcile the SAME admin record (same UUID)
     assert_eq!(
@@ -178,7 +182,7 @@ async fn test_admin_username_rotation_reconciles_managed_user_and_revokes_sessio
     // Total admin accounts in DB must be exactly 1 (no accumulation of stale admin accounts)
     let admins = michi_db::list_admin_users(&pool).await.unwrap();
     assert_eq!(admins.len(), 1, "Must have exactly 1 admin after rotation");
-    assert_eq!(admins[0].1, "admin_beta");
+    assert_eq!(admins[0].username, "admin_beta");
 
     // Verify non-admin user still exists intact
     let normal_user = michi_db::get_user_by_username(&pool, "normal_user")
@@ -233,7 +237,7 @@ async fn test_admin_username_rotation_reconciles_managed_user_and_revokes_sessio
 async fn test_clear_all_sessions_db_first_ordering() {
     let (pool, db_path) = test_db_file().await;
     let cfg = test_config_for_db(&db_path, "admin", "adminpass123");
-    let admin_id = init_admin_user(&cfg, &pool).await.unwrap();
+    let admin_id = init_admin_user(&cfg, &pool).await.unwrap().unwrap();
     let state = AppState::new(cfg, pool.clone(), Some(admin_id));
 
     let token = state.auth_sessions.create_session(admin_id).await.unwrap();
@@ -273,7 +277,8 @@ async fn test_session_persistence_across_restarts() {
     let cfg1 = test_config_for_db(&db_path, "admin", "supersecret123");
     let admin_id = init_admin_user(&cfg1, &pool)
         .await
-        .expect("admin user must be initialized");
+        .expect("admin user must be initialized")
+        .unwrap();
 
     let state1 = AppState::new(cfg1.clone(), pool.clone(), Some(admin_id));
 
@@ -353,7 +358,8 @@ async fn test_update_status_and_check_contract() {
     let cfg = test_config_for_db(&db_path, "admin", "supersecret123");
     let admin_id = init_admin_user(&cfg, &pool)
         .await
-        .expect("admin user must be initialized");
+        .expect("admin user must be initialized")
+        .unwrap();
 
     let state = AppState::new(cfg, pool, Some(admin_id));
     let token = state.auth_sessions.create_session(admin_id).await.unwrap();
@@ -424,14 +430,15 @@ fn extract_cookie_token(res: &axum::response::Response) -> Option<String> {
 }
 
 #[tokio::test]
-async fn test_password_rotation_revokes_old_sessions() {
+async fn test_managed_admin_password_rotation_revokes_old_session() {
     let (pool, db_path) = test_db_file().await;
 
     // 1. Initial boot with pass1
     let cfg1 = test_config_for_db(&db_path, "admin", "pass1_initial");
     let admin_id = init_admin_user(&cfg1, &pool)
         .await
-        .expect("admin user must be initialized");
+        .expect("admin user must be initialized")
+        .unwrap();
 
     let state1 = AppState::new(cfg1, pool.clone(), Some(admin_id));
     let app1 = create_router(state1);
@@ -449,7 +456,7 @@ async fn test_password_rotation_revokes_old_sessions() {
             .unwrap(),
         ))
         .unwrap();
-    let res1 = app1.oneshot(login_req).await.unwrap();
+    let res1 = app1.clone().oneshot(login_req).await.unwrap();
     assert_eq!(res1.status(), StatusCode::OK);
     let cookie_token_a =
         extract_cookie_token(&res1).expect("michi_web_session cookie should be set");
@@ -462,25 +469,24 @@ async fn test_password_rotation_revokes_old_sessions() {
     assert_eq!(token_a, cookie_token_a);
 
     // Verify token A works on /api/v1/settings with Bearer
-    let state1_app = create_router(AppState::new(
-        test_config_for_db(&db_path, "admin", "pass1_initial"),
-        pool.clone(),
-        Some(admin_id),
-    ));
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/settings")
         .header(header::AUTHORIZATION, format!("Bearer {token_a}"))
         .body(Body::empty())
         .unwrap();
-    let res = state1_app.oneshot(req).await.unwrap();
+    let res = app1.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(res.into_body(), 1024 * 64)
+        .await
+        .unwrap();
 
     // 2. Rotate password to pass2_rotated
     let cfg2 = test_config_for_db(&db_path, "admin", "pass2_rotated");
     let admin_id2 = init_admin_user(&cfg2, &pool)
         .await
-        .expect("admin password must be reconciled");
+        .expect("admin password must be reconciled")
+        .unwrap();
     assert_eq!(admin_id, admin_id2);
 
     let state2 = AppState::new(cfg2, pool.clone(), Some(admin_id2));
@@ -563,7 +569,8 @@ async fn test_cookie_persistence_and_logout_across_restart() {
     let cfg1 = test_config_for_db(&db_path, "admin", "supersecret123");
     let admin_id = init_admin_user(&cfg1, &pool)
         .await
-        .expect("admin user must be initialized");
+        .expect("admin user must be initialized")
+        .unwrap();
 
     let state1 = AppState::new(cfg1.clone(), pool.clone(), Some(admin_id));
     let app1 = create_router(state1);
@@ -668,7 +675,8 @@ async fn test_multiple_session_isolation_and_bulk_revocation() {
     let cfg1 = test_config_for_db(&db_path, "admin", "password123");
     let admin_id = init_admin_user(&cfg1, &pool)
         .await
-        .expect("admin user must be initialized");
+        .expect("admin user must be initialized")
+        .unwrap();
 
     let state = AppState::new(cfg1.clone(), pool.clone(), Some(admin_id));
 
@@ -743,7 +751,8 @@ async fn test_multiple_session_isolation_and_bulk_revocation() {
     let cfg2 = test_config_for_db(&db_path, "admin", "new_password456");
     init_admin_user(&cfg2, &pool)
         .await
-        .expect("password rotation");
+        .expect("password rotation")
+        .unwrap();
 
     let state2 = AppState::new(cfg2, pool.clone(), Some(admin_id));
     let app2 = create_router(state2);
@@ -770,7 +779,8 @@ async fn test_session_fail_closed_orphan_user() {
     let cfg = test_config_for_db(&db_path, "admin", "password123");
     let admin_id = init_admin_user(&cfg, &pool)
         .await
-        .expect("admin user must be initialized");
+        .expect("admin user must be initialized")
+        .unwrap();
 
     let state = AppState::new(cfg, pool.clone(), Some(admin_id));
     let token = state.auth_sessions.create_session(admin_id).await.unwrap();
@@ -840,7 +850,7 @@ async fn test_update_status_matrix_with_mock_source() {
     let _lock = UPDATE_TEST_LOCK.lock().await;
     let (pool, db_path) = test_db_file().await;
     let cfg = test_config_for_db(&db_path, "admin", "password123");
-    let admin_id = init_admin_user(&cfg, &pool).await.unwrap();
+    let admin_id = init_admin_user(&cfg, &pool).await.unwrap().unwrap();
 
     let state = AppState::new(cfg, pool, Some(admin_id));
     let token = state.auth_sessions.create_session(admin_id).await.unwrap();
@@ -1033,7 +1043,7 @@ async fn test_update_invalid_version_fail_closed() {
     let mut cfg = test_config_for_db(&db_path, "admin", "adminpass123");
     cfg.version = "banana"; // invalid semver
 
-    let admin_id = init_admin_user(&cfg, &pool).await.unwrap();
+    let admin_id = init_admin_user(&cfg, &pool).await.unwrap().unwrap();
     let state = AppState::new(cfg, pool.clone(), Some(admin_id));
     let token = state.auth_sessions.create_session(admin_id).await.unwrap();
 
@@ -1091,7 +1101,7 @@ async fn test_update_concurrent_refresh_coalescing() {
     let _lock = UPDATE_TEST_LOCK.lock().await;
     let (pool, db_path) = test_db_file().await;
     let cfg = test_config_for_db(&db_path, "admin", "adminpass123");
-    let admin_id = init_admin_user(&cfg, &pool).await.unwrap();
+    let admin_id = init_admin_user(&cfg, &pool).await.unwrap().unwrap();
     let state = AppState::new(cfg, pool.clone(), Some(admin_id));
     let token = state.auth_sessions.create_session(admin_id).await.unwrap();
 
@@ -1140,7 +1150,7 @@ async fn test_update_concurrent_refresh_coalescing() {
 async fn test_logout_sanitized_500_on_persistence_failure() {
     let (pool, db_path) = test_db_file().await;
     let cfg = test_config_for_db(&db_path, "admin", "adminpass123");
-    let admin_id = init_admin_user(&cfg, &pool).await.unwrap();
+    let admin_id = init_admin_user(&cfg, &pool).await.unwrap().unwrap();
     let state = AppState::new(cfg, pool.clone(), Some(admin_id));
     let token = state.auth_sessions.create_session(admin_id).await.unwrap();
 
@@ -1200,7 +1210,7 @@ async fn test_logout_sanitized_500_on_persistence_failure() {
 async fn test_force_backup_restore_purges_active_auth_sessions() {
     let (pool, db_path) = test_db_file().await;
     let cfg = test_config_for_db(&db_path, "admin", "adminpass123");
-    let admin_id = init_admin_user(&cfg, &pool).await.unwrap();
+    let admin_id = init_admin_user(&cfg, &pool).await.unwrap().unwrap();
     let state = AppState::new(cfg, pool.clone(), Some(admin_id));
     let token = state.auth_sessions.create_session(admin_id).await.unwrap();
 
@@ -1263,6 +1273,244 @@ async fn test_force_backup_restore_purges_active_auth_sessions() {
         .unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json["authenticated"], false);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_managed_env_admin_survives_username_rotation_with_other_admin() {
+    let (pool, db_path) = test_db_file().await;
+
+    // 1. Initial boot: creates managed admin 'env_admin'
+    let cfg1 = test_config_for_db(&db_path, "env_admin", "env_pass_1");
+    let env_admin_id = init_admin_user(&cfg1, &pool)
+        .await
+        .expect("env admin must be initialized")
+        .expect("env admin id");
+
+    // 2. Insert another admin manually (managed_by_environment = 0)
+    let manual_admin_id = Uuid::new_v4();
+    let manual_hash = michi_api::auth::hash_password("manual_pass_123").unwrap();
+    michi_db::create_user(&pool, &manual_admin_id, "manual_admin", &manual_hash, true)
+        .await
+        .unwrap();
+
+    let admins_before = michi_db::list_admin_users(&pool).await.unwrap();
+    assert_eq!(admins_before.len(), 2);
+
+    // 3. Rotate env admin username to 'env_admin_v2'
+    let cfg2 = test_config_for_db(&db_path, "env_admin_v2", "env_pass_2");
+    let reconciled_id = init_admin_user(&cfg2, &pool)
+        .await
+        .expect("env admin must reconcile")
+        .expect("reconciled admin id");
+
+    assert_eq!(
+        reconciled_id, env_admin_id,
+        "Managed admin ID must be preserved"
+    );
+
+    // 4. Verify both admins exist: manual_admin untouched, env_admin renamed
+    let admins_after = michi_db::list_admin_users(&pool).await.unwrap();
+    assert_eq!(admins_after.len(), 2, "Both admins must still exist");
+
+    let env_user = michi_db::get_user_by_username(&pool, "env_admin_v2")
+        .await
+        .unwrap()
+        .expect("renamed env admin");
+    assert_eq!(env_user.0, env_admin_id);
+
+    let env_managed: i64 =
+        sqlx::query_scalar("SELECT managed_by_environment FROM users WHERE id = ?")
+            .bind(env_admin_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(env_managed, 1);
+
+    let manual_user = michi_db::get_user_by_username(&pool, "manual_admin")
+        .await
+        .unwrap()
+        .expect("manual admin");
+    assert_eq!(manual_user.0, manual_admin_id);
+
+    let manual_managed: i64 =
+        sqlx::query_scalar("SELECT managed_by_environment FROM users WHERE id = ?")
+            .bind(manual_admin_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(manual_managed, 0);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_managed_env_admin_repeated_rotations_do_not_accumulate_accounts() {
+    let (pool, db_path) = test_db_file().await;
+
+    let names = ["admin_r1", "admin_r2", "admin_r3", "admin_r4"];
+    let mut original_id = None;
+
+    for name in names {
+        let cfg = test_config_for_db(&db_path, name, "password123");
+        let admin_id = init_admin_user(&cfg, &pool)
+            .await
+            .expect("rotation must succeed")
+            .expect("admin id");
+
+        if let Some(prev) = original_id {
+            assert_eq!(prev, admin_id, "Admin ID must not change across rotations");
+        } else {
+            original_id = Some(admin_id);
+        }
+
+        let admins = michi_db::list_admin_users(&pool).await.unwrap();
+        assert_eq!(
+            admins.len(),
+            1,
+            "Must never accumulate duplicate admin rows"
+        );
+        assert_eq!(admins[0].username, name);
+    }
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_ambiguous_legacy_multiple_admins_fail_closed() {
+    let (pool, db_path) = test_db_file().await;
+
+    // Insert 2 legacy admins (managed_by_environment = 0)
+    let id1 = Uuid::new_v4();
+    let id2 = Uuid::new_v4();
+    let hash = michi_api::auth::hash_password("legacy_pass_123").unwrap();
+    michi_db::create_user(&pool, &id1, "legacy_one", &hash, true)
+        .await
+        .unwrap();
+    michi_db::create_user(&pool, &id2, "legacy_two", &hash, true)
+        .await
+        .unwrap();
+
+    // Now attempt to boot with a different username
+    let cfg = test_config_for_db(&db_path, "legacy_three", "password123");
+    let res = init_admin_user(&cfg, &pool).await;
+    assert!(
+        res.is_err(),
+        "Must fail closed on ambiguous multiple legacy admins"
+    );
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("Ambiguous administrator state") || err.contains("admin users exist"),
+        "Error must clearly explain ambiguous legacy admins: {err}"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_managed_admin_username_collision_is_atomic() {
+    let (pool, db_path) = test_db_file().await;
+
+    // 1. Create managed admin 'admin'
+    let cfg1 = test_config_for_db(&db_path, "admin", "admin_pw_123");
+    let admin_id = init_admin_user(&cfg1, &pool).await.unwrap().unwrap();
+
+    // 2. Create normal user 'alice'
+    let alice_id = Uuid::new_v4();
+    let alice_hash = michi_api::auth::hash_password("alice_pw_123").unwrap();
+    michi_db::create_user(&pool, &alice_id, "alice", &alice_hash, false)
+        .await
+        .unwrap();
+
+    // 3. Try to rotate managed admin to username 'alice' (collision with existing non-admin user)
+    let cfg2 = test_config_for_db(&db_path, "alice", "new_admin_pw_123");
+    let res = init_admin_user(&cfg2, &pool).await;
+    assert!(res.is_err(), "Must fail closed on username collision");
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("collision"),
+        "Error must mention collision: {err}"
+    );
+
+    // 4. Verify atomic rollback: admin is still 'admin', alice is still 'alice'
+    let admin_user = michi_db::get_user_by_username(&pool, "admin")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(admin_user.0, admin_id);
+
+    let alice_user = michi_db::get_user_by_username(&pool, "alice")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(alice_user.0, alice_id);
+    assert!(!alice_user.3);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_session_delete_db_failure_does_not_clear_ram() {
+    let (pool, db_path) = test_db_file().await;
+    let cfg = test_config_for_db(&db_path, "admin", "password123");
+    let admin_id = init_admin_user(&cfg, &pool).await.unwrap().unwrap();
+    let state = AppState::new(cfg, pool.clone(), Some(admin_id));
+
+    let token = state.auth_sessions.create_session(admin_id).await.unwrap();
+    assert!(state.auth_sessions.validate(&token).await);
+
+    // Drop auth_sessions table to simulate DB failure on session deletion
+    sqlx::query("DROP TABLE auth_sessions")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let res = state.auth_sessions.invalidate(&token).await;
+    assert!(res.is_err(), "invalidate must fail closed on DB error");
+
+    // In-memory cache must retain session (fail closed, no RAM-DB inconsistency)
+    assert!(
+        state
+            .auth_sessions
+            .sessions
+            .read()
+            .await
+            .contains_key(&token),
+        "RAM session must NOT be cleared if database deletion failed"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_clear_all_sessions_db_failure_does_not_clear_ram() {
+    let (pool, db_path) = test_db_file().await;
+    let cfg = test_config_for_db(&db_path, "admin", "password123");
+    let admin_id = init_admin_user(&cfg, &pool).await.unwrap().unwrap();
+    let state = AppState::new(cfg, pool.clone(), Some(admin_id));
+
+    let token1 = state.auth_sessions.create_session(admin_id).await.unwrap();
+    let token2 = state.auth_sessions.create_session(admin_id).await.unwrap();
+    assert!(state.auth_sessions.validate(&token1).await);
+    assert!(state.auth_sessions.validate(&token2).await);
+
+    // Drop auth_sessions table to simulate DB failure
+    sqlx::query("DROP TABLE auth_sessions")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let res = state.auth_sessions.clear_all_sessions().await;
+    assert!(
+        res.is_err(),
+        "clear_all_sessions must fail closed when DB fails"
+    );
+
+    // In-memory cache must still retain both sessions
+    let ram = state.auth_sessions.sessions.read().await;
+    assert!(ram.contains_key(&token1));
+    assert!(ram.contains_key(&token2));
 
     let _ = std::fs::remove_file(db_path);
 }

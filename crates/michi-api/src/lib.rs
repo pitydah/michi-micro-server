@@ -469,15 +469,19 @@ impl AppState {
         let shutdown = self.shutdown_token.clone();
 
         // Import cleanup (siempre corre)
-        routes::v1::import::spawn_import_cleanup(&self.config, db.clone());
+        let import_handle =
+            routes::v1::import::spawn_import_cleanup(&self.config, db.clone(), shutdown.clone());
+        self.track_task(import_handle);
 
         // Restore playback state (siempre corre)
-        routes::v1::playback::auto_restore_playback_state(
+        let playback_restore_handle = routes::v1::playback::auto_restore_playback_state(
             db.clone(),
             self.playback_state.clone(),
             self.playback_engine.clone(),
             self.config.music_paths.clone(),
+            shutdown.clone(),
         );
+        self.track_task(playback_restore_handle);
 
         // DB maintenance scheduler (siempre corre)
         let maintenance_db = db.clone();
@@ -949,132 +953,148 @@ async fn run_job_worker(
     }
 }
 
-pub async fn init_admin_user(config: &Config, db: &SqlitePool) -> Option<Uuid> {
+pub async fn init_admin_user(config: &Config, db: &SqlitePool) -> Result<Option<Uuid>, String> {
     if !config.auth_enabled {
-        return None;
+        return Ok(None);
     }
     let username = config
         .auth_username
         .as_deref()
         .map(|s| s.trim())
-        .filter(|s| !s.is_empty())?;
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "MICHI_AUTH_USERNAME is missing or empty while auth is enabled".to_string()
+        })?;
+
     let password = config
         .auth_password
         .as_deref()
         .map(|s| s.trim())
-        .filter(|s| s.len() >= 8)?;
+        .filter(|s| s.len() >= 8)
+        .ok_or_else(|| "MICHI_AUTH_PASSWORD is missing or shorter than 8 characters".to_string())?;
 
-    let user_opt = match michi_db::get_user_by_username(db, username).await {
-        Ok(u) => u,
-        Err(e) => {
-            warn!("failed to check user by username during admin initialization: {e}");
-            return None;
-        }
-    };
+    // A. Si ya existe usuario marcado managed_by_environment:
+    let managed_admin_opt = michi_db::get_managed_admin_user(db)
+        .await
+        .map_err(|e| format!("failed to query managed admin from database: {e}"))?;
 
-    match user_opt {
-        Some((id, _, password_hash, is_admin)) => {
-            let password_matches = auth::verify_password(password, &password_hash).unwrap_or(false);
-            if !password_matches || !is_admin {
-                let target_hash = if !password_matches {
-                    match auth::hash_password(password) {
-                        Ok(h) => h,
-                        Err(e) => {
-                            warn!("failed to hash updated admin password: {e}");
-                            return None;
-                        }
-                    }
-                } else {
-                    password_hash
-                };
-                if !password_matches {
-                    if let Err(e) = michi_db::update_user_password_and_revoke_sessions(
-                        db,
-                        &id,
-                        &target_hash,
-                        true,
-                    )
-                    .await
-                    {
-                        warn!("failed to reconcile admin credentials and revoke sessions in database: {e}");
-                        return None;
-                    }
-                    info!(
-                        "configured administrator credentials changed; existing sessions revoked"
-                    );
-                } else if let Err(e) =
-                    michi_db::update_user_password_and_admin(db, &id, &target_hash, true).await
-                {
-                    warn!("failed to promote administrator in database: {e}");
-                    return None;
-                }
-                if !is_admin && password_matches {
-                    info!("promoted configured user '{}' to administrator", username);
-                }
-            }
-            Some(id)
-        }
-        None => {
-            // Check if there is an existing single administrator account to reconcile/rename
-            let existing_admins = match michi_db::list_admin_users(db).await {
-                Ok(admins) => admins,
-                Err(e) => {
-                    warn!("failed to list admin users during admin reconciliation: {e}");
-                    return None;
-                }
-            };
+    if let Some(managed) = managed_admin_opt {
+        // Conservar exactamente su UUID; reconciliar username, password hash, asegurar is_admin=true.
+        let password_matches =
+            auth::verify_password(password, &managed.password_hash).unwrap_or(false);
+        let username_matches = managed.username == username;
+        let credentials_changed = !password_matches || !username_matches;
 
-            if existing_admins.len() == 1 {
-                let (existing_id, old_username, _, _) = &existing_admins[0];
-                match auth::hash_password(password) {
-                    Ok(target_hash) => {
-                        if let Err(e) = michi_db::update_user_credentials_and_revoke_sessions(
-                            db,
-                            existing_id,
-                            username,
-                            &target_hash,
-                            true,
-                        )
-                        .await
-                        {
-                            warn!(
-                                "failed to rotate administrator username from '{}' to '{}': {e}",
-                                old_username, username
-                            );
-                            return None;
-                        }
-                        info!(
-                            "rotated administrator username from '{}' to '{}'; existing sessions revoked",
-                            old_username, username
-                        );
-                        return Some(*existing_id);
-                    }
-                    Err(e) => {
-                        warn!("failed to hash admin password for username rotation: {e}");
-                        return None;
-                    }
-                }
-            }
+        let target_hash = if !password_matches {
+            auth::hash_password(password)
+                .map_err(|e| format!("failed to hash admin password: {e}"))?
+        } else {
+            managed.password_hash.clone()
+        };
 
-            let id = Uuid::new_v4();
-            match auth::hash_password(password) {
-                Ok(hash) => match michi_db::create_user(db, &id, username, &hash, true).await {
-                    Ok(_) => {
-                        info!("created admin user: {}", username);
-                        Some(id)
-                    }
-                    Err(e) => {
-                        warn!("failed to create admin user: {e}");
-                        None
-                    }
-                },
-                Err(e) => {
-                    warn!("failed to hash admin password: {}", e);
-                    None
-                }
+        if credentials_changed || !managed.is_admin {
+            michi_db::reconcile_managed_admin(
+                db,
+                &managed.id,
+                username,
+                &target_hash,
+                credentials_changed,
+            )
+            .await
+            .map_err(|e| format!("failed to reconcile managed admin: {e}"))?;
+
+            if credentials_changed {
+                info!(
+                    "environment-managed administrator credentials updated from '{}:***' to '{}:***'; previous sessions revoked",
+                    managed.username, username
+                );
             }
         }
+        return Ok(Some(managed.id));
     }
+
+    // B. Primera ejecución después de migración sin usuario marcado:
+    // B1. Si existe usuario cuyo username coincide exactamente con MICHI_AUTH_USERNAME:
+    if let Some((user_id, _, current_password_hash, _)) =
+        michi_db::get_user_by_username(db, username)
+            .await
+            .map_err(|e| format!("failed to check user by username: {e}"))?
+    {
+        let password_matches =
+            auth::verify_password(password, &current_password_hash).unwrap_or(false);
+        let target_hash = if !password_matches {
+            auth::hash_password(password)
+                .map_err(|e| format!("failed to hash admin password: {e}"))?
+        } else {
+            current_password_hash
+        };
+
+        michi_db::reconcile_managed_admin(db, &user_id, username, &target_hash, !password_matches)
+            .await
+            .map_err(|e| format!("failed to adopt matching user as managed admin: {e}"))?;
+
+        info!(
+            "adopted existing user '{}' as environment-managed administrator",
+            username
+        );
+        return Ok(Some(user_id));
+    }
+
+    // Inspect all admin users
+    let existing_admins = michi_db::list_admin_users(db)
+        .await
+        .map_err(|e| format!("failed to list admin users: {e}"))?;
+
+    // B2. Si no coincide ninguno y existe exactamente UN administrador:
+    if existing_admins.len() == 1 {
+        let legacy_admin = &existing_admins[0];
+        let target_hash = auth::hash_password(password)
+            .map_err(|e| format!("failed to hash admin password: {e}"))?;
+
+        michi_db::reconcile_managed_admin(db, &legacy_admin.id, username, &target_hash, true)
+            .await
+            .map_err(|e| format!("failed to adopt legacy admin: {e}"))?;
+
+        info!(
+            "adopted single legacy administrator '{}' as environment-managed administrator and reconciled credentials to '{}'",
+            legacy_admin.username, username
+        );
+        return Ok(Some(legacy_admin.id));
+    }
+
+    // B3. Si no existen administradores:
+    if existing_admins.is_empty() {
+        let user_exists = michi_db::get_user_by_username(db, username)
+            .await
+            .map_err(|e| format!("failed to check username uniqueness: {e}"))?
+            .is_some();
+        if user_exists {
+            return Err(format!(
+                "Cannot create managed admin with username '{username}': username is already taken by a non-admin user"
+            ));
+        }
+
+        let new_id = Uuid::new_v4();
+        let target_hash = auth::hash_password(password)
+            .map_err(|e| format!("failed to hash admin password: {e}"))?;
+
+        michi_db::create_managed_admin_user(db, &new_id, username, &target_hash)
+            .await
+            .map_err(|e| format!("failed to create managed admin user: {e}"))?;
+
+        info!("created environment-managed administrator: {}", username);
+        return Ok(Some(new_id));
+    }
+
+    // B4. Si existen DOS O MÁS admins y ninguno coincide con MICHI_AUTH_USERNAME:
+    // ESTADO AMBIGUO. FALLAR CERRADO.
+    let err_msg = format!(
+        "Ambiguous administrator state: {} admin users exist, but none matches configured MICHI_AUTH_USERNAME '{}' and none is marked as managed_by_environment. Refusing to initialize administrator to prevent unauthorized privilege escalation or data corruption.",
+        existing_admins.len(),
+        username
+    );
+    tracing::error!("{err_msg}");
+    Err(err_msg)
 }
 
 pub fn start_sync_peers(state: &AppState, cancel_token: CancellationToken) {

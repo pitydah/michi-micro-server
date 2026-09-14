@@ -310,8 +310,16 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
     if current < 48 {
         run_migration_step!(conn, 48, "auth_sessions table and indexes", migration_048);
     }
+    if current < 49 {
+        run_migration_step!(
+            conn,
+            49,
+            "users managed_by_environment column and unique index",
+            migration_049
+        );
+    }
 
-    info!("database schema at version 48");
+    info!("database schema at version 49");
     Ok(())
 }
 
@@ -1315,6 +1323,20 @@ async fn migration_048(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
     Ok(())
 }
 
+async fn migration_049(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    sqlx::query("ALTER TABLE users ADD COLUMN managed_by_environment INTEGER NOT NULL DEFAULT 0")
+        .execute(&mut **tx)
+        .await?;
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_managed_by_environment ON users(managed_by_environment) WHERE managed_by_environment != 0",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedReceiver {
     pub id: String,
@@ -1816,26 +1838,161 @@ pub async fn update_user_password_and_revoke_sessions(
     Ok(())
 }
 
-pub async fn list_admin_users(
-    pool: &SqlitePool,
-) -> Result<Vec<(Uuid, String, String, bool)>, DbError> {
-    let rows = sqlx::query("SELECT id, username, password_hash, is_admin FROM users WHERE is_admin != 0 ORDER BY created_at ASC")
-        .fetch_all(pool)
-        .await?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminUserRecord {
+    pub id: Uuid,
+    pub username: String,
+    pub password_hash: String,
+    pub is_admin: bool,
+    pub managed_by_environment: bool,
+}
+
+pub async fn get_managed_admin_user(pool: &SqlitePool) -> Result<Option<AdminUserRecord>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, username, password_hash, is_admin, managed_by_environment FROM users WHERE managed_by_environment != 0 LIMIT 1"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.first().map(|r| {
+        let id = Uuid::parse_str(r.get::<&str, _>("id")).unwrap_or(Uuid::nil());
+        let is_admin: bool = r.get::<i64, _>("is_admin") != 0;
+        let managed: bool = r.get::<i64, _>("managed_by_environment") != 0;
+        AdminUserRecord {
+            id,
+            username: r.get::<&str, _>("username").to_string(),
+            password_hash: r.get::<&str, _>("password_hash").to_string(),
+            is_admin,
+            managed_by_environment: managed,
+        }
+    }))
+}
+
+pub async fn list_admin_users(pool: &SqlitePool) -> Result<Vec<AdminUserRecord>, DbError> {
+    let rows = sqlx::query(
+        "SELECT id, username, password_hash, is_admin, managed_by_environment FROM users WHERE is_admin != 0 ORDER BY created_at ASC"
+    )
+    .fetch_all(pool)
+    .await?;
 
     Ok(rows
         .into_iter()
         .map(|r| {
             let id = Uuid::parse_str(r.get::<&str, _>("id")).unwrap_or(Uuid::nil());
             let is_admin: bool = r.get::<i64, _>("is_admin") != 0;
-            (
+            let managed: bool = r.get::<i64, _>("managed_by_environment") != 0;
+            AdminUserRecord {
                 id,
-                r.get::<&str, _>("username").to_string(),
-                r.get::<&str, _>("password_hash").to_string(),
+                username: r.get::<&str, _>("username").to_string(),
+                password_hash: r.get::<&str, _>("password_hash").to_string(),
                 is_admin,
-            )
+                managed_by_environment: managed,
+            }
         })
         .collect())
+}
+
+pub async fn create_managed_admin_user(
+    pool: &SqlitePool,
+    id: &Uuid,
+    username: &str,
+    password_hash: &str,
+) -> Result<(), DbError> {
+    let id_str = id.to_string();
+    sqlx::query(
+        "INSERT INTO users (id, username, password_hash, is_admin, managed_by_environment) VALUES (?, ?, ?, 1, 1)"
+    )
+    .bind(&id_str)
+    .bind(username)
+    .bind(password_hash)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn reconcile_managed_admin(
+    pool: &SqlitePool,
+    id: &Uuid,
+    username: &str,
+    password_hash: &str,
+    revoke_sessions: bool,
+) -> Result<(), DbError> {
+    let id_str = id.to_string();
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let mut tx = match pool.begin().await {
+            Ok(tx) => tx,
+            Err(_e) if attempts < 10 => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+            Err(e) => return Err(DbError::Sqlx(e)),
+        };
+
+        // Pre-check for username collision with a DIFFERENT user
+        let existing_user = match sqlx::query("SELECT id FROM users WHERE username = ? AND id != ?")
+            .bind(username)
+            .bind(&id_str)
+            .fetch_optional(&mut *tx)
+            .await
+        {
+            Ok(u) => u,
+            Err(_e) if attempts < 10 => {
+                let _ = tx.rollback().await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+            Err(e) => return Err(DbError::Sqlx(e)),
+        };
+
+        if existing_user.is_some() {
+            return Err(DbError::InvalidData(format!(
+                "Username collision: '{username}' is already taken by another user"
+            )));
+        }
+
+        if let Err(e) = sqlx::query(
+            "UPDATE users SET username = ?, password_hash = ?, is_admin = 1, managed_by_environment = 1 WHERE id = ?"
+        )
+        .bind(username)
+        .bind(password_hash)
+        .bind(&id_str)
+        .execute(&mut *tx)
+        .await
+        {
+            let _ = tx.rollback().await;
+            if attempts < 10 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+            return Err(DbError::Sqlx(e));
+        }
+
+        if revoke_sessions {
+            if let Err(e) = sqlx::query("DELETE FROM auth_sessions WHERE user_id = ?")
+                .bind(&id_str)
+                .execute(&mut *tx)
+                .await
+            {
+                let _ = tx.rollback().await;
+                if attempts < 10 {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+                return Err(DbError::Sqlx(e));
+            }
+        }
+
+        match tx.commit().await {
+            Ok(()) => return Ok(()),
+            Err(_e) if attempts < 10 => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+            Err(e) => return Err(DbError::Sqlx(e)),
+        }
+    }
 }
 
 pub async fn update_user_credentials_and_revoke_sessions(

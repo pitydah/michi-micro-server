@@ -501,16 +501,16 @@ const AuthSession = {
     try {
       const resp = await MichiAPI.authCheck();
       this.registrationAllowed = !!resp.registration_allowed;
-      if (resp.authenticated === true) {
+      if (resp.enabled === false) {
+        this.state = 'disabled';
+        this.user = null;
+      } else if (resp.authenticated === true) {
         this.state = 'authenticated';
         this.user = {
           id: resp.id,
           username: resp.username || 'User',
           is_admin: !!resp.is_admin
         };
-      } else if (resp.enabled === false) {
-        this.state = 'disabled';
-        this.user = null;
       } else {
         this.state = 'anonymous';
         this.user = null;
@@ -722,6 +722,27 @@ function renderTruthfulText(val, fallback) {
 }
 window.renderTruthfulText = renderTruthfulText;
 
+function setTruthfulBooleanSelect(el, val, disableOnUnknown) {
+  if (!el) return;
+  if (typeof val === 'boolean') {
+    el.value = val ? 'true' : 'false';
+    el.disabled = false;
+  } else {
+    var unavailOpt = el.querySelector('option[value=""]');
+    if (!unavailOpt) {
+      unavailOpt = document.createElement('option');
+      unavailOpt.value = '';
+      unavailOpt.textContent = 'Unavailable';
+      el.insertBefore(unavailOpt, el.firstChild);
+    }
+    el.value = '';
+    if (disableOnUnknown) {
+      el.disabled = true;
+    }
+  }
+}
+window.setTruthfulBooleanSelect = setTruthfulBooleanSelect;
+
 function showToast(msg, isErr) {
   const el = $('#toast');
   if (!el) return;
@@ -881,13 +902,34 @@ function openTrackDetailModal(idx) {
     '<div class="panel-row"><span class="panel-label">Sample Rate</span><span>' + (t.sample_rate ? t.sample_rate + ' Hz' : 'N/D') + '</span></div>' +
     '<div class="panel-row"><span class="panel-label">Bit Depth</span><span>' + (t.bit_depth ? t.bit_depth + '-bit' : 'N/D') + '</span></div>' +
     '<div class="panel-row"><span class="panel-label">Channels</span><span>' + (t.channels ? t.channels + ' ch' : 'N/D') + '</span></div>' +
-    '<div class="panel-row"><span class="panel-label">Rating</span><span>' + (t.rating ? '★'.repeat(t.rating) : 'Unrated') + '</span></div>' +
+    '<div class="panel-row"><span class="panel-label">Rating</span><span>' +
+      [1, 2, 3, 4, 5].map(function(star) {
+        var active = t.rating && t.rating >= star;
+        return '<button type="button" class="icon-btn star-btn" style="color:' + (active ? 'var(--gold, #f59e0b)' : 'var(--text-dim)') + ';cursor:pointer;background:none;border:none;padding:0 2px" onclick="rateTrack(\'' + esc(t.id) + '\', ' + star + ')">★</button>';
+      }).join('') +
+      '</span></div>' +
     '<div class="panel-row"><span class="panel-label">Starred</span><span>' + (t.starred ? '⭐ Starred' : 'No') + '</span></div>' +
     '<div class="panel-row"><span class="panel-label">File Size</span><span>' + fmtBytes(t.file_size) + '</span></div>' +
     '<div class="panel-row"><span class="panel-label">Content Hash</span><span class="panel-mono">' + esc(t.content_hash || 'N/D') + '</span></div>' +
     '</div>';
 
   overlay.classList.remove('hidden');
+}
+
+async function rateTrack(id, rating) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
+  try {
+    await MichiAPI.rateTrack(id, rating);
+    showToast('Rating saved: ' + rating + ' ★');
+    var tr = await MichiAPI.track(id);
+    if (tr && tr.track) {
+      showTrackDetailModal(tr.track);
+    }
+  } catch (e) {
+    showToast('Failed to save rating: ' + e.message, true);
+  }
 }
 
 function closeTrackDetailModal() {
@@ -1246,9 +1288,10 @@ const FEATURE_LABELS = {
 
 function hasServerFeature(featureName) {
   var info = State.serverInfo;
-  if (!info || !info.features) return true;
+  if (!info || !info.features) return null;
   var feats = info.features;
   if (typeof feats === 'object' && !Array.isArray(feats)) {
+    if (feats[featureName] === undefined) return null;
     return feats[featureName] === true;
   }
   if (Array.isArray(feats)) {
@@ -1256,7 +1299,7 @@ function hasServerFeature(featureName) {
       return f === featureName || (f && f.name === featureName && f.enabled !== false);
     });
   }
-  return false;
+  return null;
 }
 
 function featureBadge(enabled, meta) {
@@ -1348,7 +1391,7 @@ function renderDashboard() {
       offline: '● Offline',
     }[ConnectionStatus.state] || '● Offline';
     meta.textContent = 'Server ' + statusText +
-      ' · v' + (State.serverInfo?.version || State.status?.version || '?') +
+      ' · v' + (State.serverInfo?.version || '--') +
       (lib.tracks !== undefined ? ' · ' + lib.tracks + ' tracks' : '');
   }
 }
@@ -1499,6 +1542,9 @@ var ServerPlayback = {
 };
 
 function toggleOutputTarget() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   showOutputSelectorModal();
 }
 
@@ -2236,6 +2282,7 @@ async function loadEcosystemDevices() {
 }
 
 async function revokeDevice(deviceId) {
+  if (!canPerformProtectedAction()) return;
   if (!deviceId || deviceId === 'undefined') {
     showToast('Invalid device ID', true);
     return;
@@ -2258,6 +2305,7 @@ var _qrTimer = null;
 var _qrState = 'IDLE';
 
 async function generateQR() {
+  if (!canPerformProtectedAction()) return;
   _qrState = 'GENERATING';
   try {
     var originUrl = window.location.origin;
@@ -2419,10 +2467,12 @@ async function openPlaylistTracks(id, name) {
 }
 
 function exportPlaylistM3U(id) {
+  if (!canPerformProtectedAction()) return;
   window.open('/api/v1/playlists/' + id + '/export/m3u', '_blank');
 }
 
 function confirmDeletePlaylist(id, name) {
+  if (!canPerformProtectedAction()) return;
   showModal('Delete Playlist', 'Are you sure you want to delete playlist "' + name + '"?', 'Delete', async function () {
     try {
       await MichiAPI.deletePlaylist(id);
@@ -2485,7 +2535,34 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 });
 
+async function createPlaylist(name, description) {
+  if (!canPerformProtectedAction()) return;
+  try {
+    var res = await MichiAPI.createPlaylist(name, description);
+    showToast('Playlist created');
+    loadPlaylists();
+    return res;
+  } catch (e) {
+    showToast('Failed to create playlist: ' + e.message, true);
+  }
+}
+window.createPlaylist = createPlaylist;
+
+async function updatePlaylist(id, body) {
+  if (!canPerformProtectedAction()) return;
+  try {
+    var res = await MichiAPI.updatePlaylist(id, body);
+    showToast('Playlist updated');
+    loadPlaylists();
+    return res;
+  } catch (e) {
+    showToast('Failed to update playlist: ' + e.message, true);
+  }
+}
+window.updatePlaylist = updatePlaylist;
+
 async function createSmartPlaylist() {
+  if (!canPerformProtectedAction()) return;
   var name = $('#smart-name')?.value.trim();
   var rule = $('#smart-rule')?.value;
   var limit = parseInt($('#smart-limit')?.value || '50');
@@ -2578,6 +2655,7 @@ function historyPage(offset) {
 }
 
 async function exportHistory() {
+  if (!canPerformProtectedAction()) return;
   try {
     const data = await MichiAPI.exportHistory();
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -2594,6 +2672,7 @@ async function exportHistory() {
 }
 
 async function clearHistory() {
+  if (!canPerformProtectedAction()) return;
   showModal('Clear History', 'Clear all play history? This cannot be undone.', 'Clear', async function () {
     try {
       await MichiAPI.clearHistory();
@@ -2637,6 +2716,7 @@ async function loadRoomGroups() {
 }
 
 async function createRoomGroup() {
+  if (!canPerformProtectedAction()) return;
   var name = $('#rg-name')?.value.trim();
   var mode = $('#rg-mode')?.value;
   var recvs = $('#rg-receivers')?.value.trim();
@@ -2652,6 +2732,7 @@ async function createRoomGroup() {
 }
 
 async function activateRoomGroup(id) {
+  if (!canPerformProtectedAction()) return;
   try {
     var resp = await MichiAPI.activateRoomGroup(id);
     loadRoomGroups();
@@ -2671,6 +2752,7 @@ async function activateRoomGroup(id) {
 }
 
 async function deactivateRoomGroup(id) {
+  if (!canPerformProtectedAction()) return;
   try {
     await MichiAPI.deactivateRoomGroup(id);
     loadRoomGroups();
@@ -2679,6 +2761,7 @@ async function deactivateRoomGroup(id) {
 }
 
 async function deleteRoomGroup(id) {
+  if (!canPerformProtectedAction()) return;
   try {
     await MichiAPI.deleteRoomGroup(id);
     loadRoomGroups();
@@ -2720,6 +2803,7 @@ async function loadSources() {
 }
 
 async function addSource() {
+  if (!canPerformProtectedAction()) return;
   var url = $('#source-url-input')?.value.trim();
   if (!url) { showToast(t('error.please_enter_url'), true); return; }
   try {
@@ -2739,12 +2823,23 @@ async function addSource() {
 }
 
 async function deleteSource(id) {
+  if (!canPerformProtectedAction()) return;
   try {
     await MichiAPI.deleteSource(id);
     loadSources();
     showToast(t('toast.deleted'));
   } catch (e) { showToast(e.message, true); }
 }
+
+async function updateEpisode(id, position_ms, played) {
+  if (!canPerformProtectedAction()) return;
+  try {
+    return await MichiAPI.updateEpisode(id, position_ms, played);
+  } catch (e) {
+    showToast('Failed to update episode: ' + e.message, true);
+  }
+}
+window.updateEpisode = updateEpisode;
 function playSource(id) {
   var audio = getAudio();
   audio.src = '/api/v1/stream/proxy/' + id;
@@ -2995,6 +3090,7 @@ async function computeFileSha256Streaming(file, onProgress) {
 
 // ── Sync & Handoff Handlers ─────────────────────────────────────
 async function uploadFile() {
+  if (!canPerformProtectedAction()) return;
   var fileInput = $('#settings-file-input');
   var progressWrap = $('#upload-progress-wrap');
   var progressFill = $('#upload-progress-fill');
@@ -3140,6 +3236,7 @@ async function uploadFile() {
 }
 
 async function syncPlaylist() {
+  if (!canPerformProtectedAction()) return;
   var nameInput = $('#sync-playlist-name');
   var tracksInput = $('#sync-playlist-tracks');
   var resEl = $('#sync-playlist-result');
@@ -3196,6 +3293,7 @@ async function syncPlaylist() {
 }
 
 async function transferHandoff() {
+  if (!canPerformProtectedAction()) return;
   var trackInput = $('#handoff-track-id');
   var posInput = $('#handoff-position');
   var playingInput = $('#handoff-playing');
@@ -3273,6 +3371,7 @@ async function transferHandoff() {
 }
 
 async function discoverDevices() {
+  if (!canPerformProtectedAction()) return;
   var resEl = $('#discover-result');
   if (resEl) resEl.innerHTML = '<span style="color:var(--text-3)">Scanning local network for Michi receivers...</span>';
   try {
@@ -3296,6 +3395,30 @@ async function discoverDevices() {
     showToast('Discovery failed: ' + e.message, true);
   }
 }
+
+async function startReceiverPair(deviceId) {
+  if (!canPerformProtectedAction()) return;
+  try {
+    var res = await MichiAPI.startReceiverPair({ receiver_id: deviceId });
+    showToast('Receiver pairing initiated');
+    return res;
+  } catch (e) {
+    showToast('Pairing start failed: ' + e.message, true);
+  }
+}
+window.startReceiverPair = startReceiverPair;
+
+async function confirmReceiverPair(deviceId, pin) {
+  if (!canPerformProtectedAction()) return;
+  try {
+    var res = await MichiAPI.confirmReceiverPair({ receiver_id: deviceId, pin: pin });
+    showToast('Receiver paired successfully');
+    return res;
+  } catch (e) {
+    showToast('Pairing confirmation failed: ' + e.message, true);
+  }
+}
+window.confirmReceiverPair = confirmReceiverPair;
 
 // ── Settings ─────────────────────────────────────────────────────
 const SETTINGS_TAB_ALIASES = {
@@ -3391,19 +3514,23 @@ async function loadSettings() {
     if ($('#settings-format-policy')) $('#settings-format-policy').value = s.format_policy || '';
     if ($('#settings-job-max-concurrent')) $('#settings-job-max-concurrent').value = s.job_max_concurrent !== undefined && s.job_max_concurrent !== null ? s.job_max_concurrent : '';
     if ($('#settings-max-remote-bitrate')) $('#settings-max-remote-bitrate').value = s.max_remote_bitrate !== undefined && s.max_remote_bitrate !== null ? s.max_remote_bitrate : '';
-    if ($('#settings-scrobble-toggle')) $('#settings-scrobble-toggle').value = s.scrobble_enabled ? 'true' : 'false';
+    setTruthfulBooleanSelect($('#settings-scrobble-toggle'), s.scrobble_enabled);
     if ($('#settings-sync-name-input')) $('#settings-sync-name-input').value = s.sync_name || '';
-    if ($('#settings-remote-sync')) $('#settings-remote-sync').value = s.remote_sync ? 'true' : 'false';
-    if ($('#settings-auto-backup')) $('#settings-auto-backup').value = s.auto_backup_enabled ? 'true' : 'false';
+    setTruthfulBooleanSelect($('#settings-remote-sync'), s.remote_sync);
+    setTruthfulBooleanSelect($('#settings-auto-backup'), s.auto_backup_enabled);
     if ($('#settings-backup-max-keep')) $('#settings-backup-max-keep').value = s.backup_max_keep !== undefined && s.backup_max_keep !== null ? s.backup_max_keep : '';
     if ($('#settings-reconnect-delay-max')) $('#settings-reconnect-delay-max').value = s.reconnect_delay_max !== undefined && s.reconnect_delay_max !== null ? s.reconnect_delay_max : '';
-    if ($('#settings-dev-mode-select')) $('#settings-dev-mode-select').value = s.dev_mode ? 'true' : 'false';
-    if ($('#settings-cover-art')) $('#settings-cover-art').value = (s.cover_art_enabled !== false) ? 'true' : 'false';
-    if ($('#settings-sidebar-collapsed')) $('#settings-sidebar-collapsed').value = s.sidebar_collapsed ? 'true' : 'false';
+    setTruthfulBooleanSelect($('#settings-dev-mode-select'), s.dev_mode);
+    setTruthfulBooleanSelect($('#settings-cover-art'), s.cover_art_enabled);
+    setTruthfulBooleanSelect($('#settings-sidebar-collapsed'), s.sidebar_collapsed);
 
-    // Apply real consumer effect for cover art and sidebar
-    applyCoverArtPreference(s.cover_art_enabled !== false);
-    applySidebarPreference(!!s.sidebar_collapsed);
+    // Apply real consumer effect for cover art and sidebar only if boolean provided
+    if (typeof s.cover_art_enabled === 'boolean') {
+      applyCoverArtPreference(s.cover_art_enabled);
+    }
+    if (typeof s.sidebar_collapsed === 'boolean') {
+      applySidebarPreference(s.sidebar_collapsed);
+    }
 
     // Apply server canonical theme and language if not overridden manually in this browser
     if (s.theme && !localStorage.getItem('michi_theme_manual')) {
@@ -3585,6 +3712,7 @@ async function updateScrobbleStatusUI() {
 }
 
 async function saveListenBrainzToken() {
+  if (!canPerformProtectedAction()) return;
   var input = $('#settings-lb-token');
   var resultEl = $('#settings-lb-result');
   if (!input || !resultEl) return;
@@ -3607,6 +3735,7 @@ async function saveListenBrainzToken() {
 }
 
 async function saveLastFmToken() {
+  if (!canPerformProtectedAction()) return;
   var input = $('#settings-lfm-token');
   var resultEl = $('#settings-lfm-result');
   if (!input || !resultEl) return;
@@ -3629,6 +3758,7 @@ async function saveLastFmToken() {
 }
 
 async function disconnectListenBrainz() {
+  if (!canPerformProtectedAction()) return;
   var resultEl = $('#settings-lb-result');
   if (resultEl) resultEl.textContent = 'Disconnecting ListenBrainz...';
   try {
@@ -3645,6 +3775,7 @@ async function disconnectListenBrainz() {
 }
 
 async function testListenBrainz() {
+  if (!canPerformProtectedAction()) return;
   var resultEl = $('#settings-lb-result');
   if (resultEl) resultEl.textContent = 'Testing ListenBrainz connection...';
   try {
@@ -3659,6 +3790,7 @@ async function testListenBrainz() {
 }
 
 async function disconnectLastFm() {
+  if (!canPerformProtectedAction()) return;
   var resultEl = $('#settings-lfm-result');
   if (resultEl) resultEl.textContent = 'Disconnecting Last.fm...';
   try {
@@ -3675,6 +3807,7 @@ async function disconnectLastFm() {
 }
 
 async function testLastFm() {
+  if (!canPerformProtectedAction()) return;
   var resultEl = $('#settings-lfm-result');
   if (resultEl) resultEl.textContent = 'Testing Last.fm connection...';
   try {
@@ -3718,6 +3851,9 @@ function renderRestartBanner(fieldsStr) {
 }
 
 async function saveSetting(key, value) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var body = {};
   body[key] = value;
   try {
@@ -3758,6 +3894,9 @@ function renderSyncPeers(peers) {
 }
 
 async function addSyncPeer() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var input = $('#settings-new-peer');
   var val = input ? input.value.trim() : '';
   if (!val) return;
@@ -3771,6 +3910,9 @@ async function addSyncPeer() {
 }
 
 async function removeSyncPeer(idx) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   if (idx < 0 || idx >= _currentPeers.length) return;
   var updated = _currentPeers.filter(function(_, i) { return i !== idx; });
   await saveSetting('sync_peers', updated);
@@ -3778,6 +3920,9 @@ async function removeSyncPeer(idx) {
 
 // ── Webhooks ─────────────────────────────────────────────────────
 async function setWebhook() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var url = $('#webhook-url')?.value.trim();
   if (!url) { showToast(t('error.please_enter_url'), true); return; }
   try {
@@ -3789,6 +3934,9 @@ async function setWebhook() {
 }
 
 async function testWebhook() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var el = $('#webhook-status');
   if (el) el.innerHTML = '<span style="color:var(--text-dim)">Testing webhook...</span>';
   try {
@@ -3810,6 +3958,9 @@ async function testWebhook() {
 }
 
 async function deleteWebhook() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   try {
     await MichiAPI.deleteWebhook();
     var el = $('#webhook-status');
@@ -3821,6 +3972,9 @@ async function deleteWebhook() {
 
 // ── Backup, Diagnostics, Jobs, Integrations ───────────────────────
 async function createSnapshot() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var el = $('#snapshot-result');
   if (el) el.innerHTML = '<span style="color:var(--text-dim)">Creating library statistics snapshot...</span>';
   try {
@@ -3841,10 +3995,16 @@ async function createSnapshot() {
 }
 
 function downloadBackup() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   window.open('/api/v1/backup/download', '_blank');
 }
 
 async function restoreBackup() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var fileInput = $('#backup-restore-file');
   var resEl = $('#backup-restore-result');
 
@@ -3905,6 +4065,9 @@ async function restoreBackup() {
 }
 
 async function loadDiagnostics() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var statusEl = $('#diag-status');
   var ffmpegEl = $('#diag-ffmpeg');
   var transEl = $('#diag-transcodes');
@@ -3920,7 +4083,13 @@ async function loadDiagnostics() {
       statusEl.textContent = isOk ? 'Healthy' : (diag.degraded ? 'Degraded' : 'Unhealthy');
       statusEl.className = isOk ? 'badge stable' : 'badge disabled';
     }
-    if (ffmpegEl) ffmpegEl.textContent = settings.ffmpeg_available ? 'Available (Transcoding ready)' : 'Unavailable (Direct play only)';
+    if (ffmpegEl) {
+      if (typeof settings.ffmpeg_available !== 'boolean') {
+        ffmpegEl.textContent = 'Status Unavailable';
+      } else {
+        ffmpegEl.textContent = settings.ffmpeg_available ? 'Available (Transcoding ready)' : 'Unavailable (Direct play only)';
+      }
+    }
     if (transEl) transEl.textContent = (settings.effective_transcode_workers !== undefined && settings.effective_transcode_workers !== null)
       ? 'Capacity: ' + settings.effective_transcode_workers + ' worker slots'
       : 'Capacity: Unavailable';
@@ -3947,6 +4116,9 @@ async function loadDiagnostics() {
 }
 
 async function loadJobs() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var maxEl = $('#jobs-max-concurrent');
   var listEl = $('#jobs-list');
 
@@ -3987,6 +4159,9 @@ async function loadJobs() {
 }
 
 async function cancelJobAction(id) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   if (!confirm('Are you sure you want to cancel job ' + id + '?')) return;
   try {
     await MichiAPI.cancelJob(id);
@@ -4008,7 +4183,10 @@ async function loadIntegrations() {
     var ha = diag.homeassistant || {};
 
     if (haStatusEl) {
-      if (ha.enabled === false) {
+      if (!diag.homeassistant || typeof ha.configured !== 'boolean') {
+        haStatusEl.textContent = 'Status Unavailable';
+        haStatusEl.className = 'badge disabled';
+      } else if (ha.enabled === false) {
         haStatusEl.textContent = 'Disabled (Module deactivated)';
         haStatusEl.className = 'badge disabled';
       } else if (!ha.configured) {
@@ -4036,6 +4214,9 @@ async function loadIntegrations() {
 }
 
 async function verifyIntegrity() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var el = $('#integrity-result');
   if (el) el.innerHTML = '<span style="color:var(--text-dim)">Checking file availability...</span>';
   try {
@@ -4092,6 +4273,9 @@ function hideCreateChain() {
 }
 
 async function createChain() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var name = $('#new-chain-name')?.value.trim();
   if (!name) { showToast(t('error.please_enter_name'), true); return; }
   try {
@@ -4104,6 +4288,9 @@ async function createChain() {
 }
 
 async function openChain(id) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   _currentChainId = id;
   try {
     var raw = await MichiAPI.chain(id);
@@ -4160,6 +4347,9 @@ function renderChainLinks(links) {
 }
 
 async function addLink() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   if (!_currentChainId) return;
   var sel = $('#chain-add-receiver');
   var recvId = sel?.value;
@@ -4172,6 +4362,9 @@ async function addLink() {
 }
 
 async function removeLink(linkId, chainId) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   try {
     await MichiAPI.removeChainLink(chainId, linkId);
     openChain(_currentChainId);
@@ -4180,12 +4373,18 @@ async function removeLink(linkId, chainId) {
 }
 
 async function saveLinkVolume(linkId, chainId, val) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   try {
     await MichiAPI.updateChainLink(chainId, linkId, { volume: parseInt(val) });
   } catch (e) { showToast(e.message, true); }
 }
 
 async function setChainTrack() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   if (!_currentChainId) return;
   var trackId = $('#chain-track-id')?.value.trim();
   try {
@@ -4198,6 +4397,9 @@ async function setChainTrack() {
 }
 
 async function playChain() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   if (!_currentChainId) return;
   try {
     var resp = await MichiAPI.playChain(_currentChainId);
@@ -4216,6 +4418,9 @@ async function playChain() {
 }
 
 async function stopChain() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   if (!_currentChainId) return;
   try {
     await MichiAPI.stopChain(_currentChainId);
@@ -4234,6 +4439,9 @@ function setChainVolume(val) {
 
   if (_chainVolTimeout) clearTimeout(_chainVolTimeout);
   _chainVolTimeout = setTimeout(async function () {
+    if (!canPerformProtectedAction()) {
+      return;
+    }
     try {
       await MichiAPI.setChainVolume(_currentChainId, parseInt(val));
     } catch (e) {
@@ -4410,3 +4618,4 @@ window.renderUpdateStatus = renderUpdateStatus;
 window.showOutputSelectorModal = showOutputSelectorModal;
 window.toggleOutputTarget = toggleOutputTarget;
 window.closeOutputSelectorModal = closeOutputSelectorModal;
+window.rateTrack = rateTrack;

@@ -21,6 +21,8 @@ HTML_PATH = ROOT / "crates/michi-api/static/index.html"
 JS_PATH = ROOT / "crates/michi-api/static/app.js"
 MANIFEST_PATH = ROOT / "spec/v1/webui-actions.json"
 
+REGISTRY_PATH = ROOT / "tests/webui/action_contract_registry.json"
+
 BANNED_LEGACY_PATTERNS = [
     r"/api/status\b",
     r"/api/v1/episodes/",
@@ -64,6 +66,13 @@ def load_manifest():
         return json.load(f)
 
 
+def load_registry():
+    if not REGISTRY_PATH.exists():
+        return None
+    with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def inspect_html():
     with open(HTML_PATH, "r", encoding="utf-8") as f:
         html = f.read()
@@ -78,6 +87,28 @@ def inspect_html():
         "onchanges": onchanges,
         "settings": settings,
     }
+
+
+def extract_function_body(name, js_text):
+    patterns = [
+        rf"(?:async\s+)?function\s+{re.escape(name)}\s*\([^)]*\)\s*\{{",
+        rf"\b{re.escape(name)}\s*:\s*(?:async\s+)?function\s*\([^)]*\)\s*\{{",
+        rf"\b{re.escape(name)}\s*\([^)]*\)\s*\{{"
+    ]
+    for p in patterns:
+        m = re.search(p, js_text)
+        if m:
+            start_idx = m.end() - 1
+            depth = 1
+            pos = start_idx + 1
+            while pos < len(js_text) and depth > 0:
+                if js_text[pos] == "{":
+                    depth += 1
+                elif js_text[pos] == "}":
+                    depth -= 1
+                pos += 1
+            return js_text[start_idx:pos]
+    return None
 
 
 def inspect_js():
@@ -190,6 +221,12 @@ def main():
     actions = manifest.get("actions", [])
     print(f"📋 Loaded {len(actions)} actions from {MANIFEST_PATH.name}")
 
+    registry = load_registry()
+    if registry:
+        print(f"📑 Loaded test contract registry from {REGISTRY_PATH.name}")
+    else:
+        print(f"⚠️ Warning: Registry not found at {REGISTRY_PATH}")
+
     html_data = inspect_html()
     js_data = inspect_js()
 
@@ -225,7 +262,19 @@ def main():
         elif test_id not in test_corpus:
             errors.append(f"Action '{aid}' test reference '{test_id}' not found in any test file")
 
-        # Verify handler
+        # Verify against registry if present
+        if registry and registry.get("actions"):
+            reg_entry = registry["actions"].get(aid)
+            if not reg_entry:
+                errors.append(f"Action '{aid}' is not recorded in test contract registry {REGISTRY_PATH.name}")
+            else:
+                if reg_entry.get("test_id") != test_id:
+                    errors.append(f"Action '{aid}' test_id mismatch between manifest ({test_id}) and registry ({reg_entry.get('test_id')})")
+                test_fn = reg_entry.get("test_function")
+                if not test_fn or test_fn not in test_corpus:
+                    errors.append(f"Action '{aid}' registry test function '{test_fn}' not found in test corpus")
+
+        # Verify handler exists
         handler = action.get("frontend_handler")
         if handler and handler not in js_data["functions"]:
             if not any(f"{handler}" in js_data["js"] for h in [handler]):
@@ -236,12 +285,31 @@ def main():
         if auth_authority not in ("browser", "server", "shared", "local", "active_target"):
             errors.append(f"Action '{aid}' has invalid authority '{auth_authority}'")
 
-        # Verify auth dimension: must be explicitly 'public', 'protected', or 'local_only'
+        # Verify auth dimension: must be explicitly 'public', 'protected', 'conditional', or 'local_only'
         auth_level = action.get("auth")
         if not auth_level:
-            errors.append(f"Action '{aid}' is missing required 'auth' field (must be 'public', 'protected', or 'local_only')")
-        elif auth_level not in ("public", "protected", "local_only"):
-            errors.append(f"Action '{aid}' has invalid auth value '{auth_level}' (expected 'public', 'protected', or 'local_only')")
+            errors.append(f"Action '{aid}' is missing required 'auth' field")
+        elif auth_level not in ("public", "protected", "conditional", "local_only"):
+            errors.append(f"Action '{aid}' has invalid auth value '{auth_level}' (expected 'public', 'protected', 'conditional', or 'local_only')")
+
+        # Structural JS handler checks based on auth level
+        if handler:
+            fn_body = extract_function_body(handler, js_data["js"])
+            if fn_body:
+                if auth_level == "protected":
+                    guard_pos = fn_body.find("canPerformProtectedAction()")
+                    michi_pos = fn_body.find("MichiAPI.")
+                    if guard_pos == -1:
+                        errors.append(f"Action '{aid}' (protected) handler '{handler}' is missing 'canPerformProtectedAction()' guard")
+                    elif michi_pos != -1 and guard_pos > michi_pos:
+                        errors.append(f"Action '{aid}' (protected) handler '{handler}' calls MichiAPI before 'canPerformProtectedAction()' guard")
+                elif auth_level == "conditional":
+                    cond = action.get("auth_condition")
+                    if not cond:
+                        errors.append(f"Action '{aid}' is conditional but missing 'auth_condition' declaration")
+                elif auth_level == "local_only":
+                    if "MichiAPI." in fn_body:
+                        errors.append(f"Action '{aid}' is local_only but handler '{handler}' makes MichiAPI network calls")
 
         # Verify endpoint matches Axum router
         ep = action.get("endpoint")
@@ -273,6 +341,7 @@ def main():
     # Count auth categories
     public_count = sum(1 for a in actions if a.get("auth") == "public")
     protected_count = sum(1 for a in actions if a.get("auth") == "protected")
+    conditional_count = sum(1 for a in actions if a.get("auth") == "conditional")
     local_only_count = sum(1 for a in actions if a.get("auth") == "local_only")
 
     # Output report
@@ -281,6 +350,7 @@ def main():
         "actions_valid": len(action_ids) - len(errors),
         "public_actions": public_count,
         "protected_actions": protected_count,
+        "conditional_actions": conditional_count,
         "local_only_actions": local_only_count,
         "errors": errors,
         "html_violations": html_violations,

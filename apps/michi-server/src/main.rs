@@ -166,7 +166,13 @@ async fn async_main(config: michi_config::Config) -> Result<()> {
         }
     });
 
-    let admin_user_id = michi_api::init_admin_user(&config, &pool).await;
+    let admin_user_id = match michi_api::init_admin_user(&config, &pool).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!("FATAL: Administrator initialization failed: {e}");
+            return Err(anyhow::anyhow!("Administrator initialization failed: {e}"));
+        }
+    };
     let state = michi_api::AppState::new_with_identity(
         config.clone(),
         pool,
