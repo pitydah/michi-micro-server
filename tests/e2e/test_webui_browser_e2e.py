@@ -331,9 +331,10 @@ def test_mobile_settings_no_horizontal_overflow(browser_context):
     page.goto(f"{SERVER_URL}/")
     page.wait_for_timeout(500)
 
-    # Navigate to Settings
-    page.click(".nav-item[data-section='settings']")
+    # Navigate to Settings (using showSection directly as mobile sidebar is off-canvas by default)
+    page.evaluate("() => showSection('settings')")
     page.wait_for_timeout(500)
+    expect(page.locator("#page-settings")).to_be_visible()
 
     # Check that document width does not exceed viewport width
     has_overflow = page.evaluate("() => document.documentElement.scrollWidth > document.documentElement.clientWidth")
