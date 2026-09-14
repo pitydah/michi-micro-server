@@ -10,6 +10,7 @@ Usage:
 """
 
 import os
+from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright, expect
 
@@ -485,11 +486,33 @@ def test_auth_disabled_real_server_zero_protected_requests(browser_context):
 
         page = browser_context.new_page()
         recorded_401s = []
+        protected_requested = []
+
+        protected_patterns = [
+            "/api/v1/settings",
+            "/api/v1/library/scan",
+            "/api/v1/search",
+            "/api/v1/receivers",
+            "/api/v1/rooms",
+            "/api/v1/chains",
+            "/api/v1/backup",
+            "/api/v1/history",
+            "/api/v1/sources",
+            "/api/v1/dashboard",
+            "/api/v1/tracks",
+            "/api/v1/playback/output",
+        ]
+
+        def on_request(req):
+            url = req.url
+            if any(p in url for p in protected_patterns):
+                protected_requested.append(url)
 
         def on_response(response):
             if response.status == 401:
                 recorded_401s.append(response.url)
 
+        page.on("request", on_request)
         page.on("response", on_response)
         page.goto(f"{server_url}/")
         expect(page).to_have_title("Michi Micro Server")
@@ -513,7 +536,14 @@ def test_auth_disabled_real_server_zero_protected_requests(browser_context):
         auth_overlay = page.locator("#auth-overlay")
         expect(auth_overlay).to_be_hidden()
 
-        # 3. Verify zero 401 responses occurred across interactions
+        # 5. Trigger representative actions to verify client-side fail-closed / no-op gating
+        page.evaluate("() => showOutputSelectorModal()")
+        page.evaluate("() => handleScan()")
+        page.evaluate("() => handleSearch()")
+        page.wait_for_timeout(500)
+
+        # 6. Verify zero protected requests dispatched and zero 401 responses occurred
+        assert len(protected_requested) == 0, f"Dispatched protected requests with auth disabled: {protected_requested}"
         assert len(recorded_401s) == 0, f"Encountered 401 responses with auth disabled: {recorded_401s}"
         page.close()
     finally:
@@ -523,4 +553,127 @@ def test_auth_disabled_real_server_zero_protected_requests(browser_context):
         except Exception:
             proc.kill()
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_truthful_ui_state_matrix(browser_context):
+    """Verifies that truthful UI helpers correctly distinguish known/unknown value states and handle environment overrides."""
+    js_code = (Path(__file__).resolve().parent.parent.parent / "crates/michi-api/static/app.js").read_text(encoding="utf-8")
+    page = browser_context.new_page()
+    page.goto(f"{SERVER_URL}/")
+    page.evaluate(js_code)
+
+    # 1. Test setTruthfulBooleanSelect: true, false, null, undefined
+    results = page.evaluate("""() => {
+        const sel = document.createElement('select');
+        sel.innerHTML = '<option value="true">True</option><option value="false">False</option>';
+        document.body.appendChild(sel);
+
+        // Test boolean true
+        setTruthfulBooleanSelect(sel, true);
+        const r1 = { value: sel.value, state: sel.dataset.truthState };
+
+        // Test boolean false
+        setTruthfulBooleanSelect(sel, false);
+        const r2 = { value: sel.value, state: sel.dataset.truthState };
+
+        // Test unknown (null)
+        setTruthfulBooleanSelect(sel, null);
+        const r3 = { value: sel.value, state: sel.dataset.truthState, hasEmptyOpt: !!sel.querySelector('option[value=""]') };
+
+        // Test unknown (undefined)
+        setTruthfulBooleanSelect(sel, undefined);
+        const r4 = { value: sel.value, state: sel.dataset.truthState };
+
+        sel.remove();
+        return { r1, r2, r3, r4 };
+    }""")
+
+    assert results["r1"] == {"value": "true", "state": "known"}
+    assert results["r2"] == {"value": "false", "state": "known"}
+    assert results["r3"]["value"] == ""
+    assert results["r3"]["state"] == "unknown"
+    assert results["r3"]["hasEmptyOpt"] is True
+    assert results["r4"] == {"value": "", "state": "unknown"}
+
+    # 2. Test setTruthfulNumberInput: 0, positive, null, undefined
+    num_results = page.evaluate("""() => {
+        const inp = document.createElement('input');
+        inp.type = 'number';
+        document.body.appendChild(inp);
+
+        // 0 is valid known number
+        setTruthfulNumberInput(inp, 0);
+        const n0 = { value: inp.value, state: inp.dataset.truthState };
+
+        // 42 is valid known number
+        setTruthfulNumberInput(inp, 42);
+        const n42 = { value: inp.value, state: inp.dataset.truthState };
+
+        // null is unknown
+        setTruthfulNumberInput(inp, null);
+        const nNull = { value: inp.value, state: inp.dataset.truthState, placeholder: inp.placeholder };
+
+        inp.remove();
+        return { n0, n42, nNull };
+    }""")
+
+    assert num_results["n0"] == {"value": "0", "state": "known"}
+    assert num_results["n42"] == {"value": "42", "state": "known"}
+    assert num_results["nNull"]["value"] == ""
+    assert num_results["nNull"]["state"] == "unknown"
+    assert num_results["nNull"]["placeholder"] == "Unavailable"
+
+    # 3. Test setTruthfulSelect: known string, empty/null
+    sel_results = page.evaluate("""() => {
+        const sel = document.createElement('select');
+        sel.innerHTML = '<option value="eco">Eco</option><option value="balanced">Balanced</option>';
+        document.body.appendChild(sel);
+
+        setTruthfulSelect(sel, 'balanced');
+        const sKnown = { value: sel.value, state: sel.dataset.truthState };
+
+        setTruthfulSelect(sel, null);
+        const sNull = { value: sel.value, state: sel.dataset.truthState, hasEmptyOpt: !!sel.querySelector('option[value=""]') };
+
+        sel.remove();
+        return { sKnown, sNull };
+    }""")
+
+    assert sel_results["sKnown"] == {"value": "balanced", "state": "known"}
+    assert sel_results["sNull"]["value"] == ""
+    assert sel_results["sNull"]["state"] == "unknown"
+    assert sel_results["sNull"]["hasEmptyOpt"] is True
+
+    page.close()
+
+
+def test_feature_capability_unknown_badge(browser_context):
+    """Verifies that featureBadge returns UNKNOWN on null/undefined capability, never collapsing into OFF."""
+    js_code = (Path(__file__).resolve().parent.parent.parent / "crates/michi-api/static/app.js").read_text(encoding="utf-8")
+    page = browser_context.new_page()
+    page.goto(f"{SERVER_URL}/")
+    page.evaluate(js_code)
+
+    badges = page.evaluate("""() => {
+        const meta = { label: 'Transcoding', future: true };
+        const bNull = featureBadge(null, meta);
+        const bUndef = featureBadge(undefined, meta);
+        const bTrue = featureBadge(true, meta);
+        const bFalse = featureBadge(false, meta);
+
+        const stableMeta = { label: 'Library', stable: true };
+        const bStableNull = featureBadge(null, stableMeta);
+        const bStableFalse = featureBadge(false, stableMeta);
+
+        return { bNull, bUndef, bTrue, bFalse, bStableNull, bStableFalse };
+    }""")
+
+    assert badges["bNull"] == {"cls": "disabled", "text": "UNKNOWN"}
+    assert badges["bUndef"] == {"cls": "disabled", "text": "UNKNOWN"}
+    assert badges["bTrue"] == {"cls": "stable", "text": "ON"}
+    assert badges["bFalse"] == {"cls": "experimental", "text": "EXP"}
+    assert badges["bStableNull"] == {"cls": "disabled", "text": "UNKNOWN"}
+    assert badges["bStableFalse"] == {"cls": "disabled", "text": "OFF"}
+
+    page.close()
 

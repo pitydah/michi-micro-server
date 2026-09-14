@@ -722,26 +722,69 @@ function renderTruthfulText(val, fallback) {
 }
 window.renderTruthfulText = renderTruthfulText;
 
-function setTruthfulBooleanSelect(el, val, disableOnUnknown) {
+function setTruthfulBooleanSelect(el, val) {
   if (!el) return;
+  var unavailOpt = el.querySelector('option[value=""]');
+  if (!unavailOpt) {
+    unavailOpt = document.createElement('option');
+    unavailOpt.value = '';
+    unavailOpt.textContent = 'Unavailable';
+    el.insertBefore(unavailOpt, el.firstChild);
+  }
   if (typeof val === 'boolean') {
     el.value = val ? 'true' : 'false';
-    el.disabled = false;
+    el.dataset.truthState = 'known';
   } else {
-    var unavailOpt = el.querySelector('option[value=""]');
-    if (!unavailOpt) {
-      unavailOpt = document.createElement('option');
-      unavailOpt.value = '';
-      unavailOpt.textContent = 'Unavailable';
-      el.insertBefore(unavailOpt, el.firstChild);
-    }
     el.value = '';
-    if (disableOnUnknown) {
-      el.disabled = true;
-    }
+    el.dataset.truthState = 'unknown';
   }
 }
 window.setTruthfulBooleanSelect = setTruthfulBooleanSelect;
+
+function setTruthfulSelect(el, val) {
+  if (!el) return;
+  var unavailOpt = el.querySelector('option[value=""]');
+  if (!unavailOpt) {
+    unavailOpt = document.createElement('option');
+    unavailOpt.value = '';
+    unavailOpt.textContent = 'Unavailable';
+    el.insertBefore(unavailOpt, el.firstChild);
+  }
+  if (val !== null && val !== undefined && val !== '') {
+    el.value = String(val);
+    el.dataset.truthState = 'known';
+  } else {
+    el.value = '';
+    el.dataset.truthState = 'unknown';
+  }
+}
+window.setTruthfulSelect = setTruthfulSelect;
+
+function setTruthfulNumberInput(el, val) {
+  if (!el) return;
+  if (typeof val === 'number' && !isNaN(val)) {
+    el.value = val;
+    el.dataset.truthState = 'known';
+  } else {
+    el.value = '';
+    el.placeholder = 'Unavailable';
+    el.dataset.truthState = 'unknown';
+  }
+}
+window.setTruthfulNumberInput = setTruthfulNumberInput;
+
+function setTruthfulTextInput(el, val) {
+  if (!el) return;
+  if (val !== null && val !== undefined && String(val).trim() !== '') {
+    el.value = String(val);
+    el.dataset.truthState = 'known';
+  } else {
+    el.value = '';
+    el.placeholder = 'Unavailable';
+    el.dataset.truthState = 'unknown';
+  }
+}
+window.setTruthfulTextInput = setTruthfulTextInput;
 
 function showToast(msg, isErr) {
   const el = $('#toast');
@@ -1254,7 +1297,7 @@ function renderStatusPage() {
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--online)" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg></div><div class="info"><div class="label">Status</div><div class="value"><span class="badge ' + (s.status === 'ok' ? 'stable' : 'disabled') + '">' + esc(s.status) + '</span></div></div></div>' +
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="info"><div class="label">Service</div><div class="value">' + esc(s.name || 'Michi Micro Server') + '</div></div></div>' +
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div><div class="info"><div class="label">Uptime</div><div class="value">' + fmtDur((s.uptime_seconds || 0) * 1000) + '</div></div></div>' +
-    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></div><div class="info"><div class="label">Version</div><div class="value">' + esc(s.version || 'No disponible') + '</div></div></div>' +
+    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></div><div class="info"><div class="label">Version</div><div class="value">' + esc(State.serverInfo?.version || '--') + '</div></div></div>' +
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/></svg></div><div class="info"><div class="label">Database</div><div class="value"><span class="badge ' + (s.database === 'connected' ? 'stable' : 'disabled') + '">' + esc(s.database || 'No disponible') + '</span></div></div></div>' +
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="info"><div class="label">Server ID</div><div class="value" style="font-family:var(--font-mono);font-size:.75rem">' + esc(s.server_id || 'No disponible') + '</div></div></div>' +
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div><div class="info"><div class="label">Music Paths</div><div class="value">' + esc((s.music_paths || []).join(', ') || 'No disponible') + '</div></div></div>';
@@ -1265,6 +1308,10 @@ async function loadServerInfo() {
   try {
     State.serverInfo = await MichiAPI.serverInfo();
     renderServerInfo();
+    renderStatusPage();
+    if (State.dashboard) {
+      renderDashboard();
+    }
   } catch (e) { console.warn('server info failed:', e.message); }
 }
 
@@ -1303,18 +1350,22 @@ function hasServerFeature(featureName) {
 }
 
 function featureBadge(enabled, meta) {
+  if (enabled === null || enabled === undefined) {
+    return { cls: 'disabled', text: 'UNKNOWN' };
+  }
   if (meta?.future && !enabled) return { cls: 'experimental', text: 'EXP' };
   if (meta?.beta && enabled) return { cls: 'beta', text: 'BETA' };
   if (enabled) return { cls: 'stable', text: 'ON' };
   return { cls: 'disabled', text: 'OFF' };
 }
+window.featureBadge = featureBadge;
 
 function renderServerInfo() {
   const info = State.serverInfo;
   if (!info) return;
 
   const ver = $('#sidebar-ver');
-  if (ver) ver.textContent = info.michi_link_version || info.version || '--';
+  if (ver) ver.textContent = info.version || '--';
 
   const sid = $('#server-info-id');
   if (sid) sid.textContent = info.server_id || '--';
@@ -1327,10 +1378,11 @@ function renderServerInfo() {
     const meta = FEATURE_LABELS[key];
     const val = info.features && info.features[key];
     const fb = featureBadge(val, meta);
+    const dotCls = val === true ? 'on' : (val === false ? 'off' : 'unknown');
     const item = document.createElement('div');
     item.className = 'feature-item';
     item.innerHTML =
-      '<span class="feature-dot ' + (val ? 'on' : 'off') + '"></span>' +
+      '<span class="feature-dot ' + dotCls + '"></span>' +
       esc(meta.label) +
       ' <span class="badge ' + fb.cls + '" style="margin-left:auto">' + fb.text + '</span>';
     grid.appendChild(item);
@@ -3509,17 +3561,17 @@ async function loadSettings() {
     if ($('#update-current-version')) $('#update-current-version').textContent = canonicalVersion;
     if ($('#settings-ffmpeg')) $('#settings-ffmpeg').innerHTML = renderTruthfulBadge(s.ffmpeg_available, 'Available', 'Not found', 'Unavailable');
     if ($('#settings-ffmpeg-avail')) $('#settings-ffmpeg-avail').innerHTML = renderTruthfulBadge(s.ffmpeg_available, 'Available', 'Not found', 'Unavailable');
-    if ($('#settings-resource-profile')) $('#settings-resource-profile').value = s.resource_profile || '';
-    if ($('#settings-stream-profile')) $('#settings-stream-profile').value = s.stream_profile || '';
-    if ($('#settings-format-policy')) $('#settings-format-policy').value = s.format_policy || '';
-    if ($('#settings-job-max-concurrent')) $('#settings-job-max-concurrent').value = s.job_max_concurrent !== undefined && s.job_max_concurrent !== null ? s.job_max_concurrent : '';
-    if ($('#settings-max-remote-bitrate')) $('#settings-max-remote-bitrate').value = s.max_remote_bitrate !== undefined && s.max_remote_bitrate !== null ? s.max_remote_bitrate : '';
+    setTruthfulSelect($('#settings-resource-profile'), s.resource_profile);
+    setTruthfulSelect($('#settings-stream-profile'), s.stream_profile);
+    setTruthfulSelect($('#settings-format-policy'), s.format_policy);
+    setTruthfulNumberInput($('#settings-job-max-concurrent'), s.job_max_concurrent);
+    setTruthfulSelect($('#settings-max-remote-bitrate'), s.max_remote_bitrate);
     setTruthfulBooleanSelect($('#settings-scrobble-toggle'), s.scrobble_enabled);
-    if ($('#settings-sync-name-input')) $('#settings-sync-name-input').value = s.sync_name || '';
+    setTruthfulTextInput($('#settings-sync-name-input'), s.sync_name);
     setTruthfulBooleanSelect($('#settings-remote-sync'), s.remote_sync);
     setTruthfulBooleanSelect($('#settings-auto-backup'), s.auto_backup_enabled);
-    if ($('#settings-backup-max-keep')) $('#settings-backup-max-keep').value = s.backup_max_keep !== undefined && s.backup_max_keep !== null ? s.backup_max_keep : '';
-    if ($('#settings-reconnect-delay-max')) $('#settings-reconnect-delay-max').value = s.reconnect_delay_max !== undefined && s.reconnect_delay_max !== null ? s.reconnect_delay_max : '';
+    setTruthfulNumberInput($('#settings-backup-max-keep'), s.backup_max_keep);
+    setTruthfulNumberInput($('#settings-reconnect-delay-max'), s.reconnect_delay_max);
     setTruthfulBooleanSelect($('#settings-dev-mode-select'), s.dev_mode);
     setTruthfulBooleanSelect($('#settings-cover-art'), s.cover_art_enabled);
     setTruthfulBooleanSelect($('#settings-sidebar-collapsed'), s.sidebar_collapsed);
@@ -3600,11 +3652,14 @@ async function loadSettings() {
     Object.keys(controlMap).forEach(function(field) {
       var el = $(controlMap[field]);
       if (el) {
-        if (el.tagName === 'SELECT') {
-          var placeholder = el.querySelector('option[value=""]');
-          if (placeholder) placeholder.remove();
-        }
-        if (src[field] === 'environment') {
+        if (el.dataset.truthState === 'unknown') {
+          el.disabled = true;
+          el.style.opacity = '0.65';
+          el.style.cursor = 'not-allowed';
+          el.title = src[field] === 'environment'
+            ? '🔒 Controlled by environment variable (MICHI_' + field.toUpperCase() + ') — Value unavailable'
+            : 'Unavailable';
+        } else if (src[field] === 'environment') {
           el.disabled = true;
           el.title = '🔒 Controlled by environment variable (MICHI_' + field.toUpperCase() + ')';
           el.style.opacity = '0.65';

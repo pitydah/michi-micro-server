@@ -10,6 +10,7 @@ Enforces semantic contract conformance:
 6. No silent empty catches in app.js.
 """
 
+import ast
 import glob
 import json
 import re
@@ -233,6 +234,19 @@ def main():
     action_ids = set()
     errors = []
 
+    # Verify bidirectional 1-to-1 parity between manifest and registry
+    manifest_action_ids = set(a.get("id") for a in actions if a.get("id"))
+    if registry and registry.get("actions"):
+        reg_action_ids = set(registry["actions"].keys())
+        missing_in_reg = manifest_action_ids - reg_action_ids
+        if missing_in_reg:
+            for m_id in sorted(missing_in_reg):
+                errors.append(f"Action '{m_id}' defined in manifest but missing from registry {REGISTRY_PATH.name}")
+        extra_in_reg = reg_action_ids - manifest_action_ids
+        if extra_in_reg:
+            for r_id in sorted(extra_in_reg):
+                errors.append(f"Action '{r_id}' defined in registry {REGISTRY_PATH.name} but missing from manifest")
+
     # Collect test files corpus
     test_files = glob.glob(str(ROOT / "tests/**/*.py"), recursive=True) + glob.glob(
         str(ROOT / "crates/**/*.rs"), recursive=True
@@ -271,8 +285,32 @@ def main():
                 if reg_entry.get("test_id") != test_id:
                     errors.append(f"Action '{aid}' test_id mismatch between manifest ({test_id}) and registry ({reg_entry.get('test_id')})")
                 test_fn = reg_entry.get("test_function")
-                if not test_fn or test_fn not in test_corpus:
-                    errors.append(f"Action '{aid}' registry test function '{test_fn}' not found in test corpus")
+                test_file = reg_entry.get("test_file")
+                if not test_fn:
+                    errors.append(f"Action '{aid}' registry entry missing test_function")
+                elif not test_file:
+                    errors.append(f"Action '{aid}' registry entry missing test_file")
+                else:
+                    tf_path = ROOT / test_file
+                    if not tf_path.exists():
+                        errors.append(f"Action '{aid}' registry test_file '{test_file}' does not exist")
+                    else:
+                        try:
+                            tf_content = tf_path.read_text(encoding="utf-8")
+                            tree = ast.parse(tf_content, filename=str(tf_path))
+                            found_fn_node = None
+                            for node in ast.walk(tree):
+                                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == test_fn:
+                                    found_fn_node = node
+                                    break
+                            if not found_fn_node:
+                                errors.append(f"Action '{aid}' test_function '{test_fn}' not found in AST of {test_file}")
+                            else:
+                                fn_segment = ast.get_source_segment(tf_content, found_fn_node) or ""
+                                if test_id not in fn_segment:
+                                    errors.append(f"Action '{aid}' test_id '{test_id}' not found in source of {test_fn} ({test_file})")
+                        except Exception as e:
+                            errors.append(f"Action '{aid}' failed to parse AST of {test_file}: {e}")
 
         # Verify handler exists
         handler = action.get("frontend_handler")
@@ -305,8 +343,15 @@ def main():
                         errors.append(f"Action '{aid}' (protected) handler '{handler}' calls MichiAPI before 'canPerformProtectedAction()' guard")
                 elif auth_level == "conditional":
                     cond = action.get("auth_condition")
-                    if not cond:
-                        errors.append(f"Action '{aid}' is conditional but missing 'auth_condition' declaration")
+                    if not cond or not str(cond).strip():
+                        errors.append(f"Action '{aid}' is conditional but missing non-empty 'auth_condition' declaration")
+                    michi_pos = fn_body.find("MichiAPI.")
+                    if michi_pos != -1:
+                        guard_pos = fn_body.find("canPerformProtectedAction()")
+                        if guard_pos == -1:
+                            errors.append(f"Action '{aid}' (conditional) handler '{handler}' calls MichiAPI but is missing 'canPerformProtectedAction()' guard")
+                        elif guard_pos > michi_pos:
+                            errors.append(f"Action '{aid}' (conditional) handler '{handler}' calls MichiAPI before 'canPerformProtectedAction()' guard")
                 elif auth_level == "local_only":
                     if "MichiAPI." in fn_body:
                         errors.append(f"Action '{aid}' is local_only but handler '{handler}' makes MichiAPI network calls")
