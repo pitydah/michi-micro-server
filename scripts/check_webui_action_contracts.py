@@ -284,6 +284,18 @@ def main():
             else:
                 if reg_entry.get("test_id") != test_id:
                     errors.append(f"Action '{aid}' test_id mismatch between manifest ({test_id}) and registry ({reg_entry.get('test_id')})")
+                if reg_entry.get("auth") != action.get("auth"):
+                    errors.append(f"Action '{aid}' auth mismatch between manifest ({action.get('auth')}) and registry ({reg_entry.get('auth')})")
+                if reg_entry.get("frontend_handler") != action.get("frontend_handler"):
+                    errors.append(f"Action '{aid}' frontend_handler mismatch between manifest ({action.get('frontend_handler')}) and registry ({reg_entry.get('frontend_handler')})")
+                if action.get("auth") == "conditional":
+                    m_cond = action.get("auth_condition")
+                    r_cond = reg_entry.get("auth_condition")
+                    if m_cond != r_cond:
+                        errors.append(f"Action '{aid}' auth_condition mismatch between manifest ({m_cond}) and registry ({r_cond})")
+                else:
+                    if reg_entry.get("auth_condition") is not None:
+                        errors.append(f"Action '{aid}' non-conditional action has unexpected auth_condition in registry: {reg_entry.get('auth_condition')}")
                 test_fn = reg_entry.get("test_function")
                 test_file = reg_entry.get("test_file")
                 if not test_fn:

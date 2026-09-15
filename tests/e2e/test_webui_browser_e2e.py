@@ -677,3 +677,121 @@ def test_feature_capability_unknown_badge(browser_context):
 
     page.close()
 
+
+def test_load_settings_truthful_final_dom_pipeline(browser_context):
+    """
+    Regression test exercising the COMPLETE loadSettings() + effective_sources pipeline
+    and verifying final DOM values, truthState datasets, and disabled states.
+    Covers Cases A through G:
+      Case A: remote_sync undefined + config source -> disabled, unknown, ""
+      Case B: remote_sync true + config source -> enabled, known, "true"
+      Case C: remote_sync false + environment source -> disabled, known, "false"
+      Case D: cover_art_enabled undefined -> disabled, unknown, ""
+      Case E: sidebar_collapsed undefined -> disabled, unknown, ""
+      Case F: job_max_concurrent = 0 -> known, value = 0 (not corrupted into unknown)
+      Case G: job_max_concurrent undefined -> disabled, unknown, ""
+    """
+    js_code = (Path(__file__).resolve().parent.parent.parent / "crates/michi-api/static/app.js").read_text(encoding="utf-8")
+    html_content = (Path(__file__).resolve().parent.parent.parent / "crates/michi-api/static/index.html").read_text(encoding="utf-8")
+    page = browser_context.new_page()
+    page.goto(f"{SERVER_URL}/")
+    page.evaluate("(html) => { document.open(); document.write(html); document.close(); }", html_content)
+    page.evaluate(js_code)
+
+    def run_pipeline_with_settings(mock_settings):
+        return page.evaluate("""async (mock) => {
+            AuthSession.state = 'authenticated';
+            State.serverInfo = { version: '1.0.0' };
+            window.MichiAPI.settings = async () => mock;
+            await loadSettings();
+            return {
+                remote_sync: {
+                    value: $('#settings-remote-sync').value,
+                    truthState: $('#settings-remote-sync').dataset.truthState,
+                    disabled: $('#settings-remote-sync').disabled
+                },
+                cover_art: {
+                    value: $('#settings-cover-art').value,
+                    truthState: $('#settings-cover-art').dataset.truthState,
+                    disabled: $('#settings-cover-art').disabled
+                },
+                sidebar_collapsed: {
+                    value: $('#settings-sidebar-collapsed').value,
+                    truthState: $('#settings-sidebar-collapsed').dataset.truthState,
+                    disabled: $('#settings-sidebar-collapsed').disabled
+                },
+                job_max_concurrent: {
+                    value: $('#settings-job-max-concurrent').value,
+                    truthState: $('#settings-job-max-concurrent').dataset.truthState,
+                    disabled: $('#settings-job-max-concurrent').disabled
+                }
+            };
+        }""", mock_settings)
+
+    # Case A, D, E, G: Missing / undefined values + config source -> disabled, unknown, ""
+    resA = run_pipeline_with_settings({
+        "port": 9090,
+        "remote_sync": None,
+        "cover_art_enabled": None,
+        "sidebar_collapsed": None,
+        "job_max_concurrent": None,
+        "effective_sources": {
+            "remote_sync": "config",
+            "cover_art_enabled": "config",
+            "sidebar_collapsed": "config",
+            "job_max_concurrent": "config"
+        }
+    })
+
+    # Assert Case A: remote_sync undefined + config -> unknown, disabled
+    assert resA["remote_sync"]["value"] == ""
+    assert resA["remote_sync"]["truthState"] == "unknown"
+    assert resA["remote_sync"]["disabled"] is True
+
+    # Assert Case D: cover_art_enabled undefined -> unknown, disabled
+    assert resA["cover_art"]["value"] == ""
+    assert resA["cover_art"]["truthState"] == "unknown"
+    assert resA["cover_art"]["disabled"] is True
+
+    # Assert Case E: sidebar_collapsed undefined -> unknown, disabled
+    assert resA["sidebar_collapsed"]["value"] == ""
+    assert resA["sidebar_collapsed"]["truthState"] == "unknown"
+    assert resA["sidebar_collapsed"]["disabled"] is True
+
+    # Assert Case G: job_max_concurrent undefined -> unknown, disabled
+    assert resA["job_max_concurrent"]["value"] == ""
+    assert resA["job_max_concurrent"]["truthState"] == "unknown"
+    assert resA["job_max_concurrent"]["disabled"] is True
+
+    # Case B: remote_sync true + config source -> known, enabled, "true"
+    resB = run_pipeline_with_settings({
+        "port": 9090,
+        "remote_sync": True,
+        "effective_sources": {"remote_sync": "config"}
+    })
+    assert resB["remote_sync"]["value"] == "true"
+    assert resB["remote_sync"]["truthState"] == "known"
+    assert resB["remote_sync"]["disabled"] is False
+
+    # Case C: remote_sync false + environment source -> known, disabled, "false"
+    resC = run_pipeline_with_settings({
+        "port": 9090,
+        "remote_sync": False,
+        "effective_sources": {"remote_sync": "environment"}
+    })
+    assert resC["remote_sync"]["value"] == "false"
+    assert resC["remote_sync"]["truthState"] == "known"
+    assert resC["remote_sync"]["disabled"] is True
+
+    # Case F: job_max_concurrent = 0 -> value 0, known, enabled (0 not corrupted to unknown)
+    resF = run_pipeline_with_settings({
+        "port": 9090,
+        "job_max_concurrent": 0,
+        "effective_sources": {"job_max_concurrent": "config"}
+    })
+    assert resF["job_max_concurrent"]["value"] == "0"
+    assert resF["job_max_concurrent"]["truthState"] == "known"
+    assert resF["job_max_concurrent"]["disabled"] is False
+
+    page.close()
+

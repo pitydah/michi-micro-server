@@ -734,9 +734,17 @@ function setTruthfulBooleanSelect(el, val) {
   if (typeof val === 'boolean') {
     el.value = val ? 'true' : 'false';
     el.dataset.truthState = 'known';
+    el.disabled = false;
+    el.style.opacity = '1.0';
+    el.style.cursor = 'default';
+    el.title = '';
   } else {
     el.value = '';
     el.dataset.truthState = 'unknown';
+    el.disabled = true;
+    el.style.opacity = '0.65';
+    el.style.cursor = 'not-allowed';
+    el.title = 'Unavailable';
   }
 }
 window.setTruthfulBooleanSelect = setTruthfulBooleanSelect;
@@ -753,9 +761,17 @@ function setTruthfulSelect(el, val) {
   if (val !== null && val !== undefined && val !== '') {
     el.value = String(val);
     el.dataset.truthState = 'known';
+    el.disabled = false;
+    el.style.opacity = '1.0';
+    el.style.cursor = 'default';
+    el.title = '';
   } else {
     el.value = '';
     el.dataset.truthState = 'unknown';
+    el.disabled = true;
+    el.style.opacity = '0.65';
+    el.style.cursor = 'not-allowed';
+    el.title = 'Unavailable';
   }
 }
 window.setTruthfulSelect = setTruthfulSelect;
@@ -765,10 +781,18 @@ function setTruthfulNumberInput(el, val) {
   if (typeof val === 'number' && !isNaN(val)) {
     el.value = val;
     el.dataset.truthState = 'known';
+    el.disabled = false;
+    el.style.opacity = '1.0';
+    el.style.cursor = 'default';
+    el.title = '';
   } else {
     el.value = '';
     el.placeholder = 'Unavailable';
     el.dataset.truthState = 'unknown';
+    el.disabled = true;
+    el.style.opacity = '0.65';
+    el.style.cursor = 'not-allowed';
+    el.title = 'Unavailable';
   }
 }
 window.setTruthfulNumberInput = setTruthfulNumberInput;
@@ -778,10 +802,18 @@ function setTruthfulTextInput(el, val) {
   if (val !== null && val !== undefined && String(val).trim() !== '') {
     el.value = String(val);
     el.dataset.truthState = 'known';
+    el.disabled = false;
+    el.style.opacity = '1.0';
+    el.style.cursor = 'default';
+    el.title = '';
   } else {
     el.value = '';
     el.placeholder = 'Unavailable';
     el.dataset.truthState = 'unknown';
+    el.disabled = true;
+    el.style.opacity = '0.65';
+    el.style.cursor = 'not-allowed';
+    el.title = 'Unavailable';
   }
 }
 window.setTruthfulTextInput = setTruthfulTextInput;
@@ -3646,7 +3678,9 @@ async function loadSettings() {
       'reconnect_delay_max': '#settings-reconnect-delay-max',
       'dev_mode': '#settings-dev-mode-select',
       'scrobble_enabled': '#settings-scrobble-toggle',
-      'sync_name': '#settings-sync-name-input'
+      'sync_name': '#settings-sync-name-input',
+      'cover_art_enabled': '#settings-cover-art',
+      'sidebar_collapsed': '#settings-sidebar-collapsed'
     };
 
     Object.keys(controlMap).forEach(function(field) {
@@ -4666,6 +4700,10 @@ async function checkForUpdates() {
 }
 
 // Window exports for HTML event handlers and testing
+window.MichiAPI = MichiAPI;
+window.AuthSession = AuthSession;
+window.ConnectionStatus = ConnectionStatus;
+window.loadSettings = loadSettings;
 window.switchSettingsTab = switchSettingsTab;
 window.checkUpdateStatus = checkUpdateStatus;
 window.checkForUpdates = checkForUpdates;
