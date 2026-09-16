@@ -1514,3 +1514,118 @@ async fn test_clear_all_sessions_db_failure_does_not_clear_ram() {
 
     let _ = std::fs::remove_file(db_path);
 }
+
+#[tokio::test]
+async fn test_deployment_platform_guidance_and_compose_manifests() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+
+    // 1. Root docker-compose.yml must declare MICHI_DEPLOYMENT_PLATFORM=docker
+    let root_compose_path = workspace_root.join("docker-compose.yml");
+    let root_compose_content =
+        std::fs::read_to_string(&root_compose_path).expect("root docker-compose.yml must exist");
+    assert!(
+        root_compose_content.contains("MICHI_DEPLOYMENT_PLATFORM=docker"),
+        "root docker-compose.yml must explicitly declare MICHI_DEPLOYMENT_PLATFORM=docker"
+    );
+
+    // 2. CasaOS compose must declare MICHI_DEPLOYMENT_PLATFORM=casaos
+    let casaos_compose_path = workspace_root.join("casaos/docker-compose.casaos.yml");
+    let casaos_compose_content = std::fs::read_to_string(&casaos_compose_path)
+        .expect("casaos/docker-compose.casaos.yml must exist");
+    assert!(
+        casaos_compose_content.contains("MICHI_DEPLOYMENT_PLATFORM=casaos"),
+        "casaos compose must declare MICHI_DEPLOYMENT_PLATFORM=casaos"
+    );
+
+    // 3. ZimaOS compose must declare MICHI_DEPLOYMENT_PLATFORM=zimaos
+    let zimaos_compose_path = workspace_root.join("casaos/docker-compose.zimaos.yml");
+    let zimaos_compose_content = std::fs::read_to_string(&zimaos_compose_path)
+        .expect("casaos/docker-compose.zimaos.yml must exist");
+    assert!(
+        zimaos_compose_content.contains("MICHI_DEPLOYMENT_PLATFORM=zimaos"),
+        "zimaos compose must declare MICHI_DEPLOYMENT_PLATFORM=zimaos"
+    );
+
+    // 4. Update guidance mappings
+    // Docker: must provide docker compose instructions, never fallback unknown instructions
+    let info_docker = michi_api::routes::v1::update::compute_update_info(
+        "1.0.0-rc.1",
+        "docker",
+        None,
+        None,
+        None,
+        &[],
+        false,
+    );
+    assert_eq!(info_docker.deployment_platform, "docker");
+    assert!(
+        info_docker
+            .instructions
+            .contains("docker compose pull && docker compose up -d"),
+        "docker instructions must contain docker compose pull: got {:?}",
+        info_docker.instructions
+    );
+    assert!(
+        !info_docker
+            .instructions
+            .contains("Visit the GitHub release page"),
+        "docker instructions must not fall back to generic release page instructions"
+    );
+
+    // ZimaOS: must provide ZimaOS instructions
+    let info_zima = michi_api::routes::v1::update::compute_update_info(
+        "1.0.0-rc.1",
+        "zimaos",
+        None,
+        None,
+        None,
+        &[],
+        false,
+    );
+    assert_eq!(info_zima.deployment_platform, "zimaos");
+    assert!(
+        info_zima.instructions.contains("ZimaOS"),
+        "zimaos instructions must mention ZimaOS: got {:?}",
+        info_zima.instructions
+    );
+
+    // CasaOS: must provide CasaOS instructions
+    let info_casa = michi_api::routes::v1::update::compute_update_info(
+        "1.0.0-rc.1",
+        "casaos",
+        None,
+        None,
+        None,
+        &[],
+        false,
+    );
+    assert_eq!(info_casa.deployment_platform, "casaos");
+    assert!(
+        info_casa.instructions.contains("CasaOS"),
+        "casaos instructions must mention CasaOS: got {:?}",
+        info_casa.instructions
+    );
+
+    // Unknown/unspecified: must provide safe generic instructions
+    let info_unknown = michi_api::routes::v1::update::compute_update_info(
+        "1.0.0-rc.1",
+        "unknown",
+        None,
+        None,
+        None,
+        &[],
+        false,
+    );
+    assert_eq!(info_unknown.deployment_platform, "unknown");
+    assert!(
+        info_unknown
+            .instructions
+            .contains("Visit the GitHub release page"),
+        "unknown instructions must provide generic safe instructions: got {:?}",
+        info_unknown.instructions
+    );
+}

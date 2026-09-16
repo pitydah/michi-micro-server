@@ -2214,3 +2214,49 @@ async fn test_settings_reports_active_and_configured_state() {
     assert!(val.get("restart_required").is_some());
     assert!(val.get("pending_restart_fields").is_some());
 }
+
+#[tokio::test]
+async fn test_i18n_locales_parity_and_completeness() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let i18n_dir = manifest_dir.join("static").join("i18n");
+
+    let en_path = i18n_dir.join("en.json");
+    let en_content = std::fs::read_to_string(&en_path).expect("canonical en.json must exist");
+    let en_map: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(&en_content).expect("en.json must be valid JSON");
+
+    assert!(!en_map.is_empty(), "en.json must contain translations");
+
+    let required_locales = ["en", "es", "de", "fr", "it", "ja", "pt", "ru", "zh"];
+    for locale in required_locales {
+        let loc_path = i18n_dir.join(format!("{locale}.json"));
+        assert!(
+            loc_path.exists(),
+            "Locale file for {locale} must exist at {loc_path:?}"
+        );
+        let loc_content = std::fs::read_to_string(&loc_path)
+            .unwrap_or_else(|_| panic!("Failed to read {locale}.json"));
+        let loc_map: std::collections::BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(&loc_content)
+                .unwrap_or_else(|e| panic!("{locale}.json is invalid JSON: {e}"));
+
+        for key in en_map.keys() {
+            let val = loc_map.get(key).unwrap_or_else(|| {
+                panic!("FAIL: {locale} missing translation key: {key}");
+            });
+            let s = val.as_str().unwrap_or_else(|| {
+                panic!("FAIL: {locale} key {key} is not a string");
+            });
+            assert!(
+                !s.trim().is_empty(),
+                "FAIL: {locale} has empty translation for key {key}"
+            );
+            if key.contains('.') {
+                assert_ne!(
+                    s, key,
+                    "FAIL: {locale} translation for {key} is raw un-translated key name"
+                );
+            }
+        }
+    }
+}

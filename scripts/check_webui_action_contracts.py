@@ -473,6 +473,17 @@ def main():
     print(f"  protected_guards_verified: {protected_guards_verified_count}")
     print(f"  conditional_guards_verified: {conditional_guards_verified_count}")
     print("✅ WebUI action contract verification PASSED.")
+
+    # Also enforce complete I18N locale parity
+    i18n_script = Path(__file__).parent / "check_i18n_parity.py"
+    if i18n_script.exists():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("check_i18n_parity", str(i18n_script))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if not mod.verify_i18n_parity():
+            return 1
+
     return 0
 
 

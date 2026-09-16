@@ -189,5 +189,6 @@
   "update.toast_available": "Update available: {ver}",
   "update.toast_up_to_date": "Michi Micro Server is up to date.",
   "update.toast_check_failed": "Could not check for updates.",
-  "update.toast_stale_cache": "Could not contact the update service. Showing last known update information."
+  "update.toast_stale_cache": "Could not contact the update service. Showing last known update information.",
+  "settings.rail_playback": "Playback & Streaming"
 }

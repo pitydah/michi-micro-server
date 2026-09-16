@@ -59,15 +59,16 @@ def main():
     if f"## [{product_version}]" not in changelog:
         errors.append(f"CHANGELOG.md does not contain entry for ## [{product_version}]")
 
-    # 3. Safe YAML compose check
+    # 3. Safe YAML compose check & deployment platform verification
     expected_image = f"ghcr.io/pitydah/michi-micro-server:{product_version}"
     compose_targets = [
-        os.path.join(ROOT_DIR, "zimaos-store", "Apps", "MichiMicroServer", "docker-compose.yml"),
-        os.path.join(ROOT_DIR, "casaos", "docker-compose.zimaos.yml"),
-        os.path.join(ROOT_DIR, "casaos", "docker-compose.casaos.yml"),
+        (os.path.join(ROOT_DIR, "docker-compose.yml"), "docker"),
+        (os.path.join(ROOT_DIR, "zimaos-store", "Apps", "MichiMicroServer", "docker-compose.yml"), "zimaos"),
+        (os.path.join(ROOT_DIR, "casaos", "docker-compose.zimaos.yml"), "zimaos"),
+        (os.path.join(ROOT_DIR, "casaos", "docker-compose.casaos.yml"), "casaos"),
     ]
 
-    for comp_path in compose_targets:
+    for comp_path, expected_platform in compose_targets:
         if os.path.exists(comp_path):
             with open(comp_path, "r", encoding="utf-8") as f:
                 compose = yaml.safe_load(f)
@@ -77,6 +78,23 @@ def main():
                 image = svc.get("image")
                 if image != expected_image:
                     errors.append(f"Image mismatch in {os.path.relpath(comp_path, ROOT_DIR)}: {image!r} != {expected_image!r}")
+
+                # Verify canonical deployment platform
+                env = svc.get("environment", [])
+                actual_platform = None
+                if isinstance(env, dict):
+                    actual_platform = env.get("MICHI_DEPLOYMENT_PLATFORM")
+                elif isinstance(env, list):
+                    for item in env:
+                        if isinstance(item, str) and item.startswith("MICHI_DEPLOYMENT_PLATFORM="):
+                            actual_platform = item.split("=", 1)[1].strip()
+                            break
+
+                if actual_platform != expected_platform:
+                    errors.append(
+                        f"Deployment platform mismatch in {os.path.relpath(comp_path, ROOT_DIR)}: "
+                        f"expected {expected_platform!r}, got {actual_platform!r}"
+                    )
 
     if errors:
         print("\n❌ Version Consistency Errors:", file=sys.stderr)
