@@ -128,7 +128,7 @@ def main():
         cursor = conn.cursor()
         cursor.execute("SELECT MAX(version) FROM _migrations")
         max_ver = cursor.fetchone()[0]
-        assert max_ver == 48, f"expected exact schema version 48, got {max_ver}"
+        assert max_ver == 49, f"expected exact schema version 49, got {max_ver}"
 
         # Assert play_history client_event_id column is present
         cursor.execute("PRAGMA table_info(play_history)")
@@ -146,7 +146,7 @@ def main():
         assert "auth_sessions" in tables, f"auth_sessions table missing: {tables}"
 
         conn.close()
-    test("Database Migrations Complete & Schema Invariants (version == 48, client_event_id unique index, auth_sessions table)", test_schema_version)
+    test("Database Migrations Complete & Schema Invariants (version == 49, client_event_id unique index, auth_sessions table)", test_schema_version)
 
     # 4. Range Streaming Verification
     def test_range_streaming():

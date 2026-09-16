@@ -9,6 +9,7 @@ Usage:
     MICHI_SERVER_URL=http://127.0.0.1:9090 MICHI_ADMIN_USERNAME=admin MICHI_ADMIN_PASSWORD=admin12345 pytest tests/e2e/test_webui_browser_e2e.py
 """
 
+import json
 import os
 from pathlib import Path
 import pytest
@@ -459,6 +460,8 @@ def test_auth_disabled_real_server_zero_protected_requests(browser_context):
 
     tmp_dir = tempfile.mkdtemp(prefix="michi_noauth_")
     env = os.environ.copy()
+    env.pop("MICHI_AUTH_USERNAME", None)
+    env.pop("MICHI_AUTH_PASSWORD", None)
     env["MICHI_PORT"] = str(port)
     env["MICHI_AUTH_ENABLED"] = "false"
     env["MICHI_CONFIG_PATH"] = tmp_dir
@@ -540,6 +543,7 @@ def test_auth_disabled_real_server_zero_protected_requests(browser_context):
         page.evaluate("() => showOutputSelectorModal()")
         page.evaluate("() => handleScan()")
         page.evaluate("() => handleSearch()")
+        page.evaluate("() => showSection('settings')")
         page.wait_for_timeout(500)
 
         # 6. Verify zero protected requests dispatched and zero 401 responses occurred
@@ -695,35 +699,35 @@ def test_load_settings_truthful_final_dom_pipeline(browser_context):
     html_content = (Path(__file__).resolve().parent.parent.parent / "crates/michi-api/static/index.html").read_text(encoding="utf-8")
     page = browser_context.new_page()
     page.goto(f"{SERVER_URL}/")
-    page.evaluate("(html) => { document.open(); document.write(html); document.close(); }", html_content)
+    page.evaluate("(html) => { document.body.innerHTML = html; }", html_content)
     page.evaluate(js_code)
 
     def run_pipeline_with_settings(mock_settings):
         return page.evaluate("""async (mock) => {
-            AuthSession.state = 'authenticated';
-            State.serverInfo = { version: '1.0.0' };
+            window.AuthSession.state = 'authenticated';
+            window.State.serverInfo = { version: '1.0.0' };
             window.MichiAPI.settings = async () => mock;
-            await loadSettings();
+            await window.loadSettings();
             return {
                 remote_sync: {
-                    value: $('#settings-remote-sync').value,
-                    truthState: $('#settings-remote-sync').dataset.truthState,
-                    disabled: $('#settings-remote-sync').disabled
+                    value: document.querySelector('#settings-remote-sync') ? document.querySelector('#settings-remote-sync').value : null,
+                    truthState: document.querySelector('#settings-remote-sync') ? document.querySelector('#settings-remote-sync').dataset.truthState : null,
+                    disabled: document.querySelector('#settings-remote-sync') ? document.querySelector('#settings-remote-sync').disabled : null
                 },
                 cover_art: {
-                    value: $('#settings-cover-art').value,
-                    truthState: $('#settings-cover-art').dataset.truthState,
-                    disabled: $('#settings-cover-art').disabled
+                    value: document.querySelector('#settings-cover-art') ? document.querySelector('#settings-cover-art').value : null,
+                    truthState: document.querySelector('#settings-cover-art') ? document.querySelector('#settings-cover-art').dataset.truthState : null,
+                    disabled: document.querySelector('#settings-cover-art') ? document.querySelector('#settings-cover-art').disabled : null
                 },
                 sidebar_collapsed: {
-                    value: $('#settings-sidebar-collapsed').value,
-                    truthState: $('#settings-sidebar-collapsed').dataset.truthState,
-                    disabled: $('#settings-sidebar-collapsed').disabled
+                    value: document.querySelector('#settings-sidebar-collapsed') ? document.querySelector('#settings-sidebar-collapsed').value : null,
+                    truthState: document.querySelector('#settings-sidebar-collapsed') ? document.querySelector('#settings-sidebar-collapsed').dataset.truthState : null,
+                    disabled: document.querySelector('#settings-sidebar-collapsed') ? document.querySelector('#settings-sidebar-collapsed').disabled : null
                 },
                 job_max_concurrent: {
-                    value: $('#settings-job-max-concurrent').value,
-                    truthState: $('#settings-job-max-concurrent').dataset.truthState,
-                    disabled: $('#settings-job-max-concurrent').disabled
+                    value: document.querySelector('#settings-job-max-concurrent') ? document.querySelector('#settings-job-max-concurrent').value : null,
+                    truthState: document.querySelector('#settings-job-max-concurrent') ? document.querySelector('#settings-job-max-concurrent').dataset.truthState : null,
+                    disabled: document.querySelector('#settings-job-max-concurrent') ? document.querySelector('#settings-job-max-concurrent').disabled : null
                 }
             };
         }""", mock_settings)

@@ -259,6 +259,11 @@ def main():
     axum_routes = scan_axum_routes()
     print(f"📡 Scanned {len(axum_routes)} active Axum routes from crates/michi-api")
 
+    registry_verified_count = 0
+    test_functions_verified_count = 0
+    protected_guards_verified_count = 0
+    conditional_guards_verified_count = 0
+
     # 1. Check each action in manifest
     for action in actions:
         aid = action.get("id")
@@ -277,35 +282,45 @@ def main():
             errors.append(f"Action '{aid}' test reference '{test_id}' not found in any test file")
 
         # Verify against registry if present
+        reg_action_has_error = False
         if registry and registry.get("actions"):
             reg_entry = registry["actions"].get(aid)
             if not reg_entry:
                 errors.append(f"Action '{aid}' is not recorded in test contract registry {REGISTRY_PATH.name}")
+                reg_action_has_error = True
             else:
                 if reg_entry.get("test_id") != test_id:
                     errors.append(f"Action '{aid}' test_id mismatch between manifest ({test_id}) and registry ({reg_entry.get('test_id')})")
+                    reg_action_has_error = True
                 if reg_entry.get("auth") != action.get("auth"):
                     errors.append(f"Action '{aid}' auth mismatch between manifest ({action.get('auth')}) and registry ({reg_entry.get('auth')})")
+                    reg_action_has_error = True
                 if reg_entry.get("frontend_handler") != action.get("frontend_handler"):
                     errors.append(f"Action '{aid}' frontend_handler mismatch between manifest ({action.get('frontend_handler')}) and registry ({reg_entry.get('frontend_handler')})")
+                    reg_action_has_error = True
                 if action.get("auth") == "conditional":
                     m_cond = action.get("auth_condition")
                     r_cond = reg_entry.get("auth_condition")
                     if m_cond != r_cond:
                         errors.append(f"Action '{aid}' auth_condition mismatch between manifest ({m_cond}) and registry ({r_cond})")
+                        reg_action_has_error = True
                 else:
                     if reg_entry.get("auth_condition") is not None:
                         errors.append(f"Action '{aid}' non-conditional action has unexpected auth_condition in registry: {reg_entry.get('auth_condition')}")
+                        reg_action_has_error = True
                 test_fn = reg_entry.get("test_function")
                 test_file = reg_entry.get("test_file")
                 if not test_fn:
                     errors.append(f"Action '{aid}' registry entry missing test_function")
+                    reg_action_has_error = True
                 elif not test_file:
                     errors.append(f"Action '{aid}' registry entry missing test_file")
+                    reg_action_has_error = True
                 else:
                     tf_path = ROOT / test_file
                     if not tf_path.exists():
                         errors.append(f"Action '{aid}' registry test_file '{test_file}' does not exist")
+                        reg_action_has_error = True
                     else:
                         try:
                             tf_content = tf_path.read_text(encoding="utf-8")
@@ -317,12 +332,20 @@ def main():
                                     break
                             if not found_fn_node:
                                 errors.append(f"Action '{aid}' test_function '{test_fn}' not found in AST of {test_file}")
+                                reg_action_has_error = True
                             else:
                                 fn_segment = ast.get_source_segment(tf_content, found_fn_node) or ""
                                 if test_id not in fn_segment:
                                     errors.append(f"Action '{aid}' test_id '{test_id}' not found in source of {test_fn} ({test_file})")
+                                    reg_action_has_error = True
+                                else:
+                                    test_functions_verified_count += 1
                         except Exception as e:
                             errors.append(f"Action '{aid}' failed to parse AST of {test_file}: {e}")
+                            reg_action_has_error = True
+
+                if not reg_action_has_error:
+                    registry_verified_count += 1
 
         # Verify handler exists
         handler = action.get("frontend_handler")
@@ -353,10 +376,14 @@ def main():
                         errors.append(f"Action '{aid}' (protected) handler '{handler}' is missing 'canPerformProtectedAction()' guard")
                     elif michi_pos != -1 and guard_pos > michi_pos:
                         errors.append(f"Action '{aid}' (protected) handler '{handler}' calls MichiAPI before 'canPerformProtectedAction()' guard")
+                    else:
+                        protected_guards_verified_count += 1
                 elif auth_level == "conditional":
                     cond = action.get("auth_condition")
+                    cond_ok = True
                     if not cond or not str(cond).strip():
                         errors.append(f"Action '{aid}' is conditional but missing non-empty 'auth_condition' declaration")
+                        cond_ok = False
                     michi_pos = fn_body.find("MichiAPI.")
                     if michi_pos != -1:
                         guard_pos = fn_body.find("canPerformProtectedAction()")
@@ -364,6 +391,10 @@ def main():
                             errors.append(f"Action '{aid}' (conditional) handler '{handler}' calls MichiAPI but is missing 'canPerformProtectedAction()' guard")
                         elif guard_pos > michi_pos:
                             errors.append(f"Action '{aid}' (conditional) handler '{handler}' calls MichiAPI before 'canPerformProtectedAction()' guard")
+                        elif cond_ok:
+                            conditional_guards_verified_count += 1
+                    elif cond_ok:
+                        conditional_guards_verified_count += 1
                 elif auth_level == "local_only":
                     if "MichiAPI." in fn_body:
                         errors.append(f"Action '{aid}' is local_only but handler '{handler}' makes MichiAPI network calls")
@@ -409,6 +440,10 @@ def main():
         "protected_actions": protected_count,
         "conditional_actions": conditional_count,
         "local_only_actions": local_only_count,
+        "registry_verified": registry_verified_count,
+        "test_functions_verified": test_functions_verified_count,
+        "protected_guards_verified": protected_guards_verified_count,
+        "conditional_guards_verified": conditional_guards_verified_count,
         "errors": errors,
         "html_violations": html_violations,
         "banned_violations": banned_violations,
@@ -427,6 +462,16 @@ def main():
             print(f"  - {e}")
         return 1
 
+    print("Action Contract Summary:")
+    print(f"  actions_total: {len(actions)}")
+    print(f"  public: {public_count}")
+    print(f"  protected: {protected_count}")
+    print(f"  conditional: {conditional_count}")
+    print(f"  local_only: {local_only_count}")
+    print(f"  registry_verified: {registry_verified_count}")
+    print(f"  test_functions_verified: {test_functions_verified_count}")
+    print(f"  protected_guards_verified: {protected_guards_verified_count}")
+    print(f"  conditional_guards_verified: {conditional_guards_verified_count}")
     print("✅ WebUI action contract verification PASSED.")
     return 0
 

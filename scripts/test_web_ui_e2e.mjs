@@ -493,6 +493,7 @@ async function runE2E() {
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
+    window.AuthSession.state = 'authenticated';
     await window.saveSetting('resource_profile', 'performance');
     const bannerDirect = document.getElementById('settings-restart-banner');
     assert(bannerDirect !== null,
@@ -711,6 +712,7 @@ async function runE2E() {
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
+    window.AuthSession.state = 'authenticated';
     const trackInput = document.getElementById('handoff-track-id');
     const posInput = document.getElementById('handoff-position');
     const playInput = document.getElementById('handoff-playing');
@@ -994,6 +996,7 @@ async function runE2E() {
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
+    window.AuthSession.state = 'authenticated';
     await window.loadDiagnostics();
     const transEl = document.querySelector('#diag-transcodes');
     assert(transEl && transEl.textContent === 'Capacity: Unavailable',
