@@ -58,12 +58,23 @@ const MichiAPI = {
       if (res.status === 401 && !path.startsWith('/api/auth/')) {
         AuthSession.setUnauthenticated();
         teardownProtected();
-        ConnectionStatus.setAuthRequired();
       }
 
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
-        const msg = errBody?.error?.message || errBody?.message || errBody?.error?.code || `HTTP ${res.status}`;
+        let rawMsg = errBody?.error?.message || errBody?.message || errBody?.error?.code;
+        let msg = rawMsg;
+        if (res.status === 401) {
+          if (path === '/api/auth/login' && rawMsg) {
+            msg = rawMsg;
+          } else {
+            msg = 'Sign in to continue.';
+          }
+        } else if (res.status === 403) {
+          msg = 'You do not have permission to perform this action.';
+        } else if (!msg) {
+          msg = `HTTP ${res.status}`;
+        }
         const err = new Error(msg);
         err.status = res.status;
         err.details = errBody?.error?.details || errBody;
@@ -369,6 +380,14 @@ const MichiAPI = {
   // Settings & Webhooks
   settings() { return this.request('/api/v1/settings'); },
   updateSettings(body) { return this.request('/api/v1/settings', { method: 'PUT', body }); },
+  updateStatus(channel) {
+    var url = '/api/v1/update/status';
+    if (channel) url += '?channel=' + encodeURIComponent(channel);
+    return this.request(url);
+  },
+  updateCheck(body) {
+    return this.request('/api/v1/update/check', { method: 'POST', body: body || {} });
+  },
   setWebhook(url) { return this.request('/api/v1/webhook', { method: 'POST', body: { url } }); },
   testWebhook() { return this.request('/api/v1/webhook/test', { method: 'POST', timeout: 10000 }); },
   deleteWebhook() { return this.request('/api/v1/webhook', { method: 'DELETE' }); },
@@ -421,7 +440,7 @@ const MichiAPI = {
 
 // ── Connection Status State Machine ──────────────────────────────
 const ConnectionStatus = {
-  state: 'checking', // 'checking' | 'online' | 'degraded' | 'auth_required' | 'offline'
+  state: 'checking', // 'checking' | 'online' | 'degraded' | 'offline'
 
   update(statusData) {
     if (!statusData) {
@@ -435,11 +454,6 @@ const ConnectionStatus = {
     } else {
       this.state = 'degraded';
     }
-    this.render();
-  },
-
-  setAuthRequired() {
-    this.state = 'auth_required';
     this.render();
   },
 
@@ -458,7 +472,6 @@ const ConnectionStatus = {
       checking: 'Checking...',
       online: 'Online',
       degraded: 'Degraded',
-      auth_required: 'Auth Required',
       offline: 'Offline',
     };
 
@@ -466,7 +479,6 @@ const ConnectionStatus = {
       checking: 'checking',
       online: 'online',
       degraded: 'degraded',
-      auth_required: 'auth-required',
       offline: 'offline',
     }[this.state] || 'offline';
 
@@ -489,16 +501,16 @@ const AuthSession = {
     try {
       const resp = await MichiAPI.authCheck();
       this.registrationAllowed = !!resp.registration_allowed;
-      if (resp.authenticated === true) {
+      if (resp.enabled === false) {
+        this.state = 'disabled';
+        this.user = null;
+      } else if (resp.authenticated === true) {
         this.state = 'authenticated';
         this.user = {
           id: resp.id,
           username: resp.username || 'User',
           is_admin: !!resp.is_admin
         };
-      } else if (resp.enabled === false) {
-        this.state = 'disabled';
-        this.user = null;
       } else {
         this.state = 'anonymous';
         this.user = null;
@@ -683,6 +695,129 @@ function renderError(container, message, retryFn) {
     '</div>';
 }
 
+function renderTruthfulBadge(val, trueLabel, falseLabel, unknownLabel) {
+  if (val === true) {
+    return '<span class="badge stable">' + esc(trueLabel || 'Enabled') + '</span>';
+  }
+  if (val === false) {
+    return '<span class="badge disabled">' + esc(falseLabel || 'Disabled') + '</span>';
+  }
+  return '<span class="badge disabled">' + esc(unknownLabel || 'Unavailable') + '</span>';
+}
+window.renderTruthfulBadge = renderTruthfulBadge;
+
+function renderTruthfulNumber(val, suffix, fallback) {
+  if (typeof val === 'number' && !isNaN(val)) {
+    return val + (suffix ? ' ' + suffix : '');
+  }
+  return fallback || 'Unavailable';
+}
+window.renderTruthfulNumber = renderTruthfulNumber;
+
+function renderTruthfulText(val, fallback) {
+  if (val !== null && val !== undefined && String(val).trim() !== '') {
+    return esc(String(val));
+  }
+  return esc(fallback || '--');
+}
+window.renderTruthfulText = renderTruthfulText;
+
+function setTruthfulBooleanSelect(el, val) {
+  if (!el) return;
+  var unavailOpt = el.querySelector('option[value=""]');
+  if (!unavailOpt) {
+    unavailOpt = document.createElement('option');
+    unavailOpt.value = '';
+    unavailOpt.textContent = 'Unavailable';
+    el.insertBefore(unavailOpt, el.firstChild);
+  }
+  if (typeof val === 'boolean') {
+    el.value = val ? 'true' : 'false';
+    el.dataset.truthState = 'known';
+    el.disabled = false;
+    el.style.opacity = '1.0';
+    el.style.cursor = 'default';
+    el.title = '';
+  } else {
+    el.value = '';
+    el.dataset.truthState = 'unknown';
+    el.disabled = true;
+    el.style.opacity = '0.65';
+    el.style.cursor = 'not-allowed';
+    el.title = 'Unavailable';
+  }
+}
+window.setTruthfulBooleanSelect = setTruthfulBooleanSelect;
+
+function setTruthfulSelect(el, val) {
+  if (!el) return;
+  var unavailOpt = el.querySelector('option[value=""]');
+  if (!unavailOpt) {
+    unavailOpt = document.createElement('option');
+    unavailOpt.value = '';
+    unavailOpt.textContent = 'Unavailable';
+    el.insertBefore(unavailOpt, el.firstChild);
+  }
+  if (val !== null && val !== undefined && val !== '') {
+    el.value = String(val);
+    el.dataset.truthState = 'known';
+    el.disabled = false;
+    el.style.opacity = '1.0';
+    el.style.cursor = 'default';
+    el.title = '';
+  } else {
+    el.value = '';
+    el.dataset.truthState = 'unknown';
+    el.disabled = true;
+    el.style.opacity = '0.65';
+    el.style.cursor = 'not-allowed';
+    el.title = 'Unavailable';
+  }
+}
+window.setTruthfulSelect = setTruthfulSelect;
+
+function setTruthfulNumberInput(el, val) {
+  if (!el) return;
+  if (typeof val === 'number' && !isNaN(val)) {
+    el.value = val;
+    el.dataset.truthState = 'known';
+    el.disabled = false;
+    el.style.opacity = '1.0';
+    el.style.cursor = 'default';
+    el.title = '';
+  } else {
+    el.value = '';
+    el.placeholder = 'Unavailable';
+    el.dataset.truthState = 'unknown';
+    el.disabled = true;
+    el.style.opacity = '0.65';
+    el.style.cursor = 'not-allowed';
+    el.title = 'Unavailable';
+  }
+}
+window.setTruthfulNumberInput = setTruthfulNumberInput;
+
+function setTruthfulTextInput(el, val) {
+  if (!el) return;
+  if (val !== null && val !== undefined && String(val).trim() !== '') {
+    el.value = String(val);
+    el.dataset.truthState = 'known';
+    el.disabled = false;
+    el.style.opacity = '1.0';
+    el.style.cursor = 'default';
+    el.title = '';
+  } else {
+    el.value = '';
+    el.placeholder = 'Unavailable';
+    el.dataset.truthState = 'unknown';
+    el.disabled = true;
+    el.style.opacity = '0.65';
+    el.style.cursor = 'not-allowed';
+    el.title = 'Unavailable';
+  }
+}
+window.setTruthfulTextInput = setTruthfulTextInput;
+
 function showToast(msg, isErr) {
   const el = $('#toast');
   if (!el) return;
@@ -728,6 +863,30 @@ function closeModal() {
   }
   _modalPreviousFocus = null;
 }
+
+function canPerformProtectedAction() {
+  if (AuthSession.state === 'authenticated') {
+    return true;
+  }
+  if (AuthSession.state === 'disabled') {
+    showToast(t('auth.disabled_notice') || 'Administrative actions are unavailable because authentication is disabled for this deployment.', true);
+    return false;
+  }
+  showToast(t('auth.signin_required') || 'Sign in required to perform this action.', true);
+  openAuthModal();
+  return false;
+}
+window.canPerformProtectedAction = canPerformProtectedAction;
+
+function withAuthenticatedAction(fn, actionName) {
+  return async function(...args) {
+    if (!canPerformProtectedAction()) {
+      return;
+    }
+    return await fn.apply(this, args);
+  };
+}
+window.withAuthenticatedAction = withAuthenticatedAction;
 
 function openAuthModal() {
   var overlay = $('#auth-overlay');
@@ -818,13 +977,34 @@ function openTrackDetailModal(idx) {
     '<div class="panel-row"><span class="panel-label">Sample Rate</span><span>' + (t.sample_rate ? t.sample_rate + ' Hz' : 'N/D') + '</span></div>' +
     '<div class="panel-row"><span class="panel-label">Bit Depth</span><span>' + (t.bit_depth ? t.bit_depth + '-bit' : 'N/D') + '</span></div>' +
     '<div class="panel-row"><span class="panel-label">Channels</span><span>' + (t.channels ? t.channels + ' ch' : 'N/D') + '</span></div>' +
-    '<div class="panel-row"><span class="panel-label">Rating</span><span>' + (t.rating ? '★'.repeat(t.rating) : 'Unrated') + '</span></div>' +
+    '<div class="panel-row"><span class="panel-label">Rating</span><span>' +
+      [1, 2, 3, 4, 5].map(function(star) {
+        var active = t.rating && t.rating >= star;
+        return '<button type="button" class="icon-btn star-btn" style="color:' + (active ? 'var(--gold, #f59e0b)' : 'var(--text-dim)') + ';cursor:pointer;background:none;border:none;padding:0 2px" onclick="rateTrack(\'' + esc(t.id) + '\', ' + star + ')">★</button>';
+      }).join('') +
+      '</span></div>' +
     '<div class="panel-row"><span class="panel-label">Starred</span><span>' + (t.starred ? '⭐ Starred' : 'No') + '</span></div>' +
     '<div class="panel-row"><span class="panel-label">File Size</span><span>' + fmtBytes(t.file_size) + '</span></div>' +
     '<div class="panel-row"><span class="panel-label">Content Hash</span><span class="panel-mono">' + esc(t.content_hash || 'N/D') + '</span></div>' +
     '</div>';
 
   overlay.classList.remove('hidden');
+}
+
+async function rateTrack(id, rating) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
+  try {
+    await MichiAPI.rateTrack(id, rating);
+    showToast('Rating saved: ' + rating + ' ★');
+    var tr = await MichiAPI.track(id);
+    if (tr && tr.track) {
+      showTrackDetailModal(tr.track);
+    }
+  } catch (e) {
+    showToast('Failed to save rating: ' + e.message, true);
+  }
 }
 
 function closeTrackDetailModal() {
@@ -878,8 +1058,77 @@ function toggleNavigation(force) {
   if (button) button.setAttribute('aria-expanded', String(open));
 }
 
-// ── Navigation ──────────────────────────────────────────────────
+// ── Navigation & Section Policy ─────────────────────────────────
+const SECTION_POLICY = {
+  dashboard: 'public',
+  status: 'public',
+  library: 'protected',
+  playlists: 'protected',
+  broadcast: 'protected',
+  scan: 'protected',
+  michilink: 'protected',
+  settings: 'protected',
+  history: 'protected',
+  chains: 'protected',
+};
+
+var currentSection = 'dashboard';
+
+function reevaluateCurrentSectionAccess() {
+  var section = currentSection || 'dashboard';
+  var page = $('#page-' + section);
+  if (!page) return;
+
+  var policy = SECTION_POLICY[section] || 'protected';
+  var existingAuthGate = page.querySelector('.auth-required-gate');
+  var isAuthRequired = policy === 'protected' && AuthSession.state !== 'authenticated';
+
+  if (isAuthRequired) {
+    var isDisabled = AuthSession.state === 'disabled';
+    var gateHtml = isDisabled
+      ? '<div class="empty-state mascot" style="padding:48px 16px;text-align:center">' +
+        '<div class="icon" style="font-size:2.5rem;margin-bottom:12px">🔒</div>' +
+        '<p><strong style="font-size:1.1rem">' + (t('auth.disabled_title') || 'Administrative access unavailable') + '</strong></p>' +
+        '<p style="color:var(--text-3);font-size:.85rem;margin:6px 0 16px 0">' + (t('auth.disabled_explanation') || 'Administrative access is unavailable because authentication is disabled for this deployment.') + '</p>' +
+        '</div>'
+      : '<div class="empty-state mascot" style="padding:48px 16px;text-align:center">' +
+        '<div class="icon" style="font-size:2.5rem;margin-bottom:12px">🔒</div>' +
+        '<p><strong style="font-size:1.1rem">' + (t('auth.signin_required_title') || 'Sign in required') + '</strong></p>' +
+        '<p style="color:var(--text-3);font-size:.85rem;margin:6px 0 16px 0">' + (t('auth.signin_required_desc') || 'Authentication is enabled on this server. Please sign in to view and manage this section.') + '</p>' +
+        '<button class="btn btn-primary" onclick="openAuthModal()">' + (t('auth.signin_action') || 'Sign in to Michi') + '</button>' +
+        '</div>';
+
+    if (!existingAuthGate) {
+      existingAuthGate = document.createElement('div');
+      existingAuthGate.className = 'auth-required-gate';
+      page.prepend(existingAuthGate);
+    }
+    existingAuthGate.innerHTML = gateHtml;
+    existingAuthGate.style.display = '';
+    Array.from(page.children).forEach(function(child) {
+      if (child !== existingAuthGate) {
+        child.dataset.authHidden = 'true';
+        child.style.display = 'none';
+      }
+    });
+    // Safely move focus away from hidden protected controls to the auth gate button
+    var gateBtn = existingAuthGate.querySelector('button');
+    if (gateBtn && document.activeElement && page.contains(document.activeElement)) {
+      gateBtn.focus();
+    }
+  } else {
+    if (existingAuthGate) existingAuthGate.remove();
+    Array.from(page.children).forEach(function(child) {
+      if (child.dataset.authHidden === 'true') {
+        delete child.dataset.authHidden;
+        child.style.display = '';
+      }
+    });
+  }
+}
+
 function showSection(section) {
+  currentSection = section || 'dashboard';
   $$('.nav-item').forEach(n => {
     n.classList.remove('active');
     n.removeAttribute('aria-current');
@@ -904,7 +1153,13 @@ function showSection(section) {
   }
   toggleNavigation(false);
 
-  if (AuthSession.state !== 'authenticated') return;
+  // Check and apply access policy for section
+  reevaluateCurrentSectionAccess();
+
+  var policy = SECTION_POLICY[section] || 'protected';
+  if (policy === 'protected' && AuthSession.state !== 'authenticated') {
+    return;
+  }
 
   // Lazy loaders for sections
   if (section === 'playlists') loadPlaylists();
@@ -969,6 +1224,7 @@ function teardownProtected() {
   renderTracks([], 'tracks-table');
   renderTracks([], 'library-table');
   renderQueue([], 0);
+  reevaluateCurrentSectionAccess();
 }
 
 async function init() {
@@ -1073,7 +1329,7 @@ function renderStatusPage() {
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--online)" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg></div><div class="info"><div class="label">Status</div><div class="value"><span class="badge ' + (s.status === 'ok' ? 'stable' : 'disabled') + '">' + esc(s.status) + '</span></div></div></div>' +
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="info"><div class="label">Service</div><div class="value">' + esc(s.name || 'Michi Micro Server') + '</div></div></div>' +
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div><div class="info"><div class="label">Uptime</div><div class="value">' + fmtDur((s.uptime_seconds || 0) * 1000) + '</div></div></div>' +
-    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></div><div class="info"><div class="label">Version</div><div class="value">' + esc(s.version || 'No disponible') + '</div></div></div>' +
+    '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></div><div class="info"><div class="label">Version</div><div class="value">' + esc(State.serverInfo?.version || '--') + '</div></div></div>' +
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/></svg></div><div class="info"><div class="label">Database</div><div class="value"><span class="badge ' + (s.database === 'connected' ? 'stable' : 'disabled') + '">' + esc(s.database || 'No disponible') + '</span></div></div></div>' +
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="info"><div class="label">Server ID</div><div class="value" style="font-family:var(--font-mono);font-size:.75rem">' + esc(s.server_id || 'No disponible') + '</div></div></div>' +
     '<div class="status-item"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div><div class="info"><div class="label">Music Paths</div><div class="value">' + esc((s.music_paths || []).join(', ') || 'No disponible') + '</div></div></div>';
@@ -1084,6 +1340,10 @@ async function loadServerInfo() {
   try {
     State.serverInfo = await MichiAPI.serverInfo();
     renderServerInfo();
+    renderStatusPage();
+    if (State.dashboard) {
+      renderDashboard();
+    }
   } catch (e) { console.warn('server info failed:', e.message); }
 }
 
@@ -1107,9 +1367,10 @@ const FEATURE_LABELS = {
 
 function hasServerFeature(featureName) {
   var info = State.serverInfo;
-  if (!info || !info.features) return true;
+  if (!info || !info.features) return null;
   var feats = info.features;
   if (typeof feats === 'object' && !Array.isArray(feats)) {
+    if (feats[featureName] === undefined) return null;
     return feats[featureName] === true;
   }
   if (Array.isArray(feats)) {
@@ -1117,22 +1378,26 @@ function hasServerFeature(featureName) {
       return f === featureName || (f && f.name === featureName && f.enabled !== false);
     });
   }
-  return false;
+  return null;
 }
 
 function featureBadge(enabled, meta) {
+  if (enabled === null || enabled === undefined) {
+    return { cls: 'disabled', text: 'UNKNOWN' };
+  }
   if (meta?.future && !enabled) return { cls: 'experimental', text: 'EXP' };
   if (meta?.beta && enabled) return { cls: 'beta', text: 'BETA' };
   if (enabled) return { cls: 'stable', text: 'ON' };
   return { cls: 'disabled', text: 'OFF' };
 }
+window.featureBadge = featureBadge;
 
 function renderServerInfo() {
   const info = State.serverInfo;
   if (!info) return;
 
   const ver = $('#sidebar-ver');
-  if (ver) ver.textContent = info.michi_link_version || info.version || '--';
+  if (ver) ver.textContent = info.version || '--';
 
   const sid = $('#server-info-id');
   if (sid) sid.textContent = info.server_id || '--';
@@ -1145,10 +1410,11 @@ function renderServerInfo() {
     const meta = FEATURE_LABELS[key];
     const val = info.features && info.features[key];
     const fb = featureBadge(val, meta);
+    const dotCls = val === true ? 'on' : (val === false ? 'off' : 'unknown');
     const item = document.createElement('div');
     item.className = 'feature-item';
     item.innerHTML =
-      '<span class="feature-dot ' + (val ? 'on' : 'off') + '"></span>' +
+      '<span class="feature-dot ' + dotCls + '"></span>' +
       esc(meta.label) +
       ' <span class="badge ' + fb.cls + '" style="margin-left:auto">' + fb.text + '</span>';
     grid.appendChild(item);
@@ -1205,12 +1471,11 @@ function renderDashboard() {
     var statusText = {
       online: '● Online',
       degraded: '▲ Degraded',
-      auth_required: '🔒 Auth Required',
       checking: '◌ Checking...',
       offline: '● Offline',
     }[ConnectionStatus.state] || '● Offline';
     meta.textContent = 'Server ' + statusText +
-      ' · v' + (State.serverInfo?.version || State.status?.version || '?') +
+      ' · v' + (State.serverInfo?.version || '--') +
       (lib.tracks !== undefined ? ' · ' + lib.tracks + ' tracks' : '');
   }
 }
@@ -1280,6 +1545,9 @@ function renderTracks(tracks, tableId) {
 }
 
 async function toggleStar(idx) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   const t = State.tracks[idx];
   if (!t) return;
   const next = !t.starred;
@@ -1300,6 +1568,9 @@ function isAdvancedQuery(q) {
 }
 
 async function handleSearch() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   const q = $('#search-input')?.value.trim();
   if (!q) {
     State.tracks = State.allTracks;
@@ -1328,6 +1599,9 @@ document.addEventListener('keydown', (e) => {
 
 // ── Scan ────────────────────────────────────────────────────────
 async function handleScan() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   try {
     const r = await MichiAPI.scan();
     showToast(t('toast.scanned', {n: r.scanned, s: r.saved}));
@@ -1352,6 +1626,9 @@ var ServerPlayback = {
 };
 
 function toggleOutputTarget() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   showOutputSelectorModal();
 }
 
@@ -1371,13 +1648,16 @@ function updateOutputRoutingBadge() {
 }
 
 async function showOutputSelectorModal() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   closeOutputSelectorModal();
   try {
     var [recResp, groupResp, chainResp, curOut] = await Promise.all([
-      MichiAPI.getReceivers().catch(function() { return { receivers: [] }; }),
-      MichiAPI.getRoomGroups().catch(function() { return { groups: [] }; }),
-      MichiAPI.getChains().catch(function() { return { chains: [] }; }),
-      MichiAPI.getPlaybackOutput().catch(function() { return { output: null }; }),
+      MichiAPI.getReceivers(),
+      MichiAPI.getRoomGroups(),
+      MichiAPI.getChains(),
+      MichiAPI.getPlaybackOutput(),
     ]);
 
     var receivers = recResp.receivers || [];
@@ -1447,6 +1727,9 @@ function selectLocalBrowserOutput() {
 }
 
 async function selectServerOutputTarget(kind, id, name) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   try {
     await MichiAPI.setPlaybackOutput({ kind: kind, id: id });
     ServerPlayback.outputTarget = 'server';
@@ -1656,6 +1939,10 @@ async function playTrack(idx) {
     return;
   }
 
+  if (!canPerformProtectedAction()) {
+    return;
+  }
+
   // Canonical server playback
   try {
     await MichiAPI.playbackControl({
@@ -1694,6 +1981,10 @@ async function playPause() {
     return;
   }
 
+  if (!canPerformProtectedAction()) {
+    return;
+  }
+
   // Canonical server toggle
   try {
     await MichiAPI.playbackControl({ command: 'toggle' });
@@ -1711,6 +2002,9 @@ async function toggleShuffle() {
     BrowserPlayback.toggleShuffle();
     return;
   }
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   try {
     var nextVal = !ServerPlayback.shuffle;
     var resp = await MichiAPI.playbackControl({ command: 'shuffle', value: nextVal });
@@ -1725,6 +2019,9 @@ async function toggleShuffle() {
 async function toggleRepeat() {
   if (ServerPlayback.outputTarget === 'browser') {
     BrowserPlayback.toggleRepeat();
+    return;
+  }
+  if (!canPerformProtectedAction()) {
     return;
   }
   try {
@@ -1767,6 +2064,10 @@ async function addToQueue(idx) {
   if (ServerPlayback.outputTarget === 'browser') {
     BrowserPlayback.addToQueue(t);
     showToast('Added to Browser Up Next');
+    return;
+  }
+
+  if (!canPerformProtectedAction()) {
     return;
   }
 
@@ -1819,6 +2120,9 @@ function renderQueue(items, currentIndex) {
 async function jumpToQueueItem(pos) {
   if (ServerPlayback.outputTarget === 'browser') {
     BrowserPlayback.jumpToIndex(pos);
+    return;
+  }
+  if (!canPerformProtectedAction()) {
     return;
   }
   try {
@@ -1988,6 +2292,9 @@ function updateMiniPlayer(t) {
 
 // ── Michi Link & Ecosystem ──────────────────────────────────────
 async function testMichiLink() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   const btn = $('#page-michilink button[onclick="testMichiLink()"]');
   if (btn) { btn.disabled = true; btn.textContent = 'Testing...'; }
   try {
@@ -2059,6 +2366,7 @@ async function loadEcosystemDevices() {
 }
 
 async function revokeDevice(deviceId) {
+  if (!canPerformProtectedAction()) return;
   if (!deviceId || deviceId === 'undefined') {
     showToast('Invalid device ID', true);
     return;
@@ -2081,6 +2389,7 @@ var _qrTimer = null;
 var _qrState = 'IDLE';
 
 async function generateQR() {
+  if (!canPerformProtectedAction()) return;
   _qrState = 'GENERATING';
   try {
     var originUrl = window.location.origin;
@@ -2242,10 +2551,12 @@ async function openPlaylistTracks(id, name) {
 }
 
 function exportPlaylistM3U(id) {
+  if (!canPerformProtectedAction()) return;
   window.open('/api/v1/playlists/' + id + '/export/m3u', '_blank');
 }
 
 function confirmDeletePlaylist(id, name) {
+  if (!canPerformProtectedAction()) return;
   showModal('Delete Playlist', 'Are you sure you want to delete playlist "' + name + '"?', 'Delete', async function () {
     try {
       await MichiAPI.deletePlaylist(id);
@@ -2308,7 +2619,34 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 });
 
+async function createPlaylist(name, description) {
+  if (!canPerformProtectedAction()) return;
+  try {
+    var res = await MichiAPI.createPlaylist(name, description);
+    showToast('Playlist created');
+    loadPlaylists();
+    return res;
+  } catch (e) {
+    showToast('Failed to create playlist: ' + e.message, true);
+  }
+}
+window.createPlaylist = createPlaylist;
+
+async function updatePlaylist(id, body) {
+  if (!canPerformProtectedAction()) return;
+  try {
+    var res = await MichiAPI.updatePlaylist(id, body);
+    showToast('Playlist updated');
+    loadPlaylists();
+    return res;
+  } catch (e) {
+    showToast('Failed to update playlist: ' + e.message, true);
+  }
+}
+window.updatePlaylist = updatePlaylist;
+
 async function createSmartPlaylist() {
+  if (!canPerformProtectedAction()) return;
   var name = $('#smart-name')?.value.trim();
   var rule = $('#smart-rule')?.value;
   var limit = parseInt($('#smart-limit')?.value || '50');
@@ -2401,6 +2739,7 @@ function historyPage(offset) {
 }
 
 async function exportHistory() {
+  if (!canPerformProtectedAction()) return;
   try {
     const data = await MichiAPI.exportHistory();
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -2417,6 +2756,7 @@ async function exportHistory() {
 }
 
 async function clearHistory() {
+  if (!canPerformProtectedAction()) return;
   showModal('Clear History', 'Clear all play history? This cannot be undone.', 'Clear', async function () {
     try {
       await MichiAPI.clearHistory();
@@ -2460,6 +2800,7 @@ async function loadRoomGroups() {
 }
 
 async function createRoomGroup() {
+  if (!canPerformProtectedAction()) return;
   var name = $('#rg-name')?.value.trim();
   var mode = $('#rg-mode')?.value;
   var recvs = $('#rg-receivers')?.value.trim();
@@ -2475,6 +2816,7 @@ async function createRoomGroup() {
 }
 
 async function activateRoomGroup(id) {
+  if (!canPerformProtectedAction()) return;
   try {
     var resp = await MichiAPI.activateRoomGroup(id);
     loadRoomGroups();
@@ -2494,6 +2836,7 @@ async function activateRoomGroup(id) {
 }
 
 async function deactivateRoomGroup(id) {
+  if (!canPerformProtectedAction()) return;
   try {
     await MichiAPI.deactivateRoomGroup(id);
     loadRoomGroups();
@@ -2502,6 +2845,7 @@ async function deactivateRoomGroup(id) {
 }
 
 async function deleteRoomGroup(id) {
+  if (!canPerformProtectedAction()) return;
   try {
     await MichiAPI.deleteRoomGroup(id);
     loadRoomGroups();
@@ -2543,6 +2887,7 @@ async function loadSources() {
 }
 
 async function addSource() {
+  if (!canPerformProtectedAction()) return;
   var url = $('#source-url-input')?.value.trim();
   if (!url) { showToast(t('error.please_enter_url'), true); return; }
   try {
@@ -2562,12 +2907,23 @@ async function addSource() {
 }
 
 async function deleteSource(id) {
+  if (!canPerformProtectedAction()) return;
   try {
     await MichiAPI.deleteSource(id);
     loadSources();
     showToast(t('toast.deleted'));
   } catch (e) { showToast(e.message, true); }
 }
+
+async function updateEpisode(id, position_ms, played) {
+  if (!canPerformProtectedAction()) return;
+  try {
+    return await MichiAPI.updateEpisode(id, position_ms, played);
+  } catch (e) {
+    showToast('Failed to update episode: ' + e.message, true);
+  }
+}
+window.updateEpisode = updateEpisode;
 function playSource(id) {
   var audio = getAudio();
   audio.src = '/api/v1/stream/proxy/' + id;
@@ -2818,6 +3174,7 @@ async function computeFileSha256Streaming(file, onProgress) {
 
 // ── Sync & Handoff Handlers ─────────────────────────────────────
 async function uploadFile() {
+  if (!canPerformProtectedAction()) return;
   var fileInput = $('#settings-file-input');
   var progressWrap = $('#upload-progress-wrap');
   var progressFill = $('#upload-progress-fill');
@@ -2963,6 +3320,7 @@ async function uploadFile() {
 }
 
 async function syncPlaylist() {
+  if (!canPerformProtectedAction()) return;
   var nameInput = $('#sync-playlist-name');
   var tracksInput = $('#sync-playlist-tracks');
   var resEl = $('#sync-playlist-result');
@@ -3019,6 +3377,7 @@ async function syncPlaylist() {
 }
 
 async function transferHandoff() {
+  if (!canPerformProtectedAction()) return;
   var trackInput = $('#handoff-track-id');
   var posInput = $('#handoff-position');
   var playingInput = $('#handoff-playing');
@@ -3096,6 +3455,7 @@ async function transferHandoff() {
 }
 
 async function discoverDevices() {
+  if (!canPerformProtectedAction()) return;
   var resEl = $('#discover-result');
   if (resEl) resEl.innerHTML = '<span style="color:var(--text-3)">Scanning local network for Michi receivers...</span>';
   try {
@@ -3120,33 +3480,107 @@ async function discoverDevices() {
   }
 }
 
-// ── Settings ─────────────────────────────────────────────────────
-function switchSettingsTab(tab) {
-  $$('.tab[data-stab]').forEach(function (b) {
-    b.classList.remove('active');
-    b.setAttribute('aria-selected', 'false');
-    b.setAttribute('tabindex', '-1');
-  });
-  var btn = $('.tab[data-stab="' + tab + '"]');
-  if (btn) {
-    btn.classList.add('active');
-    btn.setAttribute('aria-selected', 'true');
-    btn.setAttribute('tabindex', '0');
+async function startReceiverPair(deviceId) {
+  if (!canPerformProtectedAction()) return;
+  try {
+    var res = await MichiAPI.startReceiverPair({ receiver_id: deviceId });
+    showToast('Receiver pairing initiated');
+    return res;
+  } catch (e) {
+    showToast('Pairing start failed: ' + e.message, true);
   }
+}
+window.startReceiverPair = startReceiverPair;
+
+async function confirmReceiverPair(deviceId, pin) {
+  if (!canPerformProtectedAction()) return;
+  try {
+    var res = await MichiAPI.confirmReceiverPair({ receiver_id: deviceId, pin: pin });
+    showToast('Receiver paired successfully');
+    return res;
+  } catch (e) {
+    showToast('Pairing confirmation failed: ' + e.message, true);
+  }
+}
+window.confirmReceiverPair = confirmReceiverPair;
+
+// ── Settings ─────────────────────────────────────────────────────
+const SETTINGS_TAB_ALIASES = {
+  overview: 'overview',
+  general: 'general',
+  library: 'library',
+  streaming: 'streaming',
+  devices: 'devices',
+  integrations: 'integrations',
+  maintenance: 'maintenance',
+  advanced: 'advanced',
+  // Legacy aliases
+  diagnostics: 'advanced',
+  jobs: 'advanced',
+  network: 'advanced',
+  sync: 'library',
+  audio: 'integrations',
+  webhook: 'integrations',
+  receivers: 'devices',
+  handoff: 'streaming',
+  backup: 'maintenance',
+  updates: 'maintenance'
+};
+
+function switchSettingsTab(tab) {
+  var target = SETTINGS_TAB_ALIASES[tab] || tab || 'overview';
+
+  // 1. Update rail navigation items (both legacy .tab[data-stab] and .settings-rail-item)
+  $$('.tab[data-stab], .settings-rail-item[data-stab]').forEach(function (b) {
+    var isTarget = b.getAttribute('data-stab') === target;
+    b.classList.toggle('active', isTarget);
+    b.setAttribute('aria-selected', isTarget ? 'true' : 'false');
+    b.setAttribute('tabindex', isTarget ? '0' : '-1');
+  });
+
+  // 2. Sync mobile select dropdown if present
+  var mobSel = $('#settings-rail-mobile');
+  if (mobSel && mobSel.value !== target) {
+    mobSel.value = target;
+  }
+
+  // 3. Toggle content panels
   $$('[id^="stab-"]').forEach(function (t) {
     t.classList.add('hidden');
     t.setAttribute('aria-hidden', 'true');
   });
-  var pane = $('#stab-' + tab);
+  var pane = $('#stab-' + target);
   if (pane) {
     pane.classList.remove('hidden');
     pane.setAttribute('aria-hidden', 'false');
   }
 
-  if (tab === 'diagnostics') loadDiagnostics();
-  if (tab === 'jobs') loadJobs();
-  if (tab === 'integrations') loadIntegrations();
+  // 4. Trigger target-specific loaders
+  if (target === 'advanced') {
+    loadDiagnostics();
+    loadJobs();
+  } else if (target === 'integrations') {
+    loadIntegrations();
+  } else if (target === 'devices') {
+    loadRoomGroups();
+  } else if (target === 'maintenance') {
+    checkUpdateStatus();
+  }
 }
+
+async function getCanonicalServerVersion() {
+  if (State.serverInfo && State.serverInfo.version) {
+    return State.serverInfo.version;
+  }
+  try {
+    var info = await MichiAPI.serverInfo();
+    State.serverInfo = info;
+    return (info && info.version) ? info.version : 'Unavailable';
+  } catch (e) {
+    return 'Unavailable';
+  }
+}
+window.getCanonicalServerVersion = getCanonicalServerVersion;
 
 async function loadSettings() {
   if (AuthSession.state !== 'authenticated') return;
@@ -3154,27 +3588,33 @@ async function loadSettings() {
     var s = await MichiAPI.settings();
     if (!$('#settings-port')) return;
     $('#settings-port').textContent = s.port;
-    if ($('#settings-version')) $('#settings-version').textContent = s.version || State.serverInfo?.version || '?';
-    if ($('#settings-ffmpeg')) $('#settings-ffmpeg').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
-    if ($('#settings-ffmpeg-avail')) $('#settings-ffmpeg-avail').innerHTML = s.ffmpeg_available ? '<span class="badge stable">Available</span>' : '<span class="badge disabled">Not found</span>';
-    if ($('#settings-resource-profile')) $('#settings-resource-profile').value = s.resource_profile;
-    if ($('#settings-stream-profile')) $('#settings-stream-profile').value = s.stream_profile;
-    if ($('#settings-format-policy')) $('#settings-format-policy').value = s.format_policy;
-    if ($('#settings-job-max-concurrent')) $('#settings-job-max-concurrent').value = s.job_max_concurrent || 3;
-    if ($('#settings-max-remote-bitrate')) $('#settings-max-remote-bitrate').value = s.max_remote_bitrate || 320000;
-    if ($('#settings-scrobble-toggle')) $('#settings-scrobble-toggle').value = s.scrobble_enabled ? 'true' : 'false';
-    if ($('#settings-sync-name-input')) $('#settings-sync-name-input').value = s.sync_name || '';
-    if ($('#settings-remote-sync')) $('#settings-remote-sync').value = s.remote_sync ? 'true' : 'false';
-    if ($('#settings-auto-backup')) $('#settings-auto-backup').value = s.auto_backup_enabled ? 'true' : 'false';
-    if ($('#settings-backup-max-keep')) $('#settings-backup-max-keep').value = s.backup_max_keep || 7;
-    if ($('#settings-reconnect-delay-max')) $('#settings-reconnect-delay-max').value = s.reconnect_delay_max || 300;
-    if ($('#settings-dev-mode-select')) $('#settings-dev-mode-select').value = s.dev_mode ? 'true' : 'false';
-    if ($('#settings-cover-art')) $('#settings-cover-art').value = (s.cover_art_enabled !== false) ? 'true' : 'false';
-    if ($('#settings-sidebar-collapsed')) $('#settings-sidebar-collapsed').value = s.sidebar_collapsed ? 'true' : 'false';
+    var canonicalVersion = await getCanonicalServerVersion();
+    if ($('#settings-version')) $('#settings-version').textContent = canonicalVersion;
+    if ($('#update-current-version')) $('#update-current-version').textContent = canonicalVersion;
+    if ($('#settings-ffmpeg')) $('#settings-ffmpeg').innerHTML = renderTruthfulBadge(s.ffmpeg_available, 'Available', 'Not found', 'Unavailable');
+    if ($('#settings-ffmpeg-avail')) $('#settings-ffmpeg-avail').innerHTML = renderTruthfulBadge(s.ffmpeg_available, 'Available', 'Not found', 'Unavailable');
+    setTruthfulSelect($('#settings-resource-profile'), s.resource_profile);
+    setTruthfulSelect($('#settings-stream-profile'), s.stream_profile);
+    setTruthfulSelect($('#settings-format-policy'), s.format_policy);
+    setTruthfulNumberInput($('#settings-job-max-concurrent'), s.job_max_concurrent);
+    setTruthfulSelect($('#settings-max-remote-bitrate'), s.max_remote_bitrate);
+    setTruthfulBooleanSelect($('#settings-scrobble-toggle'), s.scrobble_enabled);
+    setTruthfulTextInput($('#settings-sync-name-input'), s.sync_name);
+    setTruthfulBooleanSelect($('#settings-remote-sync'), s.remote_sync);
+    setTruthfulBooleanSelect($('#settings-auto-backup'), s.auto_backup_enabled);
+    setTruthfulNumberInput($('#settings-backup-max-keep'), s.backup_max_keep);
+    setTruthfulNumberInput($('#settings-reconnect-delay-max'), s.reconnect_delay_max);
+    setTruthfulBooleanSelect($('#settings-dev-mode-select'), s.dev_mode);
+    setTruthfulBooleanSelect($('#settings-cover-art'), s.cover_art_enabled);
+    setTruthfulBooleanSelect($('#settings-sidebar-collapsed'), s.sidebar_collapsed);
 
-    // Apply real consumer effect for cover art and sidebar
-    applyCoverArtPreference(s.cover_art_enabled !== false);
-    applySidebarPreference(!!s.sidebar_collapsed);
+    // Apply real consumer effect for cover art and sidebar only if boolean provided
+    if (typeof s.cover_art_enabled === 'boolean') {
+      applyCoverArtPreference(s.cover_art_enabled);
+    }
+    if (typeof s.sidebar_collapsed === 'boolean') {
+      applySidebarPreference(s.sidebar_collapsed);
+    }
 
     // Apply server canonical theme and language if not overridden manually in this browser
     if (s.theme && !localStorage.getItem('michi_theme_manual')) {
@@ -3191,12 +3631,15 @@ async function loadSettings() {
       try {
         var modRes = await MichiAPI.modules();
         var scanMod = (modRes.modules || []).find(function(m) { return m.name === 'scan'; });
-        if (scanMod && !scanMod.enabled) {
+        if (!scanMod) {
           watcherEl.className = 'badge disabled';
-          watcherEl.textContent = '○ Paused (Scan Module Disabled)';
+          watcherEl.textContent = '⚠ Status Unavailable';
+        } else if (!scanMod.enabled) {
+          watcherEl.className = 'badge disabled';
+          watcherEl.textContent = '○ Paused';
         } else {
           watcherEl.className = 'badge stable';
-          watcherEl.textContent = '● Active (5s Polling)';
+          watcherEl.textContent = '● Active';
         }
       } catch (e) {
         watcherEl.className = 'badge disabled';
@@ -3207,19 +3650,19 @@ async function loadSettings() {
     renderSyncPeers(s.sync_peers || []);
 
     if ($('#settings-music-paths')) $('#settings-music-paths').textContent = (s.music_paths || []).join('\n') || 'No paths configured';
-    if ($('#settings-sync-name')) $('#settings-sync-name').textContent = s.sync_name || '--';
-    if ($('#settings-cors')) $('#settings-cors').textContent = s.cors_origin || 'Restrictive (default)';
-    if ($('#settings-auth')) $('#settings-auth').innerHTML = s.auth_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
-    if ($('#settings-dev-mode')) $('#settings-dev-mode').innerHTML = s.dev_mode ? '<span class="badge stable">On</span>' : '<span class="badge disabled">Off</span>';
-    if ($('#settings-scrobble')) $('#settings-scrobble').innerHTML = s.scrobble_enabled ? '<span class="badge stable">Enabled</span>' : '<span class="badge disabled">Disabled</span>';
+    if ($('#settings-sync-name')) $('#settings-sync-name').textContent = renderTruthfulText(s.sync_name, '--');
+    if ($('#settings-cors')) $('#settings-cors').textContent = renderTruthfulText(s.cors_origin, 'Restrictive (default)');
+    if ($('#settings-auth')) $('#settings-auth').innerHTML = renderTruthfulBadge(s.auth_enabled, 'Enabled', 'Disabled', 'Unavailable');
+    if ($('#settings-dev-mode')) $('#settings-dev-mode').innerHTML = renderTruthfulBadge(s.dev_mode, 'On', 'Off', 'Unavailable');
+    if ($('#settings-scrobble')) $('#settings-scrobble').innerHTML = renderTruthfulBadge(s.scrobble_enabled, 'Enabled', 'Disabled', 'Unavailable');
     updateScrobbleStatusUI();
 
-    var scanWorkers = s.effective_scan_workers !== undefined ? s.effective_scan_workers : (s.resource_profile === 'eco' ? 1 : (s.resource_profile === 'performance' ? 4 : 2));
-    var maxTc = s.effective_transcode_workers !== undefined ? s.effective_transcode_workers : (s.resource_profile === 'eco' ? 0 : (s.resource_profile === 'performance' ? 4 : 2));
-    var dbPool = s.effective_db_pool !== undefined ? s.effective_db_pool : (s.resource_profile === 'eco' ? 4 : (s.resource_profile === 'performance' ? 16 : 8));
-    if ($('#settings-scan-concurrency')) $('#settings-scan-concurrency').textContent = scanWorkers + ' worker(s)';
-    if ($('#settings-max-transcodes')) $('#settings-max-transcodes').textContent = maxTc + ' simultaneous';
-    if ($('#settings-db-pool')) $('#settings-db-pool').textContent = dbPool + ' connections';
+    var scanWorkers = renderTruthfulNumber(s.effective_scan_workers, 'worker(s)', 'Unavailable');
+    var maxTc = renderTruthfulNumber(s.effective_transcode_workers, 'simultaneous', 'Unavailable');
+    var dbPool = renderTruthfulNumber(s.effective_db_pool, 'connections', 'Unavailable');
+    if ($('#settings-scan-concurrency')) $('#settings-scan-concurrency').textContent = scanWorkers;
+    if ($('#settings-max-transcodes')) $('#settings-max-transcodes').textContent = maxTc;
+    if ($('#settings-db-pool')) $('#settings-db-pool').textContent = dbPool;
 
     // Show environment overrides indicators and lock inputs if overridden
     var src = s.effective_sources || {};
@@ -3235,13 +3678,22 @@ async function loadSettings() {
       'reconnect_delay_max': '#settings-reconnect-delay-max',
       'dev_mode': '#settings-dev-mode-select',
       'scrobble_enabled': '#settings-scrobble-toggle',
-      'sync_name': '#settings-sync-name-input'
+      'sync_name': '#settings-sync-name-input',
+      'cover_art_enabled': '#settings-cover-art',
+      'sidebar_collapsed': '#settings-sidebar-collapsed'
     };
 
     Object.keys(controlMap).forEach(function(field) {
       var el = $(controlMap[field]);
       if (el) {
-        if (src[field] === 'environment') {
+        if (el.dataset.truthState === 'unknown') {
+          el.disabled = true;
+          el.style.opacity = '0.65';
+          el.style.cursor = 'not-allowed';
+          el.title = src[field] === 'environment'
+            ? '🔒 Controlled by environment variable (MICHI_' + field.toUpperCase() + ') — Value unavailable'
+            : 'Unavailable';
+        } else if (src[field] === 'environment') {
           el.disabled = true;
           el.title = '🔒 Controlled by environment variable (MICHI_' + field.toUpperCase() + ')';
           el.style.opacity = '0.65';
@@ -3265,7 +3717,10 @@ async function loadSettings() {
       if (banner) banner.remove();
       localStorage.removeItem('michi_restart_required');
     }
-  } catch (e) { console.warn('settings:', e.message); }
+  } catch (e) {
+    console.warn('settings:', e.message);
+    showToast(t('settings.unable_load') || 'Unable to load settings from server', true);
+  }
 }
 
 function applyCoverArtPreference(enabled) {
@@ -3346,6 +3801,7 @@ async function updateScrobbleStatusUI() {
 }
 
 async function saveListenBrainzToken() {
+  if (!canPerformProtectedAction()) return;
   var input = $('#settings-lb-token');
   var resultEl = $('#settings-lb-result');
   if (!input || !resultEl) return;
@@ -3368,6 +3824,7 @@ async function saveListenBrainzToken() {
 }
 
 async function saveLastFmToken() {
+  if (!canPerformProtectedAction()) return;
   var input = $('#settings-lfm-token');
   var resultEl = $('#settings-lfm-result');
   if (!input || !resultEl) return;
@@ -3390,6 +3847,7 @@ async function saveLastFmToken() {
 }
 
 async function disconnectListenBrainz() {
+  if (!canPerformProtectedAction()) return;
   var resultEl = $('#settings-lb-result');
   if (resultEl) resultEl.textContent = 'Disconnecting ListenBrainz...';
   try {
@@ -3406,6 +3864,7 @@ async function disconnectListenBrainz() {
 }
 
 async function testListenBrainz() {
+  if (!canPerformProtectedAction()) return;
   var resultEl = $('#settings-lb-result');
   if (resultEl) resultEl.textContent = 'Testing ListenBrainz connection...';
   try {
@@ -3420,6 +3879,7 @@ async function testListenBrainz() {
 }
 
 async function disconnectLastFm() {
+  if (!canPerformProtectedAction()) return;
   var resultEl = $('#settings-lfm-result');
   if (resultEl) resultEl.textContent = 'Disconnecting Last.fm...';
   try {
@@ -3436,6 +3896,7 @@ async function disconnectLastFm() {
 }
 
 async function testLastFm() {
+  if (!canPerformProtectedAction()) return;
   var resultEl = $('#settings-lfm-result');
   if (resultEl) resultEl.textContent = 'Testing Last.fm connection...';
   try {
@@ -3479,6 +3940,9 @@ function renderRestartBanner(fieldsStr) {
 }
 
 async function saveSetting(key, value) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var body = {};
   body[key] = value;
   try {
@@ -3519,6 +3983,9 @@ function renderSyncPeers(peers) {
 }
 
 async function addSyncPeer() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var input = $('#settings-new-peer');
   var val = input ? input.value.trim() : '';
   if (!val) return;
@@ -3532,6 +3999,9 @@ async function addSyncPeer() {
 }
 
 async function removeSyncPeer(idx) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   if (idx < 0 || idx >= _currentPeers.length) return;
   var updated = _currentPeers.filter(function(_, i) { return i !== idx; });
   await saveSetting('sync_peers', updated);
@@ -3539,6 +4009,9 @@ async function removeSyncPeer(idx) {
 
 // ── Webhooks ─────────────────────────────────────────────────────
 async function setWebhook() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var url = $('#webhook-url')?.value.trim();
   if (!url) { showToast(t('error.please_enter_url'), true); return; }
   try {
@@ -3550,6 +4023,9 @@ async function setWebhook() {
 }
 
 async function testWebhook() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var el = $('#webhook-status');
   if (el) el.innerHTML = '<span style="color:var(--text-dim)">Testing webhook...</span>';
   try {
@@ -3571,6 +4047,9 @@ async function testWebhook() {
 }
 
 async function deleteWebhook() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   try {
     await MichiAPI.deleteWebhook();
     var el = $('#webhook-status');
@@ -3582,6 +4061,9 @@ async function deleteWebhook() {
 
 // ── Backup, Diagnostics, Jobs, Integrations ───────────────────────
 async function createSnapshot() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var el = $('#snapshot-result');
   if (el) el.innerHTML = '<span style="color:var(--text-dim)">Creating library statistics snapshot...</span>';
   try {
@@ -3602,10 +4084,16 @@ async function createSnapshot() {
 }
 
 function downloadBackup() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   window.open('/api/v1/backup/download', '_blank');
 }
 
 async function restoreBackup() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var fileInput = $('#backup-restore-file');
   var resEl = $('#backup-restore-result');
 
@@ -3666,6 +4154,9 @@ async function restoreBackup() {
 }
 
 async function loadDiagnostics() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var statusEl = $('#diag-status');
   var ffmpegEl = $('#diag-ffmpeg');
   var transEl = $('#diag-transcodes');
@@ -3681,9 +4172,25 @@ async function loadDiagnostics() {
       statusEl.textContent = isOk ? 'Healthy' : (diag.degraded ? 'Degraded' : 'Unhealthy');
       statusEl.className = isOk ? 'badge stable' : 'badge disabled';
     }
-    if (ffmpegEl) ffmpegEl.textContent = settings.ffmpeg_available ? 'Available (Transcoding ready)' : 'Unavailable (Direct play only)';
-    if (transEl) transEl.textContent = 'Capacity: ' + (settings.effective_transcode_workers || 0) + ' worker slots';
-    if (poolEl) poolEl.textContent = (settings.effective_db_pool || 8) + ' connections (Tracks: ' + (diag.db?.total_tracks || 0) + ')';
+    if (ffmpegEl) {
+      if (typeof settings.ffmpeg_available !== 'boolean') {
+        ffmpegEl.textContent = 'Status Unavailable';
+      } else {
+        ffmpegEl.textContent = settings.ffmpeg_available ? 'Available (Transcoding ready)' : 'Unavailable (Direct play only)';
+      }
+    }
+    if (transEl) transEl.textContent = (settings.effective_transcode_workers !== undefined && settings.effective_transcode_workers !== null)
+      ? 'Capacity: ' + settings.effective_transcode_workers + ' worker slots'
+      : 'Capacity: Unavailable';
+    if (poolEl) {
+      var poolVal = (settings.effective_db_pool !== undefined && settings.effective_db_pool !== null)
+        ? settings.effective_db_pool + ' connections'
+        : 'Unavailable';
+      var trackCount = (diag.db && diag.db.total_tracks !== undefined && diag.db.total_tracks !== null)
+        ? diag.db.total_tracks
+        : 'Unavailable';
+      poolEl.textContent = poolVal + ' (Tracks: ' + trackCount + ')';
+    }
 
     if (capsEl && diag.player_compatibility) {
       var pc = diag.player_compatibility;
@@ -3698,6 +4205,9 @@ async function loadDiagnostics() {
 }
 
 async function loadJobs() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var maxEl = $('#jobs-max-concurrent');
   var listEl = $('#jobs-list');
 
@@ -3705,7 +4215,9 @@ async function loadJobs() {
     var settings = await MichiAPI.settings();
     var jobsData = await MichiAPI.jobs();
 
-    if (maxEl) maxEl.textContent = (settings.job_max_concurrent || 2) + ' concurrent workers';
+    if (maxEl) maxEl.textContent = (settings.job_max_concurrent !== undefined && settings.job_max_concurrent !== null)
+      ? settings.job_max_concurrent + ' concurrent workers'
+      : 'Unavailable';
     if (listEl) {
       var jobs = jobsData.jobs || [];
       if (jobs.length === 0) {
@@ -3736,6 +4248,9 @@ async function loadJobs() {
 }
 
 async function cancelJobAction(id) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   if (!confirm('Are you sure you want to cancel job ' + id + '?')) return;
   try {
     await MichiAPI.cancelJob(id);
@@ -3757,7 +4272,10 @@ async function loadIntegrations() {
     var ha = diag.homeassistant || {};
 
     if (haStatusEl) {
-      if (ha.enabled === false) {
+      if (!diag.homeassistant || typeof ha.configured !== 'boolean') {
+        haStatusEl.textContent = 'Status Unavailable';
+        haStatusEl.className = 'badge disabled';
+      } else if (ha.enabled === false) {
         haStatusEl.textContent = 'Disabled (Module deactivated)';
         haStatusEl.className = 'badge disabled';
       } else if (!ha.configured) {
@@ -3776,13 +4294,18 @@ async function loadIntegrations() {
     }
 
     if (peersEl) peersEl.textContent = (settings.sync_peers || []).join(', ') || 'No mesh peers configured';
-    if (delayEl) delayEl.textContent = (settings.reconnect_delay_max || 300) + ' seconds backoff cap';
+    if (delayEl) delayEl.textContent = (settings.reconnect_delay_max !== undefined && settings.reconnect_delay_max !== null)
+      ? settings.reconnect_delay_max + ' seconds backoff cap'
+      : 'Unavailable';
   } catch (e) {
     console.warn('integrations failed:', e.message);
   }
 }
 
 async function verifyIntegrity() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var el = $('#integrity-result');
   if (el) el.innerHTML = '<span style="color:var(--text-dim)">Checking file availability...</span>';
   try {
@@ -3839,6 +4362,9 @@ function hideCreateChain() {
 }
 
 async function createChain() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   var name = $('#new-chain-name')?.value.trim();
   if (!name) { showToast(t('error.please_enter_name'), true); return; }
   try {
@@ -3851,6 +4377,9 @@ async function createChain() {
 }
 
 async function openChain(id) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   _currentChainId = id;
   try {
     var raw = await MichiAPI.chain(id);
@@ -3907,6 +4436,9 @@ function renderChainLinks(links) {
 }
 
 async function addLink() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   if (!_currentChainId) return;
   var sel = $('#chain-add-receiver');
   var recvId = sel?.value;
@@ -3919,6 +4451,9 @@ async function addLink() {
 }
 
 async function removeLink(linkId, chainId) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   try {
     await MichiAPI.removeChainLink(chainId, linkId);
     openChain(_currentChainId);
@@ -3927,12 +4462,18 @@ async function removeLink(linkId, chainId) {
 }
 
 async function saveLinkVolume(linkId, chainId, val) {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   try {
     await MichiAPI.updateChainLink(chainId, linkId, { volume: parseInt(val) });
   } catch (e) { showToast(e.message, true); }
 }
 
 async function setChainTrack() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   if (!_currentChainId) return;
   var trackId = $('#chain-track-id')?.value.trim();
   try {
@@ -3945,6 +4486,9 @@ async function setChainTrack() {
 }
 
 async function playChain() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   if (!_currentChainId) return;
   try {
     var resp = await MichiAPI.playChain(_currentChainId);
@@ -3963,6 +4507,9 @@ async function playChain() {
 }
 
 async function stopChain() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
   if (!_currentChainId) return;
   try {
     await MichiAPI.stopChain(_currentChainId);
@@ -3981,6 +4528,9 @@ function setChainVolume(val) {
 
   if (_chainVolTimeout) clearTimeout(_chainVolTimeout);
   _chainVolTimeout = setTimeout(async function () {
+    if (!canPerformProtectedAction()) {
+      return;
+    }
     try {
       await MichiAPI.setChainVolume(_currentChainId, parseInt(val));
     } catch (e) {
@@ -4001,3 +4551,164 @@ document.addEventListener('keydown', function (e) {
     playPause();
   }
 });
+
+// ── Update Subsystem ───────────────────────────────────────────
+function renderUpdateStatus(info) {
+  if (!info) return;
+
+  var currentVerEl = $('#update-current-version');
+  if (currentVerEl && info.current_version) {
+    currentVerEl.textContent = info.current_version;
+  }
+
+  var sel = $('#update-channel-select');
+  if (sel && info.channel && !sel.dataset.userChanged) {
+    sel.value = info.channel;
+  }
+
+  var badgeEl = $('#update-status-badge');
+  if (badgeEl) {
+    if (info.status === 'check_failed') {
+      badgeEl.className = 'badge disabled';
+      badgeEl.textContent = '✕ ' + (t('update.check_failed') || 'Check failed: upstream unavailable');
+    } else if (info.status === 'stale_cache') {
+      badgeEl.className = 'badge warning';
+      badgeEl.textContent = '▲ ' + (t('update.stale_cache') || 'Stale cache (upstream unreachable)');
+    } else if (info.update_available || info.status === 'update_available') {
+      badgeEl.className = 'badge warning';
+      badgeEl.textContent = '● ' + (t('update.available') || 'Update Available') + ': ' + (info.latest_version || 'New version');
+    } else {
+      badgeEl.className = 'badge stable';
+      badgeEl.textContent = '✓ ' + (t('update.up_to_date') || 'Up to date');
+    }
+  }
+
+  var detailsEl = $('#update-details');
+  var latestVerEl = $('#update-latest-version');
+  var publishedEl = $('#update-published-date');
+  var linkEl = $('#update-release-link');
+
+  if (detailsEl && latestVerEl) {
+    if (info.latest_version && info.status !== 'check_failed') {
+      detailsEl.style.display = 'flex';
+      var suffix = info.status === 'stale_cache' ? ' (cached)' : (info.channel === 'preview' ? ' (Preview)' : '');
+      latestVerEl.textContent = (info.release_name || info.latest_version) + suffix;
+      if (publishedEl) {
+        var dateStr = info.published_at ? new Date(info.published_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+        publishedEl.textContent = dateStr ? 'Published: ' + dateStr : '';
+      }
+    } else {
+      detailsEl.style.display = 'none';
+    }
+  }
+
+  if (linkEl) {
+    if (info.release_url && info.status !== 'check_failed') {
+      linkEl.href = info.release_url;
+      linkEl.style.display = 'inline-flex';
+    } else {
+      linkEl.style.display = 'none';
+    }
+  }
+
+  var guidanceRow = $('#update-guidance-row');
+  var guidanceEl = $('#update-guidance');
+  if (guidanceRow && guidanceEl) {
+    if (info.instructions) {
+      guidanceRow.style.display = 'flex';
+      guidanceEl.textContent = info.instructions;
+    } else {
+      guidanceRow.style.display = 'none';
+    }
+  }
+}
+
+async function checkUpdateStatus(channel) {
+  var sel = $('#update-channel-select');
+  var btn = $('#update-check-btn');
+  if (channel && sel) {
+    sel.dataset.userChanged = 'true';
+  }
+  var ch = channel || (sel && sel.dataset.userChanged ? sel.value : undefined);
+  var badgeEl = $('#update-status-badge');
+  if (badgeEl) {
+    badgeEl.className = 'badge';
+    badgeEl.textContent = 'Checking...';
+  }
+
+  try {
+    var res = await MichiAPI.updateStatus(ch);
+    if (sel) {
+      sel.disabled = false;
+      var loadingOpt = sel.querySelector('option[value=""]');
+      if (loadingOpt) loadingOpt.remove();
+      if (res.channel && !sel.dataset.userChanged) {
+        sel.value = res.channel;
+      }
+    }
+    if (btn) btn.disabled = false;
+    renderUpdateStatus(res);
+  } catch (e) {
+    if (sel) sel.disabled = false;
+    if (btn) btn.disabled = false;
+    if (badgeEl) {
+      badgeEl.className = 'badge disabled';
+      badgeEl.textContent = 'Check failed: ' + (e.message || 'Error');
+    }
+  }
+}
+
+async function checkForUpdates() {
+  var sel = $('#update-channel-select');
+  var ch = sel ? sel.value : 'stable';
+  var btn = $('#update-check-btn');
+  var badgeEl = $('#update-status-badge');
+
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Checking...';
+  }
+  if (badgeEl) {
+    badgeEl.className = 'badge';
+    badgeEl.textContent = t('update.checking') || 'Checking for updates...';
+  }
+
+  try {
+    var res = await MichiAPI.updateCheck({ channel: ch });
+    renderUpdateStatus(res);
+    if (res.status === 'update_available' || res.update_available) {
+      showToast(t('update.toast_available', { ver: res.latest_version || 'New version' }));
+    } else if (res.status === 'stale_cache') {
+      showToast(t('update.toast_stale_cache') || 'Could not contact the update service. Showing last known update information.');
+    } else if (res.status === 'check_failed') {
+      showToast(t('update.toast_check_failed') || 'Could not check for updates.', true);
+    } else {
+      showToast(t('update.toast_up_to_date') || 'Michi Micro Server is up to date.');
+    }
+  } catch (e) {
+    if (badgeEl) {
+      badgeEl.className = 'badge disabled';
+      badgeEl.textContent = 'Check failed: ' + (e.message || 'Error');
+    }
+    showToast('Failed to check for updates: ' + e.message, true);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = t('settings.check_updates') || 'Check for Updates';
+    }
+  }
+}
+
+// Window exports for HTML event handlers and testing
+window.MichiAPI = MichiAPI;
+window.AuthSession = AuthSession;
+window.ConnectionStatus = ConnectionStatus;
+window.loadSettings = loadSettings;
+window.switchSettingsTab = switchSettingsTab;
+window.checkUpdateStatus = checkUpdateStatus;
+window.checkForUpdates = checkForUpdates;
+window.renderUpdateStatus = renderUpdateStatus;
+window.showOutputSelectorModal = showOutputSelectorModal;
+window.toggleOutputTarget = toggleOutputTarget;
+window.closeOutputSelectorModal = closeOutputSelectorModal;
+window.rateTrack = rateTrack;

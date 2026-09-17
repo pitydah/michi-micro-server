@@ -10,6 +10,7 @@ services:
       - ./config:/config
       - ./cache:/cache
     environment:
+      - MICHI_DEPLOYMENT_PLATFORM=docker
       - MICHI_PORT=9090
       - MICHI_MUSIC_PATH=/music
       - MICHI_DATABASE=sqlite:///config/michi.db

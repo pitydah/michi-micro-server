@@ -27,6 +27,7 @@ services:
       - MICHI_AUTH_USERNAME=${MICHI_AUTH_USERNAME:-admin}
       - MICHI_AUTH_PASSWORD=${MICHI_AUTH_PASSWORD:?A strong Michi administrator password is required}
       - MICHI_ADVERTISE_HOST=${MICHI_ADVERTISE_HOST:-}
+      - MICHI_DEPLOYMENT_PLATFORM=zimaos
     restart: unless-stopped
     devices: []
     cap_add: []

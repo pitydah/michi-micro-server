@@ -283,6 +283,16 @@ pub async fn restore_handler(
                 &format!("failed to clear tracks for force restore: {e}"),
             )
         })?;
+        sqlx::query("DELETE FROM auth_sessions")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &format!("failed to clear auth_sessions for force restore: {e}"),
+                )
+            })?;
     }
 
     for track in &body.tracks {
@@ -390,6 +400,10 @@ pub async fn restore_handler(
             &format!("failed to commit restore transaction: {e}"),
         )
     })?;
+
+    if body.force {
+        state.auth_sessions.sessions.write().await.clear();
+    }
 
     Ok(Json(serde_json::json!({
         "status": "restored",

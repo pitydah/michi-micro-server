@@ -33,4 +33,5 @@ pub mod storage;
 pub mod stream;
 pub mod sync;
 pub mod tracks;
+pub mod update;
 pub mod validate;

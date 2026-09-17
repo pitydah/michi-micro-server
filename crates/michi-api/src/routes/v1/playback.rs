@@ -1236,117 +1236,109 @@ pub fn auto_restore_playback_state(
     _playback_state: std::sync::Arc<tokio::sync::RwLock<michi_sync::PlaybackState>>,
     playback_engine: michi_playback::PlaybackEngineHandle,
     music_paths: Vec<std::path::PathBuf>,
-) {
+    shutdown: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        match michi_db::get_latest_playback_session(&db).await {
-            Ok(Some(session)) => {
-                if let Some(qid) = session.queue_id {
-                    match michi_db::get_queue_items(&db, &qid).await {
-                        Ok(items) => {
-                            let track_ids: Vec<Uuid> =
-                                items.into_iter().map(|(id, _)| id).collect();
-                            match validate_and_load_tracks(&db, &track_ids, &music_paths).await {
-                                Ok(tracks) => {
-                                    let cur_idx = match resolve_restore_index(
-                                        &tracks,
-                                        session.current_track_id,
-                                        session.current_index,
-                                    ) {
-                                        Ok(idx) => idx,
-                                        Err(e) => {
-                                            tracing::warn!(
+        if shutdown.is_cancelled() {
+            return;
+        }
+        let session = tokio::select! {
+            _ = shutdown.cancelled() => return,
+            res = michi_db::get_latest_playback_session(&db) => match res {
+                Ok(Some(session)) => session,
+                Ok(None) => return,
+                Err(_) => return,
+            }
+        };
+        if let Some(qid) = session.queue_id {
+            match michi_db::get_queue_items(&db, &qid).await {
+                Ok(items) => {
+                    let track_ids: Vec<Uuid> = items.into_iter().map(|(id, _)| id).collect();
+                    match validate_and_load_tracks(&db, &track_ids, &music_paths).await {
+                        Ok(tracks) => {
+                            let cur_idx = match resolve_restore_index(
+                                &tracks,
+                                session.current_track_id,
+                                session.current_index,
+                            ) {
+                                Ok(idx) => idx,
+                                Err(e) => {
+                                    tracing::warn!(
                                                 "auto-restore: invalid restore state ({e}), skipping auto track selection"
                                             );
-                                            return;
-                                        }
-                                    };
-                                    if let Err(e) = playback_engine
-                                        .set_queue(
-                                            tracks.clone(),
-                                            cur_idx,
-                                            session.current_track_id,
-                                        )
-                                        .await
-                                    {
-                                        tracing::warn!(
-                                            "playback restore failed to set queue: session_id={}, error={}",
-                                            session.id,
-                                            e
-                                        );
-                                        return;
-                                    }
+                                    return;
+                                }
+                            };
+                            if let Err(e) = playback_engine
+                                .set_queue(tracks.clone(), cur_idx, session.current_track_id)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "playback restore failed to set queue: session_id={}, error={}",
+                                    session.id,
+                                    e
+                                );
+                                return;
+                            }
 
-                                    // Restore volume, shuffle, repeat to engine
-                                    let vol_u8 =
-                                        (session.volume * 100.0).round().clamp(0.0, 100.0) as u8;
-                                    let _ = playback_engine.set_volume(vol_u8).await;
-                                    let _ = playback_engine.set_shuffle(session.shuffle).await;
-                                    let rep_mode = match session.repeat_mode.as_str() {
-                                        "one" => RepeatMode::One,
-                                        "all" => RepeatMode::All,
-                                        _ => RepeatMode::Off,
-                                    };
-                                    let _ = playback_engine.set_repeat(rep_mode).await;
+                            // Restore volume, shuffle, repeat to engine
+                            let vol_u8 = (session.volume * 100.0).round().clamp(0.0, 100.0) as u8;
+                            let _ = playback_engine.set_volume(vol_u8).await;
+                            let _ = playback_engine.set_shuffle(session.shuffle).await;
+                            let rep_mode = match session.repeat_mode.as_str() {
+                                "one" => RepeatMode::One,
+                                "all" => RepeatMode::All,
+                                _ => RepeatMode::Off,
+                            };
+                            let _ = playback_engine.set_repeat(rep_mode).await;
 
-                                    if let Some(cur_track) = tracks.get(cur_idx) {
-                                        let pos_ms = cur_track
-                                            .duration_ms
-                                            .map(|d| session.position_ms.min(d))
-                                            .unwrap_or(session.position_ms);
-                                        if let Err(e) = playback_engine
-                                            .load_track(cur_track.clone(), pos_ms)
-                                            .await
-                                        {
-                                            tracing::warn!(
+                            if let Some(cur_track) = tracks.get(cur_idx) {
+                                let pos_ms = cur_track
+                                    .duration_ms
+                                    .map(|d| session.position_ms.min(d))
+                                    .unwrap_or(session.position_ms);
+                                if let Err(e) =
+                                    playback_engine.load_track(cur_track.clone(), pos_ms).await
+                                {
+                                    tracing::warn!(
                                                 "playback restore failed to load track: session_id={}, track_id={}, error={}",
                                                 session.id,
                                                 cur_track.id,
                                                 e
                                             );
-                                            return;
-                                        }
-                                    }
-
-                                    let mut updated = session.clone();
-                                    updated.restored = true;
-                                    let _ = michi_db::update_playback_session(&db, &updated).await;
-
-                                    info!(
-                                        "restored {} queue items from session {}",
-                                        tracks.len(),
-                                        session.id
-                                    );
+                                    return;
                                 }
-                                Err(e) => {
-                                    tracing::warn!(
+                            }
+
+                            let mut updated = session.clone();
+                            updated.restored = true;
+                            let _ = michi_db::update_playback_session(&db, &updated).await;
+
+                            info!(
+                                "restored {} queue items from session {}",
+                                tracks.len(),
+                                session.id
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
                                         "playback restore failed to validate tracks: session_id={}, error={:?}",
                                         session.id,
                                         e
                                     );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "playback restore failed to get queue items: session_id={}, error={}",
-                                session.id,
-                                e
-                            );
                         }
                     }
                 }
-            }
-            Ok(None) => {
-                info!("no saved playback session to restore");
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "failed to restore playback state: {} (server will start fresh)",
-                    e
-                );
+                Err(e) => {
+                    tracing::warn!(
+                        "playback restore failed to get queue items: session_id={}, error={}",
+                        session.id,
+                        e
+                    );
+                }
             }
         }
-    });
+    })
 }
 
 #[derive(Debug, Deserialize)]

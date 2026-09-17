@@ -56,6 +56,7 @@ pub struct Config {
     pub opensubsonic_enabled: bool,
     pub trust_proxy: bool,
     pub trusted_proxies: Vec<std::net::IpAddr>,
+    pub deployment_platform: String,
 }
 
 #[allow(dead_code)]
@@ -192,6 +193,11 @@ impl Config {
             .filter_map(|s| s.trim().parse::<std::net::IpAddr>().ok())
             .collect();
 
+        let deployment_platform = env::var("MICHI_DEPLOYMENT_PLATFORM")
+            .unwrap_or_else(|_| "unknown".to_string())
+            .trim()
+            .to_lowercase();
+
         let mut config = Self {
             port,
             music_paths,
@@ -229,6 +235,7 @@ impl Config {
             opensubsonic_enabled,
             trust_proxy,
             trusted_proxies,
+            deployment_platform,
         };
 
         // Load from config.json if present (env vars override)
@@ -277,6 +284,11 @@ impl Config {
                 if !file_cfg.trusted_proxies.is_empty() {
                     self.trusted_proxies = file_cfg.trusted_proxies;
                 }
+                if !file_cfg.deployment_platform.is_empty()
+                    && file_cfg.deployment_platform != "unknown"
+                {
+                    self.deployment_platform = file_cfg.deployment_platform;
+                }
             }
         }
     }
@@ -318,6 +330,7 @@ impl Config {
             ("MICHI_OPENSUBSONIC_ENABLED", "opensubsonic_enabled"),
             ("MICHI_TRUST_PROXY", "trust_proxy"),
             ("MICHI_TRUSTED_PROXIES", "trusted_proxies"),
+            ("MICHI_DEPLOYMENT_PLATFORM", "deployment_platform"),
         ];
 
         for (env_var, field_name) in env_keys {
@@ -418,6 +431,12 @@ impl Config {
                 .split(',')
                 .filter_map(|s| s.trim().parse::<std::net::IpAddr>().ok())
                 .collect();
+        }
+        if let Ok(v) = env::var("MICHI_DEPLOYMENT_PLATFORM") {
+            let t = v.trim();
+            if !t.is_empty() {
+                self.deployment_platform = t.to_lowercase();
+            }
         }
     }
 
@@ -533,7 +552,7 @@ impl Serialize for Config {
     where
         S: serde::Serializer,
     {
-        let mut s = serializer.serialize_struct("Config", 22)?;
+        let mut s = serializer.serialize_struct("Config", 23)?;
         s.serialize_field("port", &self.port)?;
         s.serialize_field("music_paths", &self.music_paths)?;
         s.serialize_field("sync_peers", &self.sync_peers)?;
@@ -557,6 +576,7 @@ impl Serialize for Config {
         s.serialize_field("cors_origin", &self.cors_origin)?;
         s.serialize_field("trust_proxy", &self.trust_proxy)?;
         s.serialize_field("trusted_proxies", &self.trusted_proxies)?;
+        s.serialize_field("deployment_platform", &self.deployment_platform)?;
         s.end()
     }
 }
@@ -592,6 +612,7 @@ impl<'de> Deserialize<'de> for Config {
             opensubsonic_enabled: Option<bool>,
             trust_proxy: Option<bool>,
             trusted_proxies: Option<Vec<std::net::IpAddr>>,
+            deployment_platform: Option<String>,
         }
 
         let h = ConfigHelper::deserialize(deserializer)?;
@@ -630,6 +651,9 @@ impl<'de> Deserialize<'de> for Config {
             opensubsonic_enabled: false,
             trust_proxy: false,
             trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
+            deployment_platform: h
+                .deployment_platform
+                .unwrap_or_else(|| "unknown".to_string()),
         };
         if let Some(v) = h.port {
             cfg.port = v;

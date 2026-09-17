@@ -1179,13 +1179,20 @@ pub async fn import_rollback_handler(
     Ok(Json(serde_json::json!({ "status": "rolled_back" })))
 }
 
-pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool) {
+pub fn spawn_import_cleanup(
+    config: &michi_config::Config,
+    db: sqlx::SqlitePool,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     let music_paths = config.music_paths.clone();
     let cache_path = config.cache_path.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {}
+            }
             let cutoff = (Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
             if let Ok(expired) = michi_db::list_expired_import_sessions(&db, &cutoff).await {
                 for sid in expired {
@@ -1242,5 +1249,5 @@ pub fn spawn_import_cleanup(config: &michi_config::Config, db: sqlx::SqlitePool)
                 }
             }
         }
-    });
+    })
 }

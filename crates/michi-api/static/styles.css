@@ -363,6 +363,23 @@ tr.playing td { color: var(--primary); }
 .tab:hover, .theme-options button:hover { color: var(--text); }
 .tab.active, .theme-options button.active { border-color: var(--border); background: var(--surface-3); color: var(--text); }
 
+.settings-layout { display: flex; gap: 24px; align-items: flex-start; }
+.settings-rail { width: 230px; flex-shrink: 0; position: sticky; top: 16px; }
+.settings-rail-nav { display: flex; flex-direction: column; gap: 4px; padding: 6px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px; }
+.settings-rail-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 8px 12px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--text-3); cursor: pointer; font-size: .8125rem; font-weight: 550; text-align: left; transition: all .15s ease; }
+.settings-rail-item:hover { color: var(--text); background: var(--surface-3); }
+.settings-rail-item.active { border-color: var(--border); background: var(--surface-3); color: var(--text); font-weight: 650; box-shadow: 0 1px 3px rgba(0, 0, 0, .1); }
+.settings-rail-item .rail-icon { font-size: 1.05rem; }
+.settings-rail-mobile-wrap { display: none; margin-bottom: 14px; }
+.settings-content { flex: 1; min-width: 0; }
+@media (max-width: 860px) {
+  .settings-layout { flex-direction: column; gap: 12px; }
+  .settings-rail { width: 100%; position: static; }
+  .settings-rail-nav { display: none; }
+  .settings-rail-mobile-wrap { display: block; }
+  .settings-mobile-select { width: 100%; font-size: .875rem; padding: 9px 12px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border); }
+}
+
 .progress-bar, .np-mini-progress { position: relative; height: 5px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
 .progress-bar .fill, .np-mini-progress .fill { height: 100%; width: 0; border-radius: inherit; background: var(--primary); }
 .settings-progress-wrap { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
