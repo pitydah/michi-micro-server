@@ -1553,7 +1553,7 @@ async fn test_deployment_platform_guidance_and_compose_manifests() {
     // 4. Update guidance mappings
     // Docker: must provide docker compose instructions, never fallback unknown instructions
     let info_docker = michi_api::routes::v1::update::compute_update_info(
-        "1.0.0-rc.1",
+        "1.0.0-rc.2",
         "docker",
         None,
         None,
@@ -1578,7 +1578,7 @@ async fn test_deployment_platform_guidance_and_compose_manifests() {
 
     // ZimaOS: must provide ZimaOS instructions
     let info_zima = michi_api::routes::v1::update::compute_update_info(
-        "1.0.0-rc.1",
+        "1.0.0-rc.2",
         "zimaos",
         None,
         None,
@@ -1595,7 +1595,7 @@ async fn test_deployment_platform_guidance_and_compose_manifests() {
 
     // CasaOS: must provide CasaOS instructions
     let info_casa = michi_api::routes::v1::update::compute_update_info(
-        "1.0.0-rc.1",
+        "1.0.0-rc.2",
         "casaos",
         None,
         None,
@@ -1612,7 +1612,7 @@ async fn test_deployment_platform_guidance_and_compose_manifests() {
 
     // Unknown/unspecified: must provide safe generic instructions
     let info_unknown = michi_api::routes::v1::update::compute_update_info(
-        "1.0.0-rc.1",
+        "1.0.0-rc.2",
         "unknown",
         None,
         None,
