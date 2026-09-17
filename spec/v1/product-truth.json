@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "canonical_version": "1.0.0-rc.1",
+  "canonical_version": "1.0.0-rc.2",
   "canonical_port": 9090,
   "features": {
     "library": {

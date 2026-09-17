@@ -1,6 +1,23 @@
 # Changelog
 
+## [1.0.0-rc.2] - 2026-09-17
+
+### Added
+- **Truthful UI State & Persistence**: Controls de configuración (incluyendo `cover_art_enabled` y `sidebar_collapsed`) ahora reflejan con exactitud el estado del backend, permaneciendo deshabilitados mientras el estado es indeterminado.
+- **Canonical Deployment Platform Guidance**: Detección canónica de plataforma de despliegue (`docker`, `zimaos`, `casaos`) con instrucciones específicas de actualización contextuales en API y Web UI.
+- **Settings Rail & Complete i18n Parity**: Paridad completa de internacionalización en todos los idiomas soportados (`en`, `es`, `zh`, `ja`, `de`, `fr`) para la barra de configuración y modal de actualización.
+- **Robust Multi-Arch Release Pipeline**: Flujos de CI/CD para release multiplataforma con validación de digest GHCR y certificación de compresión binaria.
+
+### Changed
+- Actualización de versiones canónicas del workspace y manifiestos de despliegue a `1.0.0-rc.2`.
+- Integración de contratos web UI y auditoría de paridad i18n en el proceso de verificación.
+
+### Fixed
+- Corregida discrepancia en la detección de plataforma de despliegue canónica en `docker-compose.yml`.
+- Eliminadas regresiones de interfaz donde valores booleanos no cargados podían causar estados visuales inconsistentes.
+
 ## [1.0.0-rc.1] - 2026-09-05
+
 
 ### Added
 - **Release Evidence Ledger**: Marco riguroso de evaluación de evidencia en `release/gates.json`, con clasificación estricta de taxonomías (`STATIC_ANALYSIS`, `INTEGRATION_REAL`, `CONTRACT_SIMULATOR`, `PHYSICAL_HARDWARE`) sin estados hardcodeados.
