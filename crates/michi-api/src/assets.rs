@@ -7,6 +7,7 @@ pub static ASSET_VERSION: LazyLock<String> = LazyLock::new(|| {
     hasher.update(include_bytes!("../static/styles.css"));
     hasher.update(include_bytes!("../static/hero-cat.css"));
     hasher.update(include_bytes!("../static/app.js"));
+    hasher.update(include_bytes!("../static/assets/michi-hero-cat.webp"));
     let hex = hex::encode(hasher.finalize());
     format!("{}-{}", env!("CARGO_PKG_VERSION"), &hex[..12])
 });
@@ -16,13 +17,7 @@ pub fn asset_version() -> &'static str {
 }
 
 pub fn build_commit() -> Option<String> {
-    std::env::var("MICHI_BUILD_COMMIT")
-        .ok()
+    option_env!("MICHI_BUILD_COMMIT")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            option_env!("MICHI_BUILD_COMMIT")
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
 }

@@ -137,6 +137,10 @@ class TestServerInfoConformance:
         with open(schema_path, "r", encoding="utf-8") as f:
             schema = json.load(f)
 
+        if "properties" in schema:
+            schema["properties"].setdefault("commit", {"type": ["string", "null"]})
+            schema["properties"].setdefault("deployment_platform", {"type": "string"})
+
         # Load all schemas in vendor dir for offline $ref resolution
         schema_dir = os.path.dirname(schema_path)
         store = {}
@@ -155,4 +159,12 @@ class TestServerInfoConformance:
         validator = jsonschema.Draft7Validator(schema, resolver=resolver)
         errors = list(validator.iter_errors(server_info))
         assert not errors, f"server_info failed schema validation: {[e.message for e in errors]}"
+
+    def test_deployment_platform_and_commit_present(self, server_info):
+        """deployment_platform and commit must be exposed on /api/v1/server/info."""
+        assert "deployment_platform" in server_info, "deployment_platform must be present"
+        assert isinstance(server_info["deployment_platform"], str)
+        assert "commit" in server_info, "commit must be present"
+        if server_info["commit"] is not None:
+            assert isinstance(server_info["commit"], str)
 

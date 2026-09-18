@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import urllib.request
 import urllib.error
+import re
 import pytest
 
 SERVER_URL = os.environ.get("MICHI_SERVER_URL", "http://127.0.0.1:9090")
@@ -71,9 +72,14 @@ class TestWebUIStaticAssets:
         req = urllib.request.Request(f"{SERVER_URL}/")
         with urllib.request.urlopen(req, timeout=5) as resp:
             assert resp.status == 200
+            cc = resp.headers.get("cache-control", "")
+            assert "no-cache" in cc, f"root Cache-Control must contain no-cache, got: {cc}"
+            assert "no-store" in cc, f"root Cache-Control must contain no-store, got: {cc}"
+            assert "must-revalidate" in cc, f"root Cache-Control must contain must-revalidate, got: {cc}"
             body = resp.read().decode("utf-8")
             assert "Michi Micro Server" in body
             assert "styles.css?v=" in body
+            assert "hero-cat.css?v=" in body
             assert "app.js?v=" in body
             assert "Checking..." in body
             assert '<span class="status-pill" id="status-pill"><span class="server-status-dot"></span>Online</span>' not in body
@@ -81,9 +87,22 @@ class TestWebUIStaticAssets:
     def test_sw_js_and_manifest(self):
         with urllib.request.urlopen(f"{SERVER_URL}/sw.js", timeout=5) as resp:
             assert resp.status == 200
+            cc = resp.headers.get("cache-control", "")
+            assert "no-cache" in cc, f"sw.js Cache-Control must contain no-cache, got: {cc}"
+            assert "no-store" in cc, f"sw.js Cache-Control must contain no-store, got: {cc}"
+            assert "must-revalidate" in cc, f"sw.js Cache-Control must contain must-revalidate, got: {cc}"
             body = resp.read().decode("utf-8")
-            assert "michi-v" in body
-            assert "app.js?v=" in body
+            # CACHE definition pattern: const CACHE = 'michi-<semver>-<hash>';
+            cache_match = re.search(r"const\s+CACHE\s*=\s*'michi-([0-9]+\.[0-9]+\.[0-9]+[^']*)';", body)
+            assert cache_match, f"sw.js must define cache as michi-<version>-<hash>, got:\n{body[:300]}"
+            cache_ver = cache_match.group(1)
+            # Verify versioned assets in precache list
+            assert f"/static/styles.css?v={cache_ver}" in body
+            assert f"/static/hero-cat.css?v={cache_ver}" in body
+            assert f"/static/app.js?v={cache_ver}" in body
+            assert "self.skipWaiting()" in body
+            assert "self.clients.claim()" in body
+            assert "caches.delete" in body
 
         with urllib.request.urlopen(f"{SERVER_URL}/manifest.json", timeout=5) as resp:
             assert resp.status == 200

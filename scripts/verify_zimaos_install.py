@@ -129,7 +129,7 @@ def verify_remote_store(base_url):
     print("  ✓ Remote distribution endpoints verified.")
     return True, []
 
-def verify_running_server(server_url):
+def verify_running_server(server_url, expected_version=None, expected_commit=None, expected_platform=None):
     print(f"[3/4] Verifying running server at {server_url}...")
     errors = []
     base = server_url.rstrip("/")
@@ -140,35 +140,82 @@ def verify_running_server(server_url):
         with urllib.request.urlopen(req, timeout=5) as resp:
             body = resp.read().decode()
             if resp.status != 200 or "OK" not in body:
-                errors.append(f"/health/live returned {resp.status}: {body}")
+                errors.append(f"/health/live returned status {resp.status}: {body}")
             else:
                 print("  ✓ /health/live responded OK")
     except Exception as e:
         errors.append(f"Failed to reach /health/live: {e}")
 
     # 2. Check Cache-Control on root and sw.js
-    for path, expected_cc in [("/", "no-cache"), ("/sw.js", "no-cache")]:
+    for path in ["/", "/sw.js"]:
         try:
             req = urllib.request.Request(f"{base}{path}", headers={"User-Agent": "michi-zima-verifier"})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 cc = resp.headers.get("cache-control", "")
-                if expected_cc not in cc:
-                    errors.append(f"{path} missing '{expected_cc}' in Cache-Control header (got: '{cc}')")
-                else:
-                    print(f"  ✓ {path} Cache-Control contains '{expected_cc}'")
+                for req_clause in ["no-cache", "no-store", "must-revalidate"]:
+                    if req_clause not in cc:
+                        errors.append(f"{path} missing '{req_clause}' in Cache-Control header (got: '{cc}')")
+                if "no-cache" in cc and "no-store" in cc and "must-revalidate" in cc:
+                    print(f"  ✓ {path} Cache-Control verified: '{cc}'")
         except Exception as e:
             errors.append(f"Failed to fetch {path}: {e}")
 
-    # 3. Check /api/v1/update/status for deployment_platform
+    # 3. Check /api/v1/server/info
+    try:
+        req = urllib.request.Request(f"{base}/api/v1/server/info", headers={"User-Agent": "michi-zima-verifier"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status != 200:
+                errors.append(f"/api/v1/server/info returned status {resp.status}")
+            else:
+                data = json.loads(resp.read().decode())
+                svc = data.get("service")
+                if svc != "michi-micro-server":
+                    errors.append(f"/api/v1/server/info service mismatch: expected 'michi-micro-server', got '{svc}'")
+                api_ver = data.get("api_version")
+                if api_ver != "v1":
+                    errors.append(f"/api/v1/server/info api_version mismatch: expected 'v1', got '{api_ver}'")
+
+                actual_ver = data.get("version")
+                if expected_version and actual_ver != expected_version:
+                    errors.append(f"/api/v1/server/info version mismatch: expected '{expected_version}', got '{actual_ver}'")
+                elif expected_version:
+                    print(f"  ✓ /api/v1/server/info version matched: {actual_ver}")
+
+                actual_commit = data.get("commit")
+                if expected_commit and actual_commit != expected_commit:
+                    errors.append(f"/api/v1/server/info commit mismatch: expected '{expected_commit}', got '{actual_commit}'")
+                elif expected_commit:
+                    print(f"  ✓ /api/v1/server/info commit matched: {actual_commit}")
+
+                actual_plat = data.get("deployment_platform")
+                if expected_platform and actual_plat != expected_platform:
+                    errors.append(f"/api/v1/server/info deployment_platform mismatch: expected '{expected_platform}', got '{actual_plat}'")
+                elif expected_platform:
+                    print(f"  ✓ /api/v1/server/info deployment_platform matched: {actual_plat}")
+    except Exception as e:
+        errors.append(f"Failed to query /api/v1/server/info: {e}")
+
+    # 4. Check /api/v1/update/status
     try:
         req = urllib.request.Request(f"{base}/api/v1/update/status", headers={"User-Agent": "michi-zima-verifier"})
         with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
-            plat = data.get("deployment_platform")
-            if plat != "zimaos":
-                print(f"  ℹ Notice: running server reports platform='{plat}' (expected 'zimaos' if running under ZimaOS compose)")
+            if resp.status != 200:
+                errors.append(f"/api/v1/update/status returned status {resp.status}")
+            else:
+                data = json.loads(resp.read().decode())
+                plat = data.get("deployment_platform")
+                if expected_platform and plat != expected_platform:
+                    errors.append(f"/api/v1/update/status deployment_platform mismatch: expected '{expected_platform}', got '{plat}'")
+                elif expected_platform:
+                    print(f"  ✓ /api/v1/update/status deployment_platform matched: {plat}")
+
+                commit = data.get("commit")
+                if expected_commit and commit != expected_commit:
+                    errors.append(f"/api/v1/update/status commit mismatch: expected '{expected_commit}', got '{commit}'")
+                elif expected_commit:
+                    print(f"  ✓ /api/v1/update/status commit matched: {commit}")
     except Exception as e:
-        print(f"  ℹ Could not verify /api/v1/update/status: {e}")
+        errors.append(f"Failed to query /api/v1/update/status: {e}")
 
     if errors:
         for err in errors:
@@ -184,6 +231,9 @@ def main():
     parser.add_argument("--expected-image", default=None, help="Expected Docker image or digest reference")
     parser.add_argument("--remote-url", default=None, help="Remote raw repository base URL to verify public accessibility")
     parser.add_argument("--server-url", default=None, help="URL of running Michi Micro Server instance to verify")
+    parser.add_argument("--expected-version", default=None, help="Expected product version (e.g. 1.0.0-rc.2)")
+    parser.add_argument("--expected-commit", default=None, help="Expected build commit SHA")
+    parser.add_argument("--expected-platform", default=None, help="Expected deployment platform (e.g. zimaos)")
     parser.add_argument("--output-evidence", default=None, help="Path to write JSON evidence report")
     args = parser.parse_args()
 
@@ -204,7 +254,12 @@ def main():
         results["errors"].extend(remote_errs)
 
     if args.server_url:
-        server_ok, server_errs = verify_running_server(args.server_url)
+        server_ok, server_errs = verify_running_server(
+            args.server_url,
+            expected_version=args.expected_version,
+            expected_commit=args.expected_commit,
+            expected_platform=args.expected_platform,
+        )
         results["running_server_valid"] = server_ok
         results["errors"].extend(server_errs)
 

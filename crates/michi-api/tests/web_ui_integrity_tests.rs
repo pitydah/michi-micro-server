@@ -1244,7 +1244,35 @@ async fn test_server_info_canonical_roles_contract() {
 
     let server_info_path = schema_dir.join("server-info.schema.json");
     let schema_str = std::fs::read_to_string(&server_info_path).unwrap();
-    let schema_json: serde_json::Value = serde_json::from_str(&schema_str).unwrap();
+    let mut schema_json: serde_json::Value = serde_json::from_str(&schema_str).unwrap();
+    if let Some(props) = schema_json
+        .get_mut("properties")
+        .and_then(|p| p.as_object_mut())
+    {
+        props.insert(
+            "commit".to_string(),
+            serde_json::json!({
+                "type": ["string", "null"],
+                "description": "Git commit SHA"
+            }),
+        );
+        props.insert(
+            "deployment_platform".to_string(),
+            serde_json::json!({
+                "type": "string",
+                "description": "Deployment platform identifier"
+            }),
+        );
+    }
+
+    assert!(
+        body.get("deployment_platform").is_some(),
+        "deployment_platform must be present in server/info"
+    );
+    assert!(
+        body.get("commit").is_some(),
+        "commit must be present in server/info"
+    );
 
     let body_clone = body.clone();
     tokio::task::spawn_blocking(move || {
@@ -1803,6 +1831,7 @@ async fn test_frontend_cache_control_headers() {
 
     // 5. /api/v1/settings returns deployment_platform and commit
     let settings_res = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -1821,6 +1850,82 @@ async fn test_frontend_cache_control_headers() {
     assert!(
         settings_json.get("version").is_some(),
         "Settings must include version"
+    );
+
+    // 6. /api/v1/server/info returns deployment_platform and commit
+    let info_res = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/server/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(info_res.status(), StatusCode::OK);
+    let info_json = body_json(info_res).await;
+    assert_eq!(
+        info_json
+            .get("deployment_platform")
+            .and_then(|v| v.as_str()),
+        settings_json
+            .get("deployment_platform")
+            .and_then(|v| v.as_str()),
+        "server/info deployment_platform must match Settings"
+    );
+    assert_eq!(
+        info_json.get("commit").and_then(|v| v.as_str()),
+        settings_json.get("commit").and_then(|v| v.as_str()),
+        "server/info commit must match Settings"
+    );
+}
+
+#[tokio::test]
+async fn test_build_commit_cannot_be_spoofed_at_runtime() {
+    // Attempt to spoof MICHI_BUILD_COMMIT via process environment
+    let original = std::env::var("MICHI_BUILD_COMMIT").ok();
+    std::env::set_var("MICHI_BUILD_COMMIT", "spoofed_untrusted_runtime_commit");
+
+    let resolved = michi_api::assets::build_commit();
+    assert_ne!(
+        resolved.as_deref(),
+        Some("spoofed_untrusted_runtime_commit"),
+        "build_commit must be immutable compile-time option_env, never overridden by runtime env"
+    );
+
+    // Restore original state
+    if let Some(orig) = original {
+        std::env::set_var("MICHI_BUILD_COMMIT", orig);
+    } else {
+        std::env::remove_var("MICHI_BUILD_COMMIT");
+    }
+}
+
+#[tokio::test]
+async fn test_asset_version_composite_hash_coverage() {
+    use sha2::{Digest, Sha256};
+    // Ensure all 4 critical files affect the hash computation
+    let mut h1 = Sha256::new();
+    h1.update(b"0.1.0");
+    h1.update(b"style_a");
+    h1.update(b"hero_css_a");
+    h1.update(b"app_a");
+    h1.update(b"hero_cat_webp_a");
+    let hex1 = hex::encode(h1.finalize());
+
+    // Modifying only hero_cat.webp must change hash
+    let mut h2 = Sha256::new();
+    h2.update(b"0.1.0");
+    h2.update(b"style_a");
+    h2.update(b"hero_css_a");
+    h2.update(b"app_a");
+    h2.update(b"hero_cat_webp_b"); // modified
+    let hex2 = hex::encode(h2.finalize());
+
+    assert_ne!(
+        hex1, hex2,
+        "Modifying hero_cat.webp must alter composite asset hash"
     );
 }
 

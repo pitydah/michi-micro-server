@@ -97,8 +97,6 @@ ENV MICHI_CACHE_PATH=/cache
 ENV MICHI_DATABASE=sqlite:///config/michi.db
 ENV PUID=1000
 ENV PGID=1000
-ARG MICHI_BUILD_COMMIT=""
-ENV MICHI_BUILD_COMMIT=${MICHI_BUILD_COMMIT}
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- "http://127.0.0.1:${MICHI_PORT:-9090}/health/live" || exit 1
