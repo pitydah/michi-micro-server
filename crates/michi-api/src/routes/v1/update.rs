@@ -52,6 +52,7 @@ pub struct UpdateInfo {
     pub last_checked_at: Option<String>,
     pub last_successful_check_at: Option<String>,
     pub deployment_platform: String,
+    pub commit: Option<String>,
     pub instructions: String,
     pub error: Option<String>,
 }
@@ -202,6 +203,7 @@ pub fn compute_update_info(
             last_checked_at: cached_iso,
             last_successful_check_at: last_successful_iso,
             deployment_platform: platform.to_string(),
+            commit: crate::assets::build_commit(),
             instructions: platform_instructions(platform),
             error: Some("invalid_current_version".to_string()),
         };
@@ -221,6 +223,7 @@ pub fn compute_update_info(
             last_checked_at: cached_iso,
             last_successful_check_at: last_successful_iso,
             deployment_platform: platform.to_string(),
+            commit: crate::assets::build_commit(),
             instructions: platform_instructions(platform),
             error: Some("upstream_unavailable".to_string()),
         };
@@ -287,6 +290,7 @@ pub fn compute_update_info(
         last_checked_at: cached_iso,
         last_successful_check_at: last_successful_iso,
         deployment_platform: platform.to_string(),
+        commit: crate::assets::build_commit(),
         instructions: platform_instructions(platform),
         error: if fetch_failed {
             Some("upstream_unavailable".to_string())
