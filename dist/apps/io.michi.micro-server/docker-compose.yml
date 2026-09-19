@@ -1,0 +1,62 @@
+name: michi-micro-server
+services:
+  michi-micro-server:
+    image: ghcr.io/pitydah/michi-micro-server:1.0.0-rc.2
+    container_name: michi-micro-server
+    network_mode: host
+    volumes:
+      - type: bind
+        source: ${CONFIG_PATH:-/DATA/AppData/michi/config}
+        target: /config
+      - type: bind
+        source: ${CACHE_PATH:-/DATA/AppData/michi/cache}
+        target: /cache
+      - type: bind
+        source: ${MUSIC_PATH:-/DATA/Media/Music}
+        target: /music
+        read_only: true
+    environment:
+      - TZ=${TZ:-UTC}
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - MICHI_PORT=${WEBUI_PORT:-9090}
+      - MICHI_MUSIC_PATH=/music
+      - MICHI_CONFIG_PATH=/config
+      - MICHI_CACHE_PATH=/cache
+      - MICHI_DATABASE=sqlite:///config/michi.db
+      - MICHI_AUTH_USERNAME=${MICHI_AUTH_USERNAME:-admin}
+      - MICHI_AUTH_PASSWORD=${MICHI_AUTH_PASSWORD:?A strong Michi administrator password is required}
+      - MICHI_ADVERTISE_HOST=${MICHI_ADVERTISE_HOST:-}
+      - MICHI_DEPLOYMENT_PLATFORM=zimaos
+    restart: unless-stopped
+    devices: []
+    cap_add: []
+    labels:
+      icon: https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server.svg
+
+x-casaos:
+  id: io.michi.micro-server
+  main: michi-micro-server
+  main_app: michi-micro-server
+  architectures:
+    - amd64
+    - arm64
+  author: pitydah
+  category: Media
+  developer: pitydah
+  icon: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server.svg"
+  thumbnail: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server-512.png"
+  screenshot_link: []
+  tagline:
+    en_US: High-fidelity personal music streaming appliance for ZimaOS.
+    es_ES: Servidor de música personal de alta fidelidad para ZimaOS.
+  description:
+    en_US: Lightweight, robust home music server. Stream your local music library over your home network, Tailscale, or CasaOS/ZimaOS with physical Michi Stream receiver support.
+    es_ES: Servidor de música doméstico robusto y ligero. Transmite tu biblioteca de música local a través de tu red doméstica, Tailscale o CasaOS/ZimaOS con soporte para receptores Michi Stream.
+  title:
+    en_US: Michi Micro Server
+    es_ES: Servidor Michi Micro
+  index: /
+  port_map: "${WEBUI_PORT:-9090}"
+  scheme: http
+  version: "1.0.0-rc.2"

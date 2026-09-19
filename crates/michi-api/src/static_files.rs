@@ -29,6 +29,7 @@ const I18N_JA: &str = include_str!("../static/i18n/ja.json");
 pub async fn styles_css() -> impl IntoResponse {
     Response::builder()
         .header("content-type", "text/css; charset=utf-8")
+        .header("cache-control", "no-cache, must-revalidate")
         .body(axum::body::Body::from(CSS))
         .unwrap()
 }
@@ -36,6 +37,7 @@ pub async fn styles_css() -> impl IntoResponse {
 pub async fn hero_cat_css() -> impl IntoResponse {
     Response::builder()
         .header("content-type", "text/css; charset=utf-8")
+        .header("cache-control", "no-cache, must-revalidate")
         .body(axum::body::Body::from(HERO_CAT_CSS))
         .unwrap()
 }
@@ -43,6 +45,7 @@ pub async fn hero_cat_css() -> impl IntoResponse {
 pub async fn app_js() -> impl IntoResponse {
     Response::builder()
         .header("content-type", "application/javascript; charset=utf-8")
+        .header("cache-control", "no-cache, must-revalidate")
         .body(axum::body::Body::from(JS))
         .unwrap()
 }
@@ -116,7 +119,7 @@ pub async fn i18n_handler(
     };
     Ok(Response::builder()
         .header("content-type", "application/json; charset=utf-8")
-        .header("cache-control", "public, max-age=3600")
+        .header("cache-control", "no-cache, must-revalidate")
         .body(axum::body::Body::from(data))
         .unwrap())
 }

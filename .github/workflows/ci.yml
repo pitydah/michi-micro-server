@@ -317,6 +317,8 @@ jobs:
           sudo apt-get install -y libsqlite3-dev pkg-config ffmpeg
       - name: Build release server
         run: cargo build --release --bin michi-server
+      - name: Run Soak Stability Gate Unit/Regression Tests
+        run: pytest tests/e2e/test_soak_stability_gate.py -v
       - name: Run short stability soak
         shell: bash
         run: |
@@ -740,6 +742,8 @@ jobs:
           push: false
           load: true
           tags: michi-server:test
+          build-args: |
+            MICHI_BUILD_COMMIT=${{ github.sha }}
       - name: Smoke test and Player Contract verification
         run: |
           set -euo pipefail
@@ -820,6 +824,8 @@ jobs:
           push: false
           load: true
           tags: michi-server:arm64
+          build-args: |
+            MICHI_BUILD_COMMIT=${{ github.sha }}
       - name: Verify ARM64 runtime and Player Contract under QEMU
         run: |
           set -euo pipefail
@@ -948,6 +954,13 @@ jobs:
           assert store_v2["apps"][0]["id"] == "io.michi.micro-server"
           assert store_v2["apps"][0]["version"] == expected_version
           PY
+      - name: Verify ZimaOS Package Delivery & Checked-in Consistency
+        run: |
+          python3 scripts/verify_zimaos_install.py
+          git diff --exit-code dist/
+
+      - name: Run ZimaOS Verifier Regression Tests
+        run: pytest tests/e2e/test_zimaos_verifier.py -v
 
       - name: Record release evidence
         if: always()
@@ -1173,6 +1186,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            MICHI_BUILD_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

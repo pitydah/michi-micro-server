@@ -11,12 +11,22 @@ IMAGE="${1:-}"
 EXPECTED_DIGEST="${2:-}"
 TEST_PORT="${3:-9095}"
 EVIDENCE_OUTPUT="${4:-target/release-evidence/ghcr-public-release-evidence.json}"
-TAG="${GITHUB_REF_NAME:-}"
-COMMIT="${GITHUB_SHA:-}"
+TAG="${GITHUB_REF_NAME:-${TAG:-}}"
+COMMIT="${GITHUB_SHA:-${COMMIT:-}}"
 
 if [ -z "$IMAGE" ] || [ -z "$EXPECTED_DIGEST" ]; then
     echo "Usage: $0 <image-reference> <expected-build-digest> [test-port] [evidence-output]" >&2
     echo "Example: $0 ghcr.io/pitydah/michi-micro-server:1.0.0-rc.2 sha256:abcd... 9090" >&2
+    exit 1
+fi
+
+if [ -z "$TAG" ]; then
+    echo "ERROR: TAG (or GITHUB_REF_NAME) environment variable is required and cannot be empty" >&2
+    exit 1
+fi
+
+if [ -z "$COMMIT" ]; then
+    echo "ERROR: COMMIT (or GITHUB_SHA) environment variable is required and cannot be empty" >&2
     exit 1
 fi
 
@@ -94,8 +104,8 @@ echo "Recording release evidence and verifying index digest..."
 python3 scripts/verify_public_release_image.py \
   --raw-manifest-file "$RAW_MANIFEST" \
   --expected-digest "$EXPECTED_DIGEST" \
-  --tag "${TAG:-v1.0.0-rc.2}" \
-  --commit "${COMMIT:-0000000000000000000000000000000000000000}" \
+  --tag "$TAG" \
+  --commit "$COMMIT" \
   --image "$IMAGE" \
   --output-evidence "$EVIDENCE_OUTPUT" \
   --anonymous-pull-verified \

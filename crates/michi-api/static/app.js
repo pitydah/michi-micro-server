@@ -3590,6 +3590,8 @@ async function loadSettings() {
     $('#settings-port').textContent = s.port;
     var canonicalVersion = await getCanonicalServerVersion();
     if ($('#settings-version')) $('#settings-version').textContent = canonicalVersion;
+    if ($('#settings-commit')) $('#settings-commit').textContent = s.commit ? s.commit.slice(0, 10) : 'unknown';
+    if ($('#settings-platform')) $('#settings-platform').textContent = s.deployment_platform || 'generic';
     if ($('#update-current-version')) $('#update-current-version').textContent = canonicalVersion;
     if ($('#settings-ffmpeg')) $('#settings-ffmpeg').innerHTML = renderTruthfulBadge(s.ffmpeg_available, 'Available', 'Not found', 'Unavailable');
     if ($('#settings-ffmpeg-avail')) $('#settings-ffmpeg-avail').innerHTML = renderTruthfulBadge(s.ffmpeg_available, 'Available', 'Not found', 'Unavailable');

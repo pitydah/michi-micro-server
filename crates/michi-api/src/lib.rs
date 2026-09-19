@@ -26,13 +26,14 @@ use tracing::{info, warn};
 use utoipa::OpenApi;
 use uuid::Uuid;
 
+pub mod assets;
 pub mod auth;
 mod library;
 mod openapi;
 mod players;
-mod pwa;
+pub mod pwa;
 mod rooms;
-mod root;
+pub mod root;
 mod scrobble;
 pub mod server_caps;
 mod static_files;

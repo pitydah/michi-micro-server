@@ -1,0 +1,62 @@
+name: michi-micro-server-acceptance
+services:
+  michi-micro-server:
+    image: ghcr.io/pitydah/michi-micro-server@sha256:d5a678af3e7195bf8484793cc65c36e4ad79383d139913df938196f6d2ad8841
+    container_name: michi-micro-server-acceptance
+    network_mode: host
+    volumes:
+      - type: bind
+        source: ${CONFIG_PATH:-/DATA/AppData/michi-acceptance/config}
+        target: /config
+      - type: bind
+        source: ${CACHE_PATH:-/DATA/AppData/michi-acceptance/cache}
+        target: /cache
+      - type: bind
+        source: ${MUSIC_PATH:-/DATA/Media/Music}
+        target: /music
+        read_only: true
+    environment:
+      - TZ=${TZ:-UTC}
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - MICHI_PORT=9091
+      - MICHI_MUSIC_PATH=/music
+      - MICHI_CONFIG_PATH=/config
+      - MICHI_CACHE_PATH=/cache
+      - MICHI_DATABASE=sqlite:///config/michi.db
+      - MICHI_AUTH_USERNAME=${MICHI_AUTH_USERNAME:-admin}
+      - MICHI_AUTH_PASSWORD=${MICHI_AUTH_PASSWORD:?A strong Michi administrator password is required}
+      - MICHI_ADVERTISE_HOST=${MICHI_ADVERTISE_HOST:-}
+      - MICHI_DEPLOYMENT_PLATFORM=zimaos
+    restart: unless-stopped
+    devices: []
+    cap_add: []
+    labels:
+      icon: https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server.svg
+
+x-casaos:
+  id: io.michi.micro-server-acceptance
+  main: michi-micro-server
+  main_app: michi-micro-server
+  architectures:
+    - amd64
+    - arm64
+  author: pitydah
+  category: Media
+  developer: pitydah
+  icon: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server.svg"
+  thumbnail: "https://raw.githubusercontent.com/pitydah/michi-micro-server/main/crates/michi-api/static/assets/michi-micro-server-512.png"
+  screenshot_link: []
+  tagline:
+    en_US: PR #10 Candidate Acceptance Instance on port 9091.
+    es_ES: Instancia de aceptación para candidato PR #10 en puerto 9091.
+  description:
+    en_US: Isolated pre-merge acceptance instance of Michi Micro Server running on port 9091 with pinned candidate digest.
+    es_ES: Instancia aislada de aceptación previa al merge de Michi Micro Server ejecutándose en el puerto 9091 con digest candidato fijado.
+  title:
+    en_US: Michi Micro Server (Acceptance)
+    es_ES: Servidor Michi Micro (Aceptación)
+  index: /
+  port_map: "9091"
+  scheme: http
+  version: "1.0.0-rc.2"

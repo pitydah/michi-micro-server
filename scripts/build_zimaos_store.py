@@ -6,6 +6,7 @@ Scans zimaos-store/Apps/*, extracts compose configurations and metadata,
 validates schema integrity, and produces the canonical ZimaOS distribution layout under dist/:
   dist/
   ├── index.json
+  ├── store.json
   └── apps/
       └── <app-id>/
           ├── docker-compose.yml
@@ -17,10 +18,12 @@ validates schema integrity, and produces the canonical ZimaOS distribution layou
 
 import os
 import sys
+import re
 import json
 import shutil
 import subprocess
 import hashlib
+import argparse
 import yaml
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -33,15 +36,18 @@ STORE_SCHEMA_VERSION = "3.1"
 
 STORE_SRC = os.path.join(ROOT_DIR, "zimaos-store")
 APPS_SRC = os.path.join(STORE_SRC, "Apps")
-DIST_DIR = os.path.join(ROOT_DIR, "dist")
-APPS_DIST = os.path.join(DIST_DIR, "apps")
 
-def build_store():
-    print(f"Building ZimaOS App Store packages from {STORE_SRC} -> {DIST_DIR}")
+def build_store(output_dir=None, pinned_image=None):
+    dist_dir = output_dir or os.path.join(ROOT_DIR, "dist")
+    apps_dist = os.path.join(dist_dir, "apps")
+
+    print(f"Building ZimaOS App Store packages from {STORE_SRC} -> {dist_dir}")
+    if pinned_image:
+        print(f"  Using pinned image override: {pinned_image}")
     
-    if os.path.exists(DIST_DIR):
-        shutil.rmtree(DIST_DIR)
-    os.makedirs(APPS_DIST, exist_ok=True)
+    if os.path.exists(dist_dir):
+        shutil.rmtree(dist_dir)
+    os.makedirs(apps_dist, exist_ok=True)
 
     catalog = []
     
@@ -62,11 +68,13 @@ def build_store():
             sys.exit(1)
 
         with open(compose_file, "r", encoding="utf-8") as f:
-            try:
-                compose_data = yaml.safe_load(f)
-            except Exception as e:
-                print(f"ERROR: Failed to parse YAML in {compose_file}: {e}")
-                sys.exit(1)
+            compose_raw = f.read()
+
+        try:
+            compose_data = yaml.safe_load(compose_raw)
+        except Exception as e:
+            print(f"ERROR: Failed to parse YAML in {compose_file}: {e}")
+            sys.exit(1)
 
         x_casaos = compose_data.get("x-casaos", {})
         app_id = x_casaos.get("id")
@@ -98,12 +106,22 @@ def build_store():
                 print(f"ERROR: {app_name} docker compose config validation failed:\n{res.stderr}")
                 sys.exit(1)
 
-        target_app_dir = os.path.join(APPS_DIST, app_id)
+        target_app_dir = os.path.join(apps_dist, app_id)
         target_assets_dir = os.path.join(target_app_dir, "assets")
         os.makedirs(target_assets_dir, exist_ok=True)
 
-        # Copy compose file
-        shutil.copy2(compose_file, os.path.join(target_app_dir, "docker-compose.yml"))
+        target_compose = os.path.join(target_app_dir, "docker-compose.yml")
+        if pinned_image:
+            # Replace image reference in compose_raw without modifying source file
+            new_compose = re.sub(
+                r"(image:\s*ghcr\.io/pitydah/michi-micro-server)[^\s\n\r]+",
+                rf"image: {pinned_image}",
+                compose_raw,
+            )
+            with open(target_compose, "w", encoding="utf-8") as f:
+                f.write(new_compose)
+        else:
+            shutil.copy2(compose_file, target_compose)
 
         # Copy & validate assets
         icon_svg = os.path.join(app_dir, "icon.svg")
@@ -121,7 +139,7 @@ def build_store():
 
         # Calculate content hash of compose and assets
         sha256 = hashlib.sha256()
-        with open(compose_file, "rb") as cf:
+        with open(target_compose, "rb") as cf:
             sha256.update(cf.read())
         with open(icon_svg, "rb") as ic:
             sha256.update(ic.read())
@@ -170,7 +188,7 @@ def build_store():
         "name": "Michi Official App Store",
         "apps": catalog
     }
-    with open(os.path.join(DIST_DIR, "index.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(dist_dir, "index.json"), "w", encoding="utf-8") as f:
         json.dump(index_data, f, indent=2, ensure_ascii=False)
 
     # Canonical Store v2 store.json
@@ -182,11 +200,17 @@ def build_store():
         "url": store_metadata.get("url", "https://raw.githubusercontent.com/pitydah/michi-micro-server/main"),
         "apps": catalog
     }
-    with open(os.path.join(DIST_DIR, "store.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(dist_dir, "store.json"), "w", encoding="utf-8") as f:
         json.dump(store_data, f, indent=2, ensure_ascii=False)
 
-    print(f"Successfully generated and validated ZimaOS store distribution at {DIST_DIR} with {len(catalog)} app(s).")
+    print(f"Successfully generated and validated ZimaOS store distribution at {dist_dir} with {len(catalog)} app(s).")
+
+def main():
+    parser = argparse.ArgumentParser(description="Build and validate ZimaOS App Store distribution packages")
+    parser.add_argument("--output-dir", "-o", default=None, help="Destination directory for distribution (default: dist/)")
+    parser.add_argument("--pinned-image", "-p", default=None, help="Override image reference in distribution docker-compose.yml")
+    args = parser.parse_args()
+    build_store(output_dir=args.output_dir, pinned_image=args.pinned_image)
 
 if __name__ == "__main__":
-    build_store()
-
+    main()

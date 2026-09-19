@@ -12,8 +12,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=11">
-    <link rel="stylesheet" href="/static/hero-cat.css?v=4">
+    <link rel="stylesheet" href="/static/styles.css?v=__MICHI_ASSET_HASH__">
+    <link rel="stylesheet" href="/static/hero-cat.css?v=__MICHI_ASSET_HASH__">
     <title>Michi Micro Server</title>
 </head>
 <body>
@@ -160,7 +160,7 @@
                     <div class="hero-rings"><span></span><span></span><span></span></div>
                 </div>
                 <picture class="hero-cat-media">
-                    <img src="/static/assets/michi-hero-cat.webp?v=1" alt="Orange tabby cat wearing headphones, illuminated by warm audio light." width="1600" height="800" fetchpriority="high" decoding="async">
+                    <img src="/static/assets/michi-hero-cat.webp?v=__MICHI_ASSET_HASH__" alt="Orange tabby cat wearing headphones, illuminated by warm audio light." width="1600" height="800" fetchpriority="high" decoding="async">
                 </picture>
                 <div class="listening-copy" aria-live="polite">
                     <div class="listening-meta"><span class="live-beacon"></span><span id="dashboard-now-state">Ready to listen</span></div>
@@ -422,6 +422,8 @@
                         <div class="panel">
                             <div class="panel-header">Server Identity</div>
                             <div class="panel-row"><span class="panel-label">Version</span><span class="panel-mono" style="flex:1" id="settings-version">--</span></div>
+                            <div class="panel-row"><span class="panel-label">Commit</span><span class="panel-mono" style="flex:1" id="settings-commit">--</span></div>
+                            <div class="panel-row"><span class="panel-label">Platform</span><span class="panel-mono" style="flex:1" id="settings-platform">--</span></div>
                             <div class="panel-row"><span class="panel-label">Port</span><span class="panel-mono" style="flex:1" id="settings-port">--</span></div>
                             <div class="panel-row"><span class="panel-label">FFmpeg</span><span id="settings-ffmpeg" style="flex:1">--</span></div>
                             <div class="panel-row"><span class="panel-label">Auth</span><span id="settings-auth" class="badge disabled">--</span></div>
@@ -1017,6 +1019,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=11"></script>
+    <script src="/static/app.js?v=__MICHI_ASSET_HASH__"></script>
 </body>
 </html>
