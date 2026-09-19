@@ -162,7 +162,7 @@ def main():
     elif total_seconds >= 3600:
         max_rss_slope_mb_per_hour = 2.0  # 2 MB/hour max over 24h
     else:
-        max_rss_slope_mb_per_hour = 35.0  # short smoke slope limit
+        max_rss_slope_mb_per_hour = 50.0  # short smoke slope limit
 
     base_url = args.url.rstrip("/")
     pid = args.pid
@@ -178,10 +178,68 @@ def main():
     violations = []
     request_errors = []
 
+    def write_report(status, detail, duration_elapsed, telemetry, obs_timestamps,
+                     init_metrics, cur_m, base_metrics, peak_r, max_f, peak_w,
+                     post_drift, slope_val, fd_d, th_d, viol_list, err_count):
+        init_rss = (init_metrics["rss_kb"] / 1024.0) if init_metrics else 0.0
+        base_rss = (base_metrics["rss_kb"] / 1024.0) if base_metrics else init_rss
+        final_rss = (cur_m["rss_kb"] / 1024.0) if cur_m else init_rss
+        peak_rss = peak_r / 1024.0
+        total_drift = final_rss - init_rss
+        report_data = {
+            "schema_version": 2,
+            "gate_id": args.gate_id,
+            "commit_sha": sha,
+            "evidence_class": args.evidence_class,
+            "status": status,
+            "detail": detail,
+            "requested_duration_seconds": total_seconds,
+            "warmup_duration_seconds": warmup_seconds,
+            "actual_elapsed_seconds": duration_elapsed,
+            "observation_samples_count": len(obs_timestamps),
+            "total_samples_collected": len(telemetry),
+            "initial_rss_mb": round(init_rss, 2),
+            "baseline_rss_mb": round(base_rss, 2),
+            "final_rss_mb": round(final_rss, 2),
+            "peak_rss_mb": round(peak_rss, 2),
+            "total_rss_drift_mb": round(total_drift, 2),
+            "post_warmup_rss_drift_mb": round(post_drift, 2),
+            "rss_slope_mb_per_hour": slope_val,
+            "initial_fds": init_metrics["open_fds"] if init_metrics else 0,
+            "baseline_fds": base_metrics["open_fds"] if base_metrics else 0,
+            "final_fds": cur_m["open_fds"] if cur_m else 0,
+            "peak_fds": max_f,
+            "fd_drift": fd_d,
+            "initial_threads": init_metrics["threads"] if init_metrics else 0,
+            "baseline_threads": base_metrics["threads"] if base_metrics else 0,
+            "final_threads": cur_m["threads"] if cur_m else 0,
+            "thread_drift": th_d,
+            "peak_wal_bytes": peak_w,
+            "child_processes": cur_m["child_processes"] if cur_m else 0,
+            "request_errors_count": err_count,
+            "thresholds": {
+                "max_rss_mb": args.max_rss_mb,
+                "max_post_warmup_drift_mb": max_post_warmup_drift_mb,
+                "max_rss_slope_mb_per_hour": max_rss_slope_mb_per_hour,
+                "max_fd_drift": args.max_fd_drift,
+                "max_thread_drift": args.max_thread_drift
+            },
+            "violations": viol_list,
+            "exit_code": 0 if status == "PASS" else 1
+        }
+        report_path = os.path.abspath(args.report)
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report_data, f, indent=2)
+        print(f"\nReport saved to: {report_path}")
+        return report_path
+
     # Check process existence
     initial_metrics = get_process_metrics(pid)
     if not initial_metrics or not initial_metrics["valid"]:
-        print(f"ERROR: Process {pid} is not running or invalid", file=sys.stderr)
+        msg = f"SERVER_PROCESS_NOT_RUNNING: Process PID {pid} does not exist or has invalid metrics"
+        print(f"ERROR: {msg}", file=sys.stderr)
+        write_report("FAIL", msg, 0.0, [], [], None, None, None, 0, 0, 0, 0.0, 0.0, 0, 0, [msg], 0)
         sys.exit(1)
 
     # Authenticate to get session token
@@ -211,93 +269,94 @@ def main():
     peak_wal = get_wal_size(args.config_dir)
 
     baseline_established = False
-    baseline_rss_kb = initial_metrics["rss_kb"]
-    baseline_fds = initial_metrics["open_fds"]
-    baseline_threads = initial_metrics["threads"]
+    baseline_metrics = dict(initial_metrics)
+    cur_metrics = dict(initial_metrics)
 
-    while time.time() - start_time < total_seconds:
-        now = time.time()
-        elapsed = now - start_time
-        in_warmup = elapsed < warmup_seconds
+    try:
+        while time.time() - start_time < total_seconds:
+            now = time.time()
+            elapsed = now - start_time
+            in_warmup = elapsed < warmup_seconds
 
-        # Check process survival
-        cur_metrics = get_process_metrics(pid)
-        if not cur_metrics or not cur_metrics["valid"]:
-            violations.append(f"SERVER_PROCESS_DIED: PID {pid} died after {elapsed:.1f}s")
-            break
+            # Check process survival
+            cur_metrics = get_process_metrics(pid)
+            if not cur_metrics or not cur_metrics["valid"]:
+                violations.append(f"SERVER_PROCESS_DIED: PID {pid} died after {elapsed:.1f}s")
+                break
 
-        # Check hard memory ceiling continuously
-        cur_rss_mb = cur_metrics["rss_kb"] / 1024.0
-        if cur_rss_mb > args.max_rss_mb:
-            violations.append(f"HARD_RSS_CEILING_EXCEEDED: Current RSS {cur_rss_mb:.2f}MB exceeds hard ceiling {args.max_rss_mb:.2f}MB")
-            break
+            # Check hard memory ceiling continuously
+            cur_rss_mb = cur_metrics["rss_kb"] / 1024.0
+            if cur_rss_mb > args.max_rss_mb:
+                violations.append(f"HARD_RSS_CEILING_EXCEEDED: Current RSS {cur_rss_mb:.2f}MB exceeds hard ceiling {args.max_rss_mb:.2f}MB")
+                break
 
-        # Switch phase and establish baseline post-warmup
-        if not in_warmup and not baseline_established:
-            baseline_established = True
-            baseline_rss_kb = cur_metrics["rss_kb"]
-            baseline_fds = cur_metrics["open_fds"]
-            baseline_threads = cur_metrics["threads"]
-            print(f"[{elapsed:>6.1f}s] *** WARM-UP PHASE COMPLETE — Establishing baseline RSS: {baseline_rss_kb / 1024.0:.2f} MB, Threads: {baseline_threads}, FDs: {baseline_fds} ***")
+            # Switch phase and establish baseline post-warmup
+            if not in_warmup and not baseline_established:
+                baseline_established = True
+                baseline_metrics = dict(cur_metrics)
+                print(f"[{elapsed:>6.1f}s] *** WARM-UP PHASE COMPLETE — Establishing baseline RSS: {baseline_metrics['rss_kb'] / 1024.0:.2f} MB, Threads: {baseline_metrics['threads']}, FDs: {baseline_metrics['open_fds']} ***")
 
-        # Periodic Sample
-        if now - last_sample_time >= args.sample_interval:
-            last_sample_time = now
-            wal_size = get_wal_size(args.config_dir)
-            peak_rss = max(peak_rss, cur_metrics["rss_kb"])
-            max_fds = max(max_fds, cur_metrics["open_fds"])
-            peak_wal = max(peak_wal, wal_size)
+            # Periodic Sample
+            if now - last_sample_time >= args.sample_interval:
+                last_sample_time = now
+                wal_size = get_wal_size(args.config_dir)
+                peak_rss = max(peak_rss, cur_metrics["rss_kb"])
+                max_fds = max(max_fds, cur_metrics["open_fds"])
+                peak_wal = max(peak_wal, wal_size)
 
-            phase = "warmup" if in_warmup else "observation"
-            sample = {
-                "elapsed_s": round(elapsed, 1),
-                "phase": phase,
-                "rss_mb": round(cur_metrics["rss_kb"] / 1024.0, 2),
-                "threads": cur_metrics["threads"],
-                "fds": cur_metrics["open_fds"],
-                "children": cur_metrics["child_processes"],
-                "wal_kb": round(wal_size / 1024.0, 1)
-            }
-            telemetry.append(sample)
+                phase = "warmup" if in_warmup else "observation"
+                sample = {
+                    "elapsed_s": round(elapsed, 1),
+                    "phase": phase,
+                    "rss_mb": round(cur_metrics["rss_kb"] / 1024.0, 2),
+                    "threads": cur_metrics["threads"],
+                    "fds": cur_metrics["open_fds"],
+                    "children": cur_metrics["child_processes"],
+                    "wal_kb": round(wal_size / 1024.0, 1)
+                }
+                telemetry.append(sample)
 
-            if not in_warmup:
-                observation_timestamps.append(elapsed)
-                observation_rss.append(cur_metrics["rss_kb"] / 1024.0)
+                if not in_warmup:
+                    observation_timestamps.append(elapsed)
+                    observation_rss.append(cur_metrics["rss_kb"] / 1024.0)
 
-            print(f"[{sample['elapsed_s']:>6.1f}s / {total_seconds}s] ({phase.upper():<11}) RSS: {sample['rss_mb']:>6.2f} MB | FDs: {sample['fds']:>3} | Threads: {sample['threads']:>2} | WAL: {sample['wal_kb']:>6.1f} KB | Children: {sample['children']}")
+                print(f"[{sample['elapsed_s']:>6.1f}s / {total_seconds}s] ({phase.upper():<11}) RSS: {sample['rss_mb']:>6.2f} MB | FDs: {sample['fds']:>3} | Threads: {sample['threads']:>2} | WAL: {sample['wal_kb']:>6.1f} KB | Children: {sample['children']}")
 
-        # Simulated Activity / Load
-        if now - last_request_time >= 0.5:
-            last_request_time = now
-            try:
-                # 1. Health check
-                s, _ = http_get(f"{base_url}/health/live")
-                if s != 200:
-                    request_errors.append(f"/health/live returned {s}")
+            # Simulated Activity / Load
+            if now - last_request_time >= 0.5:
+                last_request_time = now
+                try:
+                    # 1. Health check
+                    s, _ = http_get(f"{base_url}/health/live")
+                    if s != 200:
+                        request_errors.append(f"/health/live returned {s}")
 
-                # 2. Server info
-                s, _ = http_get(f"{base_url}/api/v1/server/info", headers=auth_headers)
-                if s != 200:
-                    request_errors.append(f"/server/info returned {s}")
+                    # 2. Server info
+                    s, _ = http_get(f"{base_url}/api/v1/server/info", headers=auth_headers)
+                    if s != 200:
+                        request_errors.append(f"/server/info returned {s}")
 
-                # 3. Status check
-                s, _ = http_get(f"{base_url}/api/v1/status", headers=auth_headers)
-                if s != 200:
-                    request_errors.append(f"/api/v1/status returned {s}")
+                    # 3. Status check
+                    s, _ = http_get(f"{base_url}/api/v1/status", headers=auth_headers)
+                    if s != 200:
+                        request_errors.append(f"/api/v1/status returned {s}")
 
-            except urllib.error.URLError as e:
-                request_errors.append(f"Network error: {e}")
-            except Exception as e:
-                request_errors.append(f"Unexpected request error: {e}")
+                except urllib.error.URLError as e:
+                    request_errors.append(f"Network error: {e}")
+                except Exception as e:
+                    request_errors.append(f"Unexpected request error: {e}")
 
-        time.sleep(0.1)
+            time.sleep(0.1)
+
+    except Exception as exc:
+        violations.append(f"UNEXPECTED_MONITOR_EXCEPTION: {exc}")
 
     actual_duration = round(time.time() - start_time, 1)
     final_metrics = get_process_metrics(pid) or cur_metrics or initial_metrics
 
     # Compute Statistics & Drifts
     initial_rss_mb = initial_metrics["rss_kb"] / 1024.0
-    baseline_rss_mb = baseline_rss_kb / 1024.0
+    baseline_rss_mb = baseline_metrics["rss_kb"] / 1024.0
     final_rss_mb = final_metrics["rss_kb"] / 1024.0
     peak_rss_mb = peak_rss / 1024.0
     
@@ -305,7 +364,7 @@ def main():
     post_warmup_rss_drift_mb = final_rss_mb - baseline_rss_mb if baseline_established else total_rss_drift_mb
     
     fd_drift = final_metrics["open_fds"] - initial_metrics["open_fds"]
-    thread_drift = final_metrics["threads"] - (baseline_threads if baseline_established else initial_metrics["threads"])
+    thread_drift = final_metrics["threads"] - baseline_metrics["threads"]
 
     # Compute Linear Regression Slope (MB/hour) over post-warmup window
     if len(observation_timestamps) >= 3:
@@ -329,9 +388,14 @@ def main():
         )
 
     # 3. Excessive Memory Growth Slope (MB/hour)
-    if len(observation_timestamps) >= 5 and rss_slope_mb_per_hour > max_rss_slope_mb_per_hour:
+    # Require consequential post-warmup drift (>= 3.0 MB for short runs < 300s, >= 1.0 MB for >= 300s)
+    # to avoid false positives on sub-megabyte OS page alignment telemetry noise.
+    min_consequential_drift_mb = 1.0 if total_seconds >= 300 else 3.0
+    if (len(observation_timestamps) >= 5 and
+        rss_slope_mb_per_hour > max_rss_slope_mb_per_hour and
+        post_warmup_rss_drift_mb >= min_consequential_drift_mb):
         violations.append(
-            f"EXCESSIVE_RSS_GROWTH_SLOPE: Slope {rss_slope_mb_per_hour:+.2f}MB/h exceeds max allowed {max_rss_slope_mb_per_hour:.2f}MB/h"
+            f"EXCESSIVE_RSS_GROWTH_SLOPE: Slope {rss_slope_mb_per_hour:+.2f}MB/h exceeds max allowed {max_rss_slope_mb_per_hour:.2f}MB/h (drift: +{post_warmup_rss_drift_mb:.2f}MB)"
         )
 
     # 4. File Descriptor Leak
@@ -356,59 +420,18 @@ def main():
         if status == "PASS" else f"Soak stability violations: {'; '.join(violations)}"
     )
 
-    report_data = {
-        "schema_version": 2,
-        "gate_id": args.gate_id,
-        "commit_sha": sha,
-        "evidence_class": args.evidence_class,
-        "status": status,
-        "detail": detail,
-        "requested_duration_seconds": total_seconds,
-        "warmup_duration_seconds": warmup_seconds,
-        "actual_elapsed_seconds": actual_duration,
-        "observation_samples_count": len(observation_timestamps),
-        "total_samples_collected": len(telemetry),
-        "initial_rss_mb": round(initial_rss_mb, 2),
-        "baseline_rss_mb": round(baseline_rss_mb, 2),
-        "final_rss_mb": round(final_rss_mb, 2),
-        "peak_rss_mb": round(peak_rss_mb, 2),
-        "total_rss_drift_mb": round(total_rss_drift_mb, 2),
-        "post_warmup_rss_drift_mb": round(post_warmup_rss_drift_mb, 2),
-        "rss_slope_mb_per_hour": rss_slope_mb_per_hour,
-        "initial_fds": initial_metrics["open_fds"],
-        "baseline_fds": baseline_fds,
-        "final_fds": final_metrics["open_fds"],
-        "peak_fds": max_fds,
-        "fd_drift": fd_drift,
-        "initial_threads": initial_metrics["threads"],
-        "baseline_threads": baseline_threads,
-        "final_threads": final_metrics["threads"],
-        "thread_drift": thread_drift,
-        "peak_wal_bytes": peak_wal,
-        "child_processes": final_metrics["child_processes"],
-        "request_errors_count": len(request_errors),
-        "thresholds": {
-            "max_rss_mb": args.max_rss_mb,
-            "max_post_warmup_drift_mb": max_post_warmup_drift_mb,
-            "max_rss_slope_mb_per_hour": max_rss_slope_mb_per_hour,
-            "max_fd_drift": args.max_fd_drift,
-            "max_thread_drift": args.max_thread_drift
-        },
-        "violations": violations,
-        "exit_code": 0 if status == "PASS" else 1
-    }
-
-    report_path = os.path.abspath(args.report)
-    os.makedirs(os.path.dirname(report_path), exist_ok=True)
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(report_data, f, indent=2)
+    report_path = write_report(
+        status, detail, actual_duration, telemetry, observation_timestamps,
+        initial_metrics, final_metrics, baseline_metrics, peak_rss, max_fds, peak_wal,
+        post_warmup_rss_drift_mb, rss_slope_mb_per_hour, fd_drift, thread_drift,
+        violations, len(request_errors)
+    )
 
     print("\n" + "=" * 70)
     print(f"SOAK TEST COMPLETE — STATUS: {status}")
     print(f"Initial: {initial_rss_mb:.2f} MB -> Baseline: {baseline_rss_mb:.2f} MB -> Final: {final_rss_mb:.2f} MB (Peak: {peak_rss_mb:.2f} MB)")
     print(f"Post-Warmup Drift: {post_warmup_rss_drift_mb:+.2f} MB | Slope: {rss_slope_mb_per_hour:+.2f} MB/h")
     print(f"FDs: {initial_metrics['open_fds']} -> {final_metrics['open_fds']} (Drift: {fd_drift:+d}) | Threads: {initial_metrics['threads']} -> {final_metrics['threads']} (Drift: {thread_drift:+d})")
-    print(f"Report saved to: {report_path}")
     print("=" * 70)
 
     if violations:

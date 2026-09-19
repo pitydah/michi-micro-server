@@ -13,7 +13,7 @@
 
 | Subsistema | Estado / Madurez v1 | Alcance Declarado | Criterio de Aceptación |
 | :--- | :---: | :---: | :--- |
-| **Config, Storage, DB** | `stable` | Core | Migraciones v1->38 automáticas, healthcheck `/health/live`, SQLite WAL |
+| **Config, Storage, DB** | `stable` | Core | Migraciones v1->49 automáticas, healthcheck `/health/live`, SQLite WAL |
 | **Library & Scanner** | `stable` | Core | Scan multi-directorio, watcher, búsqueda avanzada, tags Lofty |
 | **Streaming (Direct/Range)**| `stable` | Core | HTTP 200/206/416 con ByteRange, Content-Range, Accept-Ranges |
 | **Transcoding** | `stable` | Core | MP3 / Ogg / Opus bajo demanda con FFmpeg |
@@ -53,5 +53,5 @@
 | **P1-07** | P1 | Capabilities | Semántica honesta de niveles de evidencia en runtime | Sí | Sí | `COMPLETED` | `server_caps.rs` refleja madurez canónica y evidencia de compilación |
 | **P1-08** | P1 | Stability | Detección estricta de fugas de memoria en Soak | Sí | Sí | `COMPLETED` | `soak_test.py` incorpora fase warm-up, baseline post-warmup, hard ceiling y pendiente lineal MB/h |
 | **P1-09** | P1 | Hardware | Certificación física ZimaOS / CasaOS | No | Sí | `IN_PROGRESS` | Imagen candidata fijada por digest, compose en puerto 9091 aislado, verifier fail-closed |
-| **P1-10** | P1 | Hardware | Certificación física Raspberry Pi ARM64 | No | Sí | `PENDING` | Ejecución en Raspberry Pi 4/5 con gate `raspberry-pi-arm64-real` |
+| **P1-10** | P1 | Hardware | Certificación física Raspberry Pi ARM64 | No | Sí | `PENDING` | Ejecución en Raspberry Pi 4/5 con gate `raspberry-pi-physical` (job `rpi-physical`) |
 | **P1-11** | P1 | Stability | Certificación de estabilidad 24 horas | No | Sí | `PENDING` | Ejecución del workflow `soak-24h.yml` con monitor matemático de fugas |

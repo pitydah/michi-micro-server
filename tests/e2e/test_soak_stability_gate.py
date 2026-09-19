@@ -235,3 +235,34 @@ def test_soak_passes_stable_process(mock_server):
         proc.kill()
         if os.path.exists(report_file):
             os.remove(report_file)
+
+
+def test_soak_emits_failure_artifact_on_invalid_pid(mock_server):
+    """soak_test.py must emit a valid failure JSON artifact even if target PID does not exist."""
+    report_file = tempfile.mktemp(suffix=".json")
+    try:
+        # Pass a nonexistent PID (e.g. 9999999)
+        res = subprocess.run(
+            [
+                sys.executable,
+                SOAK_SCRIPT,
+                "--url", mock_server,
+                "--pid", "9999999",
+                "--duration-seconds", "5",
+                "--report", report_file,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode != 0, "Expected non-zero exit on invalid PID"
+        assert os.path.exists(report_file), "Expected failure report JSON to be created on early exit"
+
+        with open(report_file, "r") as f:
+            data = json.load(f)
+        assert data["status"] == "FAIL"
+        assert data["exit_code"] == 1
+        assert any("SERVER_PROCESS_NOT_RUNNING" in v for v in data["violations"])
+    finally:
+        if os.path.exists(report_file):
+            os.remove(report_file)
+

@@ -74,11 +74,14 @@ python3 "${PROJECT_ROOT}/tests/e2e/test_reliability_qualification.py" \
     --password "admin123"
 
 # 5. Run Stability & Soak Telemetry Monitor
+# Note: debug build running 11k track stress test holds SQLite caches in debug unoptimized allocators (~180-200MB RSS);
+# allow --max-rss-mb 250.0 for this debug integration battery. Release builds are tested with hard 65MB ceiling in ci-short-stability-smoke.
 python3 "${PROJECT_ROOT}/scripts/soak_test.py" \
     --url "http://127.0.0.1:${SERVER_PORT}" \
     --pid "$SERVER_PID" \
     --config-dir "$CONFIG_DIR" \
     --duration-seconds 15 \
+    --max-rss-mb 250.0 \
     --username "admin" \
     --password "admin123" \
     --report "${PROJECT_ROOT}/target/soak_report.json"

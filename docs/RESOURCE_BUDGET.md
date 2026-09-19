@@ -31,7 +31,7 @@ Under the default `balanced` profile, the server operates 13 threads:
 - **Main Thread (1)**: Signal handling, process lifecycle, startup orchestrator.
 - **Tokio Worker Pool (4)**: Async multi-thread runtime (`worker_threads(4)`).
 - **Service Discovery Daemon (1)**: Dedicated `mDNS_daemon` thread for zero-conf receiver discovery.
-- **SQLite Worker Pool (7)**: Dedicated synchronous SQLite workers spawned by `sqlx` (pool size: 8).
+- **SQLite Worker Pool (7)**: Dedicated synchronous SQLite workers observed under qualification workload (sqlx max pool size: 8).
 *Total*: 13 threads, well within the release hard budget of <= 16 threads.
 
 ## Resource Profiles
