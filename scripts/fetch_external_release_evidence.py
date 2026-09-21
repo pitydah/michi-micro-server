@@ -57,65 +57,152 @@ def fetch_artifact_from_local(source_dir: str, gate_id: str, commit_sha: str) ->
                 print(f"WARNING: Error reading local artifact {p}: {e}", file=sys.stderr)
     return None
 
+GATE_WORKFLOW_MAP = {
+    "soak-24h": {
+        "workflow_file": "soak-24h.yml",
+        "job": "soak-24h",
+    },
+    "raspberry-pi-physical": {
+        "workflow_file": "rpi-physical.yml",
+        "job": "rpi-physical",
+    },
+    "casaos-zimaos-real": {
+        "workflow_file": "zimaos-physical.yml",
+        "job": "zimaos-physical",
+    },
+}
+
 def fetch_artifact_from_github(
     repo: str,
     token: str,
     gate_id: str,
     commit_sha: str,
 ) -> Optional[Dict[str, Any]]:
-    """Fetch and extract artifact from GitHub Actions API."""
+    """Fetch and extract artifact from GitHub Actions API, verifying real GitHub workflow origin."""
     headers = {
         "User-Agent": "michi-evidence-fetcher",
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
     }
-    
-    # 1. Search for artifact by name
+
     expected_artifact_name = f"release-evidence-{gate_id}-{commit_sha}"
-    api_url = f"https://api.github.com/repos/{repo}/actions/artifacts?per_page=100"
-    
-    try:
-        req = urllib.request.Request(api_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        print(f"WARNING: GitHub API query failed for {repo}: {e}", file=sys.stderr)
-        return None
+    expected_workflow_spec = GATE_WORKFLOW_MAP.get(gate_id)
 
-    artifacts = data.get("artifacts", [])
-    target_art = None
-    for a in artifacts:
-        name = a.get("name", "")
-        if name == expected_artifact_name:
-            target_art = a
-            break
-        if name == f"release-evidence-{gate_id}" and a.get("workflow_run", {}).get("head_sha") == commit_sha:
-            target_art = a
+    # 1. Paginate artifacts up to 10 pages (1000 artifacts)
+    matching_artifacts = []
+    page = 1
+    while page <= 10:
+        api_url = f"https://api.github.com/repos/{repo}/actions/artifacts?per_page=100&page={page}"
+        try:
+            req = urllib.request.Request(api_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            print(f"WARNING: GitHub API query failed for {repo} on page {page}: {e}", file=sys.stderr)
             break
 
-    if not target_art:
+        page_artifacts = data.get("artifacts", [])
+        if not page_artifacts:
+            break
+
+        for a in page_artifacts:
+            if a.get("expired", False):
+                continue
+            name = a.get("name", "")
+            wf_run = a.get("workflow_run", {})
+            run_sha = wf_run.get("head_sha")
+
+            if name == expected_artifact_name:
+                matching_artifacts.append(a)
+            elif name == f"release-evidence-{gate_id}" and run_sha == commit_sha:
+                matching_artifacts.append(a)
+
+        if any(a.get("name") == expected_artifact_name for a in matching_artifacts):
+            break
+
+        if len(page_artifacts) < 100:
+            break
+        page += 1
+
+    if not matching_artifacts:
         return None
 
-    art_id = target_art["id"]
-    download_url = f"https://api.github.com/repos/{repo}/actions/artifacts/{art_id}/zip"
-    
-    try:
-        req = urllib.request.Request(download_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            zip_bytes = resp.read()
-    except Exception as e:
-        print(f"WARNING: Failed to download artifact {art_id} from {download_url}: {e}", file=sys.stderr)
-        return None
+    matching_artifacts.sort(key=lambda x: x.get("id", 0), reverse=True)
 
-    try:
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
-            for fname in z.namelist():
-                if fname.endswith(".json"):
-                    with z.open(fname) as jf:
-                        return json.loads(jf.read().decode("utf-8"))
-    except Exception as e:
-        print(f"WARNING: Failed to parse zip archive for artifact {art_id}: {e}", file=sys.stderr)
-        return None
+    # 2. Inspect candidates and verify workflow and job origin
+    for candidate in matching_artifacts:
+        wf_run = candidate.get("workflow_run", {})
+        run_id = wf_run.get("id")
+        run_sha = wf_run.get("head_sha")
+
+        if run_sha != commit_sha:
+            print(f"  ⚠️ Candidate artifact {candidate.get('id')} has head_sha mismatch: expected {commit_sha}, got {run_sha}", file=sys.stderr)
+            continue
+
+        if not run_id:
+            print(f"  ⚠️ Candidate artifact {candidate.get('id')} missing workflow_run.id", file=sys.stderr)
+            continue
+
+        run_url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}"
+        try:
+            req = urllib.request.Request(run_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                run_data = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            print(f"  ⚠️ Failed to inspect workflow run {run_id}: {e}", file=sys.stderr)
+            continue
+
+        if run_data.get("conclusion") != "success":
+            print(f"  ⚠️ Workflow run {run_id} did not conclude with success (conclusion: {run_data.get('conclusion')})", file=sys.stderr)
+            continue
+
+        run_path = run_data.get("path", "")
+        if expected_workflow_spec:
+            expected_wf_file = expected_workflow_spec["workflow_file"]
+            if not run_path.endswith(expected_wf_file):
+                print(f"  ⚠️ Workflow run {run_id} path '{run_path}' does not match expected '{expected_wf_file}'", file=sys.stderr)
+                continue
+
+            # Verify authorized job in the run
+            jobs_url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"
+            try:
+                req = urllib.request.Request(jobs_url, headers=headers)
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    jobs_data = json.loads(resp.read().decode("utf-8"))
+                jobs = jobs_data.get("jobs", [])
+                expected_job_name = expected_workflow_spec["job"]
+                matching_job = next((j for j in jobs if j.get("name") == expected_job_name), None)
+                if not matching_job:
+                    print(f"  ⚠️ Workflow run {run_id} missing expected job '{expected_job_name}'", file=sys.stderr)
+                    continue
+                if matching_job.get("conclusion") != "success":
+                    print(f"  ⚠️ Job '{expected_job_name}' in run {run_id} conclusion was '{matching_job.get('conclusion')}' (not success)", file=sys.stderr)
+                    continue
+            except Exception as e:
+                print(f"  ⚠️ Could not verify jobs in run {run_id}: {e}", file=sys.stderr)
+                continue
+
+        # 3. Download and extract artifact
+        art_id = candidate["id"]
+        download_url = f"https://api.github.com/repos/{repo}/actions/artifacts/{art_id}/zip"
+        try:
+            req = urllib.request.Request(download_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                zip_bytes = resp.read()
+        except Exception as e:
+            print(f"  ⚠️ Failed to download artifact {art_id} from {download_url}: {e}", file=sys.stderr)
+            continue
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+                for fname in z.namelist():
+                    if fname.endswith(".json"):
+                        with z.open(fname) as jf:
+                            artifact_json = json.loads(jf.read().decode("utf-8"))
+                            return artifact_json
+        except Exception as e:
+            print(f"  ⚠️ Failed to parse zip archive for artifact {art_id}: {e}", file=sys.stderr)
+            continue
 
     return None
 

@@ -111,12 +111,17 @@ def verify_local_dist(dist_dir, expected_image=None):
     print("  ✓ Local store distribution structure, metadata, content hash, and compose verified.")
     return True, []
 
-def verify_remote_store(base_url, expected_image=None):
+def verify_remote_store(base_url, expected_image=None, expected_version=None):
     print(f"[2/4] Verifying remote distribution endpoints at {base_url}...")
     errors = []
     base = base_url.rstrip("/")
     store_url = f"{base}/dist/store.json"
-    compose_url = f"{base}/dist/apps/io.michi.micro-server/docker-compose.yml"
+    app_base = f"{base}/dist/apps/io.michi.micro-server"
+    compose_url = f"{app_base}/docker-compose.yml"
+    meta_url = f"{app_base}/meta.json"
+    icon_url = f"{app_base}/assets/icon.svg"
+    thumb_url = f"{app_base}/assets/thumbnail.png"
+    target_version = expected_version or get_product_version()
 
     # 1. Fetch and validate store.json
     store_data = None
@@ -145,19 +150,24 @@ def verify_remote_store(base_url, expected_image=None):
             if not michi_app:
                 errors.append("Remote store.json missing app 'io.michi.micro-server'")
             else:
-                print(f"  ✓ Remote store.json contains io.michi.micro-server (version {michi_app.get('version')})")
+                app_version = michi_app.get("version")
+                if app_version != target_version:
+                    errors.append(f"Remote store app version '{app_version}' does not match expected '{target_version}'")
+                else:
+                    print(f"  ✓ Remote store.json contains io.michi.micro-server (version {app_version})")
 
     # 2. Fetch and validate docker-compose.yml
     compose_data = None
+    compose_bytes = None
     try:
         req = urllib.request.Request(compose_url, headers={"User-Agent": "michi-zima-verifier"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             if resp.status != 200:
                 errors.append(f"Remote endpoint {compose_url} returned HTTP status {resp.status}")
             else:
-                body = resp.read().decode("utf-8")
+                compose_bytes = resp.read()
                 try:
-                    compose_data = yaml.safe_load(body)
+                    compose_data = yaml.safe_load(compose_bytes.decode("utf-8"))
                 except Exception as e:
                     errors.append(f"Remote docker-compose.yml is malformed YAML: {e}")
     except Exception as e:
@@ -203,6 +213,64 @@ def verify_remote_store(base_url, expected_image=None):
                     errors.append(f"Remote docker-compose.yml MICHI_AUTH_PASSWORD must use fail-closed ':?' parameter expansion (got: {auth_pass})")
                 else:
                     print("  ✓ Remote docker-compose.yml fail-closed password expression verified")
+
+    # 3. Fetch and validate meta.json
+    meta_data = None
+    try:
+        req = urllib.request.Request(meta_url, headers={"User-Agent": "michi-zima-verifier"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status != 200:
+                errors.append(f"Remote endpoint {meta_url} returned HTTP status {resp.status}")
+            else:
+                meta_data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        errors.append(f"Failed to fetch {meta_url}: {e}")
+
+    if meta_data is not None:
+        meta_ver = meta_data.get("version")
+        if meta_ver != target_version:
+            errors.append(f"Remote meta.json version '{meta_ver}' does not match expected '{target_version}'")
+        else:
+            print(f"  ✓ Remote meta.json version matched: {meta_ver}")
+
+    # 4. Fetch assets and verify content_hash
+    icon_bytes = None
+    try:
+        req = urllib.request.Request(icon_url, headers={"User-Agent": "michi-zima-verifier"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status != 200:
+                errors.append(f"Remote endpoint {icon_url} returned HTTP status {resp.status}")
+            else:
+                icon_bytes = resp.read()
+                if len(icon_bytes) == 0:
+                    errors.append(f"Remote asset {icon_url} is empty")
+    except Exception as e:
+        errors.append(f"Failed to fetch {icon_url}: {e}")
+
+    thumb_bytes = None
+    try:
+        req = urllib.request.Request(thumb_url, headers={"User-Agent": "michi-zima-verifier"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status != 200:
+                errors.append(f"Remote endpoint {thumb_url} returned HTTP status {resp.status}")
+            else:
+                thumb_bytes = resp.read()
+                if len(thumb_bytes) == 0:
+                    errors.append(f"Remote asset {thumb_url} is empty")
+    except Exception as e:
+        errors.append(f"Failed to fetch {thumb_url}: {e}")
+
+    if compose_bytes and icon_bytes and thumb_bytes and meta_data:
+        expected_hash = meta_data.get("content_hash")
+        sha256 = hashlib.sha256()
+        sha256.update(compose_bytes)
+        sha256.update(icon_bytes)
+        sha256.update(thumb_bytes)
+        actual_hash = sha256.hexdigest()
+        if expected_hash != actual_hash:
+            errors.append(f"Remote meta.json content_hash mismatch: expected calculated {actual_hash}, got {expected_hash}")
+        else:
+            print(f"  ✓ Remote content_hash verified against compose and assets: {actual_hash}")
 
     if errors:
         for err in errors:
@@ -260,6 +328,12 @@ def verify_running_server(
             auth_token = tok
             print("  ✓ Authenticated via /api/auth/login successfully")
 
+    runtime_info = {
+        "version": None,
+        "commit": None,
+        "deployment_platform": None,
+    }
+
     # 1. Health check
     try:
         req = urllib.request.Request(f"{base}/health/live", headers={"User-Agent": "michi-zima-verifier"})
@@ -305,18 +379,25 @@ def verify_running_server(
                     errors.append(f"/api/v1/server/info api_version mismatch: expected 'v1', got '{api_ver}'")
 
                 actual_ver = data.get("version")
+                actual_commit = data.get("commit")
+                actual_plat = data.get("deployment_platform")
+                runtime_info["version"] = actual_ver
+                runtime_info["commit"] = actual_commit
+                runtime_info["deployment_platform"] = actual_plat
+
                 if expected_version and actual_ver != expected_version:
                     errors.append(f"/api/v1/server/info version mismatch: expected '{expected_version}', got '{actual_ver}'")
                 elif expected_version:
                     print(f"  ✓ /api/v1/server/info version matched: {actual_ver}")
 
-                actual_commit = data.get("commit")
-                if expected_commit and actual_commit != expected_commit:
-                    errors.append(f"/api/v1/server/info commit mismatch: expected '{expected_commit}', got '{actual_commit}'")
-                elif expected_commit:
-                    print(f"  ✓ /api/v1/server/info commit matched: {actual_commit}")
+                if expected_commit:
+                    if not actual_commit:
+                        errors.append(f"/api/v1/server/info missing commit (expected '{expected_commit}')")
+                    elif actual_commit != expected_commit:
+                        errors.append(f"/api/v1/server/info commit mismatch: expected '{expected_commit}', got '{actual_commit}'")
+                    else:
+                        print(f"  ✓ /api/v1/server/info commit matched: {actual_commit}")
 
-                actual_plat = data.get("deployment_platform")
                 if expected_platform and actual_plat != expected_platform:
                     errors.append(f"/api/v1/server/info deployment_platform mismatch: expected '{expected_platform}', got '{actual_plat}'")
                 elif expected_platform:
@@ -342,10 +423,13 @@ def verify_running_server(
                     print(f"  ✓ /api/v1/update/status deployment_platform matched: {plat}")
 
                 commit = data.get("commit")
-                if expected_commit and commit != expected_commit:
-                    errors.append(f"/api/v1/update/status commit mismatch: expected '{expected_commit}', got '{commit}'")
-                elif expected_commit:
-                    print(f"  ✓ /api/v1/update/status commit matched: {commit}")
+                if expected_commit:
+                    if not commit:
+                        errors.append(f"/api/v1/update/status missing commit (expected '{expected_commit}')")
+                    elif commit != expected_commit:
+                        errors.append(f"/api/v1/update/status commit mismatch: expected '{expected_commit}', got '{commit}'")
+                    else:
+                        print(f"  ✓ /api/v1/update/status commit matched: {commit}")
     except urllib.error.HTTPError as e:
         if e.code == 401:
             errors.append("/api/v1/update/status returned 401 Unauthorized (requires valid --username/--password or --token)")
@@ -357,10 +441,10 @@ def verify_running_server(
     if errors:
         for err in errors:
             print(f"  ❌ {err}")
-        return False, errors
+        return False, errors, runtime_info
 
     print("  ✓ Running server checks passed.")
-    return True, []
+    return True, [], runtime_info
 
 def main():
     parser = argparse.ArgumentParser(description="Verify ZimaOS package delivery and installation")
@@ -381,6 +465,7 @@ def main():
         "local_dist_valid": False,
         "remote_endpoints_valid": None,
         "running_server_valid": None,
+        "runtime": None,
         "errors": []
     }
 
@@ -389,12 +474,16 @@ def main():
     results["errors"].extend(local_errs)
 
     if args.remote_url:
-        remote_ok, remote_errs = verify_remote_store(args.remote_url, expected_image=args.expected_image)
+        remote_ok, remote_errs = verify_remote_store(
+            args.remote_url,
+            expected_image=args.expected_image,
+            expected_version=args.expected_version,
+        )
         results["remote_endpoints_valid"] = remote_ok
         results["errors"].extend(remote_errs)
 
     if args.server_url:
-        server_ok, server_errs = verify_running_server(
+        server_ok, server_errs, runtime_info = verify_running_server(
             args.server_url,
             expected_version=args.expected_version,
             expected_commit=args.expected_commit,
@@ -404,6 +493,7 @@ def main():
             password=args.password,
         )
         results["running_server_valid"] = server_ok
+        results["runtime"] = runtime_info
         results["errors"].extend(server_errs)
 
     passed = len(results["errors"]) == 0

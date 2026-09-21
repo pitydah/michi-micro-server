@@ -87,46 +87,19 @@ jobs:
             exit 1
           fi
 
-          # Verify that all 15 required certification gates exist and completed with success
-          REQUIRED_GATES=(
-            "ci-rust"
-            "ci-stream-contract"
-            "ci-receiver-contract-simulator"
-            "ci-snapcast-contract-mock"
-            "ci-mqtt-contract-simulator"
-            "ci-mosquitto-real"
-            "ci-generic-linux-appliance"
-            "ci-reliability-short"
-            "ci-web-ui-functional-integrity"
-            "ci-web-ui-browser-e2e"
-            "ci-no-test-api-release"
-            "ci-three-way-ecosystem"
-            "ci-docker-amd64"
-            "ci-arm64-qemu"
-            "ci-zimaos-package"
-          )
-
+          # Verify that CI workflow concluded with overall success and ci-release-gate completed with success
           JOBS_JSON=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs?per_page=100" --jq '.jobs')
+          GATE_CONCLUSION=$(echo "${JOBS_JSON}" | jq -r '
+            [.[] | select(.name == "ci-release-gate")][0] | if . == null then "MISSING" else .conclusion end
+          ')
 
-          ERRORS=()
-          for GATE in "${REQUIRED_GATES[@]}"; do
-            CONCLUSION=$(echo "${JOBS_JSON}" | jq -r --arg name "$GATE" '
-              [.[] | select(.name == $name)][0] | if . == null then "MISSING" else .conclusion end
-            ')
-            if [ "$CONCLUSION" != "success" ]; then
-              ERRORS+=("${GATE}: ${CONCLUSION}")
-            fi
-          done
-
-          if [ ${#ERRORS[@]} -gt 0 ]; then
-            echo "ERROR: Not all required certification gates succeeded for run ${RUN_ID}:"
-            for ERR in "${ERRORS[@]}"; do
-              echo "  - ${ERR}"
-            done
+          if [ "${GATE_CONCLUSION}" != "success" ]; then
+            echo "ERROR: ci-release-gate has not completed successfully for CI run ${RUN_ID} (conclusion: ${GATE_CONCLUSION})."
+            echo "       ci-release-gate aggregates all canonical gates defined in release/gates.json."
             exit 1
           fi
 
-          echo "CI run ${RUN_ID} is 100% green across all 15 required gates for SHA ${SHA}. Proceeding with publish."
+          echo "CI run ${RUN_ID} is 100% green and certified by ci-release-gate for SHA ${SHA}. Proceeding with publish."
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

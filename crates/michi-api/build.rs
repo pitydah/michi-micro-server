@@ -8,41 +8,47 @@ fn main() {
         }
     }
 
-    // Inspect git directory to emit rerun-if-changed for HEAD, current branch ref, and packed-refs
-    let git_dir_res = std::process::Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .output()
-        .ok()
-        .and_then(|out| {
-            if out.status.success() {
-                String::from_utf8(out.stdout)
-                    .ok()
-                    .map(|s| std::path::PathBuf::from(s.trim()))
+    // Inspect git paths using rev-parse --git-path to support Git worktrees and common dirs
+    let resolve_git_path = |subpath: &str| -> Option<std::path::PathBuf> {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "--git-path", subpath])
+            .output()
+            .ok()?;
+        if out.status.success() {
+            let s = String::from_utf8(out.stdout).ok()?;
+            let p = std::path::PathBuf::from(s.trim());
+            let p = if p.is_relative() {
+                std::env::current_dir().unwrap_or_default().join(p)
             } else {
-                None
-            }
-        });
-
-    if let Some(git_dir) = git_dir_res {
-        let git_dir = if git_dir.is_relative() {
-            std::env::current_dir().unwrap_or_default().join(&git_dir)
+                p
+            };
+            Some(p)
         } else {
-            git_dir
-        };
+            None
+        }
+    };
 
-        let head_path = git_dir.join("HEAD");
+    if let Some(git_dir) = resolve_git_path("") {
+        if git_dir.exists() {
+            println!("cargo:rerun-if-changed={}", git_dir.display());
+        }
+    }
+
+    if let Some(head_path) = resolve_git_path("HEAD") {
         if head_path.exists() {
             println!("cargo:rerun-if-changed={}", head_path.display());
             if let Ok(content) = std::fs::read_to_string(&head_path) {
                 let trimmed = content.trim();
                 if let Some(ref_path) = trimmed.strip_prefix("ref:") {
-                    let ref_target = git_dir.join(ref_path.trim());
-                    println!("cargo:rerun-if-changed={}", ref_target.display());
+                    if let Some(resolved_ref) = resolve_git_path(ref_path.trim()) {
+                        println!("cargo:rerun-if-changed={}", resolved_ref.display());
+                    }
                 }
             }
         }
+    }
 
-        let packed_refs = git_dir.join("packed-refs");
+    if let Some(packed_refs) = resolve_git_path("packed-refs") {
         if packed_refs.exists() {
             println!("cargo:rerun-if-changed={}", packed_refs.display());
         }

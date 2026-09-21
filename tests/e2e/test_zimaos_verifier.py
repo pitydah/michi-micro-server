@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import json
+import hashlib
 import pytest
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -214,12 +215,32 @@ services:
       - MICHI_DEPLOYMENT_PLATFORM=zimaos
       - MICHI_AUTH_PASSWORD=${MICHI_AUTH_PASSWORD:?Password required}
 """
+    default_icon = b"<svg>mock icon</svg>"
+    default_thumb = b"\x89PNG\r\n\x1a\nmock thumb"
+    
+    def calc_hash(comp_b, icon_b, thumb_b):
+        h = hashlib.sha256()
+        h.update(comp_b)
+        h.update(icon_b)
+        h.update(thumb_b)
+        return h.hexdigest()
+
+    default_meta = {
+        "version": "1.0.0-rc.2",
+        "content_hash": calc_hash(default_compose.strip().encode(), default_icon, default_thumb)
+    }
 
     current_state = {
         "store_status": 200,
         "store_body": json.dumps(default_store).encode(),
         "compose_status": 200,
         "compose_body": default_compose.strip().encode(),
+        "meta_status": 200,
+        "meta_body": json.dumps(default_meta).encode(),
+        "icon_status": 200,
+        "icon_body": default_icon,
+        "thumb_status": 200,
+        "thumb_body": default_thumb,
     }
 
     class MockStoreHandler(BaseHTTPRequestHandler):
@@ -237,6 +258,21 @@ services:
                 self.send_header("Content-Type", "text/yaml")
                 self.end_headers()
                 self.wfile.write(current_state["compose_body"])
+            elif self.path == "/dist/apps/io.michi.micro-server/meta.json":
+                self.send_response(current_state["meta_status"])
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(current_state["meta_body"])
+            elif self.path == "/dist/apps/io.michi.micro-server/assets/icon.svg":
+                self.send_response(current_state["icon_status"])
+                self.send_header("Content-Type", "image/svg+xml")
+                self.end_headers()
+                self.wfile.write(current_state["icon_body"])
+            elif self.path == "/dist/apps/io.michi.micro-server/assets/thumbnail.png":
+                self.send_response(current_state["thumb_status"])
+                self.send_header("Content-Type", "image/png")
+                self.end_headers()
+                self.wfile.write(current_state["thumb_body"])
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -278,31 +314,41 @@ services:
         assert res.returncode != 0, "Expected missing app in store.json to fail"
         assert "missing app 'io.michi.micro-server'" in res.stdout or "missing app 'io.michi.micro-server'" in res.stderr
 
+        # Case 5: Stale app version in store.json fails
+        stale_store = copy.deepcopy(default_store)
+        stale_store["apps"][0]["version"] = "0.9.0"
+        current_state["store_body"] = json.dumps(stale_store).encode()
+        res = subprocess.run([sys.executable, SCRIPT_PATH, "--remote-url", base_url], capture_output=True, text=True)
+        assert res.returncode != 0, "Expected stale app version to fail"
+        assert "does not match expected" in res.stdout or "does not match expected" in res.stderr
+
         # Reset store.json to valid
         current_state["store_body"] = json.dumps(default_store).encode()
 
-        # Case 5: Malformed YAML in docker-compose.yml fails
+        # Case 6: Malformed YAML in docker-compose.yml fails
         current_state["compose_body"] = b"services:\n  bad_yaml: [unclosed"
         res = subprocess.run([sys.executable, SCRIPT_PATH, "--remote-url", base_url], capture_output=True, text=True)
         assert res.returncode != 0, "Expected malformed YAML in compose to fail"
         assert "malformed YAML" in res.stdout or "malformed YAML" in res.stderr
 
-        # Case 6: Wrong MICHI_DEPLOYMENT_PLATFORM in docker-compose.yml fails
+        # Case 7: Wrong MICHI_DEPLOYMENT_PLATFORM in docker-compose.yml fails
         wrong_platform_compose = default_compose.replace("MICHI_DEPLOYMENT_PLATFORM=zimaos", "MICHI_DEPLOYMENT_PLATFORM=generic")
         current_state["compose_body"] = wrong_platform_compose.encode()
         res = subprocess.run([sys.executable, SCRIPT_PATH, "--remote-url", base_url], capture_output=True, text=True)
         assert res.returncode != 0, "Expected wrong deployment platform to fail"
         assert "must set MICHI_DEPLOYMENT_PLATFORM=zimaos" in res.stdout or "must set MICHI_DEPLOYMENT_PLATFORM=zimaos" in res.stderr
 
-        # Case 7: Missing ':?' parameter expansion in MICHI_AUTH_PASSWORD fails
+        # Case 8: Missing ':?' parameter expansion in MICHI_AUTH_PASSWORD fails
         insecure_compose = default_compose.replace("${MICHI_AUTH_PASSWORD:?Password required}", "${MICHI_AUTH_PASSWORD:-defaultpass}")
         current_state["compose_body"] = insecure_compose.encode()
         res = subprocess.run([sys.executable, SCRIPT_PATH, "--remote-url", base_url], capture_output=True, text=True)
         assert res.returncode != 0, "Expected missing :? password expression to fail"
         assert "fail-closed ':?' parameter expansion" in res.stdout or "fail-closed ':?' parameter expansion" in res.stderr
 
-        # Case 8: Image mismatch when --expected-image specified fails
-        current_state["compose_body"] = default_compose.encode()
+        # Reset compose
+        current_state["compose_body"] = default_compose.strip().encode()
+
+        # Case 9: Image mismatch when --expected-image specified fails
         res = subprocess.run(
             [sys.executable, SCRIPT_PATH, "--remote-url", base_url, "--expected-image", "ghcr.io/pitydah/michi-micro-server:9.9.9"],
             capture_output=True,
@@ -310,6 +356,36 @@ services:
         )
         assert res.returncode != 0, "Expected image mismatch to fail"
         assert "does not match expected" in res.stdout or "does not match expected" in res.stderr
+
+        # Case 10: Stale version in meta.json fails
+        stale_meta = dict(default_meta, version="0.8.0")
+        current_state["meta_body"] = json.dumps(stale_meta).encode()
+        res = subprocess.run([sys.executable, SCRIPT_PATH, "--remote-url", base_url], capture_output=True, text=True)
+        assert res.returncode != 0, "Expected stale meta version to fail"
+        assert "does not match expected" in res.stdout or "does not match expected" in res.stderr
+
+        # Case 11: Wrong content_hash in meta.json fails
+        wrong_hash_meta = dict(default_meta, content_hash="0" * 64)
+        current_state["meta_body"] = json.dumps(wrong_hash_meta).encode()
+        res = subprocess.run([sys.executable, SCRIPT_PATH, "--remote-url", base_url], capture_output=True, text=True)
+        assert res.returncode != 0, "Expected content_hash mismatch to fail"
+        assert "content_hash mismatch" in res.stdout or "content_hash mismatch" in res.stderr
+
+        # Reset meta.json
+        current_state["meta_body"] = json.dumps(default_meta).encode()
+
+        # Case 12: Changed icon fails content_hash
+        current_state["icon_body"] = b"<svg>tampered icon</svg>"
+        res = subprocess.run([sys.executable, SCRIPT_PATH, "--remote-url", base_url], capture_output=True, text=True)
+        assert res.returncode != 0, "Expected tampered icon to fail hash check"
+        assert "content_hash mismatch" in res.stdout or "content_hash mismatch" in res.stderr
+
+        # Reset icon, Case 13: Changed thumbnail fails content_hash
+        current_state["icon_body"] = default_icon
+        current_state["thumb_body"] = b"tampered thumbnail"
+        res = subprocess.run([sys.executable, SCRIPT_PATH, "--remote-url", base_url], capture_output=True, text=True)
+        assert res.returncode != 0, "Expected tampered thumbnail to fail hash check"
+        assert "content_hash mismatch" in res.stdout or "content_hash mismatch" in res.stderr
 
     finally:
         httpd.shutdown()

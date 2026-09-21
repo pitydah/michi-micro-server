@@ -440,7 +440,7 @@ def test_soak_stability_contract_gate_specification():
 
 
 def test_build_rs_git_identity_tracking():
-    """Verify build.rs watches HEAD, branch refs, and packed-refs to prevent stale commit identity."""
+    """Verify build.rs watches HEAD, branch refs, and packed-refs via --git-path to prevent stale commit identity across worktrees."""
     build_rs_path = os.path.join(ROOT_DIR, "crates", "michi-api", "build.rs")
     assert os.path.exists(build_rs_path)
     with open(build_rs_path, "r", encoding="utf-8") as f:
@@ -448,7 +448,7 @@ def test_build_rs_git_identity_tracking():
 
     assert "cargo:rerun-if-env-changed=MICHI_BUILD_COMMIT" in content
     assert "rev-parse" in content
-    assert "--git-dir" in content
+    assert "--git-path" in content
     assert "cargo:rerun-if-changed" in content
     assert "HEAD" in content
     assert "ref:" in content
@@ -588,5 +588,179 @@ def test_physical_and_soak_qualification_workflows():
         assert len(upload_steps) >= 1, f"Missing upload-artifact in {fname}"
         art_name = upload_steps[0].get("with", {}).get("name", "")
         assert expected_artifact in art_name, f"Artifact name {art_name} does not match {expected_artifact}"
+
+
+def test_hardware_workflow_contract_contents():
+    """Verify specific contractual directives in physical qualification workflows."""
+    # 1. ZimaOS physical contract
+    zima_path = os.path.join(ROOT_DIR, ".github", "workflows", "zimaos-physical.yml")
+    with open(zima_path, "r", encoding="utf-8") as f:
+        zima_raw = f.read()
+    assert "--expected-commit" in zima_raw
+    assert "--expected-version" in zima_raw
+    assert "ZIMAOS_ADMIN_PASSWORD" in zima_raw or "ZIMAOS_ADMIN_TOKEN" in zima_raw
+    assert "zimaos-physical" in zima_raw
+    assert "attach_evidence_provenance.py" in zima_raw
+    assert "zimaos-qualification" in zima_raw
+
+    # 2. Raspberry Pi physical contract
+    rpi_path = os.path.join(ROOT_DIR, ".github", "workflows", "rpi-physical.yml")
+    with open(rpi_path, "r", encoding="utf-8") as f:
+        rpi_raw = f.read()
+    assert "self-hosted" in rpi_raw
+    assert "arm64" in rpi_raw
+    assert "rpi" in rpi_raw
+    assert "/proc/device-tree/model" in rpi_raw
+    assert "qualify_rpi_runtime.py" in rpi_raw
+    assert "attach_evidence_provenance.py" in rpi_raw
+    assert "rpi-physical" in rpi_raw
+
+
+def test_attach_evidence_provenance_helper(tmp_path):
+    """Test that attach_evidence_provenance.py preserves rich metrics while injecting canonical provenance."""
+    test_file = tmp_path / "rich-evidence.json"
+    initial_rich = {
+        "runtime": {"version": "1.0.0-rc.2", "commit": "1234abcd", "deployment_platform": "zimaos"},
+        "rss_bytes": 10485760,
+        "thread_count": 8,
+        "custom_check": "PASS",
+        "status": "PASS",
+    }
+    test_file.write_text(json.dumps(initial_rich), encoding="utf-8")
+
+    helper_path = os.path.join(ROOT_DIR, "scripts", "attach_evidence_provenance.py")
+    res = subprocess.run(
+        [
+            sys.executable,
+            helper_path,
+            "--gate", "casaos-zimaos-real",
+            "--class", "INTEGRATION_REAL",
+            "--job-status", "success",
+            "--producer-job", "zimaos-physical",
+            "--commit-sha", "1234abcd",
+            "--file", str(test_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, f"attach_evidence_provenance failed:\n{res.stdout}\n{res.stderr}"
+
+    updated = json.loads(test_file.read_text(encoding="utf-8"))
+    assert updated["schema_version"] == 1
+    assert updated["gate_id"] == "casaos-zimaos-real"
+    assert updated["commit_sha"] == "1234abcd"
+    assert updated["evidence_class"] == "INTEGRATION_REAL"
+    assert updated["status"] == "PASS"
+    assert updated["exit_code"] == 0
+    assert updated["producer"]["github_job"] == "zimaos-physical"
+    # Verify rich fields preserved intact
+    assert updated["runtime"]["version"] == "1.0.0-rc.2"
+    assert updated["runtime"]["deployment_platform"] == "zimaos"
+    assert updated["rss_bytes"] == 10485760
+    assert updated["thread_count"] == 8
+    assert updated["custom_check"] == "PASS"
+
+
+def test_rpi_device_tree_falsification(tmp_path):
+    """Test qualify_rpi_runtime.py model checking accepts RPi 4/5 and rejects unauthorized hardware."""
+    from qualify_rpi_runtime import get_rpi_model
+
+    # 1. Valid RPi 4
+    rpi4_file = tmp_path / "rpi4_model"
+    rpi4_file.write_bytes(b"Raspberry Pi 4 Model B Rev 1.4\x00")
+    assert "Raspberry Pi 4" in get_rpi_model(str(rpi4_file))
+
+    # 2. Valid RPi 5
+    rpi5_file = tmp_path / "rpi5_model"
+    rpi5_file.write_bytes(b"Raspberry Pi 5 Model B Rev 1.0\x00")
+    assert "Raspberry Pi 5" in get_rpi_model(str(rpi5_file))
+
+    # 3. Unaccepted hardware
+    unauth_file = tmp_path / "other_model"
+    unauth_file.write_bytes(b"Rockchip RK3588 Board\x00")
+    model = get_rpi_model(str(unauth_file))
+    assert "Raspberry Pi 4" not in model and "Raspberry Pi 5" not in model
+
+
+def test_full_synthetic_ga_matrix():
+    """Build full valid synthetic evidence for all gates required in GA and verify PASS, then falsify 4 failure modes."""
+    from release_evidence import get_head_sha
+    sha = get_head_sha()
+
+    reqs_path = os.path.join(ROOT_DIR, "release", "gates.json")
+    with open(reqs_path, "r", encoding="utf-8") as f:
+        reqs = json.load(f)
+
+    # 1. Build valid synthetic artifacts for all 25 gates in release/gates.json
+    artifacts = {}
+    for gate in reqs.get("gates", []):
+        gid = gate["id"]
+        classes = gate.get("accepted_evidence_classes", ["INTEGRATION_REAL"])
+        ev_class = classes[0]
+        allowed_producers = gate.get("allowed_producers")
+
+        producer = {"github_job": gid}
+        if allowed_producers:
+            producer = dict(allowed_producers[0])
+
+        artifacts[gid] = {
+            "schema_version": 1,
+            "gate_id": gid,
+            "commit_sha": sha,
+            "evidence_class": ev_class,
+            "status": "PASS",
+            "exit_code": 0,
+            "detail": f"Synthetic valid qualification for {gid}",
+            "producer": producer,
+        }
+
+    # Verify GA full pass
+    evaluated, blocked = aggregate_gates(reqs, artifacts, sha, "ga")
+    assert blocked is False, f"Expected GA to pass, but was blocked:\n{evaluated}"
+    assert len(evaluated) == len(reqs["gates"])
+    assert all(e["status"] == "PASS" for e in evaluated)
+
+    # Falsification 1: Stale Raspberry Pi physical artifact -> GA blocked
+    stale_rpi_arts = dict(artifacts)
+    stale_rpi_arts["raspberry-pi-physical"] = dict(
+        stale_rpi_arts["raspberry-pi-physical"],
+        commit_sha="0123456789abcdef0123456789abcdef01234567"
+    )
+    evaluated, blocked = aggregate_gates(reqs, stale_rpi_arts, sha, "ga")
+    assert blocked is True
+    rpi_eval = next(e for e in evaluated if e["id"] == "raspberry-pi-physical")
+    assert rpi_eval["status"] == "STALE"
+
+    # Falsification 2: Missing ZimaOS artifact -> GA blocked
+    missing_zima_arts = dict(artifacts)
+    del missing_zima_arts["casaos-zimaos-real"]
+    evaluated, blocked = aggregate_gates(reqs, missing_zima_arts, sha, "ga")
+    assert blocked is True
+    zima_eval = next(e for e in evaluated if e["id"] == "casaos-zimaos-real")
+    assert zima_eval["status"] == "NOT_RUN"
+
+    # Falsification 3: Wrong soak producer -> GA blocked
+    wrong_soak_arts = dict(artifacts)
+    wrong_soak_arts["soak-24h"] = dict(
+        wrong_soak_arts["soak-24h"],
+        producer={"github_job": "unauthorized-soak-job"}
+    )
+    evaluated, blocked = aggregate_gates(reqs, wrong_soak_arts, sha, "ga")
+    assert blocked is True
+    soak_eval = next(e for e in evaluated if e["id"] == "soak-24h")
+    assert soak_eval["status"] == "INVALID_EVIDENCE"
+
+    # Falsification 4: Failed physical run -> GA blocked
+    failed_physical_arts = dict(artifacts)
+    failed_physical_arts["raspberry-pi-physical"] = dict(
+        failed_physical_arts["raspberry-pi-physical"],
+        status="FAIL",
+        exit_code=1,
+    )
+    evaluated, blocked = aggregate_gates(reqs, failed_physical_arts, sha, "ga")
+    assert blocked is True
+    fail_eval = next(e for e in evaluated if e["id"] == "raspberry-pi-physical")
+    assert fail_eval["status"] == "FAIL"
+
 
 

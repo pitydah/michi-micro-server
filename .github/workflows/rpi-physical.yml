@@ -33,7 +33,7 @@ jobs:
           cargo test --workspace --exclude michi-api
           cargo build --release --bin michi-server
 
-      - name: Verify hardware platform identity
+      - name: Verify hardware platform identity and qualify runtime
         run: |
           ARCH=$(uname -m)
           if [ "$ARCH" != "aarch64" ] && [ "$ARCH" != "arm64" ]; then
@@ -41,14 +41,35 @@ jobs:
             exit 1
           fi
 
-      - name: Record release evidence
+          if [ ! -f /proc/device-tree/model ]; then
+            echo "ERROR: /proc/device-tree/model not found. Hardware must be a physical Raspberry Pi." >&2
+            exit 1
+          fi
+
+          MODEL=$(tr -d '\0' < /proc/device-tree/model)
+          case "$MODEL" in
+            *"Raspberry Pi 4"*|*"Raspberry Pi 5"*)
+              echo "✓ Physical board model verified: $MODEL"
+              ;;
+            *)
+              echo "ERROR: Not an accepted physical Raspberry Pi model: '$MODEL'" >&2
+              exit 1
+              ;;
+          esac
+
+          python3 scripts/qualify_rpi_runtime.py \
+            --binary target/release/michi-server \
+            --output-evidence target/release-evidence/raspberry-pi-physical.json
+
+      - name: Attach provenance to Raspberry Pi physical evidence
         if: always()
         run: |
-          python3 scripts/record_job_evidence.py \
+          python3 scripts/attach_evidence_provenance.py \
             --gate raspberry-pi-physical \
             --class PHYSICAL_HARDWARE \
             --job-status "${{ job.status }}" \
-            --output target/release-evidence/raspberry-pi-physical.json
+            --producer-job rpi-physical \
+            --file target/release-evidence/raspberry-pi-physical.json
 
       - name: Upload Raspberry Pi physical evidence
         if: always()
