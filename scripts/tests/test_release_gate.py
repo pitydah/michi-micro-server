@@ -614,6 +614,10 @@ def test_hardware_workflow_contract_contents():
     assert "qualify_rpi_runtime.py" in rpi_raw
     assert "attach_evidence_provenance.py" in rpi_raw
     assert "rpi-physical" in rpi_raw
+    assert "MICHI_BUILD_COMMIT" in rpi_raw
+    assert "--expected-commit" in rpi_raw
+    assert "--expected-version" in rpi_raw
+    assert "--skip-model-check" not in rpi_raw
 
 
 def test_attach_evidence_provenance_helper(tmp_path):
@@ -761,6 +765,259 @@ def test_full_synthetic_ga_matrix():
     assert blocked is True
     fail_eval = next(e for e in evaluated if e["id"] == "raspberry-pi-physical")
     assert fail_eval["status"] == "FAIL"
+
+
+def test_rpi_qualifier_wav_generation(tmp_path):
+    """Verify that qualify_rpi_runtime generates valid standard uncompressed PCM WAV files."""
+    from qualify_rpi_runtime import create_mock_wav_file
+    import wave
+
+    wav_path = str(tmp_path / "test.wav")
+    size = create_mock_wav_file(wav_path, duration_sec=0.5, sample_rate=44100)
+    assert os.path.exists(wav_path)
+    assert size > 0
+
+    with wave.open(wav_path, "rb") as wf:
+        assert wf.getnchannels() == 2
+        assert wf.getsampwidth() == 2
+        assert wf.getframerate() == 44100
+        frames = wf.readframes(wf.getnframes())
+        assert len(frames) == int(0.5 * 44100 * 2 * 2)
+
+
+def test_rpi_qualifier_model_validation(tmp_path):
+    """Verify Raspberry Pi hardware model check rules (RPi 4/5 accepted, other models rejected)."""
+    from qualify_rpi_runtime import get_rpi_model
+
+    # 1. RPi 4
+    rpi4_file = tmp_path / "model_rpi4"
+    rpi4_file.write_bytes(b"Raspberry Pi 4 Model B Rev 1.5\x00")
+    assert "Raspberry Pi 4" in get_rpi_model(str(rpi4_file))
+
+    # 2. RPi 5
+    rpi5_file = tmp_path / "model_rpi5"
+    rpi5_file.write_bytes(b"Raspberry Pi 5 Model B Rev 1.0\x00")
+    assert "Raspberry Pi 5" in get_rpi_model(str(rpi5_file))
+
+    # 3. Non-RPi model rejection in qualify_rpi_runtime execution
+    orangepi_file = tmp_path / "model_orange"
+    orangepi_file.write_bytes(b"Orange Pi 5 Plus\x00")
+    assert "Orange Pi" in get_rpi_model(str(orangepi_file))
+
+    evidence_file = str(tmp_path / "evidence_err.json")
+    qual_script = os.path.join(ROOT_DIR, "scripts", "qualify_rpi_runtime.py")
+    res = subprocess.run(
+        [
+            sys.executable,
+            qual_script,
+            "--model-path", str(orangepi_file),
+            "--output-evidence", evidence_file,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode != 0
+    with open(evidence_file, "r", encoding="utf-8") as f:
+        ev = json.load(f)
+    assert ev["status"] == "FAIL"
+    assert any("Unaccepted physical hardware model" in err for err in ev["errors"])
+
+
+def test_rpi_evidence_constants_and_limits():
+    """Verify strict qualification resource budget limits."""
+    import qualify_rpi_runtime as rpi_mod
+
+    assert rpi_mod.RSS_LIMIT_BYTES == 65 * 1024 * 1024  # 65 MB
+    assert rpi_mod.THREAD_LIMIT == 16
+
+
+def test_rpi_qualifier_mock_execution_and_assertions(tmp_path):
+    """
+    Test end-to-end qualify_rpi_runtime execution against a mock server executable.
+    Verifies:
+    - Canonical environment variables passed (and absence of legacy variables).
+    - Database migration schema 49 verification.
+    - Expected commit / version assertion enforcement (success and failure cases).
+    - Correct recording of resource limits and metrics in rich evidence.
+    """
+    # 1. Create a mock michi-server executable in Python
+    env_dump_path = str(tmp_path / "env_dump.json")
+    mock_bin_path = str(tmp_path / "mock_michi_server.py")
+    mock_code = f"""#!/usr/bin/env python3
+import http.server
+import json
+import os
+import signal
+import socketserver
+import sqlite3
+import sys
+import threading
+import urllib.parse
+
+# Dump environment
+with open({json.dumps(env_dump_path)}, "w", encoding="utf-8") as f:
+    json.dump(dict(os.environ), f)
+
+# Initialize database at MICHI_DATABASE if present
+db_url = os.environ.get("MICHI_DATABASE", "")
+if db_url.startswith("sqlite://"):
+    db_file = db_url[len("sqlite://"):]
+    os.makedirs(os.path.dirname(db_file), exist_ok=True)
+    conn = sqlite3.connect(db_file)
+    conn.execute("CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY, applied_at TEXT)")
+    conn.execute("INSERT OR REPLACE INTO _migrations (version, applied_at) VALUES (49, '2026-09-21T00:00:00Z')")
+    conn.commit()
+    conn.close()
+
+port = int(os.environ.get("MICHI_PORT", 9095))
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+    def do_GET(self):
+        if self.path == "/health/live":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        elif self.path == "/api/v1/server/info":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({{"version": "1.0.0", "commit": "mockcommit123"}}).encode("utf-8"))
+        elif self.path == "/api/v1/tracks":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps([{{
+                "id": "11111111-1111-1111-1111-111111111111",
+                "title": "Smoke Track",
+            }}]).encode("utf-8"))
+        elif "/stream" in self.path:
+            self.send_response(206)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Range", "bytes 0-1023/1024")
+            self.end_headers()
+            self.wfile.write(b"RIFF" + b"\\x00" * 1020)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        if self.path == "/api/v1/library/scan":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{{}}")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+socketserver.TCPServer.allow_reuse_address = True
+httpd = socketserver.TCPServer(("127.0.0.1", port), Handler)
+try:
+    httpd.serve_forever()
+finally:
+    httpd.server_close()
+"""
+    with open(mock_bin_path, "w", encoding="utf-8") as f:
+        f.write(mock_code)
+    os.chmod(mock_bin_path, 0o755)
+
+    qual_script = os.path.join(ROOT_DIR, "scripts", "qualify_rpi_runtime.py")
+    test_port = 9188
+
+    # Case A: Success run with matching expected-commit and expected-version
+    ev_success_path = str(tmp_path / "ev_success.json")
+    res = subprocess.run(
+        [
+            sys.executable,
+            qual_script,
+            "--binary", mock_bin_path,
+            "--skip-model-check",
+            "--port", str(test_port),
+            "--expected-version", "1.0.0",
+            "--expected-commit", "mockcommit123",
+            "--output-evidence", ev_success_path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, f"Expected success but failed:\n{res.stdout}\n{res.stderr}"
+
+    with open(ev_success_path, "r", encoding="utf-8") as f:
+        ev_data = json.load(f)
+
+    assert ev_data["status"] == "PASS"
+    assert ev_data["runtime_version"] == "1.0.0"
+    assert ev_data["runtime_commit"] == "mockcommit123"
+    assert ev_data["expected_version"] == "1.0.0"
+    assert ev_data["expected_commit"] == "mockcommit123"
+    assert ev_data["database_schema_version"] == 49
+    assert ev_data["health_result"] == "PASS"
+    assert ev_data["stream_smoke_result"] == "PASS"
+    assert ev_data["rss_limit_bytes"] == 65 * 1024 * 1024
+    assert ev_data["thread_limit"] == 16
+
+    # Verify canonical environment variables in dumped env
+    with open(env_dump_path, "r", encoding="utf-8") as f:
+        dumped_env = json.load(f)
+
+    assert dumped_env.get("MICHI_PORT") == str(test_port)
+    assert "MICHI_CONFIG_PATH" in dumped_env
+    assert "MICHI_CACHE_PATH" in dumped_env
+    assert "MICHI_MUSIC_PATH" in dumped_env
+    assert "MICHI_MUSIC_PATHS" in dumped_env
+    assert dumped_env.get("MICHI_DATABASE", "").startswith("sqlite://")
+    assert dumped_env.get("MICHI_DEPLOYMENT_PLATFORM") == "rpi"
+
+    # Assert absence of non-canonical / legacy environment variables
+    for legacy_var in ["MICHI_CONFIG_DIR", "MICHI_CACHE_DIR", "MICHI_MUSIC_DIR", "MICHI_SERVER_PORT"]:
+        assert legacy_var not in dumped_env, f"Legacy environment variable {legacy_var} must not be set"
+
+    # Case B: Failure when expected-commit does not match
+    ev_wrong_commit_path = str(tmp_path / "ev_wrong_commit.json")
+    res_commit = subprocess.run(
+        [
+            sys.executable,
+            qual_script,
+            "--binary", mock_bin_path,
+            "--skip-model-check",
+            "--port", str(test_port + 1),
+            "--expected-version", "1.0.0",
+            "--expected-commit", "unmatched_commit_sha",
+            "--output-evidence", ev_wrong_commit_path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_commit.returncode != 0
+    with open(ev_wrong_commit_path, "r", encoding="utf-8") as f:
+        ev_commit = json.load(f)
+    assert ev_commit["status"] == "FAIL"
+    assert any("Runtime commit mismatch" in err for err in ev_commit["errors"])
+
+    # Case C: Failure when expected-version does not match
+    ev_wrong_ver_path = str(tmp_path / "ev_wrong_ver.json")
+    res_ver = subprocess.run(
+        [
+            sys.executable,
+            qual_script,
+            "--binary", mock_bin_path,
+            "--skip-model-check",
+            "--port", str(test_port + 2),
+            "--expected-version", "2.0.0-rc.99",
+            "--expected-commit", "mockcommit123",
+            "--output-evidence", ev_wrong_ver_path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_ver.returncode != 0
+    with open(ev_wrong_ver_path, "r", encoding="utf-8") as f:
+        ev_ver = json.load(f)
+    assert ev_ver["status"] == "FAIL"
+    assert any("Runtime version mismatch" in err for err in ev_ver["errors"])
 
 
 

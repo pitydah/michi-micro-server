@@ -24,16 +24,27 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import wave
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-def create_mock_flac_file(path: str, title: str, artist: str, album: str) -> int:
+# Strict qualification resource budget ceilings
+RSS_LIMIT_BYTES = 65 * 1024 * 1024  # 65 MB hard ceiling for idle/light qualification
+THREAD_LIMIT = 16                    # 16 threads hard ceiling
+
+def create_mock_wav_file(path: str, duration_sec: float = 1.0, sample_rate: int = 44100) -> int:
+    """Generate standard uncompressed 16-bit stereo PCM WAV file."""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    header = b"fLaC\x00\x00\x00\"\x10\x00\x10\x00\x00\x00\x00\x00\x00\x00\x0a\xc4\x42\xf0\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
-    pcm_payload = (title.encode("utf-8") + b" - " + artist.encode("utf-8") + b" rpi audio stream ") * 1024
-    with open(path, "wb") as f:
-        f.write(header + pcm_payload)
-    return len(header + pcm_payload)
+    num_channels = 2
+    sampwidth = 2  # 16-bit
+    num_frames = int(duration_sec * sample_rate)
+    payload = b"\x00" * (num_frames * num_channels * sampwidth)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(num_channels)
+        wf.setsampwidth(sampwidth)
+        wf.setframerate(sample_rate)
+        wf.writeframes(payload)
+    return os.path.getsize(path)
 
 def get_rpi_model(model_path: str = "/proc/device-tree/model") -> str:
     if not os.path.exists(model_path):
@@ -71,6 +82,8 @@ def main():
     parser.add_argument("--binary", default=os.path.join(ROOT_DIR, "target", "release", "michi-server"), help="Path to michi-server binary")
     parser.add_argument("--model-path", default="/proc/device-tree/model", help="Path to device tree model file")
     parser.add_argument("--port", type=int, default=9095, help="Port to bind qualification server")
+    parser.add_argument("--expected-version", default=None, help="Expected runtime version to assert against /api/v1/server/info")
+    parser.add_argument("--expected-commit", default=None, help="Expected runtime git commit SHA to assert against /api/v1/server/info")
     parser.add_argument("--output-evidence", required=True, help="Path to write rich physical evidence JSON")
     parser.add_argument("--skip-model-check", action="store_true", help="Skip physical model verification (for test harness only)")
     args = parser.parse_args()
@@ -82,15 +95,19 @@ def main():
         "kernel": platform.release(),
         "runtime_version": None,
         "runtime_commit": None,
+        "expected_version": args.expected_version,
+        "expected_commit": args.expected_commit,
         "rss_bytes": None,
+        "rss_limit_bytes": RSS_LIMIT_BYTES,
         "thread_count": None,
+        "thread_limit": THREAD_LIMIT,
         "database_schema_version": None,
         "health_result": "NOT_RUN",
         "stream_smoke_result": "NOT_RUN",
         "errors": [],
     }
 
-    # 1. P0-05: Hardware Model Verification
+    # 1. Hardware Model Verification
     if not args.skip_model_check:
         print(f"[1/5] Inspecting physical board identity at {args.model_path}...")
         try:
@@ -122,19 +139,29 @@ def main():
     for d in [config_dir, cache_dir, music_dir]:
         os.makedirs(d, exist_ok=True)
 
-    # Seed mock audio
-    track_path = os.path.join(music_dir, "rpi_stream_smoke.flac")
-    create_mock_flac_file(track_path, "RPi Physical Stream", "Michi ARM64", "Physical Qualification")
+    # Seed mock audio using standard PCM WAV
+    track_path = os.path.join(music_dir, "rpi_stream_smoke.wav")
+    create_mock_wav_file(track_path, duration_sec=1.0, sample_rate=44100)
 
-    # 3. Start Native michi-server
+    # 3. Start Native michi-server with canonical configuration environment variables
     print(f"[2/5] Starting native michi-server at port {args.port}...")
+    admin_user = "rpiadmin"
+    admin_pass = "rpiqualification123"
     env = os.environ.copy()
-    env["MICHI_CONFIG_DIR"] = config_dir
-    env["MICHI_CACHE_DIR"] = cache_dir
-    env["MICHI_MUSIC_DIR"] = music_dir
-    env["MICHI_SERVER_PORT"] = str(args.port)
+    env["MICHI_PORT"] = str(args.port)
+    env["MICHI_CONFIG_PATH"] = config_dir
+    env["MICHI_CACHE_PATH"] = cache_dir
+    env["MICHI_MUSIC_PATH"] = music_dir
+    env["MICHI_MUSIC_PATHS"] = music_dir
+    env["MICHI_DATABASE"] = f"sqlite://{config_dir}/michi.db"
+    env["MICHI_AUTH_USERNAME"] = admin_user
+    env["MICHI_AUTH_PASSWORD"] = admin_pass
     env["MICHI_DEPLOYMENT_PLATFORM"] = "rpi"
     env["RUST_LOG"] = "info"
+
+    # Remove non-canonical / legacy environment variables
+    for legacy_var in ["MICHI_CONFIG_DIR", "MICHI_CACHE_DIR", "MICHI_MUSIC_DIR", "MICHI_SERVER_PORT"]:
+        env.pop(legacy_var, None)
 
     proc = None
     try:
@@ -171,13 +198,27 @@ def main():
         evidence["health_result"] = "PASS"
         print(f"  ✓ /health/live responded OK ({int((time.time() - start_time) * 1000)}ms)")
 
-        # 5. Runtime server info check
+        # 5. Runtime server info and commit / version assertions
         req = urllib.request.Request(f"{base_url}/api/v1/server/info")
         with urllib.request.urlopen(req, timeout=5) as resp:
             info = json.loads(resp.read().decode())
             evidence["runtime_version"] = info.get("version")
             evidence["runtime_commit"] = info.get("commit")
             print(f"  ✓ /api/v1/server/info verified: version={info.get('version')}, commit={info.get('commit')}")
+
+        if args.expected_version:
+            if evidence["runtime_version"] != args.expected_version:
+                err = f"Runtime version mismatch: expected '{args.expected_version}', got '{evidence['runtime_version']}'"
+                evidence["errors"].append(err)
+                raise RuntimeError(err)
+            print(f"  ✓ Runtime version matches expected: {args.expected_version}")
+
+        if args.expected_commit:
+            if evidence["runtime_commit"] != args.expected_commit:
+                err = f"Runtime commit mismatch: expected '{args.expected_commit}', got '{evidence['runtime_commit']}'"
+                evidence["errors"].append(err)
+                raise RuntimeError(err)
+            print(f"  ✓ Runtime commit matches expected: {args.expected_commit}")
 
         # 6. Database schema version verification (P0-06)
         print("[3/5] Verifying SQLite database migrations and schema...")
@@ -187,7 +228,8 @@ def main():
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
         cur.execute("SELECT MAX(version) FROM _migrations")
-        max_ver = cur.fetchone()[0]
+        row = cur.fetchone()
+        max_ver = row[0] if row else None
         conn.close()
         evidence["database_schema_version"] = max_ver
         if max_ver != 49:
@@ -198,10 +240,27 @@ def main():
 
         # 7. Streaming Smoke Verification (P0-07)
         print("[4/5] Executing streaming smoke test...")
+        auth_headers = {}
+        try:
+            login_req = urllib.request.Request(
+                f"{base_url}/api/auth/login",
+                data=json.dumps({"username": admin_user, "password": admin_pass}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(login_req, timeout=5) as resp:
+                if resp.status == 200:
+                    token = json.loads(resp.read().decode()).get("token")
+                    if token:
+                        auth_headers = {"Authorization": f"Bearer {token}"}
+        except Exception:
+            pass
+
+        scan_headers = {"Content-Type": "application/json", **auth_headers}
         scan_req = urllib.request.Request(
             f"{base_url}/api/v1/library/scan",
             data=json.dumps({}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=scan_headers,
             method="POST",
         )
         with urllib.request.urlopen(scan_req, timeout=10) as resp:
@@ -210,7 +269,8 @@ def main():
         # Poll tracks until scanned track is present
         tracks = []
         for _ in range(10):
-            with urllib.request.urlopen(f"{base_url}/api/v1/tracks", timeout=5) as resp:
+            req_tracks = urllib.request.Request(f"{base_url}/api/v1/tracks", headers=auth_headers)
+            with urllib.request.urlopen(req_tracks, timeout=5) as resp:
                 data = json.loads(resp.read().decode())
                 tracks = data.get("tracks", data) if isinstance(data, dict) else data
                 if len(tracks) > 0:
@@ -223,9 +283,10 @@ def main():
             raise RuntimeError(err)
 
         track_id = tracks[0]["id"]
+        stream_headers = {"Range": "bytes=0-1023", **auth_headers}
         stream_req = urllib.request.Request(
             f"{base_url}/api/v1/tracks/{track_id}/stream",
-            headers={"Range": "bytes=0-1023"},
+            headers=stream_headers,
         )
         with urllib.request.urlopen(stream_req, timeout=10) as resp:
             audio_bytes = resp.read()
@@ -236,20 +297,19 @@ def main():
             print(f"  ✓ Stream smoke succeeded: HTTP {resp.status}, {len(audio_bytes)} bytes received")
             evidence["stream_smoke_result"] = "PASS"
 
-        # 8. Resource Sanity (P0-06, P0-08)
+        # 8. Resource Sanity (P0-05)
         print("[5/5] Measuring runtime resource sanity...")
         rss, threads = get_process_metrics(proc.pid)
         evidence["rss_bytes"] = rss
         evidence["thread_count"] = threads
-        print(f"  ✓ Process alive: PID={proc.pid}, RSS={rss // 1024} KB, Threads={threads}")
+        print(f"  ✓ Process alive: PID={proc.pid}, RSS={rss // 1024} KB (limit: {RSS_LIMIT_BYTES // (1024*1024)} MB), Threads={threads} (limit: {THREAD_LIMIT})")
 
-        # RSS hard limit: 512 MB, thread ceiling: 64
-        if rss > 512 * 1024 * 1024:
-            err = f"RSS usage {rss} bytes exceeded 512MB hard ceiling"
+        if rss > RSS_LIMIT_BYTES:
+            err = f"RSS usage {rss} bytes exceeded limit of {RSS_LIMIT_BYTES} bytes ({RSS_LIMIT_BYTES // (1024*1024)} MB)"
             evidence["errors"].append(err)
             raise RuntimeError(err)
-        if threads > 64:
-            err = f"Thread count {threads} exceeded ceiling of 64"
+        if threads > THREAD_LIMIT:
+            err = f"Thread count {threads} exceeded limit of {THREAD_LIMIT}"
             evidence["errors"].append(err)
             raise RuntimeError(err)
 

@@ -251,6 +251,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config sqlite3
       - name: Run Appliance Qualification on Generic Linux Runner
         run: bash scripts/test_appliance_e2e.sh 9092
+      - name: Run Raspberry Pi runtime qualifier regression smoke
+        run: |
+          COMMIT_SHA="$(git rev-parse HEAD)"
+          VERSION="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")"
+          python3 scripts/qualify_rpi_runtime.py \
+            --binary target/release/michi-server \
+            --skip-model-check \
+            --port 9097 \
+            --expected-version "$VERSION" \
+            --expected-commit "$COMMIT_SHA" \
+            --output-evidence target/test-rpi-qualifier-regression.json
       - name: Record release evidence
         if: always()
         run: |

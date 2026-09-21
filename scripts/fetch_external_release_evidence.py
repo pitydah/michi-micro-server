@@ -88,10 +88,10 @@ def fetch_artifact_from_github(
     expected_artifact_name = f"release-evidence-{gate_id}-{commit_sha}"
     expected_workflow_spec = GATE_WORKFLOW_MAP.get(gate_id)
 
-    # 1. Paginate artifacts up to 10 pages (1000 artifacts)
+    # 1. Paginate artifacts until exhausted (up to 100 pages / 10000 artifacts)
     matching_artifacts = []
     page = 1
-    while page <= 10:
+    while page <= 100:
         api_url = f"https://api.github.com/repos/{repo}/actions/artifacts?per_page=100&page={page}"
         try:
             req = urllib.request.Request(api_url, headers=headers)

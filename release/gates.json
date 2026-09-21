@@ -147,7 +147,7 @@
     },
     {
       "id": "casaos-zimaos-real",
-      "description": "Instalación y actualización en runtime real de CasaOS/ZimaOS",
+      "description": "Cualificación en runtime real de appliance CasaOS/ZimaOS (instalación, arranque y verificación funcional)",
       "required_for": ["ga"],
       "accepted_evidence_classes": ["INTEGRATION_REAL"],
       "allowed_producers": [

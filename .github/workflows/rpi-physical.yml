@@ -31,7 +31,7 @@ jobs:
       - name: Build and test natively on ARM64 hardware
         run: |
           cargo test --workspace --exclude michi-api
-          cargo build --release --bin michi-server
+          MICHI_BUILD_COMMIT="${{ github.sha }}" cargo build --release --bin michi-server
 
       - name: Verify hardware platform identity and qualify runtime
         run: |
@@ -57,8 +57,11 @@ jobs:
               ;;
           esac
 
+          EXPECTED_VERSION="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")"
           python3 scripts/qualify_rpi_runtime.py \
             --binary target/release/michi-server \
+            --expected-version "${EXPECTED_VERSION}" \
+            --expected-commit "${{ github.sha }}" \
             --output-evidence target/release-evidence/raspberry-pi-physical.json
 
       - name: Attach provenance to Raspberry Pi physical evidence
