@@ -158,7 +158,7 @@ def build_report(
         exit_code = 0 if status == "PASS" else 1
 
     return {
-        "schema_version": 2,
+        "schema_version": 1,
         "gate_id": gate_id,
         "commit_sha": commit_sha,
         "evidence_class": evidence_class,
