@@ -262,6 +262,27 @@ def test_soak_emits_failure_artifact_on_invalid_pid(mock_server):
         assert data["status"] == "FAIL"
         assert data["exit_code"] == 1
         assert any("SERVER_PROCESS_NOT_RUNNING" in v for v in data["violations"])
+        assert "SERVER_PROCESS_NOT_RUNNING" in data["violation_codes"]
+
+        # Semantics of unobservable metrics: must be None (JSON null), never manufactured 0 / 0.0
+        assert data["initial_rss_mb"] is None
+        assert data["baseline_rss_mb"] is None
+        assert data["final_rss_mb"] is None
+        assert data["peak_rss_mb"] is None
+        assert data["total_rss_drift_mb"] is None
+        assert data["post_warmup_rss_drift_mb"] is None
+        assert data["rss_slope_mb_per_hour"] is None
+        assert data["initial_fds"] is None
+        assert data["baseline_fds"] is None
+        assert data["final_fds"] is None
+        assert data["peak_fds"] is None
+        assert data["fd_drift"] is None
+        assert data["initial_threads"] is None
+        assert data["baseline_threads"] is None
+        assert data["final_threads"] is None
+        assert data["thread_drift"] is None
+        assert data["peak_wal_bytes"] is None
+        assert data["child_processes"] is None
     finally:
         if os.path.exists(report_file):
             os.remove(report_file)
@@ -291,6 +312,7 @@ def test_soak_fails_closed_on_invalid_long_soak_duration():
         assert data["status"] == "FAIL"
         assert data["exit_code"] == 1
         assert any("INVALID_LONG_SOAK_DURATION" in v for v in data["violations"])
+        assert "INVALID_LONG_SOAK_DURATION" in data["violation_codes"]
     finally:
         if os.path.exists(report_file):
             os.remove(report_file)
@@ -337,6 +359,122 @@ time.sleep(10)
         # Post-warmup growth should be negligible (< 3.0MB) even though total growth from t=0 was ~30MB
         assert data["post_warmup_rss_drift_mb"] < 3.0
         assert data["total_rss_drift_mb"] >= 20.0
+    finally:
+        proc.kill()
+        if os.path.exists(report_file):
+            os.remove(report_file)
+
+
+def test_validate_duration_coverage_pure():
+    """Mathematical validation of temporal duration coverage for LONG_SOAK."""
+    sys.path.insert(0, os.path.join(ROOT_DIR, "scripts"))
+    from soak_test import validate_duration_coverage
+
+    # 1. LONG_SOAK with requested < 24h fails closed
+    ok, err = validate_duration_coverage("LONG_SOAK", 3600, 3600)
+    assert not ok
+    assert "INVALID_LONG_SOAK_DURATION" in err
+
+    # 2. LONG_SOAK with requested 24h but actual elapsed < 99.9% fails closed
+    ok, err = validate_duration_coverage("LONG_SOAK", 86400, 80000)
+    assert not ok
+    assert "LONG_SOAK_DURATION_INCOMPLETE" in err
+
+    # 3. LONG_SOAK with requested 24h and actual elapsed >= 99.9% passes (e.g. 86350s >= 86313.6s)
+    ok, err = validate_duration_coverage("LONG_SOAK", 86400, 86350)
+    assert ok
+    assert err is None
+
+    # 4. Other evidence classes pass without 24h requirement
+    ok, err = validate_duration_coverage("INTEGRATION_REAL", 90, 90)
+    assert ok
+    assert err is None
+
+
+def test_soak_fails_on_fd_leak(mock_server):
+    """soak_test.py must detect file descriptor leak and fail with FD_LEAK_DETECTED."""
+    script = """
+import time, os
+# Warm-up is 1.5 seconds.
+time.sleep(1.8)
+# Post-warmup: open 20 pipe pairs and keep them open (40 FDs)
+pipes = []
+for _ in range(20):
+    pipes.append(os.pipe())
+time.sleep(10)
+"""
+    proc = subprocess.Popen([sys.executable, "-c", script])
+    report_file = tempfile.mktemp(suffix=".json")
+    try:
+        res = subprocess.run(
+            [
+                sys.executable,
+                SOAK_SCRIPT,
+                "--url", mock_server,
+                "--pid", str(proc.pid),
+                "--duration-seconds", "5",
+                "--warmup-seconds", "1.5",
+                "--sample-interval", "0.5",
+                "--max-fd-drift", "5",
+                "--report", report_file,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode != 0, f"Expected failure on FD leak:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+        assert os.path.exists(report_file), "Expected report JSON to exist"
+
+        with open(report_file, "r") as f:
+            data = json.load(f)
+        assert data["status"] == "FAIL"
+        assert "FD_LEAK_DETECTED" in data["violation_codes"]
+        assert any("FD_LEAK_DETECTED" in v for v in data["violations"])
+    finally:
+        proc.kill()
+        if os.path.exists(report_file):
+            os.remove(report_file)
+
+
+def test_soak_fails_on_thread_leak(mock_server):
+    """soak_test.py must detect thread leak post-warmup and fail with THREAD_LEAK_DETECTED."""
+    script = """
+import time, threading
+# Warm-up is 1.5 seconds.
+time.sleep(1.8)
+# Post-warmup: spawn 10 worker threads and keep them alive
+threads = []
+for _ in range(10):
+    t = threading.Thread(target=lambda: time.sleep(15), daemon=True)
+    t.start()
+    threads.append(t)
+time.sleep(10)
+"""
+    proc = subprocess.Popen([sys.executable, "-c", script])
+    report_file = tempfile.mktemp(suffix=".json")
+    try:
+        res = subprocess.run(
+            [
+                sys.executable,
+                SOAK_SCRIPT,
+                "--url", mock_server,
+                "--pid", str(proc.pid),
+                "--duration-seconds", "5",
+                "--warmup-seconds", "1.5",
+                "--sample-interval", "0.5",
+                "--max-thread-drift", "3",
+                "--report", report_file,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode != 0, f"Expected failure on thread leak:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+        assert os.path.exists(report_file), "Expected report JSON to exist"
+
+        with open(report_file, "r") as f:
+            data = json.load(f)
+        assert data["status"] == "FAIL"
+        assert "THREAD_LEAK_DETECTED" in data["violation_codes"]
+        assert any("THREAD_LEAK_DETECTED" in v for v in data["violations"])
     finally:
         proc.kill()
         if os.path.exists(report_file):

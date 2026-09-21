@@ -44,6 +44,7 @@
 | **P0-08** | P0 | Product Truth | Fuente única de verdad canónica (Product Truth Spec) | Sí | Sí | `COMPLETED` | `spec/v1/product-truth.json`, sincronización con README, PRODUCT.md y tests automatizados |
 | **P0-09** | P0 | Streaming | HLS VOD robusto (AAC compatible) y descarte de "adaptive" | Sí | Sí | `COMPLETED` | FFmpeg HLS genera audio universal AAC estéreo 48kHz; adaptive ABR/DASH marcado honestamente como post-v1 |
 | **P0-10** | P0 | Playback | Retirar claim de gapless no certificado | Sí | Sí | `COMPLETED` | Claim "gapless" retirado de documentación y features activas para v1 |
+| **P0-11** | P0 | Stability Contract | Falsación adversarial y suite contractual del monitor de estabilidad | Sí | Sí | `COMPLETED` | Gate `soak-stability-contract` (job `ci-soak-stability-contract`), 10 tests de detección de fugas (RSS, drift, slope, FD, thread, death, duration coverage) |
 | **P1-01** | P1 | CI | Snapserver Real Daemon Integration | No | Sí | `COMPLETED` | `ci-snapserver-real` ejecuta daemon real en CI con validación de sockets y JSON-RPC |
 | **P1-02** | P1 | Release Train | Proceso de release y branch protection | Sí | Sí | `COMPLETED` | Branch protection activa y verificada en `main` (`gh api`) requiriendo `ci-rust` y `ci-release-gate` |
 | **P1-03** | P1 | Changelog | CHANGELOG actualizado con 1.0.0-rc.2 | Sí | Sí | `COMPLETED` | Resumen semántico agrupado de cambios, fixes, beta modules y roadmap |

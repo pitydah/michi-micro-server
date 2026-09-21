@@ -57,6 +57,12 @@
       "accepted_evidence_classes": ["INTEGRATION_REAL"]
     },
     {
+      "id": "soak-stability-contract",
+      "description": "Validación contractual y falsación adversarial del monitor de estabilidad y detección de fugas",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["UNIT"]
+    },
+    {
       "id": "short-stability-smoke",
       "description": "Monitor de telemetría de estabilidad y detección de fugas (RSS, FDs, WAL)",
       "required_for": ["rc", "ga"],

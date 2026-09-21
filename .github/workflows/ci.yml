@@ -395,6 +395,22 @@ jobs:
         run: pip install pytest
       - name: Run Soak Stability Gate Unit/Regression Tests
         run: pytest tests/e2e/test_soak_stability_gate.py -v
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate soak-stability-contract \
+            --class UNIT \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/soak-stability-contract.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-soak-stability-contract
+          path: target/release-evidence/soak-stability-contract.json
+          if-no-files-found: error
+          retention-days: 30
 
   ci-resource-budget:
     runs-on: ubuntu-latest

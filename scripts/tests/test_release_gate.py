@@ -416,3 +416,24 @@ def test_ci_workflow_step_variable_isolation():
     # In release-github, release_meta must also be defined
     release_step_ids = [s.get("id") for s in release_job["steps"] if "id" in s]
     assert "release_meta" in release_step_ids
+
+def test_soak_stability_contract_gate_specification():
+    gates_path = os.path.join(ROOT_DIR, "release", "gates.json")
+    with open(gates_path, "r", encoding="utf-8") as f:
+        gates_data = json.load(f)
+
+    gate = next((g for g in gates_data.get("gates", []) if g["id"] == "soak-stability-contract"), None)
+    assert gate is not None, "soak-stability-contract must be defined in release/gates.json"
+    assert "rc" in gate.get("required_for", []), "soak-stability-contract must be required for rc"
+    assert "ga" in gate.get("required_for", []), "soak-stability-contract must be required for ga"
+    assert "UNIT" in gate.get("accepted_evidence_classes", [])
+
+    ci_path = os.path.join(ROOT_DIR, ".github", "workflows", "ci.yml")
+    with open(ci_path, "r", encoding="utf-8") as f:
+        ci = yaml.safe_load(f)
+
+    assert "ci-soak-stability-contract" in ci["jobs"]
+    soak_job = ci["jobs"]["ci-soak-stability-contract"]
+    step_runs = [s.get("run", "") for s in soak_job["steps"]]
+    assert any("soak-stability-contract" in r for r in step_runs)
+

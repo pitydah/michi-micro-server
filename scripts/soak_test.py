@@ -105,6 +105,103 @@ def calculate_slope(timestamps, values):
         return 0.0
     return numerator / denominator
 
+def validate_duration_coverage(evidence_class: str, requested_seconds: float, actual_elapsed_seconds: float, min_coverage_ratio: float = 0.999):
+    """
+    Validates temporal coverage. For LONG_SOAK, requires >= 24h requested and actual elapsed coverage >= 99.9%.
+    """
+    if evidence_class == "LONG_SOAK":
+        if requested_seconds < 24 * 3600:
+            return False, f"INVALID_LONG_SOAK_DURATION: LONG_SOAK evidence requires >= 24 hours (requested: {requested_seconds}s)"
+        min_required = requested_seconds * min_coverage_ratio
+        if actual_elapsed_seconds < min_required:
+            return False, f"LONG_SOAK_DURATION_INCOMPLETE: Actual elapsed duration {actual_elapsed_seconds:.1f}s is less than required coverage of requested {requested_seconds}s (min: {min_required:.1f}s)"
+    return True, None
+
+def build_report(
+    *,
+    gate_id,
+    commit_sha,
+    evidence_class,
+    status,
+    detail,
+    requested_duration_seconds=None,
+    warmup_duration_seconds=None,
+    actual_elapsed_seconds=0.0,
+    observation_samples_count=0,
+    total_samples_collected=0,
+    initial_rss_mb=None,
+    baseline_rss_mb=None,
+    final_rss_mb=None,
+    peak_rss_mb=None,
+    total_rss_drift_mb=None,
+    post_warmup_rss_drift_mb=None,
+    rss_slope_mb_per_hour=None,
+    initial_fds=None,
+    baseline_fds=None,
+    final_fds=None,
+    peak_fds=None,
+    fd_drift=None,
+    initial_threads=None,
+    baseline_threads=None,
+    final_threads=None,
+    thread_drift=None,
+    peak_wal_bytes=None,
+    child_processes=None,
+    request_errors_count=0,
+    thresholds=None,
+    violations=None,
+    exit_code=None,
+):
+    viols = violations or []
+    violation_codes = [v.split(":")[0].strip() for v in viols if v]
+    if exit_code is None:
+        exit_code = 0 if status == "PASS" else 1
+
+    return {
+        "schema_version": 2,
+        "gate_id": gate_id,
+        "commit_sha": commit_sha,
+        "evidence_class": evidence_class,
+        "status": status,
+        "detail": detail,
+        "requested_duration_seconds": requested_duration_seconds,
+        "warmup_duration_seconds": warmup_duration_seconds,
+        "actual_elapsed_seconds": actual_elapsed_seconds,
+        "observation_samples_count": observation_samples_count,
+        "total_samples_collected": total_samples_collected,
+        "initial_rss_mb": round(initial_rss_mb, 2) if initial_rss_mb is not None else None,
+        "baseline_rss_mb": round(baseline_rss_mb, 2) if baseline_rss_mb is not None else None,
+        "final_rss_mb": round(final_rss_mb, 2) if final_rss_mb is not None else None,
+        "peak_rss_mb": round(peak_rss_mb, 2) if peak_rss_mb is not None else None,
+        "total_rss_drift_mb": round(total_rss_drift_mb, 2) if total_rss_drift_mb is not None else None,
+        "post_warmup_rss_drift_mb": round(post_warmup_rss_drift_mb, 2) if post_warmup_rss_drift_mb is not None else None,
+        "rss_slope_mb_per_hour": rss_slope_mb_per_hour,
+        "initial_fds": initial_fds,
+        "baseline_fds": baseline_fds,
+        "final_fds": final_fds,
+        "peak_fds": peak_fds,
+        "fd_drift": fd_drift,
+        "initial_threads": initial_threads,
+        "baseline_threads": baseline_threads,
+        "final_threads": final_threads,
+        "thread_drift": thread_drift,
+        "peak_wal_bytes": peak_wal_bytes,
+        "child_processes": child_processes,
+        "request_errors_count": request_errors_count,
+        "thresholds": thresholds or {},
+        "violation_codes": violation_codes,
+        "violations": viols,
+        "exit_code": exit_code,
+    }
+
+def write_report(report_path, report_data):
+    abs_path = os.path.abspath(report_path)
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+    with open(abs_path, "w", encoding="utf-8") as f:
+        json.dump(report_data, f, indent=2)
+    print(f"\nReport saved to: {abs_path}")
+    return abs_path
+
 def main():
     parser = argparse.ArgumentParser(description="Michi Micro Server Soak Stability Test")
     parser.add_argument("--url", default="http://127.0.0.1:9091", help="Base server URL")
@@ -138,48 +235,19 @@ def main():
     else:
         total_seconds = 30
 
-    if args.evidence_class == "LONG_SOAK" and total_seconds < 24 * 3600:
-        msg = f"INVALID_LONG_SOAK_DURATION: LONG_SOAK evidence requires >= 24 hours (requested: {total_seconds}s)"
-        print(f"ERROR: {msg}", file=sys.stderr)
-        report_path = os.path.abspath(args.report)
-        os.makedirs(os.path.dirname(report_path), exist_ok=True)
-        report_data = {
-            "schema_version": 2,
-            "gate_id": args.gate_id,
-            "commit_sha": get_head_sha(),
-            "evidence_class": args.evidence_class,
-            "status": "FAIL",
-            "detail": msg,
-            "requested_duration_seconds": total_seconds,
-            "warmup_duration_seconds": None,
-            "actual_elapsed_seconds": 0.0,
-            "observation_samples_count": 0,
-            "total_samples_collected": 0,
-            "initial_rss_mb": None,
-            "baseline_rss_mb": None,
-            "final_rss_mb": None,
-            "peak_rss_mb": None,
-            "total_rss_drift_mb": None,
-            "post_warmup_rss_drift_mb": None,
-            "rss_slope_mb_per_hour": None,
-            "initial_fds": None,
-            "baseline_fds": None,
-            "final_fds": None,
-            "peak_fds": None,
-            "fd_drift": None,
-            "initial_threads": None,
-            "baseline_threads": None,
-            "final_threads": None,
-            "thread_drift": None,
-            "peak_wal_bytes": None,
-            "child_processes": None,
-            "request_errors_count": 0,
-            "thresholds": {},
-            "violations": [msg],
-            "exit_code": 1
-        }
-        with open(report_path, "w", encoding="utf-8") as f:
-            json.dump(report_data, f, indent=2)
+    valid_dur, dur_err = validate_duration_coverage(args.evidence_class, total_seconds, 0.0)
+    if not valid_dur and "INVALID_LONG_SOAK_DURATION" in dur_err:
+        print(f"ERROR: {dur_err}", file=sys.stderr)
+        rep = build_report(
+            gate_id=args.gate_id,
+            commit_sha=get_head_sha(),
+            evidence_class=args.evidence_class,
+            status="FAIL",
+            detail=dur_err,
+            requested_duration_seconds=total_seconds,
+            violations=[dur_err],
+        )
+        write_report(args.report, rep)
         sys.exit(1)
 
     # Determine sensible warm-up duration if not specified
@@ -219,68 +287,22 @@ def main():
     violations = []
     request_errors = []
 
-    def write_report(status, detail, duration_elapsed, telemetry, obs_timestamps,
-                     init_metrics, cur_m, base_metrics, peak_r, max_f, peak_w,
-                     post_drift, slope_val, fd_d, th_d, viol_list, err_count):
-        init_rss = (init_metrics["rss_kb"] / 1024.0) if init_metrics else 0.0
-        base_rss = (base_metrics["rss_kb"] / 1024.0) if base_metrics else init_rss
-        final_rss = (cur_m["rss_kb"] / 1024.0) if cur_m else init_rss
-        peak_rss = peak_r / 1024.0
-        total_drift = final_rss - init_rss
-        report_data = {
-            "schema_version": 2,
-            "gate_id": args.gate_id,
-            "commit_sha": sha,
-            "evidence_class": args.evidence_class,
-            "status": status,
-            "detail": detail,
-            "requested_duration_seconds": total_seconds,
-            "warmup_duration_seconds": warmup_seconds,
-            "actual_elapsed_seconds": duration_elapsed,
-            "observation_samples_count": len(obs_timestamps),
-            "total_samples_collected": len(telemetry),
-            "initial_rss_mb": round(init_rss, 2),
-            "baseline_rss_mb": round(base_rss, 2),
-            "final_rss_mb": round(final_rss, 2),
-            "peak_rss_mb": round(peak_rss, 2),
-            "total_rss_drift_mb": round(total_drift, 2),
-            "post_warmup_rss_drift_mb": round(post_drift, 2),
-            "rss_slope_mb_per_hour": slope_val,
-            "initial_fds": init_metrics["open_fds"] if init_metrics else 0,
-            "baseline_fds": base_metrics["open_fds"] if base_metrics else 0,
-            "final_fds": cur_m["open_fds"] if cur_m else 0,
-            "peak_fds": max_f,
-            "fd_drift": fd_d,
-            "initial_threads": init_metrics["threads"] if init_metrics else 0,
-            "baseline_threads": base_metrics["threads"] if base_metrics else 0,
-            "final_threads": cur_m["threads"] if cur_m else 0,
-            "thread_drift": th_d,
-            "peak_wal_bytes": peak_w,
-            "child_processes": cur_m["child_processes"] if cur_m else 0,
-            "request_errors_count": err_count,
-            "thresholds": {
-                "max_rss_mb": args.max_rss_mb,
-                "max_post_warmup_drift_mb": max_post_warmup_drift_mb,
-                "max_rss_slope_mb_per_hour": max_rss_slope_mb_per_hour,
-                "max_fd_drift": args.max_fd_drift,
-                "max_thread_drift": args.max_thread_drift
-            },
-            "violations": viol_list,
-            "exit_code": 0 if status == "PASS" else 1
-        }
-        report_path = os.path.abspath(args.report)
-        os.makedirs(os.path.dirname(report_path), exist_ok=True)
-        with open(report_path, "w", encoding="utf-8") as f:
-            json.dump(report_data, f, indent=2)
-        print(f"\nReport saved to: {report_path}")
-        return report_path
-
     # Check process existence
     initial_metrics = get_process_metrics(pid)
     if not initial_metrics or not initial_metrics["valid"]:
         msg = f"SERVER_PROCESS_NOT_RUNNING: Process PID {pid} does not exist or has invalid metrics"
         print(f"ERROR: {msg}", file=sys.stderr)
-        write_report("FAIL", msg, 0.0, [], [], None, None, None, 0, 0, 0, 0.0, 0.0, 0, 0, [msg], 0)
+        rep = build_report(
+            gate_id=args.gate_id,
+            commit_sha=sha,
+            evidence_class=args.evidence_class,
+            status="FAIL",
+            detail=msg,
+            requested_duration_seconds=total_seconds,
+            warmup_duration_seconds=warmup_seconds,
+            violations=[msg],
+        )
+        write_report(args.report, rep)
         sys.exit(1)
 
     # Authenticate to get session token
@@ -393,86 +415,154 @@ def main():
         violations.append(f"UNEXPECTED_MONITOR_EXCEPTION: {exc}")
 
     actual_duration = round(time.time() - start_time, 1)
-    final_metrics = get_process_metrics(pid) or cur_metrics or initial_metrics
+    final_metrics = get_process_metrics(pid) or (cur_metrics if cur_metrics and cur_metrics.get("valid") else None)
 
-    # Compute Statistics & Drifts
-    initial_rss_mb = initial_metrics["rss_kb"] / 1024.0
-    baseline_rss_mb = baseline_metrics["rss_kb"] / 1024.0
-    final_rss_mb = final_metrics["rss_kb"] / 1024.0
-    peak_rss_mb = peak_rss / 1024.0
+    # Compute Statistics & Drifts (null if unobservable)
+    initial_rss_mb = (initial_metrics["rss_kb"] / 1024.0) if (initial_metrics and initial_metrics.get("valid")) else None
+    baseline_rss_mb = (baseline_metrics["rss_kb"] / 1024.0) if (baseline_metrics and baseline_metrics.get("valid")) else initial_rss_mb
+    final_rss_mb = (final_metrics["rss_kb"] / 1024.0) if (final_metrics and final_metrics.get("valid")) else None
+    peak_rss_mb = (peak_rss / 1024.0) if peak_rss is not None else None
     
-    total_rss_drift_mb = final_rss_mb - initial_rss_mb
-    post_warmup_rss_drift_mb = final_rss_mb - baseline_rss_mb if baseline_established else total_rss_drift_mb
+    total_rss_drift_mb = (final_rss_mb - initial_rss_mb) if (final_rss_mb is not None and initial_rss_mb is not None) else None
+    post_warmup_rss_drift_mb = (final_rss_mb - baseline_rss_mb) if (final_rss_mb is not None and baseline_rss_mb is not None and baseline_established) else total_rss_drift_mb
     
-    fd_drift = final_metrics["open_fds"] - initial_metrics["open_fds"]
-    thread_drift = final_metrics["threads"] - baseline_metrics["threads"]
+    initial_fds = initial_metrics["open_fds"] if initial_metrics else None
+    baseline_fds = baseline_metrics["open_fds"] if (baseline_metrics and baseline_established) else initial_fds
+    final_fds = final_metrics["open_fds"] if final_metrics else None
+    fd_drift = (final_fds - baseline_fds) if (final_fds is not None and baseline_fds is not None) else None
+
+    initial_threads = initial_metrics["threads"] if initial_metrics else None
+    baseline_threads = baseline_metrics["threads"] if (baseline_metrics and baseline_established) else initial_threads
+    final_threads = final_metrics["threads"] if final_metrics else None
+    thread_drift = (final_threads - baseline_threads) if (final_threads is not None and baseline_threads is not None) else None
+
+    child_processes = final_metrics["child_processes"] if final_metrics else None
 
     # Compute Linear Regression Slope (MB/hour) over post-warmup window
     if len(observation_timestamps) >= 3:
         slope_mb_per_sec = calculate_slope(observation_timestamps, observation_rss)
         rss_slope_mb_per_hour = round(slope_mb_per_sec * 3600.0, 2)
-    else:
+    elif baseline_established:
         rss_slope_mb_per_hour = 0.0
+    else:
+        rss_slope_mb_per_hour = None
 
     # ══════════════════════════════════════════════════════════════════════════
     # STABILITY ASSERTIONS & LEAK DETECTION VIOLATIONS
     # ══════════════════════════════════════════════════════════════════════════
     
+    # 0. Duration coverage check for LONG_SOAK
+    valid_dur, dur_err = validate_duration_coverage(args.evidence_class, total_seconds, actual_duration)
+    if not valid_dur:
+        violations.append(dur_err)
+
     # 1. Hard RSS ceiling
-    if peak_rss_mb > args.max_rss_mb:
+    if peak_rss_mb is not None and peak_rss_mb > args.max_rss_mb:
         violations.append(f"HARD_RSS_CEILING_EXCEEDED: Peak RSS {peak_rss_mb:.2f}MB exceeds limit {args.max_rss_mb:.2f}MB")
 
     # 2. Post-warmup memory drift
-    if baseline_established and post_warmup_rss_drift_mb > max_post_warmup_drift_mb:
+    if baseline_established and post_warmup_rss_drift_mb is not None and post_warmup_rss_drift_mb > max_post_warmup_drift_mb:
         violations.append(
             f"POST_WARMUP_RSS_DRIFT_EXCEEDED: Post-warmup growth +{post_warmup_rss_drift_mb:.2f}MB exceeds limit +{max_post_warmup_drift_mb:.2f}MB"
         )
 
     # 3. Excessive Memory Growth Slope (MB/hour)
-    # Require consequential post-warmup drift (>= 3.0 MB for short runs < 300s, >= 1.0 MB for >= 300s)
-    # to avoid false positives on sub-megabyte OS page alignment telemetry noise.
     min_consequential_drift_mb = 1.0 if total_seconds >= 300 else 3.0
     if (len(observation_timestamps) >= 5 and
+        rss_slope_mb_per_hour is not None and
         rss_slope_mb_per_hour > max_rss_slope_mb_per_hour and
+        post_warmup_rss_drift_mb is not None and
         post_warmup_rss_drift_mb >= min_consequential_drift_mb):
         violations.append(
             f"EXCESSIVE_RSS_GROWTH_SLOPE: Slope {rss_slope_mb_per_hour:+.2f}MB/h exceeds max allowed {max_rss_slope_mb_per_hour:.2f}MB/h (drift: +{post_warmup_rss_drift_mb:.2f}MB)"
         )
 
-    # 4. File Descriptor Leak
-    if fd_drift >= args.max_fd_drift:
+    # 4. File Descriptor Leak (post-warmup baseline)
+    if fd_drift is not None and fd_drift >= args.max_fd_drift:
         violations.append(f"FD_LEAK_DETECTED: +{fd_drift} file descriptors exceeds limit {args.max_fd_drift}")
 
-    # 5. Thread Leak
-    if thread_drift >= args.max_thread_drift:
+    # 5. Thread Leak (post-warmup baseline)
+    if thread_drift is not None and thread_drift >= args.max_thread_drift:
         violations.append(f"THREAD_LEAK_DETECTED: +{thread_drift} threads exceeds limit {args.max_thread_drift}")
 
     # 6. Zombie Processes
-    if final_metrics["child_processes"] != 0:
-        violations.append(f"ZOMBIE_PROCESSES_DETECTED: {final_metrics['child_processes']} children left")
+    if child_processes is not None and child_processes != 0:
+        violations.append(f"ZOMBIE_PROCESSES_DETECTED: {child_processes} children left")
 
     # 7. Request Reliability
     if len(request_errors) > 5:
         violations.append(f"HIGH_REQUEST_ERROR_COUNT: {len(request_errors)} errors observed")
 
     status = "PASS" if not violations else "FAIL"
-    detail = (
-        f"Soak stable: Baseline RSS {baseline_rss_mb:.2f}MB, post-warmup drift {post_warmup_rss_drift_mb:+.2f}MB, slope {rss_slope_mb_per_hour:+.2f}MB/h, FD drift {fd_drift:+d}, 0 zombies"
-        if status == "PASS" else f"Soak stability violations: {'; '.join(violations)}"
+    if status == "PASS":
+        b_rss = f"{baseline_rss_mb:.2f}MB" if baseline_rss_mb is not None else "N/A"
+        p_drift = f"{post_warmup_rss_drift_mb:+.2f}MB" if post_warmup_rss_drift_mb is not None else "N/A"
+        sl = f"{rss_slope_mb_per_hour:+.2f}MB/h" if rss_slope_mb_per_hour is not None else "N/A"
+        f_d = f"{fd_drift:+d}" if fd_drift is not None else "N/A"
+        detail = f"Soak stable: Baseline RSS {b_rss}, post-warmup drift {p_drift}, slope {sl}, FD drift {f_d}, 0 zombies"
+    else:
+        detail = f"Soak stability violations: {'; '.join(violations)}"
+
+    thresholds = {
+        "max_rss_mb": args.max_rss_mb,
+        "max_post_warmup_drift_mb": max_post_warmup_drift_mb,
+        "max_rss_slope_mb_per_hour": max_rss_slope_mb_per_hour,
+        "max_fd_drift": args.max_fd_drift,
+        "max_thread_drift": args.max_thread_drift
+    }
+
+    report_data = build_report(
+        gate_id=args.gate_id,
+        commit_sha=sha,
+        evidence_class=args.evidence_class,
+        status=status,
+        detail=detail,
+        requested_duration_seconds=total_seconds,
+        warmup_duration_seconds=warmup_seconds,
+        actual_elapsed_seconds=actual_duration,
+        observation_samples_count=len(observation_timestamps),
+        total_samples_collected=len(telemetry),
+        initial_rss_mb=initial_rss_mb,
+        baseline_rss_mb=baseline_rss_mb,
+        final_rss_mb=final_rss_mb,
+        peak_rss_mb=peak_rss_mb,
+        total_rss_drift_mb=total_rss_drift_mb,
+        post_warmup_rss_drift_mb=post_warmup_rss_drift_mb,
+        rss_slope_mb_per_hour=rss_slope_mb_per_hour,
+        initial_fds=initial_fds,
+        baseline_fds=baseline_fds,
+        final_fds=final_fds,
+        peak_fds=max_fds,
+        fd_drift=fd_drift,
+        initial_threads=initial_threads,
+        baseline_threads=baseline_threads,
+        final_threads=final_threads,
+        thread_drift=thread_drift,
+        peak_wal_bytes=peak_wal,
+        child_processes=child_processes,
+        request_errors_count=len(request_errors),
+        thresholds=thresholds,
+        violations=violations,
+        exit_code=0 if status == "PASS" else 1,
     )
 
-    report_path = write_report(
-        status, detail, actual_duration, telemetry, observation_timestamps,
-        initial_metrics, final_metrics, baseline_metrics, peak_rss, max_fds, peak_wal,
-        post_warmup_rss_drift_mb, rss_slope_mb_per_hour, fd_drift, thread_drift,
-        violations, len(request_errors)
-    )
+    report_path = write_report(args.report, report_data)
+
+    def fmt_mb(val, sign=""):
+        if val is None:
+            return "N/A"
+        return f"{val:{sign}.2f} MB"
+
+    def fmt_val(val, unit="", sign=""):
+        if val is None:
+            return "N/A"
+        return f"{val:{sign}}{unit}"
 
     print("\n" + "=" * 70)
     print(f"SOAK TEST COMPLETE — STATUS: {status}")
-    print(f"Initial: {initial_rss_mb:.2f} MB -> Baseline: {baseline_rss_mb:.2f} MB -> Final: {final_rss_mb:.2f} MB (Peak: {peak_rss_mb:.2f} MB)")
-    print(f"Post-Warmup Drift: {post_warmup_rss_drift_mb:+.2f} MB | Slope: {rss_slope_mb_per_hour:+.2f} MB/h")
-    print(f"FDs: {initial_metrics['open_fds']} -> {final_metrics['open_fds']} (Drift: {fd_drift:+d}) | Threads: {initial_metrics['threads']} -> {final_metrics['threads']} (Drift: {thread_drift:+d})")
+    print(f"Initial: {fmt_mb(initial_rss_mb)} -> Baseline: {fmt_mb(baseline_rss_mb)} -> Final: {fmt_mb(final_rss_mb)} (Peak: {fmt_mb(peak_rss_mb)})")
+    print(f"Post-Warmup Drift: {fmt_mb(post_warmup_rss_drift_mb, '+')} | Slope: {fmt_val(rss_slope_mb_per_hour, ' MB/h', '+')}")
+    print(f"FDs: {fmt_val(initial_fds)} -> {fmt_val(final_fds)} (Drift: {fmt_val(fd_drift, '', '+')}) | Threads: {fmt_val(initial_threads)} -> {fmt_val(final_threads)} (Drift: {fmt_val(thread_drift, '', '+')})")
     print("=" * 70)
 
     if violations:

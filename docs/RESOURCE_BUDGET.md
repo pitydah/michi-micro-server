@@ -15,12 +15,14 @@
 | Polling frequency | 60s (frontend) | With document.hidden check |
 | Periodic tasks | hourly (cleanup), daily (integrity) | |
 
-## Measured Values (to be filled)
+## Measured Values (Reference Qualification)
+
+> **Note**: The authoritative measurements for each CI run are stored dynamically in the `resource-budget.json` release evidence artifacts. The table below documents the canonical reference qualification baseline.
 
 <!-- BEGIN GENERATED RESOURCE MEASUREMENTS -->
 | Resource | Release Limit | Measured | Environment |
 |----------|---------------|----------|-------------|
-| Idle RSS p95 | < 50.0 MB | 24.91 MB | CI Runner & Linux Appliance (Balanced) |
+| Idle RSS p95 | < 50.0 MB | 24.91 MB | Reference baseline Linux x86_64 (commit d3a48360) |
 | Threads p95 | <= 16 | 13 | 1 main + 4 Tokio + 1 mDNS + 7 SQLx workers |
 | FDs p95 | <= 128 | 14 | Linux procfs fd inspection |
 | Startup | <= 5000 ms | 62.4 ms | Warm-up to /health/live HTTP 200 |
