@@ -1166,6 +1166,15 @@ jobs:
             echo "mode=rc" >> "$GITHUB_OUTPUT"
             echo "Mode: RC qualification"
           fi
+      - name: Fetch External Release Evidence (GA qualification)
+        if: steps.mode.outputs.mode == 'ga'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/fetch_external_release_evidence.py \
+            --token "${GH_TOKEN}" \
+            --commit-sha "${GITHUB_SHA}" \
+            --output-dir target/release-evidence
       - name: Assert Evidence-Based Release Gates
         run: |
           python3 scripts/generate_release_gate.py \

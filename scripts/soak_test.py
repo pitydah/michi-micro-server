@@ -124,6 +124,7 @@ def build_report(
     evidence_class,
     status,
     detail,
+    producer=None,
     requested_duration_seconds=None,
     warmup_duration_seconds=None,
     actual_elapsed_seconds=0.0,
@@ -157,7 +158,18 @@ def build_report(
     if exit_code is None:
         exit_code = 0 if status == "PASS" else 1
 
-    return {
+    if producer is None:
+        prod_dict = {}
+        if os.getenv("GITHUB_JOB"):
+            prod_dict["github_job"] = os.getenv("GITHUB_JOB")
+        if os.getenv("GITHUB_RUN_ID"):
+            prod_dict["github_run_id"] = os.getenv("GITHUB_RUN_ID")
+        if os.getenv("GITHUB_WORKFLOW"):
+            prod_dict["github_workflow"] = os.getenv("GITHUB_WORKFLOW")
+        if prod_dict:
+            producer = prod_dict
+
+    rep = {
         "schema_version": 1,
         "gate_id": gate_id,
         "commit_sha": commit_sha,
@@ -193,6 +205,9 @@ def build_report(
         "violations": viols,
         "exit_code": exit_code,
     }
+    if producer:
+        rep["producer"] = producer
+    return rep
 
 def write_report(report_path, report_data):
     abs_path = os.path.abspath(report_path)
@@ -226,7 +241,17 @@ def main():
     parser.add_argument("--max-rss-slope-mb-per-hour", type=float, default=None, help="Maximum allowed RSS slope in MB/hour post-warmup")
     parser.add_argument("--max-fd-drift", type=int, default=15, help="Maximum allowed file descriptor drift")
     parser.add_argument("--max-thread-drift", type=int, default=8, help="Maximum allowed thread drift post-warmup")
+    parser.add_argument("--producer-job", default=None, help="Authorized GitHub Actions job name creating this evidence")
     args = parser.parse_args()
+
+    producer = None
+    prod_job = args.producer_job or os.getenv("GITHUB_JOB")
+    if prod_job:
+        producer = {"github_job": prod_job}
+        if os.getenv("GITHUB_RUN_ID"):
+            producer["github_run_id"] = os.getenv("GITHUB_RUN_ID")
+        if os.getenv("GITHUB_WORKFLOW"):
+            producer["github_workflow"] = os.getenv("GITHUB_WORKFLOW")
 
     if args.duration_hours is not None:
         total_seconds = int(args.duration_hours * 3600)
@@ -244,6 +269,7 @@ def main():
             evidence_class=args.evidence_class,
             status="FAIL",
             detail=dur_err,
+            producer=producer,
             requested_duration_seconds=total_seconds,
             violations=[dur_err],
         )
@@ -298,6 +324,7 @@ def main():
             evidence_class=args.evidence_class,
             status="FAIL",
             detail=msg,
+            producer=producer,
             requested_duration_seconds=total_seconds,
             warmup_duration_seconds=warmup_seconds,
             violations=[msg],
@@ -517,6 +544,7 @@ def main():
         evidence_class=args.evidence_class,
         status=status,
         detail=detail,
+        producer=producer,
         requested_duration_seconds=total_seconds,
         warmup_duration_seconds=warmup_seconds,
         actual_elapsed_seconds=actual_duration,

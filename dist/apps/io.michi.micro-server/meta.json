@@ -21,7 +21,7 @@
   "scheme": "http",
   "index": "/",
   "version": "1.0.0-rc.2",
-  "content_hash": "f0a2369a300f247597bb4c658dc2913a63ba12f26e70a11d78bc10a91c09be6c",
+  "content_hash": "db6876605a2504bc31c4b86b3921b50995338f5c954448f30c61ccee3ada0f8d",
   "architectures": [
     "amd64",
     "arm64"

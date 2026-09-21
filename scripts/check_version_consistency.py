@@ -60,15 +60,17 @@ def main():
         errors.append(f"CHANGELOG.md does not contain entry for ## [{product_version}]")
 
     # 3. Safe YAML compose check & deployment platform verification
-    expected_image = f"ghcr.io/pitydah/michi-micro-server:{product_version}"
+    canonical_image = f"ghcr.io/pitydah/michi-micro-server:{product_version}"
+    zima_store_image = "ghcr.io/pitydah/michi-micro-server:r3.1-zima"
     compose_targets = [
-        (os.path.join(ROOT_DIR, "docker-compose.yml"), "docker"),
-        (os.path.join(ROOT_DIR, "zimaos-store", "Apps", "MichiMicroServer", "docker-compose.yml"), "zimaos"),
-        (os.path.join(ROOT_DIR, "casaos", "docker-compose.zimaos.yml"), "zimaos"),
-        (os.path.join(ROOT_DIR, "casaos", "docker-compose.casaos.yml"), "casaos"),
+        (os.path.join(ROOT_DIR, "docker-compose.yml"), "docker", [canonical_image]),
+        (os.path.join(ROOT_DIR, "zimaos-store", "Apps", "MichiMicroServer", "docker-compose.yml"), "zimaos", [zima_store_image]),
+        (os.path.join(ROOT_DIR, "dist", "apps", "io.michi.micro-server", "docker-compose.yml"), "zimaos", [zima_store_image]),
+        (os.path.join(ROOT_DIR, "casaos", "docker-compose.zimaos.yml"), "zimaos", [canonical_image]),
+        (os.path.join(ROOT_DIR, "casaos", "docker-compose.casaos.yml"), "casaos", [canonical_image]),
     ]
 
-    for comp_path, expected_platform in compose_targets:
+    for comp_path, expected_platform, allowed_images in compose_targets:
         if os.path.exists(comp_path):
             with open(comp_path, "r", encoding="utf-8") as f:
                 compose = yaml.safe_load(f)
@@ -76,8 +78,8 @@ def main():
             svc = services.get("michi-micro-server") or services.get("michi-server") or services.get("michi")
             if svc:
                 image = svc.get("image")
-                if image != expected_image:
-                    errors.append(f"Image mismatch in {os.path.relpath(comp_path, ROOT_DIR)}: {image!r} != {expected_image!r}")
+                if image not in allowed_images:
+                    errors.append(f"Image mismatch in {os.path.relpath(comp_path, ROOT_DIR)}: {image!r} not in {allowed_images!r}")
 
                 # Verify canonical deployment platform
                 env = svc.get("environment", [])

@@ -4,6 +4,7 @@ import sys
 import os
 import json
 import hashlib
+import subprocess
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT_DIR, "scripts"))
@@ -436,4 +437,156 @@ def test_soak_stability_contract_gate_specification():
     soak_job = ci["jobs"]["ci-soak-stability-contract"]
     step_runs = [s.get("run", "") for s in soak_job["steps"]]
     assert any("soak-stability-contract" in r for r in step_runs)
+
+
+def test_build_rs_git_identity_tracking():
+    """Verify build.rs watches HEAD, branch refs, and packed-refs to prevent stale commit identity."""
+    build_rs_path = os.path.join(ROOT_DIR, "crates", "michi-api", "build.rs")
+    assert os.path.exists(build_rs_path)
+    with open(build_rs_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    assert "cargo:rerun-if-env-changed=MICHI_BUILD_COMMIT" in content
+    assert "rev-parse" in content
+    assert "--git-dir" in content
+    assert "cargo:rerun-if-changed" in content
+    assert "HEAD" in content
+    assert "ref:" in content
+    assert "packed-refs" in content
+
+
+def test_soak_producer_provenance_validation(tmp_path):
+    """Verify soak-24h gate strictly enforces authorized producer."""
+    from release_evidence import validate_evidence_artifact, get_head_sha
+    sha = get_head_sha()
+
+    req = {
+        "id": "soak-24h",
+        "accepted_evidence_classes": ["LONG_SOAK"],
+        "allowed_producers": [{"github_job": "soak-24h"}]
+    }
+
+    # 1. Valid producer passes
+    valid_artifact = {
+        "schema_version": 1,
+        "gate_id": "soak-24h",
+        "commit_sha": sha,
+        "evidence_class": "LONG_SOAK",
+        "status": "PASS",
+        "exit_code": 0,
+        "detail": "24h soak stable",
+        "producer": {"github_job": "soak-24h"}
+    }
+    status, detail = validate_evidence_artifact(valid_artifact, sha, req)
+    assert status == "PASS"
+
+    # 2. Missing producer rejected as INVALID_EVIDENCE
+    no_producer = dict(valid_artifact)
+    del no_producer["producer"]
+    status, detail = validate_evidence_artifact(no_producer, sha, req)
+    assert status == "INVALID_EVIDENCE"
+    assert "producer is not authorized" in detail
+
+    # 3. Wrong producer rejected as INVALID_EVIDENCE
+    wrong_producer = dict(valid_artifact, producer={"github_job": "unauthorized-job"})
+    status, detail = validate_evidence_artifact(wrong_producer, sha, req)
+    assert status == "INVALID_EVIDENCE"
+    assert "producer is not authorized" in detail
+
+
+def test_fetch_external_evidence_end_to_end(tmp_path):
+    """Test fetch_external_release_evidence handling of valid, stale, wrong producer, and missing artifacts."""
+    from fetch_external_release_evidence import ingest_evidence, fetch_artifact_from_local
+    from release_evidence import get_head_sha
+    sha = get_head_sha()
+
+    req = {
+        "id": "soak-24h",
+        "accepted_evidence_classes": ["LONG_SOAK"],
+        "allowed_producers": [{"github_job": "soak-24h"}]
+    }
+
+    source_dir = tmp_path / "source"
+    output_dir = tmp_path / "output"
+    source_dir.mkdir()
+    output_dir.mkdir()
+
+    # 1. Exact SHA + valid producer is accepted
+    valid_data = {
+        "schema_version": 1,
+        "gate_id": "soak-24h",
+        "commit_sha": sha,
+        "evidence_class": "LONG_SOAK",
+        "status": "PASS",
+        "exit_code": 0,
+        "detail": "Certified",
+        "producer": {"github_job": "soak-24h"}
+    }
+    assert ingest_evidence("soak-24h", valid_data, sha, req, str(output_dir)) is True
+    assert (output_dir / "soak-24h.json").exists()
+
+    # 2. Stale SHA is rejected
+    stale_data = dict(valid_data, commit_sha="0123456789abcdef0123456789abcdef01234567")
+    assert ingest_evidence("soak-24h", stale_data, sha, req, str(output_dir)) is False
+
+    # 3. Wrong producer is rejected
+    wrong_prod = dict(valid_data, producer={"github_job": "wrong-job"})
+    assert ingest_evidence("soak-24h", wrong_prod, sha, req, str(output_dir)) is False
+
+    # 4. fetch_artifact_from_local finds by gate_id.json
+    (source_dir / "soak-24h.json").write_text(json.dumps(valid_data))
+    loaded = fetch_artifact_from_local(str(source_dir), "soak-24h", sha)
+    assert loaded is not None
+    assert loaded["gate_id"] == "soak-24h"
+
+
+def test_fetch_external_evidence_cli_missing_flag(tmp_path):
+    """Test fetch_external_release_evidence.py CLI fails on missing unless --allow-missing."""
+    fetch_script = os.path.join(ROOT_DIR, "scripts", "fetch_external_release_evidence.py")
+    empty_source = tmp_path / "empty_source"
+    empty_source.mkdir()
+    out_dir = tmp_path / "out"
+
+    # Default (fail on missing)
+    res_fail = subprocess.run(
+        [sys.executable, fetch_script, "--source-dir", str(empty_source), "--output-dir", str(out_dir)],
+        capture_output=True,
+        text=True,
+    )
+    assert res_fail.returncode != 0
+    assert "required artifact(s) missing" in res_fail.stderr
+
+    # With --allow-missing
+    res_allow = subprocess.run(
+        [sys.executable, fetch_script, "--source-dir", str(empty_source), "--output-dir", str(out_dir), "--allow-missing"],
+        capture_output=True,
+        text=True,
+    )
+    assert res_allow.returncode == 0
+
+
+def test_physical_and_soak_qualification_workflows():
+    """Verify definitions and structural contracts of physical and soak qualification workflows."""
+    workflows = [
+        ("zimaos-physical.yml", "zimaos-physical", "casaos-zimaos-real", "release-evidence-casaos-zimaos-real"),
+        ("rpi-physical.yml", "rpi-physical", "raspberry-pi-physical", "release-evidence-raspberry-pi-physical"),
+        ("soak-24h.yml", "soak-24h", "soak-24h", "release-evidence-soak-24h"),
+    ]
+
+    for fname, expected_job, expected_gate, expected_artifact in workflows:
+        wf_path = os.path.join(ROOT_DIR, ".github", "workflows", fname)
+        assert os.path.exists(wf_path), f"Workflow {fname} does not exist"
+        with open(wf_path, "r", encoding="utf-8") as f:
+            wf = yaml.safe_load(f)
+
+        assert expected_job in wf["jobs"], f"Job {expected_job} missing in {fname}"
+        job_def = wf["jobs"][expected_job]
+        steps = job_def.get("steps", [])
+
+        # Verify upload artifact step matches expected name prefix
+        upload_steps = [s for s in steps if "upload-artifact" in s.get("uses", "")]
+        assert len(upload_steps) >= 1, f"Missing upload-artifact in {fname}"
+        art_name = upload_steps[0].get("with", {}).get("name", "")
+        assert expected_artifact in art_name, f"Artifact name {art_name} does not match {expected_artifact}"
+
 

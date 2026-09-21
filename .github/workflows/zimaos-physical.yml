@@ -1,0 +1,63 @@
+name: Michi Micro Server ZimaOS Physical Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      zimaos_host:
+        description: "Target ZimaOS / CasaOS appliance host or IP"
+        required: false
+        default: "127.0.0.1"
+      zimaos_port:
+        description: "Target port for isolated physical qualification"
+        required: false
+        default: "9091"
+
+permissions:
+  contents: read
+
+jobs:
+  zimaos-physical:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pyyaml pytest requests
+
+      - name: Execute ZimaOS Physical Installation & Verifier
+        env:
+          ZIMAOS_HOST: ${{ github.event.inputs.zimaos_host || '127.0.0.1' }}
+          ZIMAOS_PORT: ${{ github.event.inputs.zimaos_port || '9091' }}
+        run: |
+          python3 scripts/verify_zimaos_install.py \
+            --dist-dir dist \
+            --server-url "http://${ZIMAOS_HOST}:${ZIMAOS_PORT}" \
+            --expected-platform zimaos \
+            --output-evidence target/release-evidence/casaos-zimaos-real.json
+
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate casaos-zimaos-real \
+            --class INTEGRATION_REAL \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/casaos-zimaos-real.json
+
+      - name: Upload ZimaOS physical evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-casaos-zimaos-real-${{ github.sha }}
+          path: target/release-evidence/casaos-zimaos-real.json
+          if-no-files-found: error
+          retention-days: 90

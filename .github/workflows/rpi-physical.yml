@@ -1,0 +1,60 @@
+name: Michi Micro Server Raspberry Pi Physical Qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rpi-physical:
+    runs-on:
+      - self-hosted
+      - linux
+      - arm64
+      - rpi
+
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config sqlite3
+
+      - name: Build and test natively on ARM64 hardware
+        run: |
+          cargo test --workspace --exclude michi-api
+          cargo build --release --bin michi-server
+
+      - name: Verify hardware platform identity
+        run: |
+          ARCH=$(uname -m)
+          if [ "$ARCH" != "aarch64" ] && [ "$ARCH" != "arm64" ]; then
+            echo "ERROR: Expected ARM64 architecture on Raspberry Pi, got $ARCH" >&2
+            exit 1
+          fi
+
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate raspberry-pi-physical \
+            --class PHYSICAL_HARDWARE \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/raspberry-pi-physical.json
+
+      - name: Upload Raspberry Pi physical evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-raspberry-pi-physical-${{ github.sha }}
+          path: target/release-evidence/raspberry-pi-physical.json
+          if-no-files-found: error
+          retention-days: 90

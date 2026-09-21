@@ -149,7 +149,12 @@
       "id": "casaos-zimaos-real",
       "description": "Instalación y actualización en runtime real de CasaOS/ZimaOS",
       "required_for": ["ga"],
-      "accepted_evidence_classes": ["INTEGRATION_REAL"]
+      "accepted_evidence_classes": ["INTEGRATION_REAL"],
+      "allowed_producers": [
+        {
+          "github_job": "zimaos-physical"
+        }
+      ]
     },
     {
       "id": "soak-24h",

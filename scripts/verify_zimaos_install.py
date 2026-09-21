@@ -92,8 +92,16 @@ def verify_local_dist(dist_dir, expected_image=None):
         errors.append(f"docker-compose.yml must set MICHI_DEPLOYMENT_PLATFORM=zimaos (got: {env_dict.get('MICHI_DEPLOYMENT_PLATFORM')})")
 
     actual_img = main_svc.get("image", "")
-    if expected_image and expected_image not in actual_img:
+    if not actual_img:
+        errors.append("docker-compose.yml must specify a non-empty image")
+    elif expected_image and expected_image not in actual_img:
         errors.append(f"docker-compose.yml image '{actual_img}' does not match expected '{expected_image}'")
+    elif not actual_img.startswith("ghcr.io/pitydah/michi-micro-server"):
+        errors.append(f"docker-compose.yml image '{actual_img}' is not from official repository")
+
+    auth_pass = env_dict.get("MICHI_AUTH_PASSWORD", "")
+    if ":?" not in auth_pass:
+        errors.append(f"docker-compose.yml MICHI_AUTH_PASSWORD must use fail-closed ':?' parameter expansion (got: {auth_pass})")
 
     if errors:
         for err in errors:
@@ -103,23 +111,98 @@ def verify_local_dist(dist_dir, expected_image=None):
     print("  ✓ Local store distribution structure, metadata, content hash, and compose verified.")
     return True, []
 
-def verify_remote_store(base_url):
+def verify_remote_store(base_url, expected_image=None):
     print(f"[2/4] Verifying remote distribution endpoints at {base_url}...")
     errors = []
     base = base_url.rstrip("/")
     store_url = f"{base}/dist/store.json"
     compose_url = f"{base}/dist/apps/io.michi.micro-server/docker-compose.yml"
 
-    for url in [store_url, compose_url]:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "michi-zima-verifier"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                if resp.status != 200:
-                    errors.append(f"Remote endpoint {url} returned HTTP status {resp.status}")
+    # 1. Fetch and validate store.json
+    store_data = None
+    try:
+        req = urllib.request.Request(store_url, headers={"User-Agent": "michi-zima-verifier"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status != 200:
+                errors.append(f"Remote endpoint {store_url} returned HTTP status {resp.status}")
+            else:
+                body = resp.read().decode("utf-8")
+                try:
+                    store_data = json.loads(body)
+                except Exception as e:
+                    errors.append(f"Remote store.json is malformed JSON: {e}")
+    except Exception as e:
+        errors.append(f"Failed to fetch {store_url}: {e}")
+
+    if store_data is not None:
+        if not isinstance(store_data, dict):
+            errors.append("Remote store.json payload is not a JSON object")
+        else:
+            if store_data.get("store_id") != "io.michi.store":
+                errors.append(f"Remote store.json store_id must be 'io.michi.store', got '{store_data.get('store_id')}'")
+            apps = store_data.get("apps", [])
+            michi_app = next((a for a in apps if isinstance(a, dict) and a.get("id") == "io.michi.micro-server"), None)
+            if not michi_app:
+                errors.append("Remote store.json missing app 'io.michi.micro-server'")
+            else:
+                print(f"  ✓ Remote store.json contains io.michi.micro-server (version {michi_app.get('version')})")
+
+    # 2. Fetch and validate docker-compose.yml
+    compose_data = None
+    try:
+        req = urllib.request.Request(compose_url, headers={"User-Agent": "michi-zima-verifier"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status != 200:
+                errors.append(f"Remote endpoint {compose_url} returned HTTP status {resp.status}")
+            else:
+                body = resp.read().decode("utf-8")
+                try:
+                    compose_data = yaml.safe_load(body)
+                except Exception as e:
+                    errors.append(f"Remote docker-compose.yml is malformed YAML: {e}")
+    except Exception as e:
+        errors.append(f"Failed to fetch {compose_url}: {e}")
+
+    if compose_data is not None:
+        if not isinstance(compose_data, dict):
+            errors.append("Remote docker-compose.yml payload is not a YAML mapping")
+        else:
+            services = compose_data.get("services", {})
+            svc = services.get("michi-micro-server") or services.get("michi-server") or services.get("michi")
+            if not svc:
+                errors.append("Remote docker-compose.yml missing 'michi-micro-server' service")
+            else:
+                img = svc.get("image", "")
+                if not img:
+                    errors.append("Remote docker-compose.yml service missing 'image'")
+                elif expected_image and expected_image not in img:
+                    errors.append(f"Remote docker-compose.yml image '{img}' does not match expected '{expected_image}'")
+                elif not img.startswith("ghcr.io/pitydah/michi-micro-server"):
+                    errors.append(f"Remote docker-compose.yml image '{img}' is not from official repository")
                 else:
-                    print(f"  ✓ Accessible: {url}")
-        except Exception as e:
-            errors.append(f"Failed to fetch {url}: {e}")
+                    print(f"  ✓ Remote docker-compose.yml image verified: {img}")
+
+                # Check environment
+                env = svc.get("environment", [])
+                env_dict = {}
+                if isinstance(env, dict):
+                    env_dict = env
+                elif isinstance(env, list):
+                    for item in env:
+                        if isinstance(item, str) and "=" in item:
+                            k, v = item.split("=", 1)
+                            env_dict[k.strip()] = v.strip()
+
+                if env_dict.get("MICHI_DEPLOYMENT_PLATFORM") != "zimaos":
+                    errors.append(f"Remote docker-compose.yml must set MICHI_DEPLOYMENT_PLATFORM=zimaos (got: {env_dict.get('MICHI_DEPLOYMENT_PLATFORM')})")
+                else:
+                    print("  ✓ Remote docker-compose.yml MICHI_DEPLOYMENT_PLATFORM=zimaos verified")
+
+                auth_pass = env_dict.get("MICHI_AUTH_PASSWORD", "")
+                if ":?" not in auth_pass:
+                    errors.append(f"Remote docker-compose.yml MICHI_AUTH_PASSWORD must use fail-closed ':?' parameter expansion (got: {auth_pass})")
+                else:
+                    print("  ✓ Remote docker-compose.yml fail-closed password expression verified")
 
     if errors:
         for err in errors:
@@ -129,10 +212,53 @@ def verify_remote_store(base_url):
     print("  ✓ Remote distribution endpoints verified.")
     return True, []
 
-def verify_running_server(server_url, expected_version=None, expected_commit=None, expected_platform=None):
+def login_and_get_token(server_url, username, password):
+    """Authenticate with Michi Micro Server via POST /api/auth/login and return bearer token."""
+    base = server_url.rstrip("/")
+    login_url = f"{base}/api/auth/login"
+    payload = json.dumps({"username": username, "password": password}).encode("utf-8")
+    req = urllib.request.Request(
+        login_url,
+        data=payload,
+        headers={"Content-Type": "application/json", "User-Agent": "michi-zima-verifier"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status != 200:
+                return None, f"Login returned HTTP status {resp.status}"
+            data = json.loads(resp.read().decode("utf-8"))
+            token = data.get("token")
+            if not token:
+                return None, "Login response missing 'token'"
+            return token, None
+    except urllib.error.HTTPError as e:
+        return None, f"Login HTTP error {e.code}: {e.reason}"
+    except Exception as e:
+        return None, f"Login request failed: {e}"
+
+def verify_running_server(
+    server_url,
+    expected_version=None,
+    expected_commit=None,
+    expected_platform=None,
+    token=None,
+    username=None,
+    password=None,
+):
     print(f"[3/4] Verifying running server at {server_url}...")
     errors = []
     base = server_url.rstrip("/")
+
+    # Resolve token if credentials provided
+    auth_token = token
+    if not auth_token and username and password:
+        tok, login_err = login_and_get_token(server_url, username, password)
+        if login_err:
+            errors.append(f"Authentication failed: {login_err}")
+        else:
+            auth_token = tok
+            print("  ✓ Authenticated via /api/auth/login successfully")
 
     # 1. Health check
     try:
@@ -160,9 +286,12 @@ def verify_running_server(server_url, expected_version=None, expected_commit=Non
         except Exception as e:
             errors.append(f"Failed to fetch {path}: {e}")
 
-    # 3. Check /api/v1/server/info
+    # 3. Check /api/v1/server/info (public runtime identity endpoint)
     try:
-        req = urllib.request.Request(f"{base}/api/v1/server/info", headers={"User-Agent": "michi-zima-verifier"})
+        headers = {"User-Agent": "michi-zima-verifier"}
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+        req = urllib.request.Request(f"{base}/api/v1/server/info", headers=headers)
         with urllib.request.urlopen(req, timeout=5) as resp:
             if resp.status != 200:
                 errors.append(f"/api/v1/server/info returned status {resp.status}")
@@ -195,9 +324,12 @@ def verify_running_server(server_url, expected_version=None, expected_commit=Non
     except Exception as e:
         errors.append(f"Failed to query /api/v1/server/info: {e}")
 
-    # 4. Check /api/v1/update/status
+    # 4. Check /api/v1/update/status (protected admin endpoint requiring auth when enabled)
     try:
-        req = urllib.request.Request(f"{base}/api/v1/update/status", headers={"User-Agent": "michi-zima-verifier"})
+        headers = {"User-Agent": "michi-zima-verifier"}
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+        req = urllib.request.Request(f"{base}/api/v1/update/status", headers=headers)
         with urllib.request.urlopen(req, timeout=5) as resp:
             if resp.status != 200:
                 errors.append(f"/api/v1/update/status returned status {resp.status}")
@@ -214,6 +346,11 @@ def verify_running_server(server_url, expected_version=None, expected_commit=Non
                     errors.append(f"/api/v1/update/status commit mismatch: expected '{expected_commit}', got '{commit}'")
                 elif expected_commit:
                     print(f"  ✓ /api/v1/update/status commit matched: {commit}")
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            errors.append("/api/v1/update/status returned 401 Unauthorized (requires valid --username/--password or --token)")
+        else:
+            errors.append(f"/api/v1/update/status returned HTTP status {e.code}")
     except Exception as e:
         errors.append(f"Failed to query /api/v1/update/status: {e}")
 
@@ -234,6 +371,9 @@ def main():
     parser.add_argument("--expected-version", default=None, help="Expected product version (e.g. 1.0.0-rc.2)")
     parser.add_argument("--expected-commit", default=None, help="Expected build commit SHA")
     parser.add_argument("--expected-platform", default=None, help="Expected deployment platform (e.g. zimaos)")
+    parser.add_argument("--username", default=None, help="Username for authenticating against protected server endpoints")
+    parser.add_argument("--password", default=None, help="Password for authenticating against protected server endpoints")
+    parser.add_argument("--token", default=None, help="Pre-authenticated Bearer token for protected server endpoints")
     parser.add_argument("--output-evidence", default=None, help="Path to write JSON evidence report")
     args = parser.parse_args()
 
@@ -249,7 +389,7 @@ def main():
     results["errors"].extend(local_errs)
 
     if args.remote_url:
-        remote_ok, remote_errs = verify_remote_store(args.remote_url)
+        remote_ok, remote_errs = verify_remote_store(args.remote_url, expected_image=args.expected_image)
         results["remote_endpoints_valid"] = remote_ok
         results["errors"].extend(remote_errs)
 
@@ -259,6 +399,9 @@ def main():
             expected_version=args.expected_version,
             expected_commit=args.expected_commit,
             expected_platform=args.expected_platform,
+            token=args.token,
+            username=args.username,
+            password=args.password,
         )
         results["running_server_valid"] = server_ok
         results["errors"].extend(server_errs)
