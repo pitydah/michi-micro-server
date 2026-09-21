@@ -139,7 +139,48 @@ def main():
         total_seconds = 30
 
     if args.evidence_class == "LONG_SOAK" and total_seconds < 24 * 3600:
-        parser.error("LONG_SOAK evidence requires >= 24 hours")
+        msg = f"INVALID_LONG_SOAK_DURATION: LONG_SOAK evidence requires >= 24 hours (requested: {total_seconds}s)"
+        print(f"ERROR: {msg}", file=sys.stderr)
+        report_path = os.path.abspath(args.report)
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        report_data = {
+            "schema_version": 2,
+            "gate_id": args.gate_id,
+            "commit_sha": get_head_sha(),
+            "evidence_class": args.evidence_class,
+            "status": "FAIL",
+            "detail": msg,
+            "requested_duration_seconds": total_seconds,
+            "warmup_duration_seconds": None,
+            "actual_elapsed_seconds": 0.0,
+            "observation_samples_count": 0,
+            "total_samples_collected": 0,
+            "initial_rss_mb": None,
+            "baseline_rss_mb": None,
+            "final_rss_mb": None,
+            "peak_rss_mb": None,
+            "total_rss_drift_mb": None,
+            "post_warmup_rss_drift_mb": None,
+            "rss_slope_mb_per_hour": None,
+            "initial_fds": None,
+            "baseline_fds": None,
+            "final_fds": None,
+            "peak_fds": None,
+            "fd_drift": None,
+            "initial_threads": None,
+            "baseline_threads": None,
+            "final_threads": None,
+            "thread_drift": None,
+            "peak_wal_bytes": None,
+            "child_processes": None,
+            "request_errors_count": 0,
+            "thresholds": {},
+            "violations": [msg],
+            "exit_code": 1
+        }
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report_data, f, indent=2)
+        sys.exit(1)
 
     # Determine sensible warm-up duration if not specified
     if args.warmup_seconds is not None:

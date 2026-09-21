@@ -266,3 +266,80 @@ def test_soak_emits_failure_artifact_on_invalid_pid(mock_server):
         if os.path.exists(report_file):
             os.remove(report_file)
 
+
+def test_soak_fails_closed_on_invalid_long_soak_duration():
+    """soak_test.py must emit a FAIL report artifact if LONG_SOAK duration < 24h."""
+    report_file = tempfile.mktemp(suffix=".json")
+    try:
+        res = subprocess.run(
+            [
+                sys.executable,
+                SOAK_SCRIPT,
+                "--pid", "1",
+                "--evidence-class", "LONG_SOAK",
+                "--duration-seconds", "100",  # < 86400s
+                "--report", report_file,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode != 0, "Expected non-zero exit for LONG_SOAK < 24h"
+        assert os.path.exists(report_file), "Expected failure report JSON artifact for invalid LONG_SOAK duration"
+
+        with open(report_file, "r") as f:
+            data = json.load(f)
+        assert data["status"] == "FAIL"
+        assert data["exit_code"] == 1
+        assert any("INVALID_LONG_SOAK_DURATION" in v for v in data["violations"])
+    finally:
+        if os.path.exists(report_file):
+            os.remove(report_file)
+
+
+def test_soak_passes_warmup_jump_followed_by_stability(mock_server):
+    """A large memory growth during warm-up followed by stability must PASS without false positive."""
+    script = """
+import time
+# Warm-up is 2.0 seconds. Allocate 30MB during first 1.0s (warmup jump)
+arrays = []
+for _ in range(10):
+    arrays.append(bytearray(3 * 1024 * 1024))
+    time.sleep(0.1)
+# Now settled and stable for remaining observation window
+time.sleep(10)
+"""
+    proc = subprocess.Popen([sys.executable, "-c", script])
+    report_file = tempfile.mktemp(suffix=".json")
+    try:
+        res = subprocess.run(
+            [
+                sys.executable,
+                SOAK_SCRIPT,
+                "--url", mock_server,
+                "--pid", str(proc.pid),
+                "--duration-seconds", "6",
+                "--warmup-seconds", "2.0",
+                "--sample-interval", "0.5",
+                "--max-rss-mb", "200.0",
+                "--max-post-warmup-drift-mb", "8.0",
+                "--max-rss-slope-mb-per-hour", "50.0",
+                "--report", report_file,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0, f"Expected PASS for warm-up jump followed by stability:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+
+        with open(report_file, "r") as f:
+            data = json.load(f)
+        assert data["status"] == "PASS"
+        assert len(data["violations"]) == 0
+        # Post-warmup growth should be negligible (< 3.0MB) even though total growth from t=0 was ~30MB
+        assert data["post_warmup_rss_drift_mb"] < 3.0
+        assert data["total_rss_drift_mb"] >= 20.0
+    finally:
+        proc.kill()
+        if os.path.exists(report_file):
+            os.remove(report_file)
+
+
