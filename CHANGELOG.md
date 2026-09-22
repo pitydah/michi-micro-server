@@ -4,8 +4,8 @@
 
 ### Added
 - **ZimaOS / CasaOS Store Delivery & Normalization**: Soporte y empaquetado determinista para ZimaOS App Store y CasaOS con metadatos normalizados y generación canónica en `dist/`.
-- **Dynamic Frontend Cache Busting & Build Identity**: Inyección de Git SHA y timestamp en assets Web UI (`/api/v1/system/info`, `/web/index.html`) para invalidación determinista de caché en navegador.
-- **Physical Hardware Qualification Pipeline**: Ingestión y verificación estricta de evidencia de hardware físico para Raspberry Pi (`qualify_rpi_runtime.py`) y ZimaOS appliance (`verify_zimaos_runtime.py`).
+- **Dynamic Frontend Cache Busting & Build Identity**: Versionado determinista de assets basado en la versión del paquete y hashes de contenido, junto con identidad inmutable del build Git expuesta mediante `/api/v1/server/info`.
+- **Physical Hardware Qualification Pipeline**: Ingestión y verificación estricta de evidencia de hardware físico para Raspberry Pi (`scripts/qualify_rpi_runtime.py`) y ZimaOS appliance (`scripts/verify_zimaos_install.py`).
 
 ### Changed
 - Actualización de versiones canónicas del workspace, manifiestos Docker y metadatos de despliegue a `1.0.0-rc.3`.
