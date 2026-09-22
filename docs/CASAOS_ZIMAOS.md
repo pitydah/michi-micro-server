@@ -1,72 +1,113 @@
-# CasaOS / ZimaOS Compatibility
+# Michi Micro Server on CasaOS & ZimaOS
 
-Michi Micro Server is designed to run as a Docker container, making it compatible with CasaOS and ZimaOS app stores.
+Michi Micro Server is packaged and optimized for edge appliances running CasaOS and ZimaOS. It runs as a low-overhead, native Docker service with host networking support for physical receiver discovery and local mDNS playback.
 
-## CasaOS Metadata
+---
 
-CasaOS metadata lives in `casaos/`:
+## 1. Storage & Volume Mapping
 
-| File | Purpose |
-|------|---------|
-| `docker-compose.casaos.yml` | CasaOS-compatible compose file with `${}` variables |
-| `data.yml` | App store listing metadata |
+Michi follows standard CasaOS/ZimaOS directory conventions:
 
-### Requirements for CasaOS App Store submission:
+| Host Path (Default) | Container Path | Purpose | Access |
+|---------------------|----------------|---------|--------|
+| `/DATA/AppData/michi/config` | `/config` | SQLite database (`michi.db`), server secrets, auth sessions | Read / Write |
+| `/DATA/AppData/michi/cache` | `/cache` | Audio transcode cache, artwork cache, temp sync storage | Read / Write |
+| `/DATA/Media/Music` | `/music` | Music library root | Read Only |
 
-1. Application icon (512x512 PNG) — TODO: create icon
-2. Application screenshots — TODO: capture UI screenshots
-3. Published Docker image on ghcr.io — TODO: set up CI/CD
+---
 
-### CasaOS Variables
+## 2. Installation Methods
 
-The compose file uses CasaOS template variables:
+### Method A: Custom App Store (Recommended)
 
-| Variable | Purpose |
-|----------|---------|
-| `${CONFIG_PATH}` | Persistent config storage |
-| `${CACHE_PATH}` | Cache directory |
-| `${MUSIC_PATH}` | Music library mount |
-| `${TZ}` | Timezone |
+In ZimaOS / CasaOS App Store settings, add the official Michi Micro Server store source:
 
-### Manual Installation on CasaOS
-
-```bash
-# SSH into your CasaOS device
-mkdir -p /DATA/AppData/michi-micro-server/{config,cache}
-mkdir -p /DATA/Music
-
-# Run with Docker
-docker run -d \
-  --name michi-micro-server \
-  -p 8096:8096 \
-  -v /DATA/AppData/michi-micro-server/config:/config \
-  -v /DATA/AppData/michi-micro-server/cache:/cache \
-  -v /DATA/Music:/music \
-  -e TZ=America/Santiago \
-  --restart unless-stopped \
-  pitydah/michi-micro-server:latest
+```text
+https://raw.githubusercontent.com/pitydah/michi-micro-server/main
 ```
 
-### Access
+ZimaOS automatically fetches the catalog (`dist/store.json` and `dist/index.json`) and presents **Michi Micro Server** in your local App Store.
 
-- **Local network**: `http://<CASAOS_IP>:8096`
-- **Tailscale** (recommended): `http://<TAILSCALE_HOST>:8096`
-- **Do not** expose port 8096 directly to the internet.
+### Method B: Custom Install via Compose
 
-## ZimaOS Compatibility
+In the CasaOS / ZimaOS dashboard, click **Install a customized app** (or **Custom Install**) and paste the canonical compose file from:
+[`zimaos-store/Apps/MichiMicroServer/docker-compose.yml`](../zimaos-store/Apps/MichiMicroServer/docker-compose.yml)
 
-ZimaOS is based on CasaOS, so the same Docker deployment method works.
+### Method C: Command Line (Docker Compose)
 
-## Multi-Architecture Support
+```bash
+# Create required directories
+mkdir -p /DATA/AppData/michi/{config,cache}
+mkdir -p /DATA/Media/Music
 
-Michi Micro Server is compiled for:
-- `linux/amd64` — Intel/AMD 64-bit
-- `linux/arm64` — ARM 64-bit (Raspberry Pi 3/4/5, Rockchip, Apple Silicon)
+# Launch container with host networking
+docker run -d \
+  --name michi-micro-server \
+  --network host \
+  -v /DATA/AppData/michi/config:/config \
+  -v /DATA/AppData/michi/cache:/cache \
+  -v /DATA/Media/Music:/music:ro \
+  -e TZ=UTC \
+  -e PUID=1000 \
+  -e PGID=1000 \
+  -e MICHI_PORT=9090 \
+  -e MICHI_DEPLOYMENT_PLATFORM=zimaos \
+  -e MICHI_AUTH_USERNAME=admin \
+  -e MICHI_AUTH_PASSWORD="YourStrongPasswordHere" \
+  --restart unless-stopped \
+  ghcr.io/pitydah/michi-micro-server:1.0.0-rc.2
+```
 
-## TODO (Pre-Submission)
+---
 
-- [ ] Create 512x512 PNG application icon
-- [ ] Capture Web UI screenshots
-- [ ] Publish Docker image to ghcr.io/pitydah/michi-micro-server
-- [ ] Add CI/CD workflow for multi-arch builds
-- [ ] Test on actual CasaOS/ZimaOS device
+## 3. Access & Networking
+
+- **Default Web UI & API Port**: `http://<APPLIANCE_IP>:9090`
+- **Tailscale**: `http://<TAILSCALE_DEVICE_NAME>:9090`
+- **Host Network Mode**: Michi Micro Server uses `network_mode: host` to allow automatic local mDNS discovery of Michi Stream Hi-Fi receivers and Snapcast audio clients without complex Docker port forwards.
+
+---
+
+## 4. Multi-Architecture Support
+
+Official container images are multi-architecture OCI indexes supporting:
+- `linux/amd64` (Intel & AMD x86_64, Zimaboard, Zimablade)
+- `linux/arm64` (Zimacube ARM, Raspberry Pi 4/5, Rockchip)
+
+Canonical image repository:
+```text
+ghcr.io/pitydah/michi-micro-server:<version>
+```
+
+---
+
+## 5. Diagnostics & Verification
+
+To verify that your appliance is running the correct version and platform environment:
+
+```bash
+# Check container status and platform environment variable
+docker inspect michi-micro-server --format '{{json .Config.Env}}' | jq .
+
+# Verify live health endpoint
+curl -fsS http://127.0.0.1:9090/health/live
+
+# Verify server identity and platform reporting
+curl -fsS http://127.0.0.1:9090/api/v1/settings | jq '{version, deployment_platform, commit}'
+```
+
+---
+
+## 6. Frontend Cache & Service Worker Troubleshooting
+
+Michi Micro Server uses a Progressive Web App (PWA) Service Worker with automatic cache-busting:
+- `index.html` and `/sw.js` are served with `Cache-Control: no-cache, no-store, must-revalidate`.
+- Static JavaScript and CSS bundles carry dynamic content hashes (`?v=<hash>`).
+- On server upgrade, the Service Worker calls `skipWaiting()` and `clients.claim()` to purge previous caches immediately.
+
+If you previously installed an older preview or RC and your browser continues to display an older UI:
+1. In your browser, perform a hard refresh:
+   - **Chrome / Firefox / Edge (Windows/Linux)**: `Ctrl + F5` or `Ctrl + Shift + R`
+   - **Safari (Mac)**: `Cmd + Option + R`
+2. Alternatively, open **Developer Tools** > **Application** > **Storage** > click **Clear site data**.
+3. Verify in **Settings > Overview** that the reported **Version** and **Platform** match your running server.

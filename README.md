@@ -1,7 +1,7 @@
 # Michi Micro Server
 
 [![CI](https://github.com/pitydah/michi-micro-server/actions/workflows/ci.yml/badge.svg)](https://github.com/pitydah/michi-micro-server/actions/workflows/ci.yml)
-[![v1.0.0-rc.2](https://img.shields.io/badge/version-1.0.0--rc.2-blue)](https://github.com/pitydah/michi-micro-server/releases)
+[![v1.0.0-rc.3](https://img.shields.io/badge/version-1.0.0--rc.3-blue)](https://github.com/pitydah/michi-micro-server/releases)
 
 > Lightweight, robust home music server written in Rust.
 

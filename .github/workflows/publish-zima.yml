@@ -87,46 +87,19 @@ jobs:
             exit 1
           fi
 
-          # Verify that all 15 required certification gates exist and completed with success
-          REQUIRED_GATES=(
-            "ci-rust"
-            "ci-stream-contract"
-            "ci-receiver-contract-simulator"
-            "ci-snapcast-contract-mock"
-            "ci-mqtt-contract-simulator"
-            "ci-mosquitto-real"
-            "ci-generic-linux-appliance"
-            "ci-reliability-short"
-            "ci-web-ui-functional-integrity"
-            "ci-web-ui-browser-e2e"
-            "ci-no-test-api-release"
-            "ci-three-way-ecosystem"
-            "ci-docker-amd64"
-            "ci-arm64-qemu"
-            "ci-zimaos-package"
-          )
-
+          # Verify that CI workflow concluded with overall success and ci-release-gate completed with success
           JOBS_JSON=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs?per_page=100" --jq '.jobs')
+          GATE_CONCLUSION=$(echo "${JOBS_JSON}" | jq -r '
+            [.[] | select(.name == "ci-release-gate")][0] | if . == null then "MISSING" else .conclusion end
+          ')
 
-          ERRORS=()
-          for GATE in "${REQUIRED_GATES[@]}"; do
-            CONCLUSION=$(echo "${JOBS_JSON}" | jq -r --arg name "$GATE" '
-              [.[] | select(.name == $name)][0] | if . == null then "MISSING" else .conclusion end
-            ')
-            if [ "$CONCLUSION" != "success" ]; then
-              ERRORS+=("${GATE}: ${CONCLUSION}")
-            fi
-          done
-
-          if [ ${#ERRORS[@]} -gt 0 ]; then
-            echo "ERROR: Not all required certification gates succeeded for run ${RUN_ID}:"
-            for ERR in "${ERRORS[@]}"; do
-              echo "  - ${ERR}"
-            done
+          if [ "${GATE_CONCLUSION}" != "success" ]; then
+            echo "ERROR: ci-release-gate has not completed successfully for CI run ${RUN_ID} (conclusion: ${GATE_CONCLUSION})."
+            echo "       ci-release-gate aggregates all canonical gates defined in release/gates.json."
             exit 1
           fi
 
-          echo "CI run ${RUN_ID} is 100% green across all 15 required gates for SHA ${SHA}. Proceeding with publish."
+          echo "CI run ${RUN_ID} is 100% green and certified by ci-release-gate for SHA ${SHA}. Proceeding with publish."
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -152,6 +125,8 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/pitydah/michi-micro-server
             org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+          build-args: |
+            MICHI_BUILD_COMMIT=${{ steps.source.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -168,9 +143,8 @@ jobs:
           set -euo pipefail
           DIGEST="${{ steps.build.outputs.digest }}"
           PINNED_IMAGE="ghcr.io/${{ github.repository }}@${DIGEST}"
-          echo "Pinning compose images in zimaos-store to: ${PINNED_IMAGE}"
-          sed -i -E "s|image: ghcr.io/pitydah/michi-micro-server:[^ ]+|image: ${PINNED_IMAGE}|g" zimaos-store/Apps/MichiMicroServer/docker-compose.yml
-          python3 scripts/build_zimaos_store.py
+          echo "Building store packages with pinned image: ${PINNED_IMAGE}"
+          python3 scripts/build_zimaos_store.py --pinned-image "${PINNED_IMAGE}"
 
       - name: Upload ZimaOS App Store package artifact
         uses: actions/upload-artifact@v4
@@ -203,8 +177,8 @@ jobs:
           echo "### ZimaOS Release Image & App Package Certification" >> $GITHUB_STEP_SUMMARY
           echo "- **Source SHA**: \`${{ steps.source.outputs.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Image Digest**: \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Pinned URI**: \`ghcr.io/pitydah/michi-micro-server@${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **App Package**: \`dist/apps/io.michi.micro-server/\` (ID: \`io.michi.micro-server\`, Version: \`1.0.0-rc.1\`)" >> $GITHUB_STEP_SUMMARY
+          VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          echo "- **App Package**: \`dist/apps/io.michi.micro-server/\` (ID: \`io.michi.micro-server\`, Version: \`${VERSION}\`)" >> $GITHUB_STEP_SUMMARY
           echo "Certified digest: ${{ steps.build.outputs.digest }}"
 
 

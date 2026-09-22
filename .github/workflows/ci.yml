@@ -251,6 +251,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config sqlite3
       - name: Run Appliance Qualification on Generic Linux Runner
         run: bash scripts/test_appliance_e2e.sh 9092
+      - name: Run Raspberry Pi runtime qualifier regression smoke
+        run: |
+          COMMIT_SHA="$(git rev-parse HEAD)"
+          VERSION="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")"
+          python3 scripts/qualify_rpi_runtime.py \
+            --binary target/release/michi-server \
+            --skip-model-check \
+            --port 9097 \
+            --expected-version "$VERSION" \
+            --expected-commit "$COMMIT_SHA" \
+            --output-evidence target/test-rpi-qualifier-regression.json
       - name: Record release evidence
         if: always()
         run: |
@@ -323,7 +334,7 @@ jobs:
           set -euo pipefail
           ROOT="${RUNNER_TEMP}/michi-short-soak"
           rm -rf "$ROOT"
-          mkdir -p "$ROOT/config" "$ROOT/cache" "$ROOT/music"
+          mkdir -p "$ROOT/config" "$ROOT/cache" "$ROOT/music" target/release-evidence
 
           export MICHI_PORT=9101
           export MICHI_CONFIG_PATH="$ROOT/config"
@@ -362,12 +373,53 @@ jobs:
             --gate-id short-stability-smoke \
             --evidence-class INTEGRATION_REAL \
             --report target/release-evidence/short-stability-smoke.json
+      - name: Ensure short stability evidence fallback exists on unexpected failure
+        if: failure()
+        run: |
+          if [ ! -f target/release-evidence/short-stability-smoke.json ]; then
+            python3 scripts/record_job_evidence.py \
+              --gate short-stability-smoke \
+              --class INTEGRATION_REAL \
+              --job-status failure \
+              --output target/release-evidence/short-stability-smoke.json
+          fi
       - name: Upload short stability evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: release-evidence-short-stability-smoke
           path: target/release-evidence/short-stability-smoke.json
+          if-no-files-found: error
+          retention-days: 30
+
+  ci-soak-stability-contract:
+    runs-on: ubuntu-latest
+    needs: ci-rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install pytest
+      - name: Run Soak Stability Gate Unit/Regression Tests
+        run: pytest tests/e2e/test_soak_stability_gate.py -v
+      - name: Record release evidence
+        if: always()
+        run: |
+          python3 scripts/record_job_evidence.py \
+            --gate soak-stability-contract \
+            --class UNIT \
+            --job-status "${{ job.status }}" \
+            --output target/release-evidence/soak-stability-contract.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-soak-stability-contract
+          path: target/release-evidence/soak-stability-contract.json
           if-no-files-found: error
           retention-days: 30
 
@@ -740,6 +792,8 @@ jobs:
           push: false
           load: true
           tags: michi-server:test
+          build-args: |
+            MICHI_BUILD_COMMIT=${{ github.sha }}
       - name: Smoke test and Player Contract verification
         run: |
           set -euo pipefail
@@ -820,6 +874,8 @@ jobs:
           push: false
           load: true
           tags: michi-server:arm64
+          build-args: |
+            MICHI_BUILD_COMMIT=${{ github.sha }}
       - name: Verify ARM64 runtime and Player Contract under QEMU
         run: |
           set -euo pipefail
@@ -910,7 +966,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: pip install -r requirements-zima.txt
+        run: pip install -r requirements-zima.txt pytest
       - name: Validate and build ZimaOS App Store Package
         run: python3 scripts/build_zimaos_store.py
       - name: Assert ZimaOS store distribution integrity
@@ -948,6 +1004,13 @@ jobs:
           assert store_v2["apps"][0]["id"] == "io.michi.micro-server"
           assert store_v2["apps"][0]["version"] == expected_version
           PY
+      - name: Verify ZimaOS Package Delivery & Checked-in Consistency
+        run: |
+          python3 scripts/verify_zimaos_install.py
+          git diff --exit-code dist/
+
+      - name: Run ZimaOS Verifier Regression Tests
+        run: pytest tests/e2e/test_zimaos_verifier.py -v
 
       - name: Record release evidence
         if: always()
@@ -1049,6 +1112,7 @@ jobs:
       - ci-mosquitto-real
       - ci-generic-linux-appliance
       - ci-reliability-short
+      - ci-soak-stability-contract
       - ci-short-stability-smoke
       - ci-resource-budget
       - ci-web-ui-functional-integrity
@@ -1113,6 +1177,15 @@ jobs:
             echo "mode=rc" >> "$GITHUB_OUTPUT"
             echo "Mode: RC qualification"
           fi
+      - name: Fetch External Release Evidence (GA qualification)
+        if: steps.mode.outputs.mode == 'ga'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/fetch_external_release_evidence.py \
+            --token "${GH_TOKEN}" \
+            --commit-sha "${GITHUB_SHA}" \
+            --output-dir target/release-evidence
       - name: Assert Evidence-Based Release Gates
         run: |
           python3 scripts/generate_release_gate.py \
@@ -1120,6 +1193,11 @@ jobs:
             --evidence-dir target/release-evidence \
             --report target/V1_RELEASE_GATE.md \
             --check
+      - name: Assert No Upstream Job Failures
+        if: always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+        run: |
+          echo "FAIL: One or more upstream jobs failed or were cancelled."
+          exit 1
       - name: Publish calculated release report
         if: always()
         uses: actions/upload-artifact@v4
@@ -1173,6 +1251,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            MICHI_BUILD_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

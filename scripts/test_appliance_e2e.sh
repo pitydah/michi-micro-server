@@ -53,10 +53,10 @@ sqlite3 "${CONFIG_DIR}/michi.db" < "$HISTORICAL_FIXTURE"
 echo "Historical database prepared with authentic v0.2.0 schema (tracks, playlists, history, users)."
 
 # 3. Locate / Build Binary
-TARGET_BIN="${PROJECT_ROOT}/target/debug/michi-server"
+TARGET_BIN="${PROJECT_ROOT}/target/release/michi-server"
 if [ ! -f "$TARGET_BIN" ]; then
-    echo "Building michi-server..."
-    cargo build --bin michi-server
+    echo "Building michi-server (release)..."
+    MICHI_BUILD_COMMIT="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo '')}" cargo build --release --bin michi-server
 fi
 
 # 4. Start Michi Server with Historical Database

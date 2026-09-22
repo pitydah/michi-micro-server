@@ -10,6 +10,8 @@ pub struct V1ServerInfo {
     pub name: String,
     pub server_id: Uuid,
     pub version: String,
+    pub deployment_platform: String,
+    pub commit: Option<String>,
     pub api_version: String,
     pub roles: Vec<String>,
     pub features: V1Features,
@@ -49,6 +51,8 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
         name: "Michi Micro Server".into(),
         server_id: state.server_id(),
         version: state.config.version().to_string(),
+        deployment_platform: state.config.deployment_platform.clone(),
+        commit: crate::assets::build_commit(),
         api_version: "v1".into(),
         roles: michi_link::CANONICAL_MICRO_ROLES
             .iter()

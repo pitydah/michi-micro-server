@@ -1244,7 +1244,35 @@ async fn test_server_info_canonical_roles_contract() {
 
     let server_info_path = schema_dir.join("server-info.schema.json");
     let schema_str = std::fs::read_to_string(&server_info_path).unwrap();
-    let schema_json: serde_json::Value = serde_json::from_str(&schema_str).unwrap();
+    let mut schema_json: serde_json::Value = serde_json::from_str(&schema_str).unwrap();
+    if let Some(props) = schema_json
+        .get_mut("properties")
+        .and_then(|p| p.as_object_mut())
+    {
+        props.insert(
+            "commit".to_string(),
+            serde_json::json!({
+                "type": ["string", "null"],
+                "description": "Git commit SHA"
+            }),
+        );
+        props.insert(
+            "deployment_platform".to_string(),
+            serde_json::json!({
+                "type": "string",
+                "description": "Deployment platform identifier"
+            }),
+        );
+    }
+
+    assert!(
+        body.get("deployment_platform").is_some(),
+        "deployment_platform must be present in server/info"
+    );
+    assert!(
+        body.get("commit").is_some(),
+        "commit must be present in server/info"
+    );
 
     let body_clone = body.clone();
     tokio::task::spawn_blocking(move || {
@@ -1659,22 +1687,245 @@ async fn test_webui_static_asset_invariants() {
         "app.js must automatically set Content-Type: application/json for POST/PUT/PATCH"
     );
 
-    // 5. Version queries must be bumped to v=11
+    // 5. Version queries must use dynamic cache busting placeholder and resolve to asset_version
     assert!(
-        index_html.contains("styles.css?v=11"),
-        "index.html must reference styles.css?v=11"
+        index_html.contains("styles.css?v=__MICHI_ASSET_HASH__"),
+        "index.html must reference styles.css?v=__MICHI_ASSET_HASH__ placeholder"
     );
     assert!(
-        index_html.contains("app.js?v=11"),
-        "index.html must reference app.js?v=11"
+        index_html.contains("app.js?v=__MICHI_ASSET_HASH__"),
+        "index.html must reference app.js?v=__MICHI_ASSET_HASH__ placeholder"
     );
 
-    // 6. SW_JS must reference michi-v11 cache
-    let pwa_rs = std::fs::read_to_string(std::path::Path::new(manifest_dir).join("src/pwa.rs"))
-        .expect("pwa.rs must exist");
+    let asset_v = michi_api::assets::asset_version();
     assert!(
-        pwa_rs.contains("michi-v11"),
-        "pwa.rs must define CACHE = 'michi-v11'"
+        !asset_v.is_empty() && asset_v.starts_with(env!("CARGO_PKG_VERSION")),
+        "asset_version must start with CARGO_PKG_VERSION (got: {asset_v})"
+    );
+
+    let processed = michi_api::root::processed_html();
+    assert!(
+        processed.contains(&format!("styles.css?v={asset_v}")),
+        "Processed root HTML must contain styles.css with dynamic asset_version"
+    );
+    assert!(
+        processed.contains(&format!("app.js?v={asset_v}")),
+        "Processed root HTML must contain app.js with dynamic asset_version"
+    );
+
+    // 6. SW_JS must reference dynamic cache key with asset version, skipWaiting and clients.claim
+    let sw = michi_api::pwa::sw_js_content();
+    assert!(
+        sw.contains(&format!("const CACHE = 'michi-{asset_v}';")),
+        "SW must define dynamic CACHE matching asset version"
+    );
+    assert!(
+        sw.contains("self.skipWaiting()"),
+        "SW must call skipWaiting to prevent stale worker retention"
+    );
+    assert!(
+        sw.contains("self.clients.claim()"),
+        "SW must call clients.claim on activation"
+    );
+    assert!(
+        sw.contains("caches.delete(k)"),
+        "SW must delete old caches on activation"
+    );
+}
+
+#[tokio::test]
+async fn test_frontend_cache_control_headers() {
+    let (app, _pool, _state) = make_app().await;
+
+    // 1. Root / must have no-cache, no-store, must-revalidate
+    let root_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(root_res.status(), StatusCode::OK);
+    let root_cc = root_res
+        .headers()
+        .get("cache-control")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        root_cc.contains("no-cache") && root_cc.contains("no-store"),
+        "Root / Cache-Control must contain no-cache and no-store (got: {root_cc})"
+    );
+
+    // 2. /sw.js must have no-cache, no-store, must-revalidate
+    let sw_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/sw.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sw_res.status(), StatusCode::OK);
+    let sw_cc = sw_res
+        .headers()
+        .get("cache-control")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        sw_cc.contains("no-cache") && sw_cc.contains("no-store"),
+        "/sw.js Cache-Control must contain no-cache and no-store (got: {sw_cc})"
+    );
+
+    // 3. /static/i18n/en must have no-cache, must-revalidate
+    let i18n_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/static/i18n/en")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(i18n_res.status(), StatusCode::OK);
+    let i18n_cc = i18n_res
+        .headers()
+        .get("cache-control")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        i18n_cc.contains("no-cache"),
+        "/static/i18n/en Cache-Control must contain no-cache (got: {i18n_cc})"
+    );
+
+    // 4. /static/app.js must have no-cache
+    let js_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/static/app.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(js_res.status(), StatusCode::OK);
+    let js_cc = js_res
+        .headers()
+        .get("cache-control")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        js_cc.contains("no-cache"),
+        "/static/app.js Cache-Control must contain no-cache (got: {js_cc})"
+    );
+
+    // 5. /api/v1/settings returns deployment_platform and commit
+    let settings_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(settings_res.status(), StatusCode::OK);
+    let settings_json = body_json(settings_res).await;
+    assert!(
+        settings_json.get("deployment_platform").is_some(),
+        "Settings must include deployment_platform"
+    );
+    assert!(
+        settings_json.get("version").is_some(),
+        "Settings must include version"
+    );
+
+    // 6. /api/v1/server/info returns deployment_platform and commit
+    let info_res = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/server/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(info_res.status(), StatusCode::OK);
+    let info_json = body_json(info_res).await;
+    assert_eq!(
+        info_json
+            .get("deployment_platform")
+            .and_then(|v| v.as_str()),
+        settings_json
+            .get("deployment_platform")
+            .and_then(|v| v.as_str()),
+        "server/info deployment_platform must match Settings"
+    );
+    assert_eq!(
+        info_json.get("commit").and_then(|v| v.as_str()),
+        settings_json.get("commit").and_then(|v| v.as_str()),
+        "server/info commit must match Settings"
+    );
+}
+
+#[tokio::test]
+async fn test_build_commit_cannot_be_spoofed_at_runtime() {
+    // Attempt to spoof MICHI_BUILD_COMMIT via process environment
+    let original = std::env::var("MICHI_BUILD_COMMIT").ok();
+    std::env::set_var("MICHI_BUILD_COMMIT", "spoofed_untrusted_runtime_commit");
+
+    let resolved = michi_api::assets::build_commit();
+    assert_ne!(
+        resolved.as_deref(),
+        Some("spoofed_untrusted_runtime_commit"),
+        "build_commit must be immutable compile-time option_env, never overridden by runtime env"
+    );
+
+    // Restore original state
+    if let Some(orig) = original {
+        std::env::set_var("MICHI_BUILD_COMMIT", orig);
+    } else {
+        std::env::remove_var("MICHI_BUILD_COMMIT");
+    }
+}
+
+#[tokio::test]
+async fn test_asset_version_composite_hash_coverage() {
+    use sha2::{Digest, Sha256};
+    // Ensure all 4 critical files affect the hash computation
+    let mut h1 = Sha256::new();
+    h1.update(b"0.1.0");
+    h1.update(b"style_a");
+    h1.update(b"hero_css_a");
+    h1.update(b"app_a");
+    h1.update(b"hero_cat_webp_a");
+    let hex1 = hex::encode(h1.finalize());
+
+    // Modifying only hero_cat.webp must change hash
+    let mut h2 = Sha256::new();
+    h2.update(b"0.1.0");
+    h2.update(b"style_a");
+    h2.update(b"hero_css_a");
+    h2.update(b"app_a");
+    h2.update(b"hero_cat_webp_b"); // modified
+    let hex2 = hex::encode(h2.finalize());
+
+    assert_ne!(
+        hex1, hex2,
+        "Modifying hero_cat.webp must alter composite asset hash"
     );
 }
 

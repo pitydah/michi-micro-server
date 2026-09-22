@@ -57,6 +57,12 @@
       "accepted_evidence_classes": ["INTEGRATION_REAL"]
     },
     {
+      "id": "soak-stability-contract",
+      "description": "Validación contractual y falsación adversarial del monitor de estabilidad y detección de fugas",
+      "required_for": ["rc", "ga"],
+      "accepted_evidence_classes": ["UNIT"]
+    },
+    {
       "id": "short-stability-smoke",
       "description": "Monitor de telemetría de estabilidad y detección de fugas (RSS, FDs, WAL)",
       "required_for": ["rc", "ga"],
@@ -141,9 +147,14 @@
     },
     {
       "id": "casaos-zimaos-real",
-      "description": "Instalación y actualización en runtime real de CasaOS/ZimaOS",
+      "description": "Cualificación en runtime real de appliance CasaOS/ZimaOS (instalación, arranque y verificación funcional)",
       "required_for": ["ga"],
-      "accepted_evidence_classes": ["INTEGRATION_REAL"]
+      "accepted_evidence_classes": ["INTEGRATION_REAL"],
+      "allowed_producers": [
+        {
+          "github_job": "zimaos-physical"
+        }
+      ]
     },
     {
       "id": "soak-24h",

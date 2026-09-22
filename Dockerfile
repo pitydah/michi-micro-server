@@ -51,6 +51,9 @@ COPY apps ./apps
 COPY crates ./crates
 COPY vendor ./vendor
 
+ARG MICHI_BUILD_COMMIT=""
+ENV MICHI_BUILD_COMMIT=${MICHI_BUILD_COMMIT}
+
 RUN find apps crates vendor -type f \( \
       -name '*.rs' -o -name '*.html' -o -name '*.css' -o -name '*.js' -o \
       -name '*.json' -o -name '*.svg' -o -name '*.png' -o -name '*.webp' \

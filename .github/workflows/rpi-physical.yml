@@ -1,0 +1,84 @@
+name: Michi Micro Server Raspberry Pi Physical Qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rpi-physical:
+    runs-on:
+      - self-hosted
+      - linux
+      - arm64
+      - rpi
+
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config sqlite3
+
+      - name: Build and test natively on ARM64 hardware
+        run: |
+          cargo test --workspace --exclude michi-api
+          MICHI_BUILD_COMMIT="${{ github.sha }}" cargo build --release --bin michi-server
+
+      - name: Verify hardware platform identity and qualify runtime
+        run: |
+          ARCH=$(uname -m)
+          if [ "$ARCH" != "aarch64" ] && [ "$ARCH" != "arm64" ]; then
+            echo "ERROR: Expected ARM64 architecture on Raspberry Pi, got $ARCH" >&2
+            exit 1
+          fi
+
+          if [ ! -f /proc/device-tree/model ]; then
+            echo "ERROR: /proc/device-tree/model not found. Hardware must be a physical Raspberry Pi." >&2
+            exit 1
+          fi
+
+          MODEL=$(tr -d '\0' < /proc/device-tree/model)
+          case "$MODEL" in
+            *"Raspberry Pi 4"*|*"Raspberry Pi 5"*)
+              echo "✓ Physical board model verified: $MODEL"
+              ;;
+            *)
+              echo "ERROR: Not an accepted physical Raspberry Pi model: '$MODEL'" >&2
+              exit 1
+              ;;
+          esac
+
+          EXPECTED_VERSION="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")"
+          python3 scripts/qualify_rpi_runtime.py \
+            --binary target/release/michi-server \
+            --expected-version "${EXPECTED_VERSION}" \
+            --expected-commit "${{ github.sha }}" \
+            --output-evidence target/release-evidence/raspberry-pi-physical.json
+
+      - name: Attach provenance to Raspberry Pi physical evidence
+        if: always()
+        run: |
+          python3 scripts/attach_evidence_provenance.py \
+            --gate raspberry-pi-physical \
+            --class PHYSICAL_HARDWARE \
+            --job-status "${{ job.status }}" \
+            --producer-job rpi-physical \
+            --file target/release-evidence/raspberry-pi-physical.json
+
+      - name: Upload Raspberry Pi physical evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-raspberry-pi-physical-${{ github.sha }}
+          path: target/release-evidence/raspberry-pi-physical.json
+          if-no-files-found: error
+          retention-days: 90

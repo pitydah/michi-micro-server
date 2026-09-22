@@ -60,7 +60,6 @@ htmlcov/
 .impeccable/
 
 # Build & distribution
-dist/
 
 # Python
 __pycache__/

@@ -72,7 +72,7 @@ def main():
     parser = argparse.ArgumentParser(description="Resource Budget Qualification")
     parser.add_argument("--port", type=int, default=9099)
     parser.add_argument("--report", default=os.path.join(ROOT_DIR, "target", "release-evidence", "resource-budget.json"))
-    parser.add_argument("--update-doc", action="store_true", default=True)
+    parser.add_argument("--update-doc", action="store_true", default=False, help="Explicitly update docs/RESOURCE_BUDGET.md table (default: False)")
     args = parser.parse_args()
 
     sha = get_head_sha()

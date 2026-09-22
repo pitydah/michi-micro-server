@@ -1,0 +1,108 @@
+name: Michi Micro Server ZimaOS Physical Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      zimaos_host:
+        description: "Target ZimaOS / CasaOS appliance host or IP"
+        required: false
+        default: "127.0.0.1"
+      zimaos_port:
+        description: "Target port for isolated physical qualification"
+        required: false
+        default: "9091"
+
+permissions:
+  contents: read
+
+jobs:
+  zimaos-physical:
+    runs-on:
+      - self-hosted
+      - linux
+      - zimaos-qualification
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pyyaml pytest requests
+
+      - name: Guard — Validate appliance endpoint and authentication secrets
+        env:
+          ZIMAOS_HOST: ${{ github.event.inputs.zimaos_host }}
+          MICHI_ZIMAOS_USERNAME: ${{ secrets.ZIMAOS_ADMIN_USERNAME }}
+          MICHI_ZIMAOS_PASSWORD: ${{ secrets.ZIMAOS_ADMIN_PASSWORD }}
+          MICHI_ZIMAOS_TOKEN: ${{ secrets.ZIMAOS_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          HOST="${ZIMAOS_HOST:-127.0.0.1}"
+          if [ "$HOST" = "127.0.0.1" ] || [ "$HOST" = "localhost" ]; then
+            if [ -z "${ALLOW_LOCALHOST_QUALIFICATION:-}" ]; then
+              echo "ERROR: Target appliance host cannot be localhost (127.0.0.1) when qualifying external physical hardware." >&2
+              echo "       Specify the physical IP or hostname, or set ALLOW_LOCALHOST_QUALIFICATION=1 on isolated local appliance." >&2
+              exit 1
+            fi
+          fi
+
+          if [ -z "${MICHI_ZIMAOS_TOKEN:-}" ] && ([ -z "${MICHI_ZIMAOS_USERNAME:-}" ] || [ -z "${MICHI_ZIMAOS_PASSWORD:-}" ]); then
+            echo "ERROR: Missing physical authentication credentials." >&2
+            echo "       Either ZIMAOS_ADMIN_TOKEN or both ZIMAOS_ADMIN_USERNAME and ZIMAOS_ADMIN_PASSWORD secrets must be configured." >&2
+            echo "       Fail closed: unauthenticated physical qualification is prohibited." >&2
+            exit 1
+          fi
+
+      - name: Execute ZimaOS Physical Installation & Verifier
+        env:
+          ZIMAOS_HOST: ${{ github.event.inputs.zimaos_host || '127.0.0.1' }}
+          ZIMAOS_PORT: ${{ github.event.inputs.zimaos_port || '9091' }}
+          MICHI_ZIMAOS_USERNAME: ${{ secrets.ZIMAOS_ADMIN_USERNAME }}
+          MICHI_ZIMAOS_PASSWORD: ${{ secrets.ZIMAOS_ADMIN_PASSWORD }}
+          MICHI_ZIMAOS_TOKEN: ${{ secrets.ZIMAOS_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          EXPECTED_SHA="${GITHUB_SHA}"
+          EXPECTED_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")
+
+          AUTH_ARGS=()
+          if [ -n "${MICHI_ZIMAOS_TOKEN:-}" ]; then
+            AUTH_ARGS+=(--token "${MICHI_ZIMAOS_TOKEN}")
+          elif [ -n "${MICHI_ZIMAOS_USERNAME:-}" ] && [ -n "${MICHI_ZIMAOS_PASSWORD:-}" ]; then
+            AUTH_ARGS+=(--username "${MICHI_ZIMAOS_USERNAME}" --password "${MICHI_ZIMAOS_PASSWORD}")
+          fi
+
+          python3 scripts/verify_zimaos_install.py \
+            --dist-dir dist \
+            --server-url "http://${ZIMAOS_HOST}:${ZIMAOS_PORT}" \
+            --expected-platform zimaos \
+            --expected-commit "${EXPECTED_SHA}" \
+            --expected-version "${EXPECTED_VERSION}" \
+            "${AUTH_ARGS[@]}" \
+            --output-evidence target/release-evidence/casaos-zimaos-real.json
+
+      - name: Attach provenance to ZimaOS physical evidence
+        if: always()
+        run: |
+          python3 scripts/attach_evidence_provenance.py \
+            --gate casaos-zimaos-real \
+            --class INTEGRATION_REAL \
+            --job-status "${{ job.status }}" \
+            --producer-job zimaos-physical \
+            --file target/release-evidence/casaos-zimaos-real.json
+
+      - name: Upload ZimaOS physical evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-casaos-zimaos-real-${{ github.sha }}
+          path: target/release-evidence/casaos-zimaos-real.json
+          if-no-files-found: error
+          retention-days: 90

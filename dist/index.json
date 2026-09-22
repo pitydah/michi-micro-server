@@ -1,0 +1,36 @@
+{
+  "version": "3.1",
+  "name": "Michi Official App Store",
+  "apps": [
+    {
+      "id": "io.michi.micro-server",
+      "title": {
+        "en_US": "Michi Micro Server",
+        "es_ES": "Servidor Michi Micro"
+      },
+      "tagline": {
+        "en_US": "High-fidelity personal music streaming appliance for ZimaOS.",
+        "es_ES": "Servidor de música personal de alta fidelidad para ZimaOS."
+      },
+      "description": {
+        "en_US": "Lightweight, robust home music server. Stream your local music library over your home network, Tailscale, or CasaOS/ZimaOS with physical Michi Stream receiver support.",
+        "es_ES": "Servidor de música doméstico robusto y ligero. Transmite tu biblioteca de música local a través de tu red doméstica, Tailscale o CasaOS/ZimaOS con soporte para receptores Michi Stream."
+      },
+      "author": "pitydah",
+      "developer": "pitydah",
+      "category": "Media",
+      "icon": "apps/io.michi.micro-server/assets/icon.svg",
+      "thumbnail": "apps/io.michi.micro-server/assets/thumbnail.png",
+      "port_map": "${WEBUI_PORT:-9090}",
+      "scheme": "http",
+      "index": "/",
+      "version": "1.0.0-rc.3",
+      "content_hash": "ee595177c2b710f916c97bce0ee03696d53f94da1e311610bf16c3eb75f75b3d",
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "main_service": "michi-micro-server"
+    }
+  ]
+}
