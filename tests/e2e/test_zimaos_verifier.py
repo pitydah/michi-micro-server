@@ -10,10 +10,14 @@ import subprocess
 import sys
 import json
 import hashlib
+import tomllib
 import pytest
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SCRIPT_PATH = os.path.join(ROOT_DIR, "scripts", "verify_zimaos_install.py")
+
+with open(os.path.join(ROOT_DIR, "Cargo.toml"), "rb") as f:
+    PRODUCT_VERSION = tomllib.load(f)["workspace"]["package"]["version"]
 
 
 def test_local_dist_verification_succeeds():
@@ -48,7 +52,7 @@ def test_verify_with_mock_server():
     import threading
 
     server_data = {
-        "version": "1.0.0-rc.2",
+        "version": PRODUCT_VERSION,
         "commit": "abcd1234abcd",
         "deployment_platform": "zimaos"
     }
@@ -108,7 +112,7 @@ def test_verify_with_mock_server():
                 sys.executable,
                 SCRIPT_PATH,
                 "--server-url", server_url,
-                "--expected-version", "1.0.0-rc.2",
+                "--expected-version", PRODUCT_VERSION,
                 "--expected-commit", "abcd1234abcd",
                 "--expected-platform", "zimaos",
             ],
@@ -201,7 +205,7 @@ def test_verify_remote_store_adversarial_suite():
         "apps": [
             {
                 "id": "io.michi.micro-server",
-                "version": "1.0.0-rc.2",
+                "version": PRODUCT_VERSION,
             }
         ]
     }
@@ -226,7 +230,7 @@ services:
         return h.hexdigest()
 
     default_meta = {
-        "version": "1.0.0-rc.2",
+        "version": PRODUCT_VERSION,
         "content_hash": calc_hash(default_compose.strip().encode(), default_icon, default_thumb)
     }
 
@@ -442,7 +446,7 @@ def test_verify_running_server_auth_suite():
                 self.wfile.write(json.dumps({
                     "service": "michi-micro-server",
                     "api_version": "v1",
-                    "version": "1.0.0-rc.2",
+                    "version": PRODUCT_VERSION,
                     "commit": "abcd1234abcd",
                     "deployment_platform": "zimaos"
                 }).encode())
@@ -490,7 +494,7 @@ def test_verify_running_server_auth_suite():
                 "--server-url", server_url,
                 "--username", "admin",
                 "--password", "secret123",
-                "--expected-version", "1.0.0-rc.2",
+                "--expected-version", PRODUCT_VERSION,
                 "--expected-commit", "abcd1234abcd",
                 "--expected-platform", "zimaos",
             ],

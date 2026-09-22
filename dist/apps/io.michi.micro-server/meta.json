@@ -20,8 +20,8 @@
   "port_map": "${WEBUI_PORT:-9090}",
   "scheme": "http",
   "index": "/",
-  "version": "1.0.0-rc.2",
-  "content_hash": "db6876605a2504bc31c4b86b3921b50995338f5c954448f30c61ccee3ada0f8d",
+  "version": "1.0.0-rc.3",
+  "content_hash": "ee595177c2b710f916c97bce0ee03696d53f94da1e311610bf16c3eb75f75b3d",
   "architectures": [
     "amd64",
     "arm64"

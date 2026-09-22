@@ -1,7 +1,7 @@
 name: michi-micro-server
 services:
   michi-micro-server:
-    image: ghcr.io/pitydah/michi-micro-server:1.0.0-rc.2
+    image: ghcr.io/pitydah/michi-micro-server:1.0.0-rc.3
     container_name: michi-micro-server
     network_mode: host
     volumes:
@@ -59,4 +59,4 @@ x-casaos:
   index: /
   port_map: "${WEBUI_PORT:-9090}"
   scheme: http
-  version: "1.0.0-rc.2"
+  version: "1.0.0-rc.3"

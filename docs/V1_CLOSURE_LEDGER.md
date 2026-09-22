@@ -3,7 +3,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 
 **Status:** FEATURE FREEZE ACTIVE  
-**Target:** v1.0.0 (RC.2 released, RC.3 closure in progress)  
+**Target:** v1.0.0 (RC.2 released, RC.3 candidate prepared for merge and physical qualification)  
 **Baseline SHA:** `d3a48360782bbbacb3714434a024e60e362071f8`  
 **Governing Rule:** No scope expansion; only closure, truth convergence, evidence collection, and release engineering.
 
@@ -38,7 +38,7 @@
 | **P0-02** | P0 | Docs | Eliminar ledger manual duplicado y obsoleto | Sí | Sí | `COMPLETED` | `docs/STABILIZATION_EXECUTION.md` archivado / suplantado por este ledger y evidencia generada |
 | **P0-03** | P0 | Micro Promise | Medir y certificar Resource Budget real | Sí | Sí | `COMPLETED` | `scripts/measure_resource_budget.py` certifica 24.9MB idle RSS y 13 threads (<50MB target PASS) |
 | **P0-04** | P0 | Soak Test | Soak script emite siempre artifact PASS/FAIL | Sí | Sí | `COMPLETED` | `scripts/soak_test.py` captura violations, survival y emite JSON estructurado en toda rama de salida |
-| **P0-05** | P0 | Packaging | Unificar versionado (0.2.0 vs 3.1 vs r3.1-zima) | Sí | Sí | `COMPLETED` | `1.0.0-rc.2` canonizado en Cargo.toml, README, CHANGELOG y dist CasaOS/ZimaOS; schema 3.1 desacoplado |
+| **P0-05** | P0 | Packaging | Unificar versionado (0.2.0 vs 3.1 vs r3.1-zima) | Sí | Sí | `COMPLETED` | `1.0.0-rc.3` canonizado en Cargo.toml, README, CHANGELOG y dist CasaOS/ZimaOS; schema 3.1 desacoplado |
 | **P0-06** | P0 | Deployment | Canonizar puerto 9090 y healthcheck dinámico | Sí | Sí | `COMPLETED` | Dockerfile `CMD wget` respeta `MICHI_PORT`, compose usa 9090 y `/health/live` |
 | **P0-07** | P0 | OpenSubsonic | Verdad contractual, Range real y scan status | Sí | Sí | `COMPLETED` | Range 206 en `/rest/stream`, scan status dinámico, test suite de compatibilidad v1 pasando |
 | **P0-08** | P0 | Product Truth | Fuente única de verdad canónica (Product Truth Spec) | Sí | Sí | `COMPLETED` | `spec/v1/product-truth.json`, sincronización con README, PRODUCT.md y tests automatizados |
@@ -47,7 +47,7 @@
 | **P0-11** | P0 | Stability Contract | Falsación adversarial y suite contractual del monitor de estabilidad | Sí | Sí | `COMPLETED` | Gate `soak-stability-contract` (job `ci-soak-stability-contract`), suite contractual de falsación adversarial del monitor de estabilidad y detección de fugas |
 | **P1-01** | P1 | CI | Snapserver Real Daemon Integration | No | Sí | `COMPLETED` | `ci-snapserver-real` ejecuta daemon real en CI con validación de sockets y JSON-RPC |
 | **P1-02** | P1 | Release Train | Proceso de release y branch protection | Sí | Sí | `COMPLETED` | Branch protection activa y verificada en `main` (`gh api`) requiriendo `ci-rust` y `ci-release-gate` |
-| **P1-03** | P1 | Changelog | CHANGELOG actualizado con 1.0.0-rc.2 | Sí | Sí | `COMPLETED` | Resumen semántico agrupado de cambios, fixes, beta modules y roadmap |
+| **P1-03** | P1 | Changelog | CHANGELOG actualizado con 1.0.0-rc.3 | Sí | Sí | `COMPLETED` | Resumen semántico agrupado de cambios, fixes, beta modules y roadmap |
 | **P1-04** | P1 | Docs | Sincronización de estructura y crates en README | Sí | Sí | `COMPLETED` | README sincronizado con 22 crates del workspace sin contadores frágiles |
 | **P1-05** | P1 | Deployment | Purga de endpoint legacy `/api/status` en Compose | Sí | Sí | `COMPLETED` | docker-compose utiliza canónicamente `/health/live` |
 | **P1-06** | P1 | Migration | Gate de upgrade, migración limpia y backup/restore | No | Sí | `COMPLETED` | `scripts/test_upgrade_and_backup_restore.sh` e integrado en CI |
