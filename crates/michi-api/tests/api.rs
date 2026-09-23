@@ -1571,9 +1571,11 @@ async fn test_v1_server_info() {
         "artwork should be true"
     );
     assert!(json["features"]["events"].as_bool().unwrap_or(false));
-    assert!(
-        json["features"]["transcoding"].is_boolean(),
-        "transcoding should be a boolean"
+    let expected_transcoding = michi_streaming::check_ffmpeg();
+    assert_eq!(
+        json["features"]["transcoding"].as_bool(),
+        Some(expected_transcoding),
+        "transcoding in server/info must truthfully reflect FFmpeg runtime availability (expected {expected_transcoding})"
     );
     assert!(json["roles"].is_array());
     assert_eq!(json["auth"]["strategy"], "SERVER_CODE");
@@ -1581,6 +1583,101 @@ async fn test_v1_server_info() {
     assert_eq!(json["features"]["receivers"].as_bool(), Some(true));
     assert_eq!(json["features"]["rooms"].as_bool(), Some(true));
     assert_eq!(json["api_version"], "v1");
+}
+
+#[tokio::test]
+async fn test_v1_server_info_transcoding_canonical_mapping_and_availability() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    // 1. Check default state against /api/v1/capabilities and /api/v1/server/info
+    let caps = michi_api::server_caps::ServerCapabilities::from_state(&state).await;
+    let canonical_transcode = caps.feature_enabled("transcode");
+    assert_eq!(
+        canonical_transcode,
+        michi_streaming::check_ffmpeg(),
+        "canonical transcode capability must reflect check_ffmpeg when stream is enabled"
+    );
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/server/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let json: Value = serde_json::from_str(&body_text(res).await).unwrap();
+    assert_eq!(
+        json["features"]["transcoding"].as_bool(),
+        Some(canonical_transcode),
+        "server/info features.transcoding must map to canonical transcode enabled state"
+    );
+
+    // 2. Also check GET /api/v1/capabilities
+    let res_caps = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_caps.status(), StatusCode::OK);
+    let caps_json: Value = serde_json::from_str(&body_text(res_caps).await).unwrap();
+    let transcode_feature = caps_json["features"]
+        .as_array()
+        .and_then(|arr| arr.iter().find(|f| f["name"] == "transcode"));
+    assert!(
+        transcode_feature.is_some(),
+        "/api/v1/capabilities must contain 'transcode' feature"
+    );
+    assert_eq!(
+        transcode_feature.unwrap()["enabled"].as_bool(),
+        Some(canonical_transcode)
+    );
+    assert_eq!(transcode_feature.unwrap()["maturity"], "stable");
+    assert!(
+        caps_json["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["name"] != "transcoding"),
+        "/api/v1/capabilities must NOT contain legacy or duplicate 'transcoding'"
+    );
+
+    // 3. Test negative case: disable stream module
+    state
+        .disabled_modules
+        .write()
+        .await
+        .insert("stream".to_string());
+
+    let res_disabled = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/server/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_disabled.status(), StatusCode::OK);
+    let json_disabled: Value = serde_json::from_str(&body_text(res_disabled).await).unwrap();
+    assert_eq!(
+        json_disabled["features"]["transcoding"].as_bool(),
+        Some(false),
+        "transcoding must be false when stream module is disabled"
+    );
+    assert_eq!(
+        json_disabled["features"]["streaming"].as_bool(),
+        Some(false),
+        "streaming must also be false when stream module is disabled"
+    );
 }
 
 #[tokio::test]

@@ -1020,4 +1020,29 @@ finally:
     assert any("Runtime version mismatch" in err for err in ev_ver["errors"])
 
 
+def test_product_truth_transcode_capability_projection():
+    """
+    Verifies that canonical Product Truth for 'transcode' is projected into
+    crates/michi-api/src/server_caps.rs and crates/michi-api/src/routes/v1/server.rs.
+    """
+    spec_path = os.path.join(ROOT_DIR, "spec", "v1", "product-truth.json")
+    with open(spec_path, "r", encoding="utf-8") as f:
+        spec = json.load(f)
+    assert "transcode" in spec["features"]
+    assert spec["features"]["transcode"]["maturity"] == "stable"
+
+    # Check server_caps.rs contains the feature in ALWAYS_ON_FEATURES
+    caps_path = os.path.join(ROOT_DIR, "crates", "michi-api", "src", "server_caps.rs")
+    with open(caps_path, "r", encoding="utf-8") as f:
+        caps_content = f.read()
+    assert '"transcode"' in caps_content
+    assert '("transcode", FeatureMaturity::Stable)' in caps_content
+
+    # Check server.rs maps canonical transcode to public transcoding
+    server_path = os.path.join(ROOT_DIR, "crates", "michi-api", "src", "routes", "v1", "server.rs")
+    with open(server_path, "r", encoding="utf-8") as f:
+        server_content = f.read()
+    assert 'transcoding: caps.feature_enabled("transcode")' in server_content
+
+
 

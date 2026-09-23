@@ -257,6 +257,13 @@ const ALWAYS_ON_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] 
         FeatureMaturity::Beta,
         EvidenceLevel::EffectVerified,
     ),
+    (
+        "transcode",
+        "1.0",
+        "On-demand FFmpeg audio transcoding",
+        FeatureMaturity::Stable,
+        EvidenceLevel::IntegrationCertified,
+    ),
 ];
 
 const DISABLED_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] = &[];
@@ -273,7 +280,14 @@ impl ServerCapabilities {
             .list()
             .len();
         let ffmpeg = michi_streaming::check_ffmpeg();
+        Self::from_parts(&disabled, receiver_count, ffmpeg)
+    }
 
+    pub fn from_parts(
+        disabled: &std::collections::HashSet<String>,
+        receiver_count: usize,
+        ffmpeg: bool,
+    ) -> Self {
         let mut features: Vec<ServerFeature> = MODULE_FEATURES
             .iter()
             .map(
@@ -292,6 +306,8 @@ impl ServerCapabilities {
             |(name, version, description, maturity, evidence)| {
                 let enabled = if *name == "autonomous_playback" {
                     ffmpeg && !disabled.contains("playback")
+                } else if *name == "transcode" {
+                    ffmpeg && !disabled.contains("stream")
                 } else {
                     true
                 };
@@ -382,5 +398,145 @@ impl ServerCapabilities {
         map.insert("playback".to_string(), self.feature_enabled("playback"));
         map.insert("sync".to_string(), self.feature_enabled("sync"));
         map
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn test_transcode_canonical_feature_materialization() {
+        let disabled = HashSet::new();
+        let caps = ServerCapabilities::from_parts(&disabled, 0, true);
+
+        let transcode_feats: Vec<_> = caps
+            .features
+            .iter()
+            .filter(|f| f.name == "transcode")
+            .collect();
+        assert_eq!(
+            transcode_feats.len(),
+            1,
+            "features must contain exactly one 'transcode' feature"
+        );
+
+        let feat = transcode_feats[0];
+        assert_eq!(feat.name, "transcode");
+        assert_eq!(feat.version, "1.0");
+        assert_eq!(feat.description, "On-demand FFmpeg audio transcoding");
+        assert!(
+            feat.enabled,
+            "transcode must be enabled when ffmpeg is available and stream is enabled"
+        );
+        assert_eq!(
+            feat.maturity,
+            FeatureMaturity::Stable,
+            "maturity must be Stable per product truth"
+        );
+        assert_eq!(feat.evidence, EvidenceLevel::IntegrationCertified);
+    }
+
+    #[test]
+    fn test_transcode_no_duplicate_aliases() {
+        let disabled = HashSet::new();
+        let caps = ServerCapabilities::from_parts(&disabled, 0, true);
+
+        assert!(
+            caps.features.iter().all(|f| f.name != "transcoding"),
+            "features must NOT contain duplicate or legacy alias 'transcoding'"
+        );
+        let transcode_count = caps
+            .features
+            .iter()
+            .filter(|f| f.name == "transcode")
+            .count();
+        assert_eq!(
+            transcode_count, 1,
+            "exactly one canonical 'transcode' feature allowed"
+        );
+    }
+
+    #[test]
+    fn test_transcode_canonical_feature_enabled_lookup() {
+        let disabled = HashSet::new();
+        let caps = ServerCapabilities::from_parts(&disabled, 0, true);
+
+        assert!(
+            caps.feature_enabled("transcode"),
+            "feature_enabled('transcode') must return true when ffmpeg is available"
+        );
+        assert!(
+            !caps.feature_enabled("transcoding"),
+            "feature_enabled('transcoding') must return false as 'transcoding' is not a runtime feature"
+        );
+    }
+
+    #[test]
+    fn test_transcode_negative_availability() {
+        // Case 1: ffmpeg unavailable
+        let disabled = HashSet::new();
+        let caps_no_ffmpeg = ServerCapabilities::from_parts(&disabled, 0, false);
+        assert!(
+            !caps_no_ffmpeg.feature_enabled("transcode"),
+            "transcode must be disabled when ffmpeg is unavailable"
+        );
+        let feat = caps_no_ffmpeg
+            .features
+            .iter()
+            .find(|f| f.name == "transcode")
+            .unwrap();
+        assert!(!feat.enabled);
+        assert_eq!(
+            feat.maturity,
+            FeatureMaturity::Stable,
+            "maturity remains Stable even if unavailable"
+        );
+
+        // Case 2: stream module disabled
+        let mut disabled_stream = HashSet::new();
+        disabled_stream.insert("stream".to_string());
+        let caps_no_stream = ServerCapabilities::from_parts(&disabled_stream, 0, true);
+        assert!(
+            !caps_no_stream.feature_enabled("transcode"),
+            "transcode must be disabled when stream module is disabled"
+        );
+        let feat_stream = caps_no_stream
+            .features
+            .iter()
+            .find(|f| f.name == "transcode")
+            .unwrap();
+        assert!(!feat_stream.enabled);
+
+        // Case 3: both ffmpeg unavailable and stream disabled
+        let caps_neither = ServerCapabilities::from_parts(&disabled_stream, 0, false);
+        assert!(!caps_neither.feature_enabled("transcode"));
+    }
+
+    #[test]
+    fn test_product_truth_runtime_projection_consistency() {
+        let disabled = HashSet::new();
+        let caps = ServerCapabilities::from_parts(&disabled, 0, true);
+
+        // Invariant: canonical 'transcode' declared in CANONICAL_MATURITY must be materialized as a runtime ServerFeature
+        let has_canonical_transcode = CANONICAL_MATURITY
+            .iter()
+            .any(|(name, _)| *name == "transcode");
+        assert!(
+            has_canonical_transcode,
+            "'transcode' must exist in CANONICAL_MATURITY"
+        );
+
+        let runtime_transcode = caps.features.iter().find(|f| f.name == "transcode");
+        assert!(
+            runtime_transcode.is_some(),
+            "canonical 'transcode' in Product Truth must have a runtime ServerFeature projection"
+        );
+        assert_eq!(
+            runtime_transcode.unwrap().maturity,
+            FeatureMaturity::Stable,
+            "runtime transcode projection must inherit canonical maturity"
+        );
     }
 }

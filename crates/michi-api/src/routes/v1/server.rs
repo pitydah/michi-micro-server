@@ -72,7 +72,7 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
             receivers: caps.feature_enabled("receivers"),
             rooms: caps.feature_enabled("rooms"),
             events: caps.feature_enabled("events"),
-            transcoding: caps.feature_enabled("transcoding"),
+            transcoding: caps.feature_enabled("transcode"),
             token_refresh: caps.feature_enabled("token_refresh"),
         },
         auth: V1AuthInfo {
