@@ -132,15 +132,14 @@ def main():
         assert not any(f.get("name") == "transcoding" for f in caps["features"]), (
             "unexpected duplicate/alias 'transcoding' in /api/v1/capabilities features"
         )
+        # Capabilities and server/info must strictly agree on effective transcoding availability
+        assert transcode_feat.get("enabled") == info["features"].get("transcoding"), (
+            f"contract violation: /api/v1/capabilities transcode.enabled ({transcode_feat.get('enabled')}) != "
+            f"/api/v1/server/info features.transcoding ({info['features'].get('transcoding')})"
+        )
+
         ffmpeg_avail = caps.get("runtime", {}).get("ffmpeg_available", False)
-        if ffmpeg_avail:
-            assert transcode_feat.get("enabled") is True, (
-                "expected canonical 'transcode' capability enabled=True when ffmpeg_available=True"
-            )
-            assert info["features"].get("transcoding") is True, (
-                "expected features.transcoding=True in /api/v1/server/info when ffmpeg_available=True"
-            )
-        else:
+        if not ffmpeg_avail:
             assert transcode_feat.get("enabled") is False, (
                 "expected canonical 'transcode' capability enabled=False when ffmpeg_available=False"
             )

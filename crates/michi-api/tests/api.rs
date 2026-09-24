@@ -93,6 +93,20 @@ async fn make_app_with_state() -> (axum::Router, SqlitePool, michi_api::AppState
     )
 }
 
+async fn make_app_with_custom_config(
+    modify_config: impl FnOnce(&mut Config),
+) -> (axum::Router, SqlitePool, michi_api::AppState) {
+    let (pool, db_url) = test_db_with_url().await;
+    let mut config = test_config_with_url(db_url);
+    modify_config(&mut config);
+    let state = michi_api::AppState::new(config, pool.clone(), None);
+    (
+        router_with_test_admin(state.clone(), &pool).await,
+        pool,
+        state,
+    )
+}
+
 async fn router_with_test_admin(state: michi_api::AppState, pool: &SqlitePool) -> axum::Router {
     let admin_id = Uuid::new_v4();
     michi_db::create_user(
@@ -1571,11 +1585,16 @@ async fn test_v1_server_info() {
         "artwork should be true"
     );
     assert!(json["features"]["events"].as_bool().unwrap_or(false));
-    let expected_transcoding = michi_streaming::check_ffmpeg();
+    let expected_transcoding = michi_api::server_caps::effective_transcode_available(
+        michi_streaming::check_ffmpeg(),
+        false,
+        michi_core::ResourceProfile::Balanced,
+        michi_core::AudioFormatPolicy::LosslessOnly,
+    );
     assert_eq!(
         json["features"]["transcoding"].as_bool(),
         Some(expected_transcoding),
-        "transcoding in server/info must truthfully reflect FFmpeg runtime availability (expected {expected_transcoding})"
+        "transcoding in server/info must truthfully reflect effective transcode availability (expected {expected_transcoding})"
     );
     assert!(json["roles"].is_array());
     assert_eq!(json["auth"]["strategy"], "SERVER_CODE");
@@ -1589,13 +1608,18 @@ async fn test_v1_server_info() {
 async fn test_v1_server_info_transcoding_canonical_mapping_and_availability() {
     let (app, _pool, state) = make_app_with_state().await;
 
-    // 1. Check default state against /api/v1/capabilities and /api/v1/server/info
+    // 1. Check default state (Balanced + LosslessOnly) against /api/v1/capabilities and /api/v1/server/info
     let caps = michi_api::server_caps::ServerCapabilities::from_state(&state).await;
     let canonical_transcode = caps.feature_enabled("transcode");
-    assert_eq!(
-        canonical_transcode,
+    let expected_default = michi_api::server_caps::effective_transcode_available(
         michi_streaming::check_ffmpeg(),
-        "canonical transcode capability must reflect check_ffmpeg when stream is enabled"
+        false,
+        state.config.resource_profile,
+        state.config.format_policy,
+    );
+    assert_eq!(
+        canonical_transcode, expected_default,
+        "canonical transcode capability must reflect effective policy"
     );
 
     let res = app
@@ -1650,7 +1674,111 @@ async fn test_v1_server_info_transcoding_canonical_mapping_and_availability() {
         "/api/v1/capabilities must NOT contain legacy or duplicate 'transcoding'"
     );
 
-    // 3. Test negative case: disable stream module
+    // Invariant: capabilities and server/info must always agree
+    assert_eq!(
+        transcode_feature.unwrap()["enabled"].as_bool(),
+        json["features"]["transcoding"].as_bool()
+    );
+
+    // 3. Test policy gate: ResourceProfile::Eco disables transcoding
+    let (app_eco, _pool_eco, state_eco) = make_app_with_custom_config(|cfg| {
+        cfg.resource_profile = michi_core::ResourceProfile::Eco;
+    })
+    .await;
+    let caps_eco = michi_api::server_caps::ServerCapabilities::from_state(&state_eco).await;
+    assert!(
+        !caps_eco.feature_enabled("transcode"),
+        "transcode capability must be disabled under Eco profile"
+    );
+
+    let res_eco_info = app_eco
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/server/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json_eco_info: Value = serde_json::from_str(&body_text(res_eco_info).await).unwrap();
+    assert_eq!(
+        json_eco_info["features"]["transcoding"].as_bool(),
+        Some(false),
+        "server/info transcoding must be false under Eco profile"
+    );
+
+    let res_eco_caps = app_eco
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json_eco_caps: Value = serde_json::from_str(&body_text(res_eco_caps).await).unwrap();
+    let eco_feat = json_eco_caps["features"]
+        .as_array()
+        .and_then(|arr| arr.iter().find(|f| f["name"] == "transcode"))
+        .unwrap();
+    assert_eq!(eco_feat["enabled"].as_bool(), Some(false));
+    assert_eq!(
+        eco_feat["enabled"].as_bool(),
+        json_eco_info["features"]["transcoding"].as_bool(),
+        "capabilities and server/info must agree under Eco profile"
+    );
+
+    // 4. Test policy gate: AudioFormatPolicy::DirectPlay disables transcoding
+    let (app_dp, _pool_dp, state_dp) = make_app_with_custom_config(|cfg| {
+        cfg.format_policy = michi_core::AudioFormatPolicy::DirectPlay;
+    })
+    .await;
+    let caps_dp = michi_api::server_caps::ServerCapabilities::from_state(&state_dp).await;
+    assert!(
+        !caps_dp.feature_enabled("transcode"),
+        "transcode capability must be disabled under DirectPlay policy"
+    );
+
+    let res_dp_info = app_dp
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/server/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json_dp_info: Value = serde_json::from_str(&body_text(res_dp_info).await).unwrap();
+    assert_eq!(
+        json_dp_info["features"]["transcoding"].as_bool(),
+        Some(false),
+        "server/info transcoding must be false under DirectPlay policy"
+    );
+
+    let res_dp_caps = app_dp
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json_dp_caps: Value = serde_json::from_str(&body_text(res_dp_caps).await).unwrap();
+    let dp_feat = json_dp_caps["features"]
+        .as_array()
+        .and_then(|arr| arr.iter().find(|f| f["name"] == "transcode"))
+        .unwrap();
+    assert_eq!(dp_feat["enabled"].as_bool(), Some(false));
+    assert_eq!(
+        dp_feat["enabled"].as_bool(),
+        json_dp_info["features"]["transcoding"].as_bool(),
+        "capabilities and server/info must agree under DirectPlay policy"
+    );
+
+    // 5. Test negative case: disable stream module
     state
         .disabled_modules
         .write()
@@ -1658,6 +1786,7 @@ async fn test_v1_server_info_transcoding_canonical_mapping_and_availability() {
         .insert("stream".to_string());
 
     let res_disabled = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/v1/server/info")
@@ -1677,6 +1806,28 @@ async fn test_v1_server_info_transcoding_canonical_mapping_and_availability() {
         json_disabled["features"]["streaming"].as_bool(),
         Some(false),
         "streaming must also be false when stream module is disabled"
+    );
+
+    let res_disabled_caps = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json_disabled_caps: Value =
+        serde_json::from_str(&body_text(res_disabled_caps).await).unwrap();
+    let dis_feat = json_disabled_caps["features"]
+        .as_array()
+        .and_then(|arr| arr.iter().find(|f| f["name"] == "transcode"))
+        .unwrap();
+    assert_eq!(dis_feat["enabled"].as_bool(), Some(false));
+    assert_eq!(
+        dis_feat["enabled"].as_bool(),
+        json_disabled["features"]["transcoding"].as_bool(),
+        "capabilities and server/info must agree when stream module is disabled"
     );
 }
 
