@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use michi_core::{AudioFormatPolicy, ResourceProfile};
+
 use crate::AppState;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -257,9 +259,40 @@ const ALWAYS_ON_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] 
         FeatureMaturity::Beta,
         EvidenceLevel::EffectVerified,
     ),
+    (
+        "transcode",
+        "1.0",
+        "On-demand FFmpeg audio transcoding",
+        FeatureMaturity::Stable,
+        EvidenceLevel::IntegrationCertified,
+    ),
 ];
 
 const DISABLED_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] = &[];
+
+/// Determines if at least one legitimate transcode path is currently available.
+///
+/// Transcoding requires:
+/// 1. FFmpeg binary available on host (`ffmpeg_available`).
+/// 2. "stream" module is not administratively disabled (`!stream_disabled`).
+/// 3. Resource profile permits at least one concurrent transcode (`resource_profile.max_transcodes() > 0`).
+///    (e.g., `ResourceProfile::Eco` sets `max_transcodes() == 0`, returning `TRANSCODING_DISABLED`).
+/// 4. Audio format policy does not forbid transcoding (`format_policy != AudioFormatPolicy::DirectPlay`).
+///    (e.g., `AudioFormatPolicy::DirectPlay` returns `TRANSCODING_FORBIDDEN_BY_POLICY`).
+///
+/// Note: `AudioFormatPolicy::LosslessOnly` is NOT disabled universally, because legitimate
+/// transformation/lossless paths (such as PCM/WAV) remain viable.
+pub fn effective_transcode_available(
+    ffmpeg_available: bool,
+    stream_disabled: bool,
+    resource_profile: ResourceProfile,
+    format_policy: AudioFormatPolicy,
+) -> bool {
+    ffmpeg_available
+        && !stream_disabled
+        && resource_profile.max_transcodes() > 0
+        && format_policy != AudioFormatPolicy::DirectPlay
+}
 
 impl ServerCapabilities {
     pub async fn from_state(state: &AppState) -> Self {
@@ -273,7 +306,22 @@ impl ServerCapabilities {
             .list()
             .len();
         let ffmpeg = michi_streaming::check_ffmpeg();
+        Self::from_parts(
+            &disabled,
+            receiver_count,
+            ffmpeg,
+            state.config.resource_profile,
+            state.config.format_policy,
+        )
+    }
 
+    pub fn from_parts(
+        disabled: &std::collections::HashSet<String>,
+        receiver_count: usize,
+        ffmpeg: bool,
+        resource_profile: ResourceProfile,
+        format_policy: AudioFormatPolicy,
+    ) -> Self {
         let mut features: Vec<ServerFeature> = MODULE_FEATURES
             .iter()
             .map(
@@ -292,6 +340,13 @@ impl ServerCapabilities {
             |(name, version, description, maturity, evidence)| {
                 let enabled = if *name == "autonomous_playback" {
                     ffmpeg && !disabled.contains("playback")
+                } else if *name == "transcode" {
+                    effective_transcode_available(
+                        ffmpeg,
+                        disabled.contains("stream"),
+                        resource_profile,
+                        format_policy,
+                    )
                 } else {
                     true
                 };
@@ -382,5 +437,348 @@ impl ServerCapabilities {
         map.insert("playback".to_string(), self.feature_enabled("playback"));
         map.insert("sync".to_string(), self.feature_enabled("sync"));
         map
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn test_transcode_canonical_feature_materialization() {
+        let disabled = HashSet::new();
+        let caps = ServerCapabilities::from_parts(
+            &disabled,
+            0,
+            true,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::LosslessOnly,
+        );
+
+        let transcode_feats: Vec<_> = caps
+            .features
+            .iter()
+            .filter(|f| f.name == "transcode")
+            .collect();
+        assert_eq!(
+            transcode_feats.len(),
+            1,
+            "features must contain exactly one 'transcode' feature"
+        );
+
+        let feat = transcode_feats[0];
+        assert_eq!(feat.name, "transcode");
+        assert_eq!(feat.version, "1.0");
+        assert_eq!(feat.description, "On-demand FFmpeg audio transcoding");
+        assert!(
+            feat.enabled,
+            "transcode must be enabled when ffmpeg is available and policy allows it"
+        );
+        assert_eq!(
+            feat.maturity,
+            FeatureMaturity::Stable,
+            "maturity must be Stable per product truth"
+        );
+        assert_eq!(feat.evidence, EvidenceLevel::IntegrationCertified);
+    }
+
+    #[test]
+    fn test_transcode_no_duplicate_aliases() {
+        let disabled = HashSet::new();
+        let caps = ServerCapabilities::from_parts(
+            &disabled,
+            0,
+            true,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::LosslessOnly,
+        );
+
+        assert!(
+            caps.features.iter().all(|f| f.name != "transcoding"),
+            "features must NOT contain duplicate or legacy alias 'transcoding'"
+        );
+        let transcode_count = caps
+            .features
+            .iter()
+            .filter(|f| f.name == "transcode")
+            .count();
+        assert_eq!(
+            transcode_count, 1,
+            "exactly one canonical 'transcode' feature allowed"
+        );
+    }
+
+    #[test]
+    fn test_transcode_canonical_feature_enabled_lookup() {
+        let disabled = HashSet::new();
+        let caps = ServerCapabilities::from_parts(
+            &disabled,
+            0,
+            true,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::LosslessOnly,
+        );
+
+        assert!(
+            caps.feature_enabled("transcode"),
+            "feature_enabled('transcode') must return true when effective transcode is available"
+        );
+        assert!(
+            !caps.feature_enabled("transcoding"),
+            "feature_enabled('transcoding') must return false as 'transcoding' is not a runtime feature"
+        );
+    }
+
+    #[test]
+    fn test_transcode_negative_availability() {
+        // Case 1: ffmpeg unavailable
+        let disabled = HashSet::new();
+        let caps_no_ffmpeg = ServerCapabilities::from_parts(
+            &disabled,
+            0,
+            false,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::LosslessOnly,
+        );
+        assert!(
+            !caps_no_ffmpeg.feature_enabled("transcode"),
+            "transcode must be disabled when ffmpeg is unavailable"
+        );
+        let feat = caps_no_ffmpeg
+            .features
+            .iter()
+            .find(|f| f.name == "transcode")
+            .unwrap();
+        assert!(!feat.enabled);
+        assert_eq!(
+            feat.maturity,
+            FeatureMaturity::Stable,
+            "maturity remains Stable even if unavailable"
+        );
+
+        // Case 2: stream module disabled
+        let mut disabled_stream = HashSet::new();
+        disabled_stream.insert("stream".to_string());
+        let caps_no_stream = ServerCapabilities::from_parts(
+            &disabled_stream,
+            0,
+            true,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::LosslessOnly,
+        );
+        assert!(
+            !caps_no_stream.feature_enabled("transcode"),
+            "transcode must be disabled when stream module is disabled"
+        );
+        let feat_stream = caps_no_stream
+            .features
+            .iter()
+            .find(|f| f.name == "transcode")
+            .unwrap();
+        assert!(!feat_stream.enabled);
+
+        // Case 3: Eco profile disables transcoding
+        let caps_eco = ServerCapabilities::from_parts(
+            &disabled,
+            0,
+            true,
+            ResourceProfile::Eco,
+            AudioFormatPolicy::LosslessOnly,
+        );
+        assert!(
+            !caps_eco.feature_enabled("transcode"),
+            "transcode must be disabled under Eco resource profile"
+        );
+
+        // Case 4: DirectPlay policy disables transcoding
+        let caps_direct = ServerCapabilities::from_parts(
+            &disabled,
+            0,
+            true,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::DirectPlay,
+        );
+        assert!(
+            !caps_direct.feature_enabled("transcode"),
+            "transcode must be disabled under DirectPlay format policy"
+        );
+
+        // Case 5: both ffmpeg unavailable and stream disabled
+        let caps_neither = ServerCapabilities::from_parts(
+            &disabled_stream,
+            0,
+            false,
+            ResourceProfile::Eco,
+            AudioFormatPolicy::DirectPlay,
+        );
+        assert!(!caps_neither.feature_enabled("transcode"));
+    }
+
+    #[test]
+    fn test_transcode_effective_availability_matrix() {
+        let empty_disabled = HashSet::new();
+        let mut stream_disabled = HashSet::new();
+        stream_disabled.insert("stream".to_string());
+
+        // CASE 1: FFmpeg=true, stream enabled, Balanced, LosslessOnly -> true
+        assert!(effective_transcode_available(
+            true,
+            false,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::LosslessOnly
+        ));
+        let caps1 = ServerCapabilities::from_parts(
+            &empty_disabled,
+            0,
+            true,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::LosslessOnly,
+        );
+        assert!(caps1.feature_enabled("transcode"));
+
+        // CASE 2: FFmpeg=true, stream enabled, Balanced, StandardOnly -> true
+        assert!(effective_transcode_available(
+            true,
+            false,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::StandardOnly
+        ));
+        let caps2 = ServerCapabilities::from_parts(
+            &empty_disabled,
+            0,
+            true,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::StandardOnly,
+        );
+        assert!(caps2.feature_enabled("transcode"));
+
+        // CASE 3: FFmpeg=true, stream enabled, Performance, LosslessOnly -> true
+        assert!(effective_transcode_available(
+            true,
+            false,
+            ResourceProfile::Performance,
+            AudioFormatPolicy::LosslessOnly
+        ));
+        let caps3 = ServerCapabilities::from_parts(
+            &empty_disabled,
+            0,
+            true,
+            ResourceProfile::Performance,
+            AudioFormatPolicy::LosslessOnly,
+        );
+        assert!(caps3.feature_enabled("transcode"));
+
+        // CASE 4: FFmpeg=true, stream enabled, Eco, LosslessOnly -> false
+        assert!(!effective_transcode_available(
+            true,
+            false,
+            ResourceProfile::Eco,
+            AudioFormatPolicy::LosslessOnly
+        ));
+        let caps4 = ServerCapabilities::from_parts(
+            &empty_disabled,
+            0,
+            true,
+            ResourceProfile::Eco,
+            AudioFormatPolicy::LosslessOnly,
+        );
+        assert!(!caps4.feature_enabled("transcode"));
+
+        // CASE 5: FFmpeg=true, stream enabled, Balanced, DirectPlay -> false
+        assert!(!effective_transcode_available(
+            true,
+            false,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::DirectPlay
+        ));
+        let caps5 = ServerCapabilities::from_parts(
+            &empty_disabled,
+            0,
+            true,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::DirectPlay,
+        );
+        assert!(!caps5.feature_enabled("transcode"));
+
+        // CASE 6: FFmpeg=false, stream enabled, Balanced, LosslessOnly -> false
+        assert!(!effective_transcode_available(
+            false,
+            false,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::LosslessOnly
+        ));
+        let caps6 = ServerCapabilities::from_parts(
+            &empty_disabled,
+            0,
+            false,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::LosslessOnly,
+        );
+        assert!(!caps6.feature_enabled("transcode"));
+
+        // CASE 7: FFmpeg=true, stream disabled, Balanced, LosslessOnly -> false
+        assert!(!effective_transcode_available(
+            true,
+            true,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::LosslessOnly
+        ));
+        let caps7 = ServerCapabilities::from_parts(
+            &stream_disabled,
+            0,
+            true,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::LosslessOnly,
+        );
+        assert!(!caps7.feature_enabled("transcode"));
+
+        // CASE 8: FFmpeg=false, stream disabled, Eco, DirectPlay -> false
+        assert!(!effective_transcode_available(
+            false,
+            true,
+            ResourceProfile::Eco,
+            AudioFormatPolicy::DirectPlay
+        ));
+        let caps8 = ServerCapabilities::from_parts(
+            &stream_disabled,
+            0,
+            false,
+            ResourceProfile::Eco,
+            AudioFormatPolicy::DirectPlay,
+        );
+        assert!(!caps8.feature_enabled("transcode"));
+    }
+
+    #[test]
+    fn test_product_truth_runtime_projection_consistency() {
+        let disabled = HashSet::new();
+        let caps = ServerCapabilities::from_parts(
+            &disabled,
+            0,
+            true,
+            ResourceProfile::Balanced,
+            AudioFormatPolicy::LosslessOnly,
+        );
+
+        // Invariant: canonical 'transcode' declared in CANONICAL_MATURITY must be materialized as a runtime ServerFeature
+        let has_canonical_transcode = CANONICAL_MATURITY
+            .iter()
+            .any(|(name, _)| *name == "transcode");
+        assert!(
+            has_canonical_transcode,
+            "'transcode' must exist in CANONICAL_MATURITY"
+        );
+
+        let runtime_transcode = caps.features.iter().find(|f| f.name == "transcode");
+        assert!(
+            runtime_transcode.is_some(),
+            "canonical 'transcode' in Product Truth must have a runtime ServerFeature projection"
+        );
+        assert_eq!(
+            runtime_transcode.unwrap().maturity,
+            FeatureMaturity::Stable,
+            "runtime transcode projection must inherit canonical maturity"
+        );
     }
 }
