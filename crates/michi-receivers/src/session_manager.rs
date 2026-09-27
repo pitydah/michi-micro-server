@@ -1158,4 +1158,87 @@ mod tests {
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("NoActiveSession"));
     }
+
+    #[tokio::test]
+    async fn supervisor_self_join_does_not_deadlock_on_session_loss() {
+        let mgr = std::sync::Arc::new(ReceiverSessionManager::new());
+        let rec_id = "rec-self-join-test";
+
+        let entry = ReceiverRegistryEntry {
+            receiver_id: rec_id.into(),
+            name: "Test".into(),
+            device_type: "standard".into(),
+            base_url: "http://127.0.0.1:9999".into(),
+            paired: true,
+            max_sample_rate: 48000,
+            max_bit_depth: 16,
+            supported_transports: vec!["rtp_udp".into()],
+            supported_codecs: vec!["pcm_s16le".into()],
+            supported_sample_rates: vec![48000],
+            supported_bit_depths: vec![16],
+            supported_channels: vec![2],
+            active_session_id: Some("sess-123".into()),
+            ..Default::default()
+        };
+        mgr.registry.write().await.add(entry);
+
+        // Simulate an active session
+        mgr.active_sessions.write().await.insert(
+            rec_id.into(),
+            crate::ReceiverActiveSession {
+                receiver_id: rec_id.into(),
+                playback_session_id: "pb-123".into(),
+                receiver_session_id: "sess-123".into(),
+                session_token: Some("sess-tok-1".into()),
+                device_token: Some("tok-1".into()),
+                stream_port: 53318,
+                lease_seconds: 30,
+                heartbeat_sequence: 1,
+                negotiated_codec: "pcm_s16le".into(),
+                negotiated_sample_rate: 48000,
+                negotiated_bit_depth: 16,
+                negotiated_channels: 2,
+                payload_type: 96,
+                ssrc: 12345,
+                state: crate::ReceiverActiveSessionState::Active,
+                created_at: chrono::Utc::now(),
+                last_heartbeat: chrono::Utc::now(),
+            },
+        );
+
+        let mgr_clone = mgr.clone();
+        let rec_id_str = rec_id.to_string();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+        let join = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            mgr_clone.handle_session_lost(&rec_id_str).await;
+            let _ = done_tx.send(());
+        });
+
+        // Register handle in heartbeat_handles before task executes handle_session_lost
+        {
+            let mut handles = mgr.heartbeat_handles.write().await;
+            handles.insert(
+                rec_id.into(),
+                super::ReceiverSupervisorHandle { cancel, join },
+            );
+        }
+
+        let _ = started_rx.await;
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(2), done_rx).await;
+        assert!(finished.is_ok(), "task must complete without deadlock");
+
+        // Verify session cleared
+        assert!(mgr.active_sessions.read().await.get(rec_id).is_none());
+        assert!(mgr.heartbeat_handles.read().await.get(rec_id).is_none());
+        let reg = mgr.registry.read().await;
+        assert_eq!(
+            reg.get(rec_id).and_then(|e| e.active_session_id.as_ref()),
+            None
+        );
+    }
 }

@@ -8454,3 +8454,118 @@ async fn test_playback_transfer_commit_validation_and_takeover() {
     assert!(unp.get("presence").is_some());
     assert!(unp.get("authority_supported").is_some());
 }
+
+#[tokio::test]
+async fn test_hardware_gate_routes_contract() {
+    let (app, _pool) = make_app().await;
+
+    // 1. GET /health/ready
+    let req = Request::builder()
+        .method("GET")
+        .uri("/health/ready")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. POST /api/v1/devices/discover
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/devices/discover")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 3. POST /api/v1/receivers/pair/start
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/pair/start")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"receiver_id":"nonexistent"}"#))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // 4. POST /api/v1/receivers/pair/confirm
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/pair/confirm")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"pairing_id":"test","pin":"123456"}"#))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
+        "unexpected status for pair/confirm: {}",
+        resp.status()
+    );
+
+    // 5. GET /api/v1/receivers/:id
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/receivers/nonexistent")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // 6. POST /api/v1/receivers/:id/session/start
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/nonexistent/session/start")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"session_id":"test","codec":"pcm_s16le","sample_rate":48000,"bit_depth":16,"channels":2,"stream_port":53318,"buffer_ms":100,"volume":80}"#,
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
+        "unexpected status for session/start: {}",
+        resp.status()
+    );
+
+    // 7. POST /api/v1/receivers/:id/heartbeat
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/nonexistent/heartbeat")
+        .header("content-type", "application/json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
+        "unexpected status for heartbeat: {}",
+        resp.status()
+    );
+
+    // 8. POST /api/v1/receivers/:id/stream/test_pcm
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/nonexistent/stream/test_pcm")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"duration_ms":10}"#))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
+        "unexpected status for stream/test_pcm: {}",
+        resp.status()
+    );
+
+    // 9. POST /api/v1/receivers/:id/session/stop
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/nonexistent/session/stop")
+        .header("content-type", "application/json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
+        "unexpected status for session/stop: {}",
+        resp.status()
+    );
+}

@@ -710,6 +710,7 @@ pub async fn receiver_heartbeat_handler(
     }
 }
 
+#[cfg(any(feature = "hardware-gate", test))]
 #[derive(Debug, Deserialize)]
 pub struct ReceiverTestPcmBody {
     pub pcm_base64: Option<String>,
@@ -717,6 +718,7 @@ pub struct ReceiverTestPcmBody {
     pub duration_ms: Option<usize>,
 }
 
+#[cfg(any(feature = "hardware-gate", test))]
 pub async fn receiver_stream_test_pcm_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,

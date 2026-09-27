@@ -413,7 +413,7 @@ impl ReceiverRegistryEntry {
             || self.max_sample_rate < 48000
             || self.max_bit_depth < 16
         {
-            return ReceiverQualification::NeedsCapabilityRefresh;
+            return ReceiverQualification::UnsupportedAudioProfile;
         }
         ReceiverQualification::Qualified
     }
@@ -447,6 +447,7 @@ pub enum ReceiverQualification {
     NeedsCapabilityRefresh,
     UnsupportedTransport,
     UnsupportedCodec,
+    UnsupportedAudioProfile,
     MissingCredential,
     IdentityMismatch,
 }
@@ -605,4 +606,154 @@ pub struct SessionRecoverResponse {
     pub volume: Option<u32>,
     pub playing: Option<bool>,
     pub error: Option<ErrorBody>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_qualified_entry() -> ReceiverRegistryEntry {
+        ReceiverRegistryEntry {
+            receiver_id: "rec-test-1".to_string(),
+            michi_id: Some("urn:michi:device:test-1".to_string()),
+            name: "Test Receiver".to_string(),
+            device_type: "standard".to_string(),
+            base_url: "http://192.168.1.50:80".to_string(),
+            paired: true,
+            token: Some("secret-token".to_string()),
+            presence: ReceiverPresence::VerifiedOnline,
+            last_seen: Some(chrono::Utc::now()),
+            capabilities: vec!["audio".to_string()],
+            capabilities_verified_at: Some(chrono::Utc::now()),
+            capabilities_stale: false,
+            authority_supported: true,
+            owner_michi_id: None,
+            owner_name: None,
+            active_session_id: None,
+            max_sample_rate: 48000,
+            max_bit_depth: 16,
+            supported_transports: vec!["rtp_udp".to_string()],
+            supported_codecs: vec!["pcm_s16le".to_string()],
+            supported_sample_rates: vec![44100, 48000],
+            supported_bit_depths: vec![16],
+            supported_channels: vec![2],
+            maximum_safe_volume: Some(100),
+            qualification: ReceiverQualification::Qualified,
+        }
+    }
+
+    #[test]
+    fn test_compute_qualification_qualified() {
+        let entry = sample_qualified_entry();
+        assert_eq!(
+            entry.compute_qualification(),
+            ReceiverQualification::Qualified
+        );
+    }
+
+    #[test]
+    fn test_compute_qualification_missing_credential() {
+        let mut entry = sample_qualified_entry();
+        entry.token = None;
+        assert_eq!(
+            entry.compute_qualification(),
+            ReceiverQualification::MissingCredential
+        );
+
+        entry.token = Some("   ".to_string());
+        assert_eq!(
+            entry.compute_qualification(),
+            ReceiverQualification::MissingCredential
+        );
+    }
+
+    #[test]
+    fn test_compute_qualification_stale_or_unverified() {
+        let mut entry = sample_qualified_entry();
+        entry.capabilities_stale = true;
+        assert_eq!(
+            entry.compute_qualification(),
+            ReceiverQualification::NeedsCapabilityRefresh
+        );
+
+        entry.capabilities_stale = false;
+        entry.capabilities_verified_at = None;
+        assert_eq!(
+            entry.compute_qualification(),
+            ReceiverQualification::NeedsCapabilityRefresh
+        );
+    }
+
+    #[test]
+    fn test_compute_qualification_unsupported_transport() {
+        let mut entry = sample_qualified_entry();
+        entry.supported_transports = vec!["tcp_raw".to_string()];
+        assert_eq!(
+            entry.compute_qualification(),
+            ReceiverQualification::UnsupportedTransport
+        );
+    }
+
+    #[test]
+    fn test_compute_qualification_unsupported_codec() {
+        let mut entry = sample_qualified_entry();
+        entry.supported_codecs = vec!["opus".to_string()];
+        assert_eq!(
+            entry.compute_qualification(),
+            ReceiverQualification::UnsupportedCodec
+        );
+    }
+
+    #[test]
+    fn test_compute_qualification_unsupported_audio_profile() {
+        // Missing 48000 Hz sample rate
+        let mut entry = sample_qualified_entry();
+        entry.supported_sample_rates = vec![44100];
+        assert_eq!(
+            entry.compute_qualification(),
+            ReceiverQualification::UnsupportedAudioProfile
+        );
+
+        // Missing 16 bit depth
+        let mut entry = sample_qualified_entry();
+        entry.supported_bit_depths = vec![24];
+        assert_eq!(
+            entry.compute_qualification(),
+            ReceiverQualification::UnsupportedAudioProfile
+        );
+
+        // Missing stereo (channel 2)
+        let mut entry = sample_qualified_entry();
+        entry.supported_channels = vec![1];
+        assert_eq!(
+            entry.compute_qualification(),
+            ReceiverQualification::UnsupportedAudioProfile
+        );
+
+        // max_sample_rate < 48000
+        let mut entry = sample_qualified_entry();
+        entry.max_sample_rate = 44100;
+        assert_eq!(
+            entry.compute_qualification(),
+            ReceiverQualification::UnsupportedAudioProfile
+        );
+
+        // max_bit_depth < 16
+        let mut entry = sample_qualified_entry();
+        entry.max_bit_depth = 8;
+        assert_eq!(
+            entry.compute_qualification(),
+            ReceiverQualification::UnsupportedAudioProfile
+        );
+    }
+
+    #[test]
+    fn test_compute_qualification_identity_mismatch() {
+        let mut entry = sample_qualified_entry();
+        entry.qualification = ReceiverQualification::IdentityMismatch;
+        assert_eq!(
+            entry.compute_qualification(),
+            ReceiverQualification::IdentityMismatch
+        );
+    }
 }

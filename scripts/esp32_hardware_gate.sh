@@ -4,11 +4,15 @@
 # Canonical Contract:
 #   - Whisker Multicast: 224.0.0.167:53318
 #   - Receiver HTTP Port: 80
+#   - Micro Server Default: http://127.0.0.1:9090
 #   - Pairing Window TTL: 120 seconds
-#   - Protocol: receiver-v1-lite (rtp_udp, pcm_s16le, 48000Hz, 16bit, 2ch)
+#   - PIN Format: /^\d{6}$/ (6 numeric ASCII digits)
+#   - Profile: rtp_udp, pcm_s16le, 48000Hz, 16bit, 2ch
+#
 # Architecture:
-#   Exercises the real Michi Micro Server APIs for pairing, capability qualification,
-#   RTP audio emission, Purrbeat heartbeat, and clean session teardown.
+#   Exercises the real Michi Micro Server APIs for discovery, pairing,
+#   capability qualification, RTP audio emission, Purrbeat heartbeat,
+#   and clean session teardown.
 # ==============================================================================
 
 set -euo pipefail
@@ -26,54 +30,115 @@ log_warn() { echo -e "${COLOR_YELLOW}[WARN]${COLOR_RESET} $*"; }
 log_err() { echo -e "${COLOR_RED}[FAIL]${COLOR_RESET} $*" >&2; }
 
 ESP32_IP="${1:-${ESP32_IP:-}}"
-PIN="${2:-${PAIRING_PIN:-}}"
-MICHI_SERVER="${3:-${MICHI_SERVER_URL:-http://127.0.0.1:3000}}"
+MICHI_SERVER="${2:-${MICHI_SERVER_URL:-http://127.0.0.1:9090}}"
+PAIRING_PIN="${3:-${PAIRING_PIN:-}}"
+MICHI_API_TOKEN="${MICHI_API_TOKEN:-}"
 MICHI_IFACE_IP="${MICHI_WHISKER_IFACE_IP:-192.168.31.224}"
 
 echo -e "${COLOR_BOLD}==================================================================${COLOR_RESET}"
 echo -e "${COLOR_BOLD}    MICHI ESP32-S3 PHYSICAL HARDWARE CERTIFICATION GATE          ${COLOR_RESET}"
 echo -e "${COLOR_BOLD}==================================================================${COLOR_RESET}"
 
-if [[ -z "${ESP32_IP}" || -z "${PIN}" ]]; then
-    echo "Usage: $0 <ESP32_IP> <6-DIGIT-PIN> [MICHI_SERVER_URL]"
-    echo "Example: $0 192.168.31.150 123456 http://127.0.0.1:3000"
+if [[ -z "${ESP32_IP}" ]]; then
+    echo "Usage: $0 <ESP32_IP> [MICHI_SERVER_URL] [6-DIGIT-PIN]"
+    echo "Example: $0 192.168.31.150 http://127.0.0.1:9090 123456"
     echo ""
-    echo "Prerequisites:"
-    echo "  1. Michi Micro Server must be running (export MICHI_WHISKER_IFACE_IP=${MICHI_IFACE_IP})"
-    echo "  2. ESP32-S3 must be on the LAN (port 80) and announce to 224.0.0.167:53318"
-    echo "  3. You must have physical access to press the pairing button (window: 120s)"
+    echo "Environment Variables:"
+    echo "  ESP32_IP                  IP address of the ESP32-S3 receiver"
+    echo "  MICHI_SERVER_URL          URL of Michi Micro Server (default: http://127.0.0.1:9090)"
+    echo "  PAIRING_PIN               6-digit numeric pairing PIN (prompted interactively if omitted)"
+    echo "  MICHI_API_TOKEN           Bearer token for authenticated Micro routes (optional)"
+    echo "  MICHI_WHISKER_IFACE_IP    Host LAN interface IP for Whisker multicast (default: 192.168.31.224)"
     exit 1
 fi
 
-if [[ ! "${PIN}" =~ ^[0-9]{6}$ ]]; then
-    log_err "PIN '${PIN}' is invalid: must be exactly 6 numeric ASCII digits (/^\\d{6}$/)."
-    exit 2
-fi
+ACTIVE_SESSION=0
+PAIRED_DEVICE_ID=""
 
-# Helper function: perform an HTTP request and verify HTTP status code strictly
-# Usage: http_expect_json <METHOD> <URL> <EXPECTED_STATUS> [JSON_BODY]
-http_expect_json() {
+cleanup() {
+    local exit_code=$?
+    if [[ "${ACTIVE_SESSION}" -eq 1 && -n "${PAIRED_DEVICE_ID}" ]]; then
+        log_warn "Trapped exit: tearing down active receiver session..."
+        micro_request "POST" "/api/v1/receivers/${PAIRED_DEVICE_ID}/session/stop" 200 "{}" || true
+    fi
+    if [[ ${exit_code} -ne 0 ]]; then
+        echo -e "${COLOR_RED}${COLOR_BOLD}✗ HARDWARE GATE ABORTED WITH STATUS ${exit_code}${COLOR_RESET}" >&2
+    fi
+}
+trap cleanup EXIT
+
+# Perform request against Michi Micro Server (applies MICHI_API_TOKEN if set)
+# Usage: micro_request <METHOD> <PATH> <EXPECTED_STATUS> [JSON_BODY]
+micro_request() {
     local method="$1"
-    local url="$2"
+    local path="$2"
     local expected_status="$3"
     local body="${4:-}"
+    local url="${MICHI_SERVER}${path}"
     local response_file
     response_file="$(mktemp)"
 
-    local http_code
-    if [[ -n "${body}" ]]; then
-        http_code=$(curl -s -o "${response_file}" -w "%{http_code}" -X "${method}" \
-            -H "Content-Type: application/json" -d "${body}" "${url}")
-    else
-        http_code=$(curl -s -o "${response_file}" -w "%{http_code}" -X "${method}" "${url}")
+    local curl_cmd=(curl -s -S -o "${response_file}" -w "%{http_code}" -X "${method}")
+
+    if [[ -n "${MICHI_API_TOKEN}" ]]; then
+        curl_cmd+=(-H "Authorization: Bearer ${MICHI_API_TOKEN}")
     fi
+
+    if [[ "${method}" =~ ^(POST|PUT|PATCH)$ ]]; then
+        curl_cmd+=(-H "Content-Type: application/json")
+        curl_cmd+=(-d "${body:-{}}")
+    elif [[ -n "${body}" ]]; then
+        curl_cmd+=(-H "Content-Type: application/json" -d "${body}")
+    fi
+
+    curl_cmd+=("${url}")
+
+    local http_code
+    http_code="$("${curl_cmd[@]}")"
 
     local resp_content
     resp_content="$(cat "${response_file}")"
     rm -f "${response_file}"
 
     if [[ "${http_code}" != "${expected_status}" ]]; then
-        log_err "${method} ${url} returned HTTP ${http_code} (expected ${expected_status}): ${resp_content}"
+        log_err "Micro Server ${method} ${path} returned HTTP ${http_code} (expected ${expected_status}): ${resp_content}"
+        exit 3
+    fi
+
+    echo "${resp_content}"
+}
+
+# Perform direct unauthenticated probe against ESP32-S3 receiver
+# Usage: receiver_request <METHOD> <PATH> <EXPECTED_STATUS> [JSON_BODY]
+receiver_request() {
+    local method="$1"
+    local path="$2"
+    local expected_status="$3"
+    local body="${4:-}"
+    local url="http://${ESP32_IP}:80${path}"
+    local response_file
+    response_file="$(mktemp)"
+
+    local curl_cmd=(curl -s -S -o "${response_file}" -w "%{http_code}" -X "${method}")
+
+    if [[ "${method}" =~ ^(POST|PUT|PATCH)$ ]]; then
+        curl_cmd+=(-H "Content-Type: application/json")
+        curl_cmd+=(-d "${body:-{}}")
+    elif [[ -n "${body}" ]]; then
+        curl_cmd+=(-H "Content-Type: application/json" -d "${body}")
+    fi
+
+    curl_cmd+=("${url}")
+
+    local http_code
+    http_code="$("${curl_cmd[@]}")"
+
+    local resp_content
+    resp_content="$(cat "${response_file}")"
+    rm -f "${response_file}"
+
+    if [[ "${http_code}" != "${expected_status}" ]]; then
+        log_err "ESP32-S3 ${method} ${path} returned HTTP ${http_code} (expected ${expected_status}): ${resp_content}"
         exit 3
     fi
 
@@ -83,96 +148,163 @@ http_expect_json() {
 # ------------------------------------------------------------------------------
 # Phase 1: Micro Server Liveness & Interface Binding
 # ------------------------------------------------------------------------------
-log_info "Phase 1: Validating Michi Micro Server at ${MICHI_SERVER} ..."
-SERVER_STATUS=$(http_expect_json "GET" "${MICHI_SERVER}/api/v1/system/status" 200)
-log_ok "Michi Micro Server is healthy and responsive."
+log_info "Phase 1: Validating Michi Micro Server readiness at ${MICHI_SERVER} (/health/ready) ..."
+HEALTH_RESP=$(micro_request "GET" "/health/ready" 200)
+log_ok "Michi Micro Server is ready: ${HEALTH_RESP}"
 
 log_info "Checking host LAN interface binding for Whisker multicast (224.0.0.167:53318) ..."
-if ip addr show | grep -q "${MICHI_IFACE_IP}"; then
+if ip addr show 2>/dev/null | grep -q "${MICHI_IFACE_IP}"; then
     log_ok "Host LAN interface IP ${MICHI_IFACE_IP} verified on physical adapter."
 else
-    log_warn "Configured IP ${MICHI_IFACE_IP} not directly found on local adapters; ensure MICHI_WHISKER_IFACE_IP is set correctly."
+    log_warn "Host IP ${MICHI_IFACE_IP} not directly matched on local adapters; ensure MICHI_WHISKER_IFACE_IP matches your LAN interface."
 fi
 
 # ------------------------------------------------------------------------------
-# Phase 2: Direct HTTP Probe to ESP32-S3 (Canonical Port 80)
+# Phase 2: Direct HTTP Probe to ESP32-S3 (Canonical Port 80, /api/v1/server/info)
 # ------------------------------------------------------------------------------
-ESP32_BASE_URL="http://${ESP32_IP}:80"
-log_info "Phase 2: Probing ESP32-S3 receiver at ${ESP32_BASE_URL}/api/v1/receiver-lite/info ..."
-RECEIVER_INFO=$(http_expect_json "GET" "${ESP32_BASE_URL}/api/v1/receiver-lite/info" 200)
-log_ok "ESP32-S3 responded on port 80: ${RECEIVER_INFO}"
+log_info "Phase 2: Probing ESP32-S3 receiver at http://${ESP32_IP}:80/api/v1/server/info ..."
+RECEIVER_INFO=$(receiver_request "GET" "/api/v1/server/info" 200)
+
+python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+
+michi_id = data.get('michi_id')
+if not michi_id:
+    sys.stderr.write('Missing michi_id in /api/v1/server/info\\n')
+    sys.exit(1)
+
+service = data.get('service', '')
+if service not in ('michi-stream-standard', 'michi-stream-hifi'):
+    sys.stderr.write(f'Unexpected service in /api/v1/server/info: {service}\\n')
+    sys.exit(1)
+
+api_version = data.get('api_version', '')
+if api_version != 'v1-lite':
+    sys.stderr.write(f'Unsupported api_version: {api_version} (must be v1-lite)\\n')
+    sys.exit(1)
+
+roles = data.get('roles', [])
+if 'audio_receiver' not in roles:
+    sys.stderr.write(f'Missing audio_receiver role: {roles}\\n')
+    sys.exit(1)
+
+audio = data.get('audio') or {}
+transports = audio.get('transports', [])
+if 'rtp_udp' not in transports:
+    sys.stderr.write(f'Receiver audio transports do not include rtp_udp: {transports}\\n')
+    sys.exit(1)
+
+codecs = audio.get('codecs', [])
+if 'pcm_s16le' not in codecs:
+    sys.stderr.write(f'Receiver audio codecs do not include pcm_s16le: {codecs}\\n')
+    sys.exit(1)
+" <<< "${RECEIVER_INFO}"
+
+log_ok "ESP32-S3 contract verified on port 80: service and capabilities valid."
 
 # ------------------------------------------------------------------------------
-# Phase 3: Discovery API Snapshot Verification
+# Phase 3: Discovery API Snapshot Verification (Whisker / Scent)
 # ------------------------------------------------------------------------------
-log_info "Phase 3: Querying Micro Server discovery snapshot: GET ${MICHI_SERVER}/api/v1/receivers/discover ..."
-DISCOVER_RESP=$(http_expect_json "GET" "${MICHI_SERVER}/api/v1/receivers/discover" 200)
+log_info "Phase 3: Triggering Micro Server discovery snapshot: POST /api/v1/devices/discover ..."
+DISCOVER_RESP=$(micro_request "POST" "/api/v1/devices/discover" 200 "{}")
 
 DEVICE_ID=$(python3 -c "
 import json, sys
-data = json.loads('''${DISCOVER_RESP}''')
-receivers = data.get('receivers', [])
-target_ip = '${ESP32_IP}'
+data = json.load(sys.stdin)
+receivers = data.get('receivers', []) or data.get('devices', [])
+target_ip = sys.argv[1]
+
 for r in receivers:
-    if target_ip in r.get('base_url', '') or target_ip in r.get('host', '') or target_ip in str(r.get('addresses', [])):
-        print(r.get('receiver_id') or r.get('id') or '')
-        sys.exit(0)
-# If not yet found by IP, try first unbonded pairable receiver
-for r in receivers:
-    if r.get('pairable', False):
-        print(r.get('receiver_id') or r.get('id') or '')
-        sys.exit(0)
+    base = r.get('base_url', '')
+    host = r.get('host', '')
+    addrs = [str(a) for a in r.get('addresses', [])]
+    if target_ip in base or target_ip in host or any(target_ip in a for a in addrs):
+        rec_id = r.get('receiver_id') or r.get('id') or ''
+        if rec_id:
+            print(rec_id)
+            sys.exit(0)
+
+sys.stderr.write(f'ESP32 receiver with IP {target_ip} NOT found in discovery snapshot!\\n')
 sys.exit(1)
-" || true)
+" "${ESP32_IP}" <<< "${DISCOVER_RESP}")
 
-if [[ -z "${DEVICE_ID}" ]]; then
-    log_warn "ESP32-S3 not yet present in registry snapshot; will initiate pairing via direct base_url."
-    TARGET_ARG="{\"base_url\":\"${ESP32_BASE_URL}\"}"
-else
-    log_ok "Discovered receiver in Micro Registry: ${DEVICE_ID}"
-    TARGET_ARG="{\"base_url\":\"${ESP32_BASE_URL}\",\"receiver_id\":\"${DEVICE_ID}\"}"
+log_ok "ESP32-S3 discovered through Whisker/Scent in Micro Registry: ID=${DEVICE_ID}"
+
+# ------------------------------------------------------------------------------
+# Phase 4 & 5: Interactive Physical Pairing
+# ------------------------------------------------------------------------------
+echo ""
+echo -e "${COLOR_BOLD}------------------------------------------------------------------${COLOR_RESET}"
+echo -e "${COLOR_YELLOW}${COLOR_BOLD}PHYSICAL ACTION REQUIRED:${COLOR_RESET}"
+echo -e "  1. Hold the physical pairing button on the ESP32-S3 for ~5 seconds."
+echo -e "  2. Confirm the pairing LED is blinking."
+echo -e "  3. You will have a 120-second pairing window once initiated."
+echo -e "${COLOR_BOLD}------------------------------------------------------------------${COLOR_RESET}"
+
+read -r -p "Press [ENTER] after holding the button on the ESP32-S3: " _
+
+log_info "Phase 4: Initiating pairing via Micro Server: POST /api/v1/receivers/pair/start ..."
+TARGET_PAYLOAD=$(printf '{"receiver_id":"%s"}' "${DEVICE_ID}")
+PAIR_START_RESP=$(micro_request "POST" "/api/v1/receivers/pair/start" 200 "${TARGET_PAYLOAD}")
+
+PAIRING_ID=$(python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+pid = data.get('pairing_id')
+if not pid:
+    sys.stderr.write('Missing pairing_id in pair/start response\\n')
+    sys.exit(1)
+print(pid)
+" <<< "${PAIR_START_RESP}")
+
+log_ok "Pairing session initiated with pairing_id: ${PAIRING_ID} (120s TTL)"
+
+if [[ -z "${PAIRING_PIN}" ]]; then
+    read -r -p "Enter the 6-digit PIN shown on/for your ESP32-S3: " PAIRING_PIN
 fi
 
-# ------------------------------------------------------------------------------
-# Phase 4: Initiate Pairing via Micro Server (120s Window)
-# ------------------------------------------------------------------------------
-log_info "Phase 4: Initiating pairing via Micro Server: POST ${MICHI_SERVER}/api/v1/receivers/pair/start ..."
-log_warn ">>> IMPORTANT: If required by your ESP32-S3 firmware, press the physical button now! (120s window) <<<"
-
-PAIR_START_RESP=$(http_expect_json "POST" "${MICHI_SERVER}/api/v1/receivers/pair/start" 200 "${TARGET_ARG}")
-PAIRING_ID=$(python3 -c "import json; print(json.loads('''${PAIR_START_RESP}''')['pairing_id'])")
-log_ok "Pairing session initiated with pairing_id: ${PAIRING_ID}"
-
-# ------------------------------------------------------------------------------
-# Phase 5: Confirm Pairing with 6-Digit PIN via Micro Server
-# ------------------------------------------------------------------------------
-log_info "Phase 5: Confirming pairing with 6-digit PIN '${PIN}' via Micro Server ..."
-PAIR_CONFIRM_PAYLOAD=$(printf '{"pairing_id":"%s","pin":"%s"}' "${PAIRING_ID}" "${PIN}")
-PAIR_CONFIRM_RESP=$(http_expect_json "POST" "${MICHI_SERVER}/api/v1/receivers/pair/confirm" 200 "${PAIR_CONFIRM_PAYLOAD}")
-
-STATUS=$(python3 -c "import json; print(json.loads('''${PAIR_CONFIRM_RESP}''').get('status', ''))")
-PAIRED_DEVICE_ID=$(python3 -c "import json; print(json.loads('''${PAIR_CONFIRM_RESP}''').get('device_id', ''))")
-
-if [[ "${STATUS}" != "paired" || -z "${PAIRED_DEVICE_ID}" ]]; then
-    log_err "Pairing confirmation failed: ${PAIR_CONFIRM_RESP}"
-    exit 4
+if [[ ! "${PAIRING_PIN}" =~ ^[0-9]{6}$ ]]; then
+    log_err "PIN '${PAIRING_PIN}' is invalid: must be exactly 6 numeric digits (/^\\d{6}$/)."
+    exit 2
 fi
+
+log_info "Phase 5: Confirming pairing with 6-digit PIN via Micro Server: POST /api/v1/receivers/pair/confirm ..."
+PAIR_CONFIRM_PAYLOAD=$(printf '{"pairing_id":"%s","pin":"%s"}' "${PAIRING_ID}" "${PAIRING_PIN}")
+PAIR_CONFIRM_RESP=$(micro_request "POST" "/api/v1/receivers/pair/confirm" 200 "${PAIR_CONFIRM_PAYLOAD}")
+
+PAIRED_DEVICE_ID=$(python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+if data.get('status') != 'paired':
+    sys.stderr.write(f'Pair confirm returned unexpected status: {data.get(\"status\")}\\n')
+    sys.exit(1)
+dev_id = data.get('device_id')
+if not dev_id:
+    sys.stderr.write('Pair confirm missing device_id\\n')
+    sys.exit(1)
+print(dev_id)
+" <<< "${PAIR_CONFIRM_RESP}")
+
 log_ok "Receiver successfully paired with Micro Server! Device ID: ${PAIRED_DEVICE_ID}"
 
 # ------------------------------------------------------------------------------
 # Phase 6: Inspect Receiver Qualification & Verified Capabilities
 # ------------------------------------------------------------------------------
-log_info "Phase 6: Verifying qualification state: GET ${MICHI_SERVER}/api/v1/receivers/${PAIRED_DEVICE_ID} ..."
-REC_STATE=$(http_expect_json "GET" "${MICHI_SERVER}/api/v1/receivers/${PAIRED_DEVICE_ID}" 200)
+log_info "Phase 6: Verifying qualification state: GET /api/v1/receivers/${PAIRED_DEVICE_ID} ..."
+REC_STATE=$(micro_request "GET" "/api/v1/receivers/${PAIRED_DEVICE_ID}" 200)
 
-QUALIFICATION=$(python3 -c "import json; print(json.loads('''${REC_STATE}''').get('qualification', 'Unknown'))")
-log_info "Receiver qualification: ${QUALIFICATION}"
+QUALIFICATION=$(python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+q = data.get('qualification', 'Unknown')
+print(q)
+if q != 'Qualified':
+    sys.stderr.write(f'Receiver qualification check failed: {q}\\n')
+    sys.exit(1)
+" <<< "${REC_STATE}")
 
-if [[ "${QUALIFICATION}" != "Qualified" ]]; then
-    log_warn "Qualification is '${QUALIFICATION}'. Checking if basic streaming is permitted..."
-else
-    log_ok "Receiver is fully Qualified (rtp_udp + pcm_s16le + 48000Hz/16bit/2ch verified)."
-fi
+log_ok "Receiver is fully Qualified: ${QUALIFICATION} (rtp_udp + pcm_s16le + 48000Hz/16bit/2ch verified)."
 
 # ------------------------------------------------------------------------------
 # Phase 7: Session Creation (RTP / PCM Negotiation)
@@ -186,60 +318,87 @@ SESSION_START_PAYLOAD=$(cat << JSON
     "sample_rate": 48000,
     "bit_depth": 16,
     "channels": 2,
-    "stream_port": 0,
+    "stream_port": 53318,
     "buffer_ms": 100,
     "volume": 80
 }
 JSON
 )
 
-SESSION_START_RESP=$(http_expect_json "POST" "${MICHI_SERVER}/api/v1/receivers/${PAIRED_DEVICE_ID}/session/start" 200 "${SESSION_START_PAYLOAD}")
-STREAM_PORT=$(python3 -c "import json; print(json.loads('''${SESSION_START_RESP}''').get('stream_port', 0))")
-SSRC=$(python3 -c "import json; print(json.loads('''${SESSION_START_RESP}''').get('ssrc', 0))")
-log_ok "Session negotiated! Remote RTP Port: ${STREAM_PORT}, SSRC: ${SSRC}"
+SESSION_START_RESP=$(micro_request "POST" "/api/v1/receivers/${PAIRED_DEVICE_ID}/session/start" 200 "${SESSION_START_PAYLOAD}")
+ACTIVE_SESSION=1
+
+python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+port = data.get('stream_port', 0)
+ssrc = data.get('ssrc', 0)
+if port <= 0 or ssrc == 0:
+    sys.stderr.write(f'Invalid session negotiation: port={port}, ssrc={ssrc}\\n')
+    sys.exit(1)
+print(f'Remote RTP Port: {port}, SSRC: {ssrc}')
+" <<< "${SESSION_START_RESP}"
+
+log_ok "Session negotiated successfully with ESP32-S3!"
 
 # ------------------------------------------------------------------------------
 # Phase 8: Emit PCM / RTP Audio Packets
 # ------------------------------------------------------------------------------
 log_info "Phase 8: Emitting 2000ms test PCM audio (440 Hz sine) via Micro Server ..."
 STREAM_TEST_PAYLOAD='{"frequency_hz":440.0,"duration_ms":2000}'
-STREAM_TEST_RESP=$(http_expect_json "POST" "${MICHI_SERVER}/api/v1/receivers/${PAIRED_DEVICE_ID}/stream/test_pcm" 200 "${STREAM_TEST_PAYLOAD}")
+STREAM_TEST_RESP=$(micro_request "POST" "/api/v1/receivers/${PAIRED_DEVICE_ID}/stream/test_pcm" 200 "${STREAM_TEST_PAYLOAD}")
 
-BYTES_SENT=$(python3 -c "import json; print(json.loads('''${STREAM_TEST_RESP}''').get('bytes_sent', 0))")
-if [[ "${BYTES_SENT}" -le 0 ]]; then
-    log_err "RTP packet emission failed (0 bytes sent): ${STREAM_TEST_RESP}"
-    exit 5
-fi
-log_ok "Audio streamed successfully! Bytes sent: ${BYTES_SENT} (~$((BYTES_SENT / 1920)) RTP packets)"
+BYTES_SENT=$(python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+bytes_sent = data.get('bytes_sent', 0)
+if bytes_sent <= 0:
+    sys.stderr.write(f'Zero bytes sent: {data}\\n')
+    sys.exit(1)
+print(bytes_sent)
+" <<< "${STREAM_TEST_RESP}")
+
+PACKETS_SENT=$((BYTES_SENT / 1920))
+log_ok "Audio streamed successfully! Bytes sent: ${BYTES_SENT} (~${PACKETS_SENT} RTP packets of 1920 bytes)"
 
 # ------------------------------------------------------------------------------
 # Phase 9: Purrbeat Heartbeat Verification
 # ------------------------------------------------------------------------------
-log_info "Phase 9: Verifying Purrbeat supervisor heartbeat: POST ${MICHI_SERVER}/api/v1/receivers/${PAIRED_DEVICE_ID}/heartbeat ..."
-HB_RESP=$(http_expect_json "POST" "${MICHI_SERVER}/api/v1/receivers/${PAIRED_DEVICE_ID}/heartbeat" 200)
-HB_STATUS=$(python3 -c "import json; print(json.loads('''${HB_RESP}''').get('status', ''))")
+log_info "Phase 9: Verifying Purrbeat supervisor heartbeat: POST /api/v1/receivers/${PAIRED_DEVICE_ID}/heartbeat ..."
+HB_RESP=$(micro_request "POST" "/api/v1/receivers/${PAIRED_DEVICE_ID}/heartbeat" 200 "{}")
 
-if [[ "${HB_STATUS}" != "alive" ]]; then
-    log_err "Heartbeat returned non-alive status: ${HB_RESP}"
-    exit 6
-fi
-log_ok "Heartbeat confirmed alive!"
+python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+status = data.get('status', '')
+if status != 'alive':
+    sys.stderr.write(f'Heartbeat status is not alive: {status}\\n')
+    sys.exit(1)
+" <<< "${HB_RESP}"
+
+log_ok "Purrbeat heartbeat confirmed alive!"
 
 # ------------------------------------------------------------------------------
 # Phase 10: Clean Session Teardown & Perch Authority Release
 # ------------------------------------------------------------------------------
-log_info "Phase 10: Stopping session and releasing authority: POST ${MICHI_SERVER}/api/v1/receivers/${PAIRED_DEVICE_ID}/session/stop ..."
-STOP_RESP=$(http_expect_json "POST" "${MICHI_SERVER}/api/v1/receivers/${PAIRED_DEVICE_ID}/session/stop" 200)
+log_info "Phase 10: Stopping session and releasing Perch authority: POST /api/v1/receivers/${PAIRED_DEVICE_ID}/session/stop ..."
+STOP_RESP=$(micro_request "POST" "/api/v1/receivers/${PAIRED_DEVICE_ID}/session/stop" 200 "{}")
+ACTIVE_SESSION=0
 log_ok "Session stopped cleanly: ${STOP_RESP}"
 
 # Verify receiver state is idle
-FINAL_STATE=$(http_expect_json "GET" "${MICHI_SERVER}/api/v1/receivers/${PAIRED_DEVICE_ID}" 200)
-IS_ACTIVE=$(python3 -c "import json; print(json.loads('''${FINAL_STATE}''').get('session_active', False))")
+FINAL_STATE=$(micro_request "GET" "/api/v1/receivers/${PAIRED_DEVICE_ID}" 200)
 
-if [[ "${IS_ACTIVE}" != "False" ]]; then
-    log_err "Receiver session remained active after teardown!"
-    exit 7
-fi
+python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+active = data.get('session_active', False)
+act_sess_id = data.get('active_session_id')
+if active or act_sess_id is not None:
+    sys.stderr.write(f'Receiver remained active after stop: active={active}, id={act_sess_id}\\n')
+    sys.exit(1)
+" <<< "${FINAL_STATE}"
+
 log_ok "Receiver session teardown verified in RAM and registry."
 
 echo -e "${COLOR_BOLD}==================================================================${COLOR_RESET}"
