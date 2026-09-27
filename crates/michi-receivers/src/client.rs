@@ -239,9 +239,9 @@ impl ReceiverClient {
             .map_err(|e| format!("heartbeat parse failed: {e}"))
     }
 
-    /// POST /api/v1/receiver-lite/session (canonical HTTP 201)
+    /// POST /api/v1/receiver-lite/session with optional Perch authority grant
     #[allow(clippy::too_many_arguments)]
-    pub async fn session_start(
+    pub async fn session_start_with_authority(
         &mut self,
         _session_id_hint: &str,
         codec: &str,
@@ -251,6 +251,7 @@ impl ReceiverClient {
         _stream_port_hint: u16,
         buffer_ms: u64,
         volume: u32,
+        authority: Option<&crate::authority_models::AuthorityGrant>,
     ) -> Result<NegotiatedReceiverSession, String> {
         if volume > 100 {
             return Err(format!("volume {volume} exceeds maximum of 100"));
@@ -277,6 +278,13 @@ impl ReceiverClient {
             req = req.header("Authorization", format!("Bearer {t}"));
         }
 
+        if let Some(grant) = authority {
+            req = req
+                .header("X-Authority-Grant", &grant.grant_token)
+                .header("X-Authority-Instance", &grant.authority_instance_id)
+                .header("X-Authority-Epoch", grant.lease_epoch.to_string());
+        }
+
         let resp = req
             .json(&payload)
             .send()
@@ -301,6 +309,33 @@ impl ReceiverClient {
         self.heartbeat_sequence.store(0, Ordering::SeqCst);
 
         Ok(negotiated)
+    }
+
+    /// POST /api/v1/receiver-lite/session (canonical HTTP 201)
+    #[allow(clippy::too_many_arguments)]
+    pub async fn session_start(
+        &mut self,
+        session_id_hint: &str,
+        codec: &str,
+        sample_rate: u32,
+        bit_depth: u32,
+        channels: u32,
+        stream_port_hint: u16,
+        buffer_ms: u64,
+        volume: u32,
+    ) -> Result<NegotiatedReceiverSession, String> {
+        self.session_start_with_authority(
+            session_id_hint,
+            codec,
+            sample_rate,
+            bit_depth,
+            channels,
+            stream_port_hint,
+            buffer_ms,
+            volume,
+            None,
+        )
+        .await
     }
 
     /// PATCH /api/v1/receiver-lite/session (canonical)
@@ -333,6 +368,32 @@ impl ReceiverClient {
         resp.json()
             .await
             .map_err(|e| format!("set_volume parse failed: {e}"))
+    }
+
+    /// PATCH /api/v1/receiver-lite/session {"paused": bool}
+    pub async fn session_pause(&mut self, paused: bool) -> Result<(), String> {
+        if self.active_session_id.is_none() {
+            return Err("NoActiveSession: cannot pause/resume session when no session is active".to_string());
+        }
+        let payload = serde_json::json!({
+            "paused": paused,
+        });
+        let mut req = self
+            .client
+            .patch(format!("{}/api/v1/receiver-lite/session", self.base_url));
+        req = self.apply_session_headers(req);
+
+        let resp = req
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("session_pause request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(format!("session_pause failed with status {status}"));
+        }
+        Ok(())
     }
 
     /// DELETE /api/v1/receiver-lite/session (canonical HTTP 204 or 200)

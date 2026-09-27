@@ -334,16 +334,32 @@ pub struct ErrorBody {
 
 // Registry
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ReceiverPresence {
+    #[default]
+    Unknown,
+    Offline,
+    VerifiedOnline,
+    Degraded,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReceiverRegistryEntry {
     pub receiver_id: String,
+    pub michi_id: Option<String>,
     pub name: String,
     pub device_type: String,
     pub base_url: String,
     pub paired: bool,
     pub token: Option<String>,
+    pub presence: ReceiverPresence,
     pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
     pub capabilities: Vec<String>,
+    pub capabilities_verified_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub capabilities_stale: bool,
+    pub authority_supported: bool,
+    pub owner_michi_id: Option<String>,
+    pub owner_name: Option<String>,
     pub active_session_id: Option<String>,
     pub max_sample_rate: u32,
     pub max_bit_depth: u32,
@@ -353,6 +369,51 @@ pub struct ReceiverRegistryEntry {
     pub supported_bit_depths: Vec<u32>,
     pub supported_channels: Vec<u8>,
     pub maximum_safe_volume: Option<u32>,
+}
+
+impl ReceiverRegistryEntry {
+    pub fn michi_id(&self) -> &str {
+        self.michi_id.as_deref().unwrap_or(&self.receiver_id)
+    }
+
+    pub fn is_online(&self) -> bool {
+        self.presence == ReceiverPresence::VerifiedOnline
+    }
+
+    pub fn supports_authority_v1(&self) -> bool {
+        self.authority_supported
+    }
+}
+
+impl Default for ReceiverRegistryEntry {
+    fn default() -> Self {
+        Self {
+            receiver_id: String::new(),
+            michi_id: None,
+            name: String::new(),
+            device_type: "standard".to_string(),
+            base_url: String::new(),
+            paired: false,
+            token: None,
+            presence: ReceiverPresence::Unknown,
+            last_seen: None,
+            capabilities: Vec::new(),
+            capabilities_verified_at: None,
+            capabilities_stale: false,
+            authority_supported: false,
+            owner_michi_id: None,
+            owner_name: None,
+            active_session_id: None,
+            max_sample_rate: 48000,
+            max_bit_depth: 16,
+            supported_transports: vec!["rtp_udp".to_string()],
+            supported_codecs: vec!["pcm_s16le".to_string()],
+            supported_sample_rates: vec![48000],
+            supported_bit_depths: vec![16],
+            supported_channels: vec![2],
+            maximum_safe_volume: Some(100),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -372,15 +433,34 @@ impl ReceiverRegistry {
     }
 
     pub fn get(&self, id: &str) -> Option<&ReceiverRegistryEntry> {
-        self.receivers.get(id)
+        self.receivers.get(id).or_else(|| self.get_by_michi_id(id))
     }
 
     pub fn get_mut(&mut self, id: &str) -> Option<&mut ReceiverRegistryEntry> {
-        self.receivers.get_mut(id)
+        if self.receivers.contains_key(id) {
+            self.receivers.get_mut(id)
+        } else {
+            self.receivers.values_mut().find(|r| r.michi_id.as_deref() == Some(id))
+        }
+    }
+
+    pub fn get_by_michi_id(&self, michi_id: &str) -> Option<&ReceiverRegistryEntry> {
+        self.receivers.values().find(|r| r.michi_id.as_deref() == Some(michi_id) || r.receiver_id == michi_id)
+    }
+
+    pub fn get_by_michi_id_mut(&mut self, michi_id: &str) -> Option<&mut ReceiverRegistryEntry> {
+        self.receivers.values_mut().find(|r| r.michi_id.as_deref() == Some(michi_id) || r.receiver_id == michi_id)
     }
 
     pub fn list(&self) -> Vec<&ReceiverRegistryEntry> {
         self.receivers.values().collect()
+    }
+
+    pub fn list_online(&self) -> Vec<&ReceiverRegistryEntry> {
+        self.receivers
+            .values()
+            .filter(|r| r.presence == ReceiverPresence::VerifiedOnline)
+            .collect()
     }
 
     pub fn remove(&mut self, id: &str) {
@@ -388,12 +468,24 @@ impl ReceiverRegistry {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ReceiverCapabilities {
     pub device_type: String,
     pub supported_codecs: Vec<String>,
     pub max_sample_rate: u32,
     pub max_bit_depth: u32,
+    #[serde(default)]
+    pub supported_transports: Vec<String>,
+    #[serde(default)]
+    pub supported_sample_rates: Vec<u32>,
+    #[serde(default)]
+    pub supported_bit_depths: Vec<u32>,
+    #[serde(default)]
+    pub supported_channels: Vec<u8>,
+    #[serde(default)]
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub authority_features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

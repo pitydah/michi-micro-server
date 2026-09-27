@@ -97,6 +97,8 @@ pub struct AppState {
     pub receiver_credential_store: Arc<Option<michi_receivers::ReceiverCredentialStore>>,
     /// Resource-bounded transcode semaphore derived from ResourceProfile.max_transcodes.
     pub transcode_semaphore: Arc<tokio::sync::Semaphore>,
+    /// In-memory store for pending PawPass playback transfers awaiting authority commit.
+    pub pending_transfers: Arc<michi_sync::playback_transfer::PendingTransferStore>,
     /// Per-module transition mutexes to serialize lifecycle changes without holding global locks during I/O.
     pub module_transition_locks:
         Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
@@ -208,27 +210,70 @@ impl AppState {
                     }
 
                     let is_paired = rec.paired && token.is_some();
+
+                    let (
+                        supported_transports,
+                        supported_codecs,
+                        supported_sample_rates,
+                        supported_bit_depths,
+                        supported_channels,
+                        max_sr,
+                        max_bd,
+                    ) = if let Some(ref json_str) = rec.capabilities_json {
+                        if let Ok(caps) =
+                            serde_json::from_str::<michi_receivers::ReceiverCapabilities>(json_str)
+                        {
+                            (
+                                caps.supported_transports,
+                                caps.supported_codecs,
+                                caps.supported_sample_rates,
+                                caps.supported_bit_depths,
+                                caps.supported_channels,
+                                caps.max_sample_rate,
+                                caps.max_bit_depth,
+                            )
+                        } else {
+                            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0, 0)
+                        }
+                    } else {
+                        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0, 0)
+                    };
+
+                    let capabilities_observed_at =
+                        rec.capabilities_observed_at.as_deref().and_then(|s| {
+                            chrono::DateTime::parse_from_rfc3339(s)
+                                .ok()
+                                .map(|d| d.with_timezone(&chrono::Utc))
+                        });
+
                     let entry = michi_receivers::ReceiverRegistryEntry {
                         receiver_id: rec.id.clone(),
+                        michi_id: rec.michi_id.clone(),
                         name: rec.name,
                         device_type: rec.device_type,
                         base_url: rec.base_url,
                         paired: is_paired,
                         token,
+                        presence: michi_receivers::ReceiverPresence::Offline,
                         last_seen: rec.last_seen.and_then(|s| {
                             chrono::DateTime::parse_from_rfc3339(&s)
                                 .ok()
                                 .map(|d| d.with_timezone(&chrono::Utc))
                         }),
                         capabilities: vec!["pcm".to_string(), "rtp".to_string()],
+                        capabilities_verified_at: capabilities_observed_at,
+                        capabilities_stale: true,
+                        authority_supported: rec.authority_supported,
+                        owner_michi_id: None,
+                        owner_name: None,
                         active_session_id: None,
-                        max_sample_rate: 48000,
-                        max_bit_depth: 16,
-                        supported_transports: vec!["rtp".to_string()],
-                        supported_codecs: vec!["pcm_s16le".to_string()],
-                        supported_sample_rates: vec![44100, 48000],
-                        supported_bit_depths: vec![16],
-                        supported_channels: vec![2],
+                        max_sample_rate: max_sr,
+                        max_bit_depth: max_bd,
+                        supported_transports,
+                        supported_codecs,
+                        supported_sample_rates,
+                        supported_bit_depths,
+                        supported_channels,
                         maximum_safe_volume: Some(100),
                     };
 
@@ -456,6 +501,7 @@ impl AppState {
             playback_output_selection,
             receiver_credential_store,
             transcode_semaphore,
+            pending_transfers: Arc::new(michi_sync::playback_transfer::PendingTransferStore::new()),
             module_transition_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             module_runtime_info,
         };
@@ -1768,6 +1814,22 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/receivers/:id/heartbeat",
             post(routes::v1::receivers::receiver_heartbeat_handler),
+        )
+        .route(
+            "/api/v1/receivers/:id/takeover",
+            post(routes::v1::receivers::receiver_takeover_handler),
+        )
+        .route(
+            "/api/v1/playback-transfer/prepare",
+            post(routes::v1::playback_transfer::playback_transfer_prepare_handler),
+        )
+        .route(
+            "/api/v1/playback-transfer/commit",
+            post(routes::v1::playback_transfer::playback_transfer_commit_handler),
+        )
+        .route(
+            "/api/v1/playback-transfer/abort",
+            post(routes::v1::playback_transfer::playback_transfer_abort_handler),
         );
 
     // /stream/test_pcm is an engineering verification route, disabled in release builds

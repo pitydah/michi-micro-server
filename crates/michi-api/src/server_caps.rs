@@ -66,6 +66,8 @@ const CANONICAL_MATURITY: &[(&str, FeatureMaturity)] = &[
     ("hls_vod", FeatureMaturity::Stable),
     ("library", FeatureMaturity::Stable),
     ("opensubsonic", FeatureMaturity::Beta),
+    ("pawpass_v1", FeatureMaturity::Beta),
+    ("perch_client_v1", FeatureMaturity::Beta),
     ("playback_history", FeatureMaturity::Stable),
     ("playlists", FeatureMaturity::Stable),
     ("receivers", FeatureMaturity::Beta),
@@ -74,6 +76,7 @@ const CANONICAL_MATURITY: &[(&str, FeatureMaturity)] = &[
     ("security", FeatureMaturity::Stable),
     ("stream", FeatureMaturity::Stable),
     ("sync", FeatureMaturity::Stable),
+    ("tailsync_v1", FeatureMaturity::Beta),
     ("transcode", FeatureMaturity::Stable),
 ];
 // END GENERATED PRODUCT MATURITY
@@ -257,6 +260,27 @@ const ALWAYS_ON_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] 
         FeatureMaturity::Beta,
         EvidenceLevel::EffectVerified,
     ),
+    (
+        "pawpass_v1",
+        "1.0",
+        "PawPass distributed playback transfer target and source",
+        FeatureMaturity::Beta,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "perch_client_v1",
+        "1.0",
+        "Perch authority client, gate and takeover",
+        FeatureMaturity::Beta,
+        EvidenceLevel::EffectVerified,
+    ),
+    (
+        "tailsync_v1",
+        "1.0",
+        "TailSync playback state synchronization",
+        FeatureMaturity::Beta,
+        EvidenceLevel::EffectVerified,
+    ),
 ];
 
 const DISABLED_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] = &[];
@@ -271,7 +295,9 @@ impl ServerCapabilities {
             .read()
             .await
             .list()
-            .len();
+            .iter()
+            .filter(|r| r.presence == michi_receivers::ReceiverPresence::VerifiedOnline)
+            .count();
         let ffmpeg = michi_streaming::check_ffmpeg();
 
         let mut features: Vec<ServerFeature> = MODULE_FEATURES

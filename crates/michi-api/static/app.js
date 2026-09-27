@@ -3480,10 +3480,18 @@ async function discoverDevices() {
   }
 }
 
-async function startReceiverPair(deviceId) {
+async function startReceiverPair(deviceIdOrBaseUrl, initiatorId) {
   if (!canPerformProtectedAction()) return;
   try {
-    var res = await MichiAPI.startReceiverPair({ receiver_id: deviceId });
+    var payload;
+    if (typeof deviceIdOrBaseUrl === 'object' && deviceIdOrBaseUrl !== null) {
+      payload = deviceIdOrBaseUrl;
+    } else if (typeof deviceIdOrBaseUrl === 'string' && (deviceIdOrBaseUrl.startsWith('http://') || deviceIdOrBaseUrl.startsWith('https://'))) {
+      payload = { base_url: deviceIdOrBaseUrl, initiator_id: initiatorId || 'michi-web' };
+    } else {
+      payload = { receiver_id: deviceIdOrBaseUrl, initiator_id: initiatorId || 'michi-web' };
+    }
+    var res = await MichiAPI.startReceiverPair(payload);
     showToast('Receiver pairing initiated');
     return res;
   } catch (e) {
@@ -3492,10 +3500,16 @@ async function startReceiverPair(deviceId) {
 }
 window.startReceiverPair = startReceiverPair;
 
-async function confirmReceiverPair(deviceId, pin) {
+async function confirmReceiverPair(pairingIdOrDeviceId, pin) {
   if (!canPerformProtectedAction()) return;
   try {
-    var res = await MichiAPI.confirmReceiverPair({ receiver_id: deviceId, pin: pin });
+    var payload;
+    if (typeof pairingIdOrDeviceId === 'object' && pairingIdOrDeviceId !== null) {
+      payload = pairingIdOrDeviceId;
+    } else {
+      payload = { pairing_id: pairingIdOrDeviceId, pin: pin };
+    }
+    var res = await MichiAPI.confirmReceiverPair(payload);
     showToast('Receiver paired successfully');
     return res;
   } catch (e) {

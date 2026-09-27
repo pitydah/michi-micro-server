@@ -1961,11 +1961,13 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "socket2 0.5.10",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -2173,6 +2175,7 @@ dependencies = [
  "michi-core",
  "michi-identity",
  "michi-playback",
+ "michi-sync",
  "rand 0.8.6",
  "reqwest",
  "serde",
@@ -2181,6 +2184,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -2277,6 +2281,8 @@ name = "michi-sync"
 version = "1.0.0-rc.3"
 dependencies = [
  "chrono",
+ "michi-core",
+ "michi-identity",
  "serde",
  "serde_json",
  "sha2",

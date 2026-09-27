@@ -1,8 +1,18 @@
+pub mod authority_client;
+pub mod authority_gate;
+pub mod authority_models;
 pub mod client;
 pub mod credentials;
 pub mod models;
+pub mod pawpass_coordinator;
 pub mod session_manager;
+pub mod session_supervisor;
 pub mod transport;
+
+pub use authority_client::ReceiverAuthorityClient;
+pub use authority_gate::AuthorityGate;
+pub use authority_models::*;
+pub use pawpass_coordinator::*;
 
 use async_trait::async_trait;
 

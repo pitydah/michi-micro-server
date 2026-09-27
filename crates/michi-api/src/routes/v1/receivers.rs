@@ -242,18 +242,21 @@ pub async fn receivers_handler(
         .list()
         .iter()
         .map(|e| {
-            let online = e
-                .last_seen
-                .map(|ls| (chrono::Utc::now() - ls).num_seconds() < 180)
-                .unwrap_or(false);
+            let online = e.presence == michi_receivers::models::ReceiverPresence::VerifiedOnline
+                || e.last_seen
+                    .map(|ls| (chrono::Utc::now() - ls).num_seconds() < 90)
+                    .unwrap_or(false);
             serde_json::json!({
                 "id": e.receiver_id,
                 "receiver_id": e.receiver_id,
+                "michi_id": e.michi_id,
                 "name": e.name,
                 "device_type": e.device_type,
                 "host": e.base_url,
                 "paired": e.paired,
                 "online": online,
+                "presence": e.presence,
+                "authority_supported": e.authority_supported,
                 "session_active": e.active_session_id.is_some(),
                 "capabilities": e.capabilities,
                 "active_session_id": e.active_session_id,
@@ -277,17 +280,21 @@ pub async fn get_receiver_handler(
             &format!("receiver not found: {id}"),
         )
     })?;
-    let online = entry
-        .last_seen
-        .map(|ls| (chrono::Utc::now() - ls).num_seconds() < 180)
-        .unwrap_or(false);
+    let online = entry.presence == michi_receivers::models::ReceiverPresence::VerifiedOnline
+        || entry.last_seen
+            .map(|ls| (chrono::Utc::now() - ls).num_seconds() < 90)
+            .unwrap_or(false);
     Ok(Json(serde_json::json!({
         "id": entry.receiver_id,
+        "receiver_id": entry.receiver_id,
+        "michi_id": entry.michi_id,
         "name": entry.name,
         "device_type": entry.device_type,
         "host": entry.base_url,
         "paired": entry.paired,
         "online": online,
+        "presence": entry.presence,
+        "authority_supported": entry.authority_supported,
         "session_active": entry.active_session_id.is_some(),
         "capabilities": entry.capabilities,
         "max_sample_rate": entry.max_sample_rate,
@@ -298,15 +305,66 @@ pub async fn get_receiver_handler(
     })))
 }
 
+/// POST /api/v1/receivers/:id/takeover
+pub async fn receiver_takeover_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let reg_arc = state.receiver_manager.registry().await;
+    let reg = reg_arc.read().await;
+    let entry = reg
+        .get(&id)
+        .or_else(|| reg.list().into_iter().find(|e| e.michi_id.as_deref() == Some(&id)))
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "RECEIVER_NOT_FOUND",
+                &format!("receiver not found: {id}"),
+            )
+        })?
+        .clone();
+    drop(reg);
+
+    if !entry.paired {
+        return Err(v1_error(
+            StatusCode::FORBIDDEN,
+            "RECEIVER_NOT_PAIRED",
+            "receiver must be paired to takeover authority",
+        ));
+    }
+
+    match state
+        .receiver_manager
+        .authority_gate()
+        .explicit_takeover(&entry)
+        .await
+    {
+        Ok(grant) => Ok(Json(serde_json::json!({
+            "status": "taken_over",
+            "receiver_id": entry.receiver_id,
+            "authority_instance_id": grant.authority_instance_id,
+            "lease_epoch": grant.lease_epoch,
+            "activation_expires_at": grant.activation_expires_at.to_rfc3339(),
+        }))),
+        Err(e) => Err(v1_error(
+            StatusCode::BAD_GATEWAY,
+            "TAKEOVER_FAILED",
+            &e.to_string(),
+        )),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ReceiverPairStartBody {
-    pub base_url: String,
+    pub base_url: Option<String>,
+    pub receiver_id: Option<String>,
     pub initiator_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ReceiverPairConfirmBody {
-    pub pairing_id: String,
+    pub pairing_id: Option<String>,
+    pub receiver_id: Option<String>,
     pub pin: String,
 }
 
@@ -318,9 +376,30 @@ pub async fn receiver_pair_start_handler(
         .initiator_id
         .unwrap_or_else(|| "michi-micro-server".into());
 
+    let target_base_url = if let Some(ref url) = body.base_url {
+        url.clone()
+    } else if let Some(ref rid) = body.receiver_id {
+        let reg_arc = state.receiver_manager.registry().await;
+        let reg = reg_arc.read().await;
+        let entry = reg.get(rid).ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "RECEIVER_NOT_FOUND",
+                &format!("receiver not found: {rid}"),
+            )
+        })?;
+        entry.base_url.clone()
+    } else {
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "either base_url or receiver_id must be provided",
+        ));
+    };
+
     match state
         .receiver_manager
-        .start_pairing(&body.base_url, &initiator_id)
+        .start_pairing(&target_base_url, &initiator_id)
         .await
     {
         Ok(pending) => Ok(Json(serde_json::json!({
@@ -383,11 +462,15 @@ async fn persist_paired_receiver(state: &AppState, device_id: &str) -> Result<()
         base_url: entry.base_url.clone(),
         paired: entry.paired,
         online: entry.last_seen.is_some(),
-        audio_capabilities: caps_json,
+        audio_capabilities: caps_json.clone(),
         last_seen: entry.last_seen.map(|d| d.to_rfc3339()),
         paired_at: Some(now.clone()),
         created_at: now.clone(),
         updated_at: now,
+        michi_id: entry.michi_id.clone(),
+        capabilities_json: Some(caps_json),
+        capabilities_observed_at: entry.capabilities_verified_at.map(|d| d.to_rfc3339()),
+        authority_supported: entry.authority_supported,
     };
 
     michi_db::persist_paired_receiver_transaction(&state.db, &prec, &cred)
@@ -419,9 +502,19 @@ pub async fn receiver_pair_confirm_handler(
         ));
     }
 
+    let pairing_id = if let Some(ref pid) = body.pairing_id {
+        pid.clone()
+    } else {
+        return Err(v1_error_code(
+            StatusCode::BAD_REQUEST,
+            michi_link::MichiLinkErrorCode::InvalidRequest,
+            "pairing_id is required to confirm pairing",
+        ));
+    };
+
     match state
         .receiver_manager
-        .confirm_pairing(&body.pairing_id, &body.pin)
+        .confirm_pairing(&pairing_id, &body.pin)
         .await
     {
         Ok(device_id) => match persist_paired_receiver(&state, &device_id).await {

@@ -144,11 +144,13 @@ impl AudioSink for ReceiverAudioSink {
 
     async fn pause(&mut self) -> Result<(), PlaybackError> {
         self.state = SinkState::Paused;
+        let _ = self.session_manager.patch_session(&self.receiver_id, true).await;
         Ok(())
     }
 
     async fn resume(&mut self) -> Result<(), PlaybackError> {
         self.state = SinkState::AudioFlowing;
+        let _ = self.session_manager.patch_session(&self.receiver_id, false).await;
         Ok(())
     }
 
@@ -169,15 +171,30 @@ impl AudioSink for ReceiverAudioSink {
     async fn health(&self) -> Result<(), PlaybackError> {
         let registry_arc = self.session_manager.registry().await;
         let registry = registry_arc.read().await;
-        if let Some(entry) = registry.get(&self.receiver_id) {
-            if entry.paired {
-                Ok(())
-            } else {
-                Err(PlaybackError::ReceiverNotPaired(self.receiver_id.clone()))
-            }
-        } else {
-            Err(PlaybackError::ReceiverNotPaired(self.receiver_id.clone()))
+        let entry = registry.get(&self.receiver_id).ok_or_else(|| {
+            PlaybackError::ReceiverNotPaired(self.receiver_id.clone())
+        })?;
+
+        if !entry.paired {
+            return Err(PlaybackError::ReceiverNotPaired(self.receiver_id.clone()));
         }
+
+        // When sink is supposed to be active (AudioFlowing or Paused), verify active session liveness in RAM
+        if self.state == SinkState::AudioFlowing || self.state == SinkState::Paused {
+            let session_active = self
+                .session_manager
+                .get_active_session(&self.receiver_id)
+                .await
+                .is_some();
+            if !session_active {
+                return Err(PlaybackError::PlaybackFailed(format!(
+                    "receiver {} lost active session",
+                    self.receiver_id
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), PlaybackError> {
@@ -386,6 +403,8 @@ mod integration_tests {
                 supported_bit_depths: vec![16],
                 supported_channels: vec![2],
                 maximum_safe_volume: Some(100),
+                presence: michi_receivers::ReceiverPresence::VerifiedOnline,
+                ..Default::default()
             });
         }
 

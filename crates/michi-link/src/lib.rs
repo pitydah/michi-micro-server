@@ -14,4 +14,7 @@ pub use events::LinkEvent;
 pub use models::*;
 pub use permissions::{DevicePermissions, Permission};
 pub use roles::{ServerRole, CANONICAL_MICRO_ROLES};
-pub use version::APP_VERSION;
+pub use version::{
+    APP_VERSION, AUTHORITY_PROFILE_VERSION, MICHI_LINK_VENDOR_COMMIT,
+    RECEIVER_LITE_PROFILE_VERSION,
+};

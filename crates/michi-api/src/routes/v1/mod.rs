@@ -17,6 +17,7 @@ pub mod library;
 pub mod modules;
 pub mod pair;
 pub mod playback;
+pub mod playback_transfer;
 pub mod playlists;
 pub mod queue;
 pub mod radio;

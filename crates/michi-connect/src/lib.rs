@@ -4,6 +4,14 @@
 //! - QR link michi://connect?id=XYZ&host=IP&port=PORT
 //! - CORS dinámico basado en firma
 
+pub mod discovery_listener;
+pub mod mdns_resolver;
+pub mod scent_store;
+
+pub use discovery_listener::{WhiskerDiscoveryListener, WhiskerMetrics};
+pub use mdns_resolver::MdnsResolver;
+pub use scent_store::{ScentEvent, ScentRecord, ScentStore, SCENT_EXPIRY_TIMEOUT};
+
 use michi_identity::IdentityManager;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -15,6 +23,7 @@ pub struct MichiConnect {
     server_url: Arc<RwLock<String>>,
     service_name: Arc<RwLock<String>>,
     mdns_daemon: Arc<RwLock<Option<mdns_sd::ServiceDaemon>>>,
+    scent_store: Arc<ScentStore>,
 }
 
 impl MichiConnect {
@@ -26,7 +35,12 @@ impl MichiConnect {
             server_url: Arc::new(RwLock::new(server_url)),
             service_name: Arc::new(RwLock::new(String::new())),
             mdns_daemon: Arc::new(RwLock::new(None)),
+            scent_store: Arc::new(ScentStore::new()),
         }
+    }
+
+    pub fn scent_store(&self) -> Arc<ScentStore> {
+        self.scent_store.clone()
     }
 
     /// Generate a QR code link string: michi://connect?id=XYZ&host=IP&port=PORT
