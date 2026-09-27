@@ -41,6 +41,8 @@ Michi Music Player, Michi Mobile, Home Assistant, and CasaOS/ZimaOS.
 | **hls_vod** | `core` | 🟢 `stable` | Single-rendition HLS VOD audio streaming |
 | **library** | `core` | 🟢 `stable` | Library scanning, indexing and browsing with watcher |
 | **opensubsonic** | `subset` | 🟡 `beta` | OpenSubsonic compatible subset layer (JSON-only) |
+| **pawpass_v1** | `v1-beta` | 🟡 `beta` | PawPass distributed playback transfer target and source |
+| **perch_client_v1** | `v1-beta` | 🟡 `beta` | Perch authority client, gate and takeover |
 | **playback_history** | `core` | 🟢 `stable` | Play history tracking, stats and scrobbling |
 | **playlists** | `core` | 🟢 `stable` | CRUD playlists, smart playlists and M3U import/export |
 | **receivers** | `v1-beta` | 🟡 `beta` | Michi Link v1-lite receiver playback plane |
@@ -49,6 +51,7 @@ Michi Music Player, Michi Mobile, Home Assistant, and CasaOS/ZimaOS.
 | **security** | `core` | 🟢 `stable` | Argon2 auth, bearer tokens, rate limiting and security headers |
 | **stream** | `core` | 🟢 `stable` | HTTP Range streaming (200/206/416) and direct play |
 | **sync** | `core` | 🟢 `stable` | State sync with Lamport logical clocks and epoch precedence |
+| **tailsync_v1** | `v1-beta` | 🟡 `beta` | TailSync playback state synchronization |
 | **transcode** | `core` | 🟢 `stable` | On-demand transcoding to MP3/Ogg/Opus via FFmpeg |
 <!-- END GENERATED V1 FEATURE MATRIX -->
 

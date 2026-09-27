@@ -87,6 +87,21 @@
       "maturity": "stable",
       "release_scope": "core",
       "description": "Argon2 auth, bearer tokens, rate limiting and security headers"
+    },
+    "pawpass_v1": {
+      "maturity": "beta",
+      "release_scope": "v1-beta",
+      "description": "PawPass distributed playback transfer target and source"
+    },
+    "perch_client_v1": {
+      "maturity": "beta",
+      "release_scope": "v1-beta",
+      "description": "Perch authority client, gate and takeover"
+    },
+    "tailsync_v1": {
+      "maturity": "beta",
+      "release_scope": "v1-beta",
+      "description": "TailSync playback state synchronization"
     }
   }
 }

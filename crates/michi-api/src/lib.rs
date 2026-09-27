@@ -1913,8 +1913,8 @@ fn v1_link_routes() -> Router<AppState> {
             post(routes::v1::playback_transfer::playback_transfer_abort_handler),
         );
 
-    // /stream/test_pcm is an engineering verification route, gated behind hardware-gate feature
-    #[cfg(any(feature = "hardware-gate", test))]
+    // /stream/test_pcm is an engineering verification route, gated behind hardware-gate or debug/test builds
+    #[cfg(any(feature = "hardware-gate", debug_assertions, test))]
     let api_v1 = api_v1.route(
         "/api/v1/receivers/:id/stream/test_pcm",
         post(routes::v1::receivers::receiver_stream_test_pcm_handler),
