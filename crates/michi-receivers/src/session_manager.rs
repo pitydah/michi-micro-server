@@ -5,9 +5,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::ReceiverClient;
 use crate::models::*;
+use crate::session_supervisor::ReceiverClientError;
 use crate::transport::{AudioTransport, RtpReceiverTransport, TransportStreamConfig};
 
 pub type SharedAudioTransport = Arc<tokio::sync::Mutex<Box<dyn AudioTransport>>>;
+
+/// Supervised heartbeat task handle holding cancellation token and background join handle.
+#[derive(Debug)]
+pub struct ReceiverSupervisorHandle {
+    pub cancel: CancellationToken,
+    pub join: tokio::task::JoinHandle<()>,
+}
 
 /// Manages receiver sessions: pairing, heartbeat, session start/stop, volume.
 #[derive(Clone)]
@@ -17,7 +25,8 @@ pub struct ReceiverSessionManager {
     pending_pairings: Arc<RwLock<HashMap<String, PendingReceiverPairing>>>,
     active_sessions: Arc<RwLock<HashMap<String, ReceiverActiveSession>>>,
     active_transports: Arc<RwLock<HashMap<String, SharedAudioTransport>>>,
-    heartbeat_tokens: Arc<RwLock<HashMap<String, CancellationToken>>>,
+    heartbeat_handles: Arc<RwLock<HashMap<String, ReceiverSupervisorHandle>>>,
+    authority_gate: Arc<crate::authority_gate::AuthorityGate>,
 }
 
 impl std::fmt::Debug for ReceiverSessionManager {
@@ -30,35 +39,56 @@ impl std::fmt::Debug for ReceiverSessionManager {
 
 impl ReceiverSessionManager {
     pub fn new() -> Self {
+        let michi_id = "anonymous".to_string();
+        let authority_gate = Arc::new(crate::authority_gate::AuthorityGate::new(
+            michi_id,
+            "Michi Micro Server".to_string(),
+            "micro-server".to_string(),
+        ));
         Self {
             registry: Arc::new(RwLock::new(ReceiverRegistry::new())),
             identity: None,
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
-            heartbeat_tokens: Arc::new(RwLock::new(HashMap::new())),
+            heartbeat_handles: Arc::new(RwLock::new(HashMap::new())),
+            authority_gate,
         }
     }
 
     pub fn new_with_identity(identity: Arc<michi_identity::IdentityManager>) -> Self {
+        let michi_id = identity.michi_id().to_string();
+        let authority_gate = Arc::new(crate::authority_gate::AuthorityGate::new(
+            michi_id,
+            "Michi Micro Server".to_string(),
+            "micro-server".to_string(),
+        ));
         Self {
             registry: Arc::new(RwLock::new(ReceiverRegistry::new())),
             identity: Some(identity),
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
-            heartbeat_tokens: Arc::new(RwLock::new(HashMap::new())),
+            heartbeat_handles: Arc::new(RwLock::new(HashMap::new())),
+            authority_gate,
         }
     }
 
     pub fn new_with(registry: Arc<RwLock<ReceiverRegistry>>) -> Self {
+        let michi_id = "anonymous".to_string();
+        let authority_gate = Arc::new(crate::authority_gate::AuthorityGate::new(
+            michi_id,
+            "Michi Micro Server".to_string(),
+            "micro-server".to_string(),
+        ));
         Self {
             registry,
             identity: None,
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
-            heartbeat_tokens: Arc::new(RwLock::new(HashMap::new())),
+            heartbeat_handles: Arc::new(RwLock::new(HashMap::new())),
+            authority_gate,
         }
     }
 
@@ -324,15 +354,29 @@ impl ReceiverSessionManager {
             }
         }
 
+        let authority_supported = info
+            .features
+            .as_ref()
+            .and_then(|f| f.get("authority_v1").or_else(|| f.get("perch_v1")))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let entry = ReceiverRegistryEntry {
             receiver_id: device_id.clone(),
+            michi_id: info.michi_id.clone(),
             name,
             device_type,
             base_url: pending.receiver_base_url,
             paired: true,
             token: client.token.clone(),
+            presence: ReceiverPresence::VerifiedOnline,
             last_seen: Some(chrono::Utc::now()),
             capabilities: caps,
+            capabilities_verified_at: Some(chrono::Utc::now()),
+            capabilities_stale: false,
+            authority_supported,
+            owner_michi_id: None,
+            owner_name: None,
             active_session_id: None,
             max_sample_rate: max_sr,
             max_bit_depth: max_bd,
@@ -342,6 +386,7 @@ impl ReceiverSessionManager {
             supported_bit_depths: bit_depths,
             supported_channels: channels,
             maximum_safe_volume: Some(100),
+            qualification: ReceiverQualification::Qualified,
         };
 
         self.registry.write().await.add(entry);
@@ -359,6 +404,10 @@ impl ReceiverSessionManager {
         self.confirm_pairing(&pending.pairing_id, pin).await
     }
 
+    pub fn authority_gate(&self) -> Arc<crate::authority_gate::AuthorityGate> {
+        self.authority_gate.clone()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn start_session(
         &self,
@@ -371,6 +420,35 @@ impl ReceiverSessionManager {
         stream_port: u16,
         buffer_ms: u64,
         volume: u32,
+    ) -> Result<NegotiatedReceiverSession, String> {
+        self.start_session_with_authority(
+            receiver_id,
+            session_id,
+            codec,
+            sample_rate,
+            bit_depth,
+            channels,
+            stream_port,
+            buffer_ms,
+            volume,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_session_with_authority(
+        &self,
+        receiver_id: &str,
+        session_id: &str,
+        codec: &str,
+        sample_rate: u32,
+        bit_depth: u32,
+        channels: u32,
+        stream_port: u16,
+        buffer_ms: u64,
+        volume: u32,
+        authority: Option<&crate::authority_models::AuthorityGrant>,
     ) -> Result<NegotiatedReceiverSession, String> {
         let entry = {
             let reg = self.registry.read().await;
@@ -433,8 +511,28 @@ impl ReceiverSessionManager {
         };
         client.token = token.clone();
 
+        // If grant not explicitly passed, attempt to ensure claim via AuthorityGate
+        let claimed_grant = if authority.is_none() {
+            if entry.supports_authority_v1() {
+                match self.authority_gate.ensure_claim(&entry).await {
+                    Ok(grant) => grant,
+                    Err(crate::authority_models::AuthorityError::Unsupported) => None,
+                    Err(err) => {
+                        return Err(format!(
+                            "PERCH_AUTHORITY_FAILED: authority claim failed ({err:?})"
+                        ));
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let effective_grant = authority.or(claimed_grant.as_ref());
+
         let negotiated = client
-            .session_start(
+            .session_start_with_authority(
                 session_id,
                 codec,
                 sample_rate,
@@ -443,6 +541,7 @@ impl ReceiverSessionManager {
                 stream_port,
                 buffer_ms,
                 volume,
+                effective_grant,
             )
             .await?;
 
@@ -453,13 +552,16 @@ impl ReceiverSessionManager {
         let ssrc = negotiated.ssrc;
 
         // Create and start RtpReceiverTransport targeting receiver_host:effective_port with EXACT negotiated SSRC
-        let host = base_url
-            .trim_start_matches("http://")
-            .trim_start_matches("https://")
-            .split(':')
-            .next()
-            .unwrap_or("127.0.0.1");
-        let target_addr = format!("{host}:{effective_port}");
+        let endpoint = url::Url::parse(&base_url)
+            .map_err(|e| format!("Invalid receiver base_url '{base_url}': {e}"))?;
+        let host = endpoint
+            .host_str()
+            .ok_or_else(|| format!("Invalid receiver endpoint host in '{base_url}'"))?;
+        let target_addr = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]:{effective_port}")
+        } else {
+            format!("{host}:{effective_port}")
+        };
 
         let mut transport = RtpReceiverTransport::new(&target_addr, ssrc);
         let config = TransportStreamConfig {
@@ -527,42 +629,162 @@ impl ReceiverSessionManager {
     }
 
     async fn spawn_heartbeat_task(&self, receiver_id: &str, lease_seconds: u64) {
-        // Cancel existing task if any
-        {
-            let mut tokens = self.heartbeat_tokens.write().await;
-            if let Some(old_token) = tokens.remove(receiver_id) {
-                old_token.cancel();
-            }
+        // Cancel existing task and join if any
+        let old_handle = {
+            let mut handles = self.heartbeat_handles.write().await;
+            handles.remove(receiver_id)
+        };
+        if let Some(h) = old_handle {
+            h.cancel.cancel();
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), h.join).await;
         }
 
         let cancel_token = CancellationToken::new();
-        {
-            let mut tokens = self.heartbeat_tokens.write().await;
-            tokens.insert(receiver_id.to_string(), cancel_token.clone());
-        }
+        let loop_token = cancel_token.clone();
 
         let mgr = self.clone();
         let rec_id = receiver_id.to_string();
         let interval_secs = (lease_seconds / 6).clamp(1, 4);
+        let lease_dur = std::time::Duration::from_secs(lease_seconds);
 
-        tokio::spawn(async move {
+        let join_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // Skip the immediate first tick so interval starts ticking at interval_secs
             interval.tick().await;
+
+            let mut consecutive_failures = 0u32;
+            let mut last_success = std::time::Instant::now();
+
             loop {
                 tokio::select! {
-                    _ = cancel_token.cancelled() => {
+                    _ = loop_token.cancelled() => {
                         break;
                     }
                     _ = interval.tick() => {
-                        if let Err(e) = mgr.heartbeat(&rec_id).await {
-                            tracing::warn!("managed receiver heartbeat failed for {}: {}", rec_id, e);
+                        match mgr.heartbeat(&rec_id).await {
+                            Ok(_) => {
+                                consecutive_failures = 0;
+                                last_success = std::time::Instant::now();
+                            }
+                            Err(e) => {
+                                consecutive_failures += 1;
+                                let elapsed = last_success.elapsed();
+                                let disp = crate::session_supervisor::classify_heartbeat_error_typed(
+                                    &e,
+                                    consecutive_failures,
+                                    elapsed,
+                                    lease_dur,
+                                );
+
+                                match disp {
+                                    crate::session_supervisor::HeartbeatDisposition::Continue => {}
+                                    crate::session_supervisor::HeartbeatDisposition::RetryTransient(n) => {
+                                        tracing::warn!(
+                                            receiver_id = %rec_id,
+                                            consecutive = n,
+                                            err = %e,
+                                            "managed receiver heartbeat transient failure, retrying"
+                                        );
+                                    }
+                                    crate::session_supervisor::HeartbeatDisposition::SessionLost(reason) => {
+                                        tracing::error!(
+                                            receiver_id = %rec_id,
+                                            reason = %reason,
+                                            err = %e,
+                                            "managed receiver heartbeat lost session! Tearing down active session in RAM and RTP transport"
+                                        );
+                                        mgr.handle_session_lost(&rec_id).await;
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         });
+
+        {
+            let mut handles = self.heartbeat_handles.write().await;
+            handles.insert(
+                receiver_id.to_string(),
+                ReceiverSupervisorHandle {
+                    cancel: cancel_token,
+                    join: join_handle,
+                },
+            );
+        }
+    }
+
+    /// Tear down local session in RAM and stop RTP transport when session is lost or revoked
+    pub async fn handle_session_lost(&self, receiver_id: &str) {
+        // 1. Remove active session from RAM
+        let _ = self.active_sessions.write().await.remove(receiver_id);
+
+        // 2. Stop and drop RTP transport
+        let transport_opt = self.active_transports.write().await.remove(receiver_id);
+        if let Some(transport_lock) = transport_opt {
+            let mut tr = transport_lock.lock().await;
+            let _ = tr.stop().await;
+        }
+
+        // 3. Clear active_session_id in registry
+        {
+            let mut reg = self.registry.write().await;
+            if let Some(e) = reg.get_mut(receiver_id) {
+                e.active_session_id = None;
+            }
+        }
+
+        // 4. Cancel and await heartbeat handle (avoid self-join if called from within the supervisor task)
+        let handle_opt = {
+            let mut handles = self.heartbeat_handles.write().await;
+            handles.remove(receiver_id)
+        };
+        if let Some(h) = handle_opt {
+            h.cancel.cancel();
+            let is_self = tokio::task::try_id()
+                .map(|id| id == h.join.id())
+                .unwrap_or(false);
+            if !is_self {
+                let _ = tokio::time::timeout(std::time::Duration::from_millis(500), h.join).await;
+            }
+        }
+
+        // 5. Invalidate Perch authority grant in RAM
+        self.authority_gate.invalidate_grant(receiver_id).await;
+    }
+
+    /// Propagate pause / resume to active receiver session
+    pub async fn patch_session(&self, receiver_id: &str, paused: bool) -> Result<(), String> {
+        let (base_url, token, session_id, session_token) = {
+            let sessions = self.active_sessions.read().await;
+            let sess = sessions.get(receiver_id).ok_or_else(|| {
+                format!("NoActiveSession: receiver {receiver_id} has no active session to patch")
+            })?;
+            let reg = self.registry.read().await;
+            let entry = reg.get(receiver_id).ok_or_else(|| {
+                format!("ReceiverNotFound: receiver {receiver_id} not in registry")
+            })?;
+            (
+                entry.base_url.clone(),
+                entry.token.clone(),
+                sess.receiver_session_id.clone(),
+                sess.session_token.clone(),
+            )
+        };
+
+        let mut client = if let Some(ref id) = self.identity {
+            ReceiverClient::with_identity(&base_url, id.clone())
+        } else {
+            ReceiverClient::new(&base_url)
+        };
+        client.token = token;
+        client.active_session_id = Some(session_id);
+        client.active_session_token = session_token;
+
+        client.session_pause(paused).await
     }
 
     pub async fn stop_session(&self, receiver_id: &str) -> Result<SessionStopResponse, String> {
@@ -582,12 +804,14 @@ impl ReceiverSessionManager {
             let _ = tr.pause().await;
         }
 
-        // 3. Cancel heartbeat task
-        {
-            let mut tokens = self.heartbeat_tokens.write().await;
-            if let Some(token) = tokens.remove(receiver_id) {
-                token.cancel();
-            }
+        // 3. Cancel and await heartbeat task
+        let handle_opt = {
+            let mut handles = self.heartbeat_handles.write().await;
+            handles.remove(receiver_id)
+        };
+        if let Some(h) = handle_opt {
+            h.cancel.cancel();
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), h.join).await;
         }
 
         let entry = {
@@ -637,6 +861,9 @@ impl ReceiverSessionManager {
             }
         }
 
+        // Release Perch authority if held
+        let _ = self.authority_gate.release_grant(&entry).await;
+
         Ok(resp)
     }
 
@@ -669,17 +896,24 @@ impl ReceiverSessionManager {
         client.set_volume(volume).await
     }
 
-    pub async fn heartbeat(&self, receiver_id: &str) -> Result<HeartbeatResponse, String> {
+    pub async fn heartbeat(
+        &self,
+        receiver_id: &str,
+    ) -> Result<HeartbeatResponse, ReceiverClientError> {
         let entry = {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
         }
-        .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
+        .ok_or_else(|| {
+            ReceiverClientError::Offline(format!("receiver not found: {receiver_id}"))
+        })?;
 
         let active_sess = {
             let sessions = self.active_sessions.read().await;
             sessions.get(receiver_id).cloned().ok_or_else(|| {
-                "NoActiveSession: cannot heartbeat without active session".to_string()
+                ReceiverClientError::Protocol(
+                    "NoActiveSession: cannot heartbeat without active session".to_string(),
+                )
             })?
         };
 
@@ -779,10 +1013,6 @@ mod tests {
             device_type: "standard".into(),
             base_url: "http://127.0.0.1:9999".into(),
             paired: true,
-            token: None,
-            last_seen: None,
-            capabilities: vec![],
-            active_session_id: None,
             max_sample_rate: 48000,
             max_bit_depth: 16,
             supported_transports: vec!["rtp_udp".into()],
@@ -790,7 +1020,7 @@ mod tests {
             supported_sample_rates: vec![48000],
             supported_bit_depths: vec![16],
             supported_channels: vec![2],
-            maximum_safe_volume: Some(100),
+            ..Default::default()
         };
         mgr.registry.write().await.add(entry);
 
@@ -824,10 +1054,6 @@ mod tests {
             device_type: "standard".into(),
             base_url: "http://127.0.0.1:9999".into(),
             paired: true,
-            token: None,
-            last_seen: None,
-            capabilities: vec![],
-            active_session_id: None,
             max_sample_rate: 48000,
             max_bit_depth: 16,
             supported_transports: vec!["rtp_udp".into()],
@@ -835,7 +1061,7 @@ mod tests {
             supported_sample_rates: vec![48000],
             supported_bit_depths: vec![16],
             supported_channels: vec![2],
-            maximum_safe_volume: Some(100),
+            ..Default::default()
         };
         mgr.registry.write().await.add(entry);
 
@@ -867,10 +1093,6 @@ mod tests {
             device_type: "standard".into(),
             base_url: "http://127.0.0.1:9999".into(),
             paired: true,
-            token: None,
-            last_seen: None,
-            capabilities: vec![],
-            active_session_id: None,
             max_sample_rate: 48000,
             max_bit_depth: 16,
             supported_transports: vec!["rtp_udp".into()],
@@ -878,13 +1100,13 @@ mod tests {
             supported_sample_rates: vec![48000],
             supported_bit_depths: vec![16],
             supported_channels: vec![2],
-            maximum_safe_volume: Some(100),
+            ..Default::default()
         };
         mgr.registry.write().await.add(entry);
 
         let res = mgr.heartbeat("rec-test-3").await;
         assert!(res.is_err());
-        assert!(res.unwrap_err().contains("NoActiveSession"));
+        assert!(res.unwrap_err().to_string().contains("NoActiveSession"));
     }
 
     #[tokio::test]
@@ -896,10 +1118,6 @@ mod tests {
             device_type: "standard".into(),
             base_url: "http://127.0.0.1:9999".into(),
             paired: true,
-            token: None,
-            last_seen: None,
-            capabilities: vec![],
-            active_session_id: None,
             max_sample_rate: 48000,
             max_bit_depth: 16,
             supported_transports: vec!["rtp_udp".into()],
@@ -907,7 +1125,7 @@ mod tests {
             supported_sample_rates: vec![48000],
             supported_bit_depths: vec![16],
             supported_channels: vec![2],
-            maximum_safe_volume: Some(100),
+            ..Default::default()
         };
         mgr.registry.write().await.add(entry);
 
@@ -925,10 +1143,6 @@ mod tests {
             device_type: "standard".into(),
             base_url: "http://127.0.0.1:9999".into(),
             paired: true,
-            token: None,
-            last_seen: None,
-            capabilities: vec![],
-            active_session_id: None,
             max_sample_rate: 48000,
             max_bit_depth: 16,
             supported_transports: vec!["rtp_udp".into()],
@@ -936,12 +1150,95 @@ mod tests {
             supported_sample_rates: vec![48000],
             supported_bit_depths: vec![16],
             supported_channels: vec![2],
-            maximum_safe_volume: Some(100),
+            ..Default::default()
         };
         mgr.registry.write().await.add(entry);
 
         let res = mgr.stop_session("rec-test-5").await;
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("NoActiveSession"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_self_join_does_not_deadlock_on_session_loss() {
+        let mgr = std::sync::Arc::new(ReceiverSessionManager::new());
+        let rec_id = "rec-self-join-test";
+
+        let entry = ReceiverRegistryEntry {
+            receiver_id: rec_id.into(),
+            name: "Test".into(),
+            device_type: "standard".into(),
+            base_url: "http://127.0.0.1:9999".into(),
+            paired: true,
+            max_sample_rate: 48000,
+            max_bit_depth: 16,
+            supported_transports: vec!["rtp_udp".into()],
+            supported_codecs: vec!["pcm_s16le".into()],
+            supported_sample_rates: vec![48000],
+            supported_bit_depths: vec![16],
+            supported_channels: vec![2],
+            active_session_id: Some("sess-123".into()),
+            ..Default::default()
+        };
+        mgr.registry.write().await.add(entry);
+
+        // Simulate an active session
+        mgr.active_sessions.write().await.insert(
+            rec_id.into(),
+            crate::ReceiverActiveSession {
+                receiver_id: rec_id.into(),
+                playback_session_id: "pb-123".into(),
+                receiver_session_id: "sess-123".into(),
+                session_token: Some("sess-tok-1".into()),
+                device_token: Some("tok-1".into()),
+                stream_port: 53318,
+                lease_seconds: 30,
+                heartbeat_sequence: 1,
+                negotiated_codec: "pcm_s16le".into(),
+                negotiated_sample_rate: 48000,
+                negotiated_bit_depth: 16,
+                negotiated_channels: 2,
+                payload_type: 96,
+                ssrc: 12345,
+                state: crate::ReceiverActiveSessionState::Active,
+                created_at: chrono::Utc::now(),
+                last_heartbeat: chrono::Utc::now(),
+            },
+        );
+
+        let mgr_clone = mgr.clone();
+        let rec_id_str = rec_id.to_string();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+        let join = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            mgr_clone.handle_session_lost(&rec_id_str).await;
+            let _ = done_tx.send(());
+        });
+
+        // Register handle in heartbeat_handles before task executes handle_session_lost
+        {
+            let mut handles = mgr.heartbeat_handles.write().await;
+            handles.insert(
+                rec_id.into(),
+                super::ReceiverSupervisorHandle { cancel, join },
+            );
+        }
+
+        let _ = started_rx.await;
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(2), done_rx).await;
+        assert!(finished.is_ok(), "task must complete without deadlock");
+
+        // Verify session cleared
+        assert!(mgr.active_sessions.read().await.get(rec_id).is_none());
+        assert!(mgr.heartbeat_handles.read().await.get(rec_id).is_none());
+        let reg = mgr.registry.read().await;
+        assert_eq!(
+            reg.get(rec_id).and_then(|e| e.active_session_id.as_ref()),
+            None
+        );
     }
 }

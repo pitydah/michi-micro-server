@@ -280,12 +280,16 @@ async fn async_main(config: michi_config::Config) -> Result<()> {
     let advertised_host = michi_connect::MichiConnect::resolve_lan_ip();
     info!("advertised LAN host: {}", advertised_host);
 
-    let michi_connect = michi_connect::MichiConnect::new(
+    let michi_connect = michi_connect::MichiConnect::new_with_scent(
         identity.clone(),
         actual_port,
         Some(advertised_host.clone()),
+        state.scent_store.clone(),
     );
     let _ = michi_connect.announce_mdns().await;
+
+    // Start persistent discovery runtime (Whisker multicast listener, mDNS resolver, Scent sweeper, bridge)
+    state.start_discovery_services();
 
     // Spawn UDP multicast discovery announcer with cancellation on shutdown
     let announcer_cancel = tokio_util::sync::CancellationToken::new();

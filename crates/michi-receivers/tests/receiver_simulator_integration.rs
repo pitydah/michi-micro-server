@@ -938,6 +938,8 @@ async fn test_playback_engine_to_receiver_session_manager_e2e() {
             supported_bit_depths: vec![16],
             supported_channels: vec![2],
             maximum_safe_volume: Some(100),
+            presence: michi_receivers::ReceiverPresence::VerifiedOnline,
+            ..Default::default()
         });
     }
 

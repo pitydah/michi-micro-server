@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -242,20 +243,24 @@ pub async fn receivers_handler(
         .list()
         .iter()
         .map(|e| {
-            let online = e
-                .last_seen
-                .map(|ls| (chrono::Utc::now() - ls).num_seconds() < 180)
-                .unwrap_or(false);
+            let online = e.presence == michi_receivers::models::ReceiverPresence::VerifiedOnline
+                || e.last_seen
+                    .map(|ls| (chrono::Utc::now() - ls).num_seconds() < 90)
+                    .unwrap_or(false);
             serde_json::json!({
                 "id": e.receiver_id,
                 "receiver_id": e.receiver_id,
+                "michi_id": e.michi_id,
                 "name": e.name,
                 "device_type": e.device_type,
                 "host": e.base_url,
                 "paired": e.paired,
                 "online": online,
+                "presence": e.presence,
+                "authority_supported": e.authority_supported,
                 "session_active": e.active_session_id.is_some(),
                 "capabilities": e.capabilities,
+                "qualification": e.compute_qualification(),
                 "active_session_id": e.active_session_id,
                 "last_seen": e.last_seen,
             })
@@ -277,19 +282,25 @@ pub async fn get_receiver_handler(
             &format!("receiver not found: {id}"),
         )
     })?;
-    let online = entry
-        .last_seen
-        .map(|ls| (chrono::Utc::now() - ls).num_seconds() < 180)
-        .unwrap_or(false);
+    let online = entry.presence == michi_receivers::models::ReceiverPresence::VerifiedOnline
+        || entry
+            .last_seen
+            .map(|ls| (chrono::Utc::now() - ls).num_seconds() < 90)
+            .unwrap_or(false);
     Ok(Json(serde_json::json!({
         "id": entry.receiver_id,
+        "receiver_id": entry.receiver_id,
+        "michi_id": entry.michi_id,
         "name": entry.name,
         "device_type": entry.device_type,
         "host": entry.base_url,
         "paired": entry.paired,
         "online": online,
+        "presence": entry.presence,
+        "authority_supported": entry.authority_supported,
         "session_active": entry.active_session_id.is_some(),
         "capabilities": entry.capabilities,
+        "qualification": entry.compute_qualification(),
         "max_sample_rate": entry.max_sample_rate,
         "max_bit_depth": entry.max_bit_depth,
         "supported_codecs": entry.supported_codecs,
@@ -298,15 +309,70 @@ pub async fn get_receiver_handler(
     })))
 }
 
+/// POST /api/v1/receivers/:id/takeover
+pub async fn receiver_takeover_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let reg_arc = state.receiver_manager.registry().await;
+    let reg = reg_arc.read().await;
+    let entry = reg
+        .get(&id)
+        .or_else(|| {
+            reg.list()
+                .into_iter()
+                .find(|e| e.michi_id.as_deref() == Some(&id))
+        })
+        .ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "RECEIVER_NOT_FOUND",
+                &format!("receiver not found: {id}"),
+            )
+        })?
+        .clone();
+    drop(reg);
+
+    if !entry.paired {
+        return Err(v1_error(
+            StatusCode::FORBIDDEN,
+            "RECEIVER_NOT_PAIRED",
+            "receiver must be paired to takeover authority",
+        ));
+    }
+
+    match state
+        .receiver_manager
+        .authority_gate()
+        .explicit_takeover(&entry)
+        .await
+    {
+        Ok(grant) => Ok(Json(serde_json::json!({
+            "status": "taken_over",
+            "receiver_id": entry.receiver_id,
+            "authority_instance_id": grant.authority_instance_id,
+            "lease_epoch": grant.lease_epoch,
+            "activation_expires_at": grant.activation_expires_at.to_rfc3339(),
+        }))),
+        Err(e) => Err(v1_error(
+            StatusCode::BAD_GATEWAY,
+            "TAKEOVER_FAILED",
+            &e.to_string(),
+        )),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ReceiverPairStartBody {
-    pub base_url: String,
+    pub base_url: Option<String>,
+    pub receiver_id: Option<String>,
     pub initiator_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ReceiverPairConfirmBody {
-    pub pairing_id: String,
+    pub pairing_id: Option<String>,
+    pub receiver_id: Option<String>,
     pub pin: String,
 }
 
@@ -318,9 +384,30 @@ pub async fn receiver_pair_start_handler(
         .initiator_id
         .unwrap_or_else(|| "michi-micro-server".into());
 
+    let target_base_url = if let Some(ref url) = body.base_url {
+        url.clone()
+    } else if let Some(ref rid) = body.receiver_id {
+        let reg_arc = state.receiver_manager.registry().await;
+        let reg = reg_arc.read().await;
+        let entry = reg.get(rid).ok_or_else(|| {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "RECEIVER_NOT_FOUND",
+                &format!("receiver not found: {rid}"),
+            )
+        })?;
+        entry.base_url.clone()
+    } else {
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "either base_url or receiver_id must be provided",
+        ));
+    };
+
     match state
         .receiver_manager
-        .start_pairing(&body.base_url, &initiator_id)
+        .start_pairing(&target_base_url, &initiator_id)
         .await
     {
         Ok(pending) => Ok(Json(serde_json::json!({
@@ -350,7 +437,8 @@ async fn persist_paired_receiver(state: &AppState, device_id: &str) -> Result<()
         .get(device_id)
         .ok_or_else(|| format!("receiver {device_id} not found in registry"))?;
     let now = chrono::Utc::now().to_rfc3339();
-    let caps_json = serde_json::to_string(&entry.capabilities).unwrap_or_else(|_| "{}".into());
+    let caps = entry.to_capabilities();
+    let caps_json = serde_json::to_string(&caps).unwrap_or_else(|_| "{}".into());
 
     let token = entry
         .token
@@ -383,11 +471,15 @@ async fn persist_paired_receiver(state: &AppState, device_id: &str) -> Result<()
         base_url: entry.base_url.clone(),
         paired: entry.paired,
         online: entry.last_seen.is_some(),
-        audio_capabilities: caps_json,
+        audio_capabilities: caps_json.clone(),
         last_seen: entry.last_seen.map(|d| d.to_rfc3339()),
         paired_at: Some(now.clone()),
         created_at: now.clone(),
         updated_at: now,
+        michi_id: entry.michi_id.clone(),
+        capabilities_json: Some(caps_json),
+        capabilities_observed_at: entry.capabilities_verified_at.map(|d| d.to_rfc3339()),
+        authority_supported: entry.authority_supported,
     };
 
     michi_db::persist_paired_receiver_transaction(&state.db, &prec, &cred)
@@ -411,17 +503,28 @@ pub async fn receiver_pair_confirm_handler(
         ));
     }
 
-    if body.pin.trim().is_empty() {
+    let pin_trimmed = body.pin.trim();
+    if pin_trimmed.len() != 6 || !pin_trimmed.chars().all(|c| c.is_ascii_digit()) {
         return Err(v1_error_code(
             StatusCode::BAD_REQUEST,
             michi_link::MichiLinkErrorCode::InvalidRequest,
-            "PIN is required to confirm pairing",
+            "PIN must be exactly 6 numeric digits",
         ));
     }
 
+    let pairing_id = if let Some(ref pid) = body.pairing_id {
+        pid.clone()
+    } else {
+        return Err(v1_error_code(
+            StatusCode::BAD_REQUEST,
+            michi_link::MichiLinkErrorCode::InvalidRequest,
+            "pairing_id is required to confirm pairing",
+        ));
+    };
+
     match state
         .receiver_manager
-        .confirm_pairing(&body.pairing_id, &body.pin)
+        .confirm_pairing(&pairing_id, pin_trimmed)
         .await
     {
         Ok(device_id) => match persist_paired_receiver(&state, &device_id).await {
@@ -466,12 +569,14 @@ pub async fn discover_receiver_handler(
         .initiator_id
         .unwrap_or_else(|| "michi-micro-server".into());
     let pin = match body.pin {
-        Some(p) if !p.trim().is_empty() => p,
+        Some(ref p) if p.trim().len() == 6 && p.trim().chars().all(|c| c.is_ascii_digit()) => {
+            p.trim().to_string()
+        }
         _ => {
             return Err(v1_error_code(
                 StatusCode::BAD_REQUEST,
                 michi_link::MichiLinkErrorCode::InvalidRequest,
-                "PIN is required to pair with receiver",
+                "PIN must be exactly 6 numeric digits",
             ));
         }
     };
@@ -597,10 +702,15 @@ pub async fn receiver_heartbeat_handler(
         Ok(resp) => Ok(Json(
             serde_json::json!({ "status": resp.status, "uptime_seconds": resp.uptime_seconds }),
         )),
-        Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "HEARTBEAT_FAILED", &e)),
+        Err(e) => Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "HEARTBEAT_FAILED",
+            &e.to_string(),
+        )),
     }
 }
 
+#[cfg(any(feature = "hardware-gate", debug_assertions, test))]
 #[derive(Debug, Deserialize)]
 pub struct ReceiverTestPcmBody {
     pub pcm_base64: Option<String>,
@@ -608,6 +718,7 @@ pub struct ReceiverTestPcmBody {
     pub duration_ms: Option<usize>,
 }
 
+#[cfg(any(feature = "hardware-gate", debug_assertions, test))]
 pub async fn receiver_stream_test_pcm_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -646,57 +757,92 @@ pub async fn receiver_stream_test_pcm_handler(
 }
 
 pub async fn discover_mdns_handler(
+    State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    match discover_mdns_receivers().await {
-        Ok(receivers) => Ok(Json(serde_json::json!({ "receivers": receivers }))),
-        Err(e) => Err(v1_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "DISCOVERY_FAILED",
-            &e,
-        )),
+    let registry_arc = state.receiver_manager.registry().await;
+    let reg = registry_arc.read().await;
+
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut receivers = Vec::new();
+
+    for entry in reg.receivers.values() {
+        let stable_id = entry.michi_id.as_deref().unwrap_or(&entry.receiver_id);
+        seen_ids.insert(stable_id.to_string());
+        seen_ids.insert(entry.receiver_id.clone());
+
+        let presence_str = match entry.presence {
+            michi_receivers::ReceiverPresence::VerifiedOnline => "verified_online",
+            michi_receivers::ReceiverPresence::Offline => "offline",
+            michi_receivers::ReceiverPresence::Degraded => "degraded",
+            michi_receivers::ReceiverPresence::Unknown => "unknown",
+        };
+        let is_online = entry.presence == michi_receivers::ReceiverPresence::VerifiedOnline;
+        let verified = entry.capabilities_verified_at.is_some()
+            || state
+                .scent_store
+                .get(entry.michi_id())
+                .map(|r| r.verified)
+                .unwrap_or(false);
+        let host_or_addr = Url::parse(&entry.base_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_string()))
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+
+        receivers.push(serde_json::json!({
+            "receiver_id": entry.receiver_id,
+            "michi_id": entry.michi_id.clone().unwrap_or_else(|| entry.receiver_id.clone()),
+            "name": entry.name,
+            "service": if entry.device_type == "hifi" { "michi-stream-hifi" } else { "michi-stream-standard" },
+            "device_type": entry.device_type,
+            "base_url": entry.base_url,
+            "host": entry.base_url,
+            "addresses": vec![host_or_addr],
+            "verified": verified,
+            "online": is_online,
+            "paired": entry.paired,
+            "presence": presence_str,
+            "last_seen": entry.last_seen.map(|d| d.to_rfc3339()),
+            "qualification": entry.compute_qualification(),
+            "pairable": !entry.paired,
+        }));
     }
-}
 
-async fn discover_mdns_receivers() -> Result<Vec<serde_json::Value>, String> {
-    use mdns_sd::{ServiceDaemon, ServiceEvent};
-    use std::time::Duration;
-
-    let daemon = ServiceDaemon::new().map_err(|e| format!("mDNS daemon: {e}"))?;
-    let service_type = "_michi-link._tcp.local.";
-    let receiver = daemon
-        .browse(service_type)
-        .map_err(|e| format!("mDNS browse: {e}"))?;
-
-    let result: Vec<serde_json::Value> = Vec::new();
-    let discovered = std::sync::Mutex::new(result);
-    let _ = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if let Ok(event) = receiver.recv_async().await {
-                match event {
-                    ServiceEvent::ServiceResolved(info) => {
-                        let host = info.get_hostname().to_string();
-                        let port = info.get_port();
-                        let fullname = info.get_fullname().to_string();
-                        let addresses: Vec<String> =
-                            info.get_addresses().iter().map(|a| a.to_string()).collect();
-                        let addr = format!("http://{}:{}", host.trim_end_matches('.'), port);
-                        discovered.lock().unwrap().push(serde_json::json!({
-                            "name": fullname,
-                            "host": addr,
-                            "port": port,
-                            "addresses": addresses,
-                        }));
-                    }
-                    ServiceEvent::ServiceRemoved(_, _) => {}
-                    _ => {}
-                }
-            }
+    for rec in state.scent_store.list_online() {
+        if seen_ids.contains(&rec.michi_id) || seen_ids.contains(&rec.device_id) {
+            continue;
         }
-    })
-    .await;
+        let base_url_str = rec
+            .base_url
+            .as_ref()
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        let host_or_addr = rec
+            .endpoints
+            .first()
+            .map(|e| e.ip().to_string())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
 
-    let _ = daemon.shutdown();
-    Ok(discovered.into_inner().unwrap())
+        seen_ids.insert(rec.michi_id.clone());
+        receivers.push(serde_json::json!({
+            "receiver_id": rec.michi_id.clone(),
+            "michi_id": rec.michi_id.clone(),
+            "name": rec.name.clone(),
+            "service": rec.service.clone(),
+            "device_type": if rec.service.contains("hifi") { "hifi" } else { "standard" },
+            "base_url": base_url_str.clone(),
+            "host": base_url_str,
+            "addresses": vec![host_or_addr],
+            "verified": rec.verified,
+            "online": rec.online,
+            "paired": false,
+            "presence": if rec.online { "verified_online" } else { "offline" },
+            "last_seen": if rec.online { Some(chrono::Utc::now().to_rfc3339()) } else { None },
+            "qualification": michi_receivers::models::ReceiverQualification::NeedsCapabilityRefresh,
+            "pairable": true,
+        }));
+    }
+
+    Ok(Json(serde_json::json!({ "receivers": receivers })))
 }
 
 // ── Room Groups (Persistent) ─────────────────────────────────────

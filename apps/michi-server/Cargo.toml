@@ -21,3 +21,7 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 sqlx.workspace = true
 futures-util.workspace = true
+
+[features]
+default = []
+hardware-gate = ["michi-api/hardware-gate"]

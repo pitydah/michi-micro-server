@@ -318,8 +318,16 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
             migration_049
         );
     }
+    if current < 50 {
+        run_migration_step!(
+            conn,
+            50,
+            "receivers table michi_id, capabilities_json, capabilities_observed_at, and authority_supported",
+            migration_050
+        );
+    }
 
-    info!("database schema at version 49");
+    info!("database schema at version 50");
     Ok(())
 }
 
@@ -1337,6 +1345,30 @@ async fn migration_049(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
     Ok(())
 }
 
+async fn migration_050(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    sqlx::query("ALTER TABLE receivers ADD COLUMN michi_id TEXT")
+        .execute(&mut **tx)
+        .await?;
+
+    sqlx::query("ALTER TABLE receivers ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '{}'")
+        .execute(&mut **tx)
+        .await?;
+
+    sqlx::query("ALTER TABLE receivers ADD COLUMN capabilities_observed_at TEXT")
+        .execute(&mut **tx)
+        .await?;
+
+    sqlx::query("ALTER TABLE receivers ADD COLUMN authority_supported INTEGER NOT NULL DEFAULT 0")
+        .execute(&mut **tx)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_receivers_michi_id ON receivers(michi_id)")
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedReceiver {
     pub id: String,
@@ -1350,6 +1382,14 @@ pub struct PersistedReceiver {
     pub paired_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub michi_id: Option<String>,
+    #[serde(default)]
+    pub capabilities_json: Option<String>,
+    #[serde(default)]
+    pub capabilities_observed_at: Option<String>,
+    #[serde(default)]
+    pub authority_supported: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1364,8 +1404,8 @@ pub struct PersistedReceiverCredential {
 
 pub async fn upsert_receiver_db(pool: &SqlitePool, rec: &PersistedReceiver) -> Result<(), DbError> {
     sqlx::query(
-        "INSERT INTO receivers (id, name, device_type, base_url, paired, online, audio_capabilities, last_seen, paired_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO receivers (id, name, device_type, base_url, paired, online, audio_capabilities, last_seen, paired_at, created_at, updated_at, michi_id, capabilities_json, capabilities_observed_at, authority_supported)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             device_type = excluded.device_type,
@@ -1375,7 +1415,11 @@ pub async fn upsert_receiver_db(pool: &SqlitePool, rec: &PersistedReceiver) -> R
             audio_capabilities = excluded.audio_capabilities,
             last_seen = excluded.last_seen,
             paired_at = excluded.paired_at,
-            updated_at = excluded.updated_at"
+            updated_at = excluded.updated_at,
+            michi_id = excluded.michi_id,
+            capabilities_json = excluded.capabilities_json,
+            capabilities_observed_at = excluded.capabilities_observed_at,
+            authority_supported = excluded.authority_supported"
     )
     .bind(&rec.id)
     .bind(&rec.name)
@@ -1388,6 +1432,10 @@ pub async fn upsert_receiver_db(pool: &SqlitePool, rec: &PersistedReceiver) -> R
     .bind(&rec.paired_at)
     .bind(&rec.created_at)
     .bind(&rec.updated_at)
+    .bind(&rec.michi_id)
+    .bind(rec.capabilities_json.as_deref().unwrap_or("{}"))
+    .bind(&rec.capabilities_observed_at)
+    .bind(if rec.authority_supported { 1 } else { 0 })
     .execute(pool)
     .await?;
 
@@ -1396,7 +1444,7 @@ pub async fn upsert_receiver_db(pool: &SqlitePool, rec: &PersistedReceiver) -> R
 
 pub async fn list_receivers_db(pool: &SqlitePool) -> Result<Vec<PersistedReceiver>, DbError> {
     let rows = sqlx::query(
-        "SELECT id, name, device_type, COALESCE(base_url, '') as base_url, paired, online, COALESCE(audio_capabilities, '{}') as audio_capabilities, last_seen, paired_at, created_at, COALESCE(updated_at, created_at) as updated_at
+        "SELECT id, name, device_type, COALESCE(base_url, '') as base_url, paired, online, COALESCE(audio_capabilities, '{}') as audio_capabilities, last_seen, paired_at, created_at, COALESCE(updated_at, created_at) as updated_at, michi_id, capabilities_json, capabilities_observed_at, authority_supported
          FROM receivers ORDER BY name ASC"
     )
     .fetch_all(pool)
@@ -1416,6 +1464,13 @@ pub async fn list_receivers_db(pool: &SqlitePool) -> Result<Vec<PersistedReceive
         let paired_at: Option<String> = row.get("paired_at");
         let created_at: String = row.get("created_at");
         let updated_at: String = row.get("updated_at");
+        let michi_id: Option<String> = row.try_get("michi_id").ok();
+        let capabilities_json: Option<String> = row.try_get("capabilities_json").ok();
+        let capabilities_observed_at: Option<String> = row.try_get("capabilities_observed_at").ok();
+        let authority_supported: bool = row
+            .try_get::<i64, _>("authority_supported")
+            .map(|v| v != 0)
+            .unwrap_or(false);
 
         receivers.push(PersistedReceiver {
             id,
@@ -1429,6 +1484,10 @@ pub async fn list_receivers_db(pool: &SqlitePool) -> Result<Vec<PersistedReceive
             paired_at,
             created_at,
             updated_at,
+            michi_id,
+            capabilities_json,
+            capabilities_observed_at,
+            authority_supported,
         });
     }
 
@@ -1440,7 +1499,7 @@ pub async fn get_receiver_db(
     id: &str,
 ) -> Result<Option<PersistedReceiver>, DbError> {
     let row_opt = sqlx::query(
-        "SELECT id, name, device_type, COALESCE(base_url, '') as base_url, paired, online, COALESCE(audio_capabilities, '{}') as audio_capabilities, last_seen, paired_at, created_at, COALESCE(updated_at, created_at) as updated_at
+        "SELECT id, name, device_type, COALESCE(base_url, '') as base_url, paired, online, COALESCE(audio_capabilities, '{}') as audio_capabilities, last_seen, paired_at, created_at, COALESCE(updated_at, created_at) as updated_at, michi_id, capabilities_json, capabilities_observed_at, authority_supported
          FROM receivers WHERE id = ?"
     )
     .bind(id)
@@ -1460,6 +1519,13 @@ pub async fn get_receiver_db(
         let paired_at: Option<String> = row.get("paired_at");
         let created_at: String = row.get("created_at");
         let updated_at: String = row.get("updated_at");
+        let michi_id: Option<String> = row.try_get("michi_id").ok();
+        let capabilities_json: Option<String> = row.try_get("capabilities_json").ok();
+        let capabilities_observed_at: Option<String> = row.try_get("capabilities_observed_at").ok();
+        let authority_supported: bool = row
+            .try_get::<i64, _>("authority_supported")
+            .map(|v| v != 0)
+            .unwrap_or(false);
 
         Ok(Some(PersistedReceiver {
             id,
@@ -1473,6 +1539,10 @@ pub async fn get_receiver_db(
             paired_at,
             created_at,
             updated_at,
+            michi_id,
+            capabilities_json,
+            capabilities_observed_at,
+            authority_supported,
         }))
     } else {
         Ok(None)
@@ -1520,8 +1590,8 @@ pub async fn persist_paired_receiver_transaction(
     let mut tx = pool.begin().await?;
 
     sqlx::query(
-        "INSERT INTO receivers (id, name, device_type, base_url, paired, online, audio_capabilities, last_seen, paired_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO receivers (id, name, device_type, base_url, paired, online, audio_capabilities, last_seen, paired_at, created_at, updated_at, michi_id, capabilities_json, capabilities_observed_at, authority_supported)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             device_type = excluded.device_type,
@@ -1531,7 +1601,11 @@ pub async fn persist_paired_receiver_transaction(
             audio_capabilities = excluded.audio_capabilities,
             last_seen = excluded.last_seen,
             paired_at = excluded.paired_at,
-            updated_at = excluded.updated_at"
+            updated_at = excluded.updated_at,
+            michi_id = excluded.michi_id,
+            capabilities_json = excluded.capabilities_json,
+            capabilities_observed_at = excluded.capabilities_observed_at,
+            authority_supported = excluded.authority_supported"
     )
     .bind(&rec.id)
     .bind(&rec.name)
@@ -1544,6 +1618,10 @@ pub async fn persist_paired_receiver_transaction(
     .bind(&rec.paired_at)
     .bind(&rec.created_at)
     .bind(&rec.updated_at)
+    .bind(&rec.michi_id)
+    .bind(rec.capabilities_json.as_deref().unwrap_or("{}"))
+    .bind(&rec.capabilities_observed_at)
+    .bind(if rec.authority_supported { 1 } else { 0 })
     .execute(&mut *tx)
     .await?;
 

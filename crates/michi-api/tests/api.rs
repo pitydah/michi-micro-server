@@ -8246,3 +8246,326 @@ async fn test_podcast_episode_progress_persistence() {
     assert_eq!(episodes[0]["position_ms"], 42000);
     assert_eq!(episodes[0]["played"], false);
 }
+
+#[tokio::test]
+async fn test_playback_transfer_prepare_and_abort() {
+    let (app, pool, state) = make_app_with_state().await;
+
+    let tmp_file = tempfile::NamedTempFile::new().unwrap();
+    let file_path = tmp_file.path().to_str().unwrap().to_string();
+    let track_id = Uuid::new_v4();
+    let track = Track {
+        id: track_id,
+        title: Some("Song One".into()),
+        artist: Some("Artist One".into()),
+        album: Some("Album One".into()),
+        album_artist: None,
+        duration_ms: Some(200_000),
+        file_path: file_path.clone(),
+        format: AudioFormat::Flac,
+        sample_rate: Some(48000),
+        bit_depth: Some(16),
+        channels: Some(2),
+        artwork_id: None,
+        genre: None,
+        year: None,
+        track_number: None,
+        disc_number: None,
+        content_hash: None,
+        file_size: None,
+        file_mtime_ns: None,
+        starred: false,
+        rating: 0,
+        starred_at: None,
+        replaygain_track_gain: None,
+        replaygain_track_peak: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    michi_db::upsert_track(&pool, &track).await.unwrap();
+
+    let receiver_id = "test-receiver-1";
+    let receiver_entry = michi_receivers::ReceiverRegistryEntry {
+        receiver_id: receiver_id.to_string(),
+        name: "Test Receiver".to_string(),
+        base_url: "http://127.0.0.1:9099".to_string(),
+        paired: true,
+        presence: michi_receivers::ReceiverPresence::VerifiedOnline,
+        ..Default::default()
+    };
+    state
+        .receiver_manager
+        .registry()
+        .await
+        .write()
+        .await
+        .add(receiver_entry);
+
+    let tailsync = serde_json::json!({
+        "transfer_id": "transfer-abc-123",
+        "source_michi_id": "source-device-id",
+        "target_michi_id": state.identity.michi_id().to_string(),
+        "receiver_michi_id": receiver_id,
+        "status": "playing",
+        "position_ms": 15000,
+        "current_track": {
+            "title": "Song One",
+            "artist": "Artist One",
+            "duration_ms": 200000,
+        },
+        "queue": [],
+        "queue_index": 0,
+        "timestamp_ms": 1000,
+    });
+
+    let prepare_body = serde_json::json!({
+        "transfer_id": "transfer-abc-123",
+        "source_michi_id": "source-device-id",
+        "target_michi_id": state.identity.michi_id().to_string(),
+        "receiver_michi_id": receiver_id,
+        "tailsync": tailsync,
+        "nonce": "nonce-test-123456",
+    });
+
+    // 1. Prepare
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/playback-transfer/prepare")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&prepare_body).unwrap()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let prepare_res: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(prepare_res["status"], "ready");
+    assert!(prepare_res["target_ready_proof"].as_str().is_some());
+
+    // Verify it is stored in pending_transfers
+    assert!(state
+        .pending_transfers
+        .get("transfer-abc-123")
+        .await
+        .is_some());
+
+    // 2. Abort
+    let abort_body = serde_json::json!({
+        "transfer_id": "transfer-abc-123",
+        "reason": "user_cancelled",
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/playback-transfer/abort")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&abort_body).unwrap()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Verify removed from pending_transfers
+    assert!(state
+        .pending_transfers
+        .get("transfer-abc-123")
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_playback_transfer_commit_validation_and_takeover() {
+    let (app, pool, state) = make_app_with_state().await;
+
+    // 1. Commit with unknown transfer_id -> 404
+    let commit_body = serde_json::json!({
+        "transfer_id": "non-existent-transfer",
+        "grant": {
+            "authority_instance_id": "inst-1",
+            "lease_epoch": 1,
+            "grant_token": "valid-token",
+            "activation_expires_at": chrono::Utc::now().to_rfc3339(),
+        }
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/playback-transfer/commit")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // 2. Takeover on unknown receiver -> 404
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/unknown-rec/takeover")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // 3. Takeover on unpaired receiver -> 403
+    let unpaired_entry = michi_receivers::ReceiverRegistryEntry {
+        receiver_id: "unpaired-rec".to_string(),
+        name: "Unpaired Rec".to_string(),
+        base_url: "http://127.0.0.1:9098".to_string(),
+        paired: false,
+        presence: michi_receivers::ReceiverPresence::Unknown,
+        ..Default::default()
+    };
+    state
+        .receiver_manager
+        .registry()
+        .await
+        .write()
+        .await
+        .add(unpaired_entry);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/unpaired-rec/takeover")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // 4. Receivers list returns presence and authority fields
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/receivers")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let list_res: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let recs = list_res["receivers"].as_array().expect("receivers array");
+    let unp = recs
+        .iter()
+        .find(|r| r["id"] == "unpaired-rec")
+        .expect("found unpaired");
+    assert_eq!(unp["paired"], false);
+    assert!(unp.get("presence").is_some());
+    assert!(unp.get("authority_supported").is_some());
+}
+
+#[tokio::test]
+async fn test_hardware_gate_routes_contract() {
+    let (app, _pool) = make_app().await;
+
+    // 1. GET /health/ready
+    let req = Request::builder()
+        .method("GET")
+        .uri("/health/ready")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. POST /api/v1/devices/discover
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/devices/discover")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 3. POST /api/v1/receivers/pair/start
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/pair/start")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"receiver_id":"nonexistent"}"#))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // 4. POST /api/v1/receivers/pair/confirm
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/pair/confirm")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"pairing_id":"test","pin":"123456"}"#))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
+        "unexpected status for pair/confirm: {}",
+        resp.status()
+    );
+
+    // 5. GET /api/v1/receivers/:id
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/receivers/nonexistent")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // 6. POST /api/v1/receivers/:id/session/start
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/nonexistent/session/start")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"session_id":"test","codec":"pcm_s16le","sample_rate":48000,"bit_depth":16,"channels":2,"stream_port":53318,"buffer_ms":100,"volume":80}"#,
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
+        "unexpected status for session/start: {}",
+        resp.status()
+    );
+
+    // 7. POST /api/v1/receivers/:id/heartbeat
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/nonexistent/heartbeat")
+        .header("content-type", "application/json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
+        "unexpected status for heartbeat: {}",
+        resp.status()
+    );
+
+    // 8. POST /api/v1/receivers/:id/stream/test_pcm
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/nonexistent/stream/test_pcm")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"duration_ms":10}"#))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
+        "unexpected status for stream/test_pcm: {}",
+        resp.status()
+    );
+
+    // 9. POST /api/v1/receivers/:id/session/stop
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/nonexistent/session/stop")
+        .header("content-type", "application/json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
+        "unexpected status for session/stop: {}",
+        resp.status()
+    );
+}

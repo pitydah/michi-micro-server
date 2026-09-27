@@ -324,6 +324,8 @@ async fn test_receiver_online_calculation_during_active_session() {
         supported_bit_depths: vec![16],
         supported_channels: vec![2],
         maximum_safe_volume: Some(100),
+        presence: michi_receivers::ReceiverPresence::VerifiedOnline,
+        ..Default::default()
     };
     reg_write.add(entry);
     drop(reg_write);
@@ -1577,6 +1579,8 @@ async fn test_three_way_integration_e2e_flow() {
         supported_bit_depths: vec![16],
         supported_channels: vec![2],
         maximum_safe_volume: Some(100),
+        presence: michi_receivers::ReceiverPresence::VerifiedOnline,
+        ..Default::default()
     };
     state
         .receiver_manager

@@ -97,6 +97,10 @@ pub struct AppState {
     pub receiver_credential_store: Arc<Option<michi_receivers::ReceiverCredentialStore>>,
     /// Resource-bounded transcode semaphore derived from ResourceProfile.max_transcodes.
     pub transcode_semaphore: Arc<tokio::sync::Semaphore>,
+    /// In-memory store for pending PawPass playback transfers awaiting authority commit.
+    pub pending_transfers: Arc<michi_sync::playback_transfer::PendingTransferStore>,
+    /// Shared in-memory Scent presence store tracking live signed peer announcements.
+    pub scent_store: Arc<michi_connect::ScentStore>,
     /// Per-module transition mutexes to serialize lifecycle changes without holding global locks during I/O.
     pub module_transition_locks:
         Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
@@ -150,6 +154,66 @@ impl AppState {
         let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .execute(&self.db)
             .await;
+    }
+
+    /// Starts persistent discovery services: Scent sweeper (90s expiry), Whisker UDP
+    /// multicast listener (224.0.0.167:53318), mDNS resolver, and ReceiverDiscoveryBridge.
+    pub fn start_discovery_services(&self) {
+        let cancel = self.shutdown_token.clone();
+
+        // 1. Scent 90s presence expiry sweeper
+        let sweeper_handle = self.scent_store.spawn_expiry_sweeper(cancel.clone());
+        self.track_task(sweeper_handle);
+
+        // 2. Whisker UDP multicast discovery listener
+        let engine = Arc::new(michi_identity::discovery::DiscoveryEngine::new(
+            self.identity.clone(),
+        ));
+        let whisker = Arc::new(michi_connect::WhiskerDiscoveryListener::new(
+            engine,
+            self.scent_store.clone(),
+        ));
+        match whisker.bind_socket() {
+            Ok(socket) => {
+                let whisker_clone = whisker.clone();
+                let cancel_clone = cancel.clone();
+                let whisker_handle = tokio::spawn(async move {
+                    whisker_clone.run(socket, cancel_clone).await;
+                });
+                self.track_task(whisker_handle);
+                tracing::info!("WhiskerDiscoveryListener started on 224.0.0.167:53318");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to bind Whisker UDP multicast socket (224.0.0.167:53318): {e}"
+                );
+            }
+        }
+
+        // 3. Persistent mDNS service resolver
+        match michi_connect::mdns_sd::ServiceDaemon::new() {
+            Ok(daemon) => {
+                let resolver = michi_connect::MdnsResolver::new(self.scent_store.clone());
+                let cancel_clone = cancel.clone();
+                let resolver_handle = tokio::spawn(async move {
+                    resolver.run(daemon, cancel_clone).await;
+                });
+                self.track_task(resolver_handle);
+                tracing::info!("MdnsResolver started for _michi-link._tcp.local.");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create ServiceDaemon for MdnsResolver: {e}");
+            }
+        }
+
+        // 4. Discovery Bridge projecting Scent into ReceiverRegistry
+        let bridge = michi_receivers::ReceiverDiscoveryBridge::new(
+            self.scent_store.clone(),
+            self.receiver_manager.clone(),
+        );
+        let bridge_handle = bridge.spawn(cancel);
+        self.track_task(bridge_handle);
+        tracing::info!("ReceiverDiscoveryBridge started projecting Scent into ReceiverRegistry");
     }
 
     pub async fn bootstrap_runtime(&self) -> Result<(), String> {
@@ -208,28 +272,89 @@ impl AppState {
                     }
 
                     let is_paired = rec.paired && token.is_some();
+
+                    let (
+                        supported_transports,
+                        supported_codecs,
+                        supported_sample_rates,
+                        supported_bit_depths,
+                        supported_channels,
+                        max_sr,
+                        max_bd,
+                    ) = if let Some(ref json_str) = rec.capabilities_json {
+                        if let Ok(caps) =
+                            serde_json::from_str::<michi_receivers::ReceiverCapabilities>(json_str)
+                        {
+                            (
+                                caps.supported_transports,
+                                caps.supported_codecs,
+                                caps.supported_sample_rates,
+                                caps.supported_bit_depths,
+                                caps.supported_channels,
+                                caps.max_sample_rate,
+                                caps.max_bit_depth,
+                            )
+                        } else {
+                            (
+                                Vec::new(),
+                                Vec::new(),
+                                Vec::new(),
+                                Vec::new(),
+                                Vec::new(),
+                                0,
+                                0,
+                            )
+                        }
+                    } else {
+                        (
+                            Vec::new(),
+                            Vec::new(),
+                            Vec::new(),
+                            Vec::new(),
+                            Vec::new(),
+                            0,
+                            0,
+                        )
+                    };
+
+                    let capabilities_observed_at =
+                        rec.capabilities_observed_at.as_deref().and_then(|s| {
+                            chrono::DateTime::parse_from_rfc3339(s)
+                                .ok()
+                                .map(|d| d.with_timezone(&chrono::Utc))
+                        });
+
                     let entry = michi_receivers::ReceiverRegistryEntry {
                         receiver_id: rec.id.clone(),
+                        michi_id: rec.michi_id.clone(),
                         name: rec.name,
                         device_type: rec.device_type,
                         base_url: rec.base_url,
                         paired: is_paired,
                         token,
+                        presence: michi_receivers::ReceiverPresence::Offline,
                         last_seen: rec.last_seen.and_then(|s| {
                             chrono::DateTime::parse_from_rfc3339(&s)
                                 .ok()
                                 .map(|d| d.with_timezone(&chrono::Utc))
                         }),
                         capabilities: vec!["pcm".to_string(), "rtp".to_string()],
+                        capabilities_verified_at: capabilities_observed_at,
+                        capabilities_stale: true,
+                        authority_supported: rec.authority_supported,
+                        owner_michi_id: None,
+                        owner_name: None,
                         active_session_id: None,
-                        max_sample_rate: 48000,
-                        max_bit_depth: 16,
-                        supported_transports: vec!["rtp".to_string()],
-                        supported_codecs: vec!["pcm_s16le".to_string()],
-                        supported_sample_rates: vec![44100, 48000],
-                        supported_bit_depths: vec![16],
-                        supported_channels: vec![2],
+                        max_sample_rate: max_sr,
+                        max_bit_depth: max_bd,
+                        supported_transports,
+                        supported_codecs,
+                        supported_sample_rates,
+                        supported_bit_depths,
+                        supported_channels,
                         maximum_safe_volume: Some(100),
+                        qualification:
+                            michi_receivers::models::ReceiverQualification::NeedsCapabilityRefresh,
                     };
 
                     registry.add(entry);
@@ -456,6 +581,8 @@ impl AppState {
             playback_output_selection,
             receiver_credential_store,
             transcode_semaphore,
+            pending_transfers: Arc::new(michi_sync::playback_transfer::PendingTransferStore::new()),
+            scent_store: Arc::new(michi_connect::ScentStore::new()),
             module_transition_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             module_runtime_info,
         };
@@ -1768,17 +1895,30 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/receivers/:id/heartbeat",
             post(routes::v1::receivers::receiver_heartbeat_handler),
+        )
+        .route(
+            "/api/v1/receivers/:id/takeover",
+            post(routes::v1::receivers::receiver_takeover_handler),
+        )
+        .route(
+            "/api/v1/playback-transfer/prepare",
+            post(routes::v1::playback_transfer::playback_transfer_prepare_handler),
+        )
+        .route(
+            "/api/v1/playback-transfer/commit",
+            post(routes::v1::playback_transfer::playback_transfer_commit_handler),
+        )
+        .route(
+            "/api/v1/playback-transfer/abort",
+            post(routes::v1::playback_transfer::playback_transfer_abort_handler),
         );
 
-    // /stream/test_pcm is an engineering verification route, disabled in release builds
-    let api_v1 = if cfg!(debug_assertions) || cfg!(test) {
-        api_v1.route(
-            "/api/v1/receivers/:id/stream/test_pcm",
-            post(routes::v1::receivers::receiver_stream_test_pcm_handler),
-        )
-    } else {
-        api_v1
-    };
+    // /stream/test_pcm is an engineering verification route, gated behind hardware-gate or debug/test builds
+    #[cfg(any(feature = "hardware-gate", debug_assertions, test))]
+    let api_v1 = api_v1.route(
+        "/api/v1/receivers/:id/stream/test_pcm",
+        post(routes::v1::receivers::receiver_stream_test_pcm_handler),
+    );
 
     api_v1
         .route(

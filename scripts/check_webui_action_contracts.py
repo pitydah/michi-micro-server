@@ -56,6 +56,9 @@ ALLOWED_UI_HELPERS = {
     "setTheme",
     "checkForUpdates",
     "checkUpdateStatus",
+    "closeReceiverPairModal",
+    "proceedToPairingPin",
+    "submitReceiverPairPin",
 }
 
 

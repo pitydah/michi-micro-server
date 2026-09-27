@@ -3454,6 +3454,163 @@ async function transferHandoff() {
   }
 }
 
+var ReceiverPairingState = {
+  receiverId: null,
+  receiverName: null,
+  pairingId: null,
+  expiresAt: null,
+  timerInterval: null,
+  phase: 'idle'
+};
+
+function openReceiverPairModal(receiverId, name) {
+  ReceiverPairingState.receiverId = receiverId;
+  ReceiverPairingState.receiverName = name;
+  ReceiverPairingState.phase = 'prompt_button';
+
+  var modal = $('#receiver-pair-modal');
+  var title = $('#pair-modal-title');
+  var stepBtn = $('#pair-step-button');
+  var stepPin = $('#pair-step-pin');
+  var pinErr = $('#pair-pin-error');
+  var pinInput = $('#pair-pin-input');
+
+  if (title) title.textContent = 'Pair ' + (name || 'Michi Music Stream');
+  if (stepBtn) stepBtn.classList.remove('hidden');
+  if (stepPin) stepPin.classList.add('hidden');
+  if (pinErr) pinErr.textContent = '';
+  if (pinInput) pinInput.value = '';
+
+  if (modal) {
+    modal.classList.remove('hidden');
+    modal.style.display = 'flex';
+  }
+}
+window.openReceiverPairModal = openReceiverPairModal;
+
+function closeReceiverPairModal() {
+  if (ReceiverPairingState.timerInterval) {
+    clearInterval(ReceiverPairingState.timerInterval);
+    ReceiverPairingState.timerInterval = null;
+  }
+  ReceiverPairingState.phase = 'idle';
+  ReceiverPairingState.receiverId = null;
+  ReceiverPairingState.pairingId = null;
+
+  var modal = $('#receiver-pair-modal');
+  if (modal) {
+    modal.classList.add('hidden');
+    modal.style.display = 'none';
+  }
+}
+window.closeReceiverPairModal = closeReceiverPairModal;
+
+async function proceedToPairingPin() {
+  if (!ReceiverPairingState.receiverId) return;
+  var stepBtn = $('#pair-step-button');
+  var stepPin = $('#pair-step-pin');
+  var pinErr = $('#pair-pin-error');
+  var readyBtn = $('#btn-pair-ready');
+
+  if (readyBtn) readyBtn.disabled = true;
+  if (pinErr) pinErr.textContent = '';
+
+  try {
+    var res = await MichiAPI.startReceiverPair({
+      receiver_id: ReceiverPairingState.receiverId,
+      initiator_id: 'michi-web'
+    });
+
+    var pairingId = res.pairing_id || res.session_id;
+    if (!pairingId) {
+      throw new Error(res.error?.message || 'STREAM_NOT_IN_PAIRING_MODE: El Stream no respondió con un ID de emparejamiento.');
+    }
+
+    ReceiverPairingState.pairingId = pairingId;
+    ReceiverPairingState.phase = 'pin_entry';
+
+    if (stepBtn) stepBtn.classList.add('hidden');
+    if (stepPin) stepPin.classList.remove('hidden');
+
+    var pinInput = $('#pair-pin-input');
+    if (pinInput) {
+      pinInput.value = '';
+      pinInput.focus();
+    }
+
+    var expiresSec = 60;
+    if (res.expires_at) {
+      var expDate = new Date(res.expires_at);
+      if (!isNaN(expDate.getTime())) {
+        expiresSec = Math.max(5, Math.floor((expDate.getTime() - Date.now()) / 1000));
+      }
+    }
+
+    var timerEl = $('#pair-timer-val');
+    if (timerEl) timerEl.textContent = expiresSec + 's';
+
+    if (ReceiverPairingState.timerInterval) clearInterval(ReceiverPairingState.timerInterval);
+    ReceiverPairingState.timerInterval = setInterval(function () {
+      expiresSec--;
+      if (timerEl) timerEl.textContent = Math.max(0, expiresSec) + 's';
+      if (expiresSec <= 0) {
+        clearInterval(ReceiverPairingState.timerInterval);
+        ReceiverPairingState.timerInterval = null;
+        if (pinErr) pinErr.textContent = 'PAIRING_EXPIRED: La sesión de emparejamiento ha expirado. Inténtalo nuevamente.';
+        var confirmBtn = $('#btn-pair-confirm');
+        if (confirmBtn) confirmBtn.disabled = true;
+      }
+    }, 1000);
+
+    var confirmBtn = $('#btn-pair-confirm');
+    if (confirmBtn) confirmBtn.disabled = false;
+  } catch (e) {
+    if (pinErr) pinErr.textContent = e.message;
+    showToast(e.message, true);
+  } finally {
+    if (readyBtn) readyBtn.disabled = false;
+  }
+}
+window.proceedToPairingPin = proceedToPairingPin;
+
+async function submitReceiverPairPin() {
+  var pinInput = $('#pair-pin-input');
+  var pin = pinInput ? pinInput.value.trim() : '';
+  var pinErr = $('#pair-pin-error');
+  var confirmBtn = $('#btn-pair-confirm');
+
+  if (!pin || !/^\d{6}$/.test(pin)) {
+    if (pinErr) pinErr.textContent = 'Ingresa un PIN válido de exactamente 6 dígitos numéricos.';
+    return;
+  }
+
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (pinErr) pinErr.textContent = '';
+
+  try {
+    await MichiAPI.confirmReceiverPair({
+      pairing_id: ReceiverPairingState.pairingId,
+      pin: pin
+    });
+
+    closeReceiverPairModal();
+    showToast('✓ Dispositivo emparejado exitosamente');
+    discoverDevices();
+  } catch (e) {
+    var msg = e.message || 'PAIRING_PIN_MISMATCH';
+    if (msg.includes('401') || msg.includes('PIN')) {
+      msg = 'PAIRING_PIN_MISMATCH: El PIN ingresado no es correcto.';
+    } else if (msg.includes('expired')) {
+      msg = 'PAIRING_EXPIRED: La sesión ha expirado.';
+    }
+    if (pinErr) pinErr.textContent = msg;
+    showToast(msg, true);
+  } finally {
+    if (confirmBtn) confirmBtn.disabled = false;
+  }
+}
+window.submitReceiverPairPin = submitReceiverPairPin;
+
 async function discoverDevices() {
   if (!canPerformProtectedAction()) return;
   var resEl = $('#discover-result');
@@ -3466,11 +3623,42 @@ async function discoverDevices() {
     var devs = res.receivers;
     if (resEl) {
       if (devs.length === 0) {
-        resEl.innerHTML = '<span style="color:var(--text-3)">No new devices discovered.</span>';
+        resEl.innerHTML = '<div class="empty-state"><p>No Michi receivers or devices discovered yet.</p></div>';
       } else {
-        resEl.innerHTML = devs.map(function(d) {
-          return '<div style="font-size:0.8rem;padding:4px 0">✓ Found: <strong>' + esc(d.name || d.device_name || d.device_type || 'Device') + '</strong> (' + esc(d.address || d.ip || 'local') + ')</div>';
-        }).join('');
+        resEl.innerHTML = '<div style="display:flex;flex-direction:column;gap:0.75rem">' + devs.map(function(d) {
+          var name = esc(d.name || d.device_name || 'Michi Music Stream');
+          var endpoint = esc(d.base_url || d.host || d.addresses?.[0] || 'Endpoint unavailable');
+          var isOnline = d.online || d.presence === 'verified_online';
+          var isPaired = d.paired === true;
+          var receiverId = esc(d.receiver_id || d.michi_id || '');
+          var typeLabel = esc(d.device_type === 'hifi' ? 'Hi-Fi' : 'Standard');
+
+          var presenceBadge = isOnline
+            ? '<span class="badge stable">Verified Online</span>'
+            : '<span class="badge disabled">Offline</span>';
+
+          var actionsHtml = '';
+          if (isPaired) {
+            actionsHtml = '<div style="display:flex;gap:0.5rem;align-items:center">' +
+              '<span class="badge stable">Paired</span>' +
+              '<button class="btn btn-sm btn-primary" onclick="selectOutputTarget(\'receiver\', \'' + receiverId + '\')">Use as Output</button>' +
+              '<button class="btn btn-sm btn-ghost" onclick="unpairReceiver(\'' + receiverId + '\')">Forget</button>' +
+              '</div>';
+          } else {
+            actionsHtml = '<div style="display:flex;gap:0.5rem;align-items:center">' +
+              '<span class="badge disabled">Unpaired</span>' +
+              '<button class="btn btn-sm btn-primary" onclick="openReceiverPairModal(\'' + receiverId + '\', \'' + name + '\')">Pair</button>' +
+              '</div>';
+          }
+
+          return '<div class="chain-item" style="display:flex;justify-content:space-between;align-items:center;padding:0.75rem 1rem;background:var(--bg-panel);border-radius:var(--radius-md);border:1px solid var(--border-color)">' +
+            '<div>' +
+            '<div style="font-weight:600;font-size:0.95rem;display:flex;gap:0.5rem;align-items:center">' + name + ' ' + presenceBadge + '</div>' +
+            '<div style="font-size:0.8rem;color:var(--text-3);margin-top:2px">' + typeLabel + ' · ' + endpoint + '</div>' +
+            '</div>' +
+            actionsHtml +
+            '</div>';
+        }).join('') + '</div>';
       }
     }
     showToast('Discovery complete');
@@ -3480,10 +3668,44 @@ async function discoverDevices() {
   }
 }
 
-async function startReceiverPair(deviceId) {
+async function unpairReceiver(receiverId) {
+  if (!canPerformProtectedAction()) return;
+  if (!confirm('Are you sure you want to unpair this receiver?')) return;
+  try {
+    await MichiAPI.request('/api/v1/receivers/' + encodeURIComponent(receiverId), { method: 'DELETE' });
+    showToast('Receiver unpaired');
+    discoverDevices();
+  } catch (e) {
+    showToast('Failed to unpair: ' + e.message, true);
+  }
+}
+window.unpairReceiver = unpairReceiver;
+
+async function selectOutputTarget(type, id) {
+  try {
+    await MichiAPI.request('/api/v1/playback/output', {
+      method: 'PUT',
+      body: { target: type, id: id }
+    });
+    showToast('Output selected');
+  } catch (e) {
+    showToast('Failed to select output: ' + e.message, true);
+  }
+}
+window.selectOutputTarget = selectOutputTarget;
+
+async function startReceiverPair(deviceIdOrBaseUrl, initiatorId) {
   if (!canPerformProtectedAction()) return;
   try {
-    var res = await MichiAPI.startReceiverPair({ receiver_id: deviceId });
+    var payload;
+    if (typeof deviceIdOrBaseUrl === 'object' && deviceIdOrBaseUrl !== null) {
+      payload = deviceIdOrBaseUrl;
+    } else if (typeof deviceIdOrBaseUrl === 'string' && (deviceIdOrBaseUrl.startsWith('http://') || deviceIdOrBaseUrl.startsWith('https://'))) {
+      payload = { base_url: deviceIdOrBaseUrl, initiator_id: initiatorId || 'michi-web' };
+    } else {
+      payload = { receiver_id: deviceIdOrBaseUrl, initiator_id: initiatorId || 'michi-web' };
+    }
+    var res = await MichiAPI.startReceiverPair(payload);
     showToast('Receiver pairing initiated');
     return res;
   } catch (e) {
@@ -3492,10 +3714,21 @@ async function startReceiverPair(deviceId) {
 }
 window.startReceiverPair = startReceiverPair;
 
-async function confirmReceiverPair(deviceId, pin) {
+async function confirmReceiverPair(pairingIdOrDeviceId, pin) {
   if (!canPerformProtectedAction()) return;
+  var pinVal = typeof pairingIdOrDeviceId === 'object' && pairingIdOrDeviceId !== null ? pairingIdOrDeviceId.pin : pin;
+  if (!pinVal || !/^\d{6}$/.test(String(pinVal).trim())) {
+    showToast('PIN must be exactly 6 numeric digits', true);
+    return;
+  }
   try {
-    var res = await MichiAPI.confirmReceiverPair({ receiver_id: deviceId, pin: pin });
+    var payload;
+    if (typeof pairingIdOrDeviceId === 'object' && pairingIdOrDeviceId !== null) {
+      payload = pairingIdOrDeviceId;
+    } else {
+      payload = { pairing_id: pairingIdOrDeviceId, pin: pin };
+    }
+    var res = await MichiAPI.confirmReceiverPair(payload);
     showToast('Receiver paired successfully');
     return res;
   } catch (e) {
