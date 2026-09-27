@@ -80,12 +80,23 @@ impl ReceiverDiscoveryBridge {
             }
         };
 
+        let target_presence = match record.presence_source {
+            michi_connect::scent_store::ScentPresenceSource::WhiskerSigned => {
+                ReceiverPresence::VerifiedOnline
+            }
+            michi_connect::scent_store::ScentPresenceSource::MdnsProvisional => {
+                ReceiverPresence::ProvisionalMdns
+            }
+        };
+
         let registry_arc = self.receiver_manager.registry().await;
         let mut reg = registry_arc.write().await;
 
         if let Some(entry) = reg.get_mut(&record.michi_id) {
             entry.base_url = base_url_str;
-            entry.presence = ReceiverPresence::VerifiedOnline;
+            if entry.presence != ReceiverPresence::VerifiedOnline {
+                entry.presence = target_presence;
+            }
             entry.last_seen = Some(chrono::Utc::now());
             entry.name = record.name.clone();
             entry.device_type = if record.service.contains("hifi") {
@@ -100,7 +111,9 @@ impl ReceiverDiscoveryBridge {
                 if entry.receiver_id == record.device_id || entry.receiver_id == record.michi_id {
                     entry.michi_id = Some(record.michi_id.clone());
                     entry.base_url = base_url_str.clone();
-                    entry.presence = ReceiverPresence::VerifiedOnline;
+                    if entry.presence != ReceiverPresence::VerifiedOnline {
+                        entry.presence = target_presence;
+                    }
                     entry.last_seen = Some(chrono::Utc::now());
                     entry.name = record.name.clone();
                     found_legacy = true;
@@ -122,7 +135,7 @@ impl ReceiverDiscoveryBridge {
                     base_url: base_url_str,
                     paired: false,
                     token: None,
-                    presence: ReceiverPresence::VerifiedOnline,
+                    presence: target_presence,
                     last_seen: Some(chrono::Utc::now()),
                     capabilities: Vec::new(),
                     capabilities_verified_at: None,
@@ -141,7 +154,12 @@ impl ReceiverDiscoveryBridge {
                     maximum_safe_volume: None,
                     qualification: ReceiverQualification::NeedsCapabilityRefresh,
                 };
-                info!(michi_id = %record.michi_id, name = %record.name, "ReceiverDiscoveryBridge: projected new unpaired receiver");
+                info!(
+                    michi_id = %record.michi_id,
+                    name = %record.name,
+                    presence = ?target_presence,
+                    "ReceiverDiscoveryBridge: projected new unpaired receiver"
+                );
                 reg.add(entry);
             }
         }
@@ -215,9 +233,10 @@ mod tests {
             service: "michi-stream-standard".to_string(),
             roles: vec!["audio_receiver".to_string()],
             verified: true,
+            presence_source: michi_connect::scent_store::ScentPresenceSource::WhiskerSigned,
             endpoints: vec!["192.168.1.100:8080".parse().unwrap()],
             base_url: Some(Url::parse("http://192.168.1.100:8080/").unwrap()),
-            last_signed_seen: Instant::now(),
+            last_signed_seen: Some(Instant::now()),
             last_mdns_seen: None,
             server_info_verified_at: Some(Instant::now()),
             online: true,
@@ -238,6 +257,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_provisional_mdns_stream_projected_to_registry() {
+        let scent = Arc::new(ScentStore::new());
+        let mgr = ReceiverSessionManager::new_with_identity(test_identity());
+        let bridge = ReceiverDiscoveryBridge::new(scent.clone(), mgr.clone());
+
+        let record = ScentRecord {
+            michi_id: "stream-mdns-id".to_string(),
+            device_id: "stream-mdns".to_string(),
+            name: "Bedroom Stream".to_string(),
+            service: "michi-stream-standard".to_string(),
+            roles: vec!["audio_receiver".to_string()],
+            verified: true,
+            presence_source: michi_connect::scent_store::ScentPresenceSource::MdnsProvisional,
+            endpoints: vec!["192.168.1.105:8080".parse().unwrap()],
+            base_url: Some(Url::parse("http://192.168.1.105:8080/").unwrap()),
+            last_signed_seen: None,
+            last_mdns_seen: Some(Instant::now()),
+            server_info_verified_at: Some(Instant::now()),
+            online: true,
+        };
+
+        bridge
+            .handle_event(ScentEvent::Discovered(record.clone()))
+            .await;
+
+        let reg = mgr.registry().await.read().await.clone();
+        let entry = reg.get("stream-mdns-id").expect("must project to registry");
+        assert_eq!(entry.name, "Bedroom Stream");
+        assert_eq!(entry.presence, ReceiverPresence::ProvisionalMdns);
+        assert!(!entry.paired);
+        assert_eq!(entry.base_url, "http://192.168.1.105:8080/");
+
+        // Now signed announce arrives: upgrades presence to VerifiedOnline
+        let mut upgraded = record.clone();
+        upgraded.presence_source = michi_connect::scent_store::ScentPresenceSource::WhiskerSigned;
+        upgraded.last_signed_seen = Some(Instant::now());
+
+        bridge.handle_event(ScentEvent::Updated(upgraded)).await;
+
+        let reg_after = mgr.registry().await.read().await.clone();
+        let entry_after = reg_after.get("stream-mdns-id").unwrap();
+        assert_eq!(entry_after.presence, ReceiverPresence::VerifiedOnline);
+    }
+
+    #[tokio::test]
     async fn test_unverified_stream_ignored() {
         let scent = Arc::new(ScentStore::new());
         let mgr = ReceiverSessionManager::new_with_identity(test_identity());
@@ -250,9 +314,10 @@ mod tests {
             service: "michi-stream-standard".to_string(),
             roles: vec!["audio_receiver".to_string()],
             verified: false, // NOT verified!
+            presence_source: michi_connect::scent_store::ScentPresenceSource::WhiskerSigned,
             endpoints: vec![],
             base_url: Some(Url::parse("http://192.168.1.100:8080/").unwrap()),
-            last_signed_seen: Instant::now(),
+            last_signed_seen: Some(Instant::now()),
             last_mdns_seen: None,
             server_info_verified_at: None,
             online: true,
@@ -277,9 +342,10 @@ mod tests {
             service: "michi-player-mobile".to_string(), // Not a stream!
             roles: vec!["player_control".to_string()],
             verified: true,
+            presence_source: michi_connect::scent_store::ScentPresenceSource::WhiskerSigned,
             endpoints: vec![],
             base_url: Some(Url::parse("http://192.168.1.101:8080/").unwrap()),
-            last_signed_seen: Instant::now(),
+            last_signed_seen: Some(Instant::now()),
             last_mdns_seen: None,
             server_info_verified_at: None,
             online: true,
@@ -304,9 +370,10 @@ mod tests {
             service: "michi-stream-standard".to_string(),
             roles: vec!["audio_receiver".to_string()],
             verified: true,
+            presence_source: michi_connect::scent_store::ScentPresenceSource::WhiskerSigned,
             endpoints: vec![],
             base_url: Some(Url::parse("http://192.168.1.100:8080/").unwrap()),
-            last_signed_seen: Instant::now(),
+            last_signed_seen: Some(Instant::now()),
             last_mdns_seen: None,
             server_info_verified_at: Some(Instant::now()),
             online: true,

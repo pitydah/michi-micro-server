@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.0-rc.4] - 2026-09-27
+
+### Added
+- **Multi-Interface Multicast Discovery**: Enlace automático de socket multicast Whisker en todas las interfaces de red IPv4 locales activas para entornos multi-NIC (ZimaOS, Docker, bridges de red), resolviendo caídas de anuncios UDP entre subredes.
+- **Provisional mDNS Receiver Convergence**: Registro provisional y seguro en Scent para receptores de streaming descubiertos por mDNS que superan verificación estricta Ed25519 de identidad vía `GET /api/v1/server/info`, permitiendo emparejamiento físico inmediato y elevación transparente a presencia firmada completa (`WhiskerSigned`).
+
+### Changed
+- Actualización de versiones canónicas del workspace, paquetes de tienda ZimaOS y manifiestos de despliegue a `1.0.0-rc.4`.
+- Detección automática de adaptador de red local en script de certificación de hardware físico (`scripts/esp32_hardware_gate.sh`).
+
+### Fixed
+- Resuelta la condición de carrera y ventana de ceguera donde receptores físicos de streaming no eran reconocidos por el servidor si el multicast inicial no se recibía por la ruta por defecto.
+
 ## [1.0.0-rc.3] - 2026-09-21
 
 ### Added

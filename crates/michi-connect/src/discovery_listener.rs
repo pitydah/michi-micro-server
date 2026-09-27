@@ -85,15 +85,53 @@ impl WhiskerDiscoveryListener {
         let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, self.multicast_port);
         socket.bind(&bind_addr.into())?;
 
-        let iface = interface_ip.unwrap_or(Ipv4Addr::UNSPECIFIED);
-        socket.join_multicast_v4(&self.multicast_group, &iface)?;
+        if let Some(iface) = interface_ip {
+            socket.join_multicast_v4(&self.multicast_group, &iface)?;
+            info!(
+                group = %self.multicast_group,
+                port = self.multicast_port,
+                interface = %iface,
+                "Whisker discovery socket bound and joined multicast group on explicit interface"
+            );
+        } else {
+            let _ = socket.join_multicast_v4(&self.multicast_group, &Ipv4Addr::UNSPECIFIED);
 
-        info!(
-            group = %self.multicast_group,
-            port = self.multicast_port,
-            interface = %iface,
-            "Whisker discovery socket bound and joined multicast group"
-        );
+            let mut joined_count = 0;
+            if let Ok(ifaces) = if_addrs::get_if_addrs() {
+                for iface in ifaces {
+                    if iface.is_loopback() {
+                        continue;
+                    }
+                    if let std::net::IpAddr::V4(ipv4) = iface.addr.ip() {
+                        match socket.join_multicast_v4(&self.multicast_group, &ipv4) {
+                            Ok(_) => {
+                                debug!(
+                                    interface = %iface.name,
+                                    ip = %ipv4,
+                                    "Whisker joined multicast group on interface"
+                                );
+                                joined_count += 1;
+                            }
+                            Err(e) => {
+                                debug!(
+                                    interface = %iface.name,
+                                    ip = %ipv4,
+                                    err = %e,
+                                    "Whisker could not join multicast group on interface"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            info!(
+                group = %self.multicast_group,
+                port = self.multicast_port,
+                interfaces_joined = joined_count,
+                "Whisker discovery socket bound and joined multicast group on available interfaces"
+            );
+        }
 
         let std_socket: std::net::UdpSocket = socket.into();
         UdpSocket::from_std(std_socket)
