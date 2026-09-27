@@ -6,7 +6,7 @@ Performs strict hardware and runtime qualification:
 1. Inspects /proc/device-tree/model to prove physical Raspberry Pi 4 or 5 hardware.
 2. Starts native michi-server binary in isolated temporary environment.
 3. Verifies readiness (/health/live == 200, /api/v1/server/info == valid).
-4. Verifies database migrations and schema invariants (version == 49).
+4. Verifies database migrations and schema invariants (version == 50).
 5. Executes streaming smoke (scans mock audio, streams audio bytes over HTTP Range 206).
 6. Captures mini resource sanity (RSS ceiling, thread count, process survival).
 7. Emits rich physical hardware evidence artifact.
@@ -232,8 +232,8 @@ def main():
         max_ver = row[0] if row else None
         conn.close()
         evidence["database_schema_version"] = max_ver
-        if max_ver != 49:
-            err = f"Expected database migration schema 49, got {max_ver}"
+        if max_ver != 50:
+            err = f"Expected database migration schema 50, got {max_ver}"
             evidence["errors"].append(err)
             raise RuntimeError(err)
         print(f"  ✓ Database migrated successfully to schema {max_ver}")

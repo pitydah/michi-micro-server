@@ -836,7 +836,7 @@ def test_rpi_qualifier_mock_execution_and_assertions(tmp_path):
     Test end-to-end qualify_rpi_runtime execution against a mock server executable.
     Verifies:
     - Canonical environment variables passed (and absence of legacy variables).
-    - Database migration schema 49 verification.
+    - Database migration schema 50 verification.
     - Expected commit / version assertion enforcement (success and failure cases).
     - Correct recording of resource limits and metrics in rich evidence.
     """
@@ -865,7 +865,7 @@ if db_url.startswith("sqlite://"):
     os.makedirs(os.path.dirname(db_file), exist_ok=True)
     conn = sqlite3.connect(db_file)
     conn.execute("CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY, applied_at TEXT)")
-    conn.execute("INSERT OR REPLACE INTO _migrations (version, applied_at) VALUES (49, '2026-09-21T00:00:00Z')")
+    conn.execute("INSERT OR REPLACE INTO _migrations (version, applied_at) VALUES (50, '2026-09-21T00:00:00Z')")
     conn.commit()
     conn.close()
 
@@ -953,7 +953,7 @@ finally:
     assert ev_data["runtime_commit"] == "mockcommit123"
     assert ev_data["expected_version"] == "1.0.0"
     assert ev_data["expected_commit"] == "mockcommit123"
-    assert ev_data["database_schema_version"] == 49
+    assert ev_data["database_schema_version"] == 50
     assert ev_data["health_result"] == "PASS"
     assert ev_data["stream_smoke_result"] == "PASS"
     assert ev_data["rss_limit_bytes"] == 65 * 1024 * 1024
