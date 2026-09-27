@@ -3633,7 +3633,9 @@ async function discoverDevices() {
           var receiverId = esc(d.receiver_id || d.michi_id || '');
           var typeLabel = esc(d.device_type === 'hifi' ? 'Hi-Fi' : 'Standard');
 
-          var presenceBadge = isOnline
+          var presenceBadge = (d.presence === 'provisional_mdns')
+            ? '<span class="badge warning">Provisional (mDNS)</span>'
+            : isOnline
             ? '<span class="badge stable">Verified Online</span>'
             : '<span class="badge disabled">Offline</span>';
 

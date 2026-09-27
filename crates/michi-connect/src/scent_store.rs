@@ -191,6 +191,13 @@ impl ScentStore {
                     record.server_info_verified_at = Some(now);
                     record.online = true;
 
+                    if record.presence_source == ScentPresenceSource::MdnsProvisional {
+                        record.device_id = info.device_id;
+                        record.name = info.name;
+                        record.service = info.service;
+                        record.roles = info.roles;
+                    }
+
                     if let Some(src) = source {
                         if !record.endpoints.contains(&src) {
                             record.endpoints.push(src);
