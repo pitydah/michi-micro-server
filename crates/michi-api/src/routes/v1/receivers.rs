@@ -777,8 +777,7 @@ pub async fn discover_mdns_handler(
             michi_receivers::ReceiverPresence::Degraded => "degraded",
             michi_receivers::ReceiverPresence::Unknown => "unknown",
         };
-        let is_online = entry.presence == michi_receivers::ReceiverPresence::VerifiedOnline
-            || entry.presence == michi_receivers::ReceiverPresence::ProvisionalMdns;
+        let is_online = entry.presence == michi_receivers::ReceiverPresence::VerifiedOnline;
         let verified = entry.capabilities_verified_at.is_some()
             || state
                 .scent_store
