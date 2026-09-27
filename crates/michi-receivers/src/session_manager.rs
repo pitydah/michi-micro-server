@@ -737,14 +737,19 @@ impl ReceiverSessionManager {
             }
         }
 
-        // 4. Cancel and await heartbeat handle
+        // 4. Cancel and await heartbeat handle (avoid self-join if called from within the supervisor task)
         let handle_opt = {
             let mut handles = self.heartbeat_handles.write().await;
             handles.remove(receiver_id)
         };
         if let Some(h) = handle_opt {
             h.cancel.cancel();
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), h.join).await;
+            let is_self = tokio::task::try_id()
+                .map(|id| id == h.join.id())
+                .unwrap_or(false);
+            if !is_self {
+                let _ = tokio::time::timeout(std::time::Duration::from_millis(500), h.join).await;
+            }
         }
 
         // 5. Invalidate Perch authority grant in RAM

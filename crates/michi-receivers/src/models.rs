@@ -401,11 +401,19 @@ impl ReceiverRegistryEntry {
         if self.capabilities_stale || self.capabilities_verified_at.is_none() {
             return ReceiverQualification::NeedsCapabilityRefresh;
         }
-        if self.supported_transports.is_empty() {
+        if !self.supported_transports.iter().any(|t| t == "rtp_udp") {
             return ReceiverQualification::UnsupportedTransport;
         }
-        if self.supported_codecs.is_empty() {
+        if !self.supported_codecs.iter().any(|c| c == "pcm_s16le") {
             return ReceiverQualification::UnsupportedCodec;
+        }
+        if !self.supported_sample_rates.contains(&48000)
+            || !self.supported_bit_depths.contains(&16)
+            || !self.supported_channels.contains(&2)
+            || self.max_sample_rate < 48000
+            || self.max_bit_depth < 16
+        {
+            return ReceiverQualification::NeedsCapabilityRefresh;
         }
         ReceiverQualification::Qualified
     }

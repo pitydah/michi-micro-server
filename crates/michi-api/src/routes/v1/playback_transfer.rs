@@ -190,25 +190,32 @@ pub async fn playback_transfer_prepare_handler(
     };
 
     let expected_epoch = if receiver.authority_supported {
-        if let Ok(endpoint) = reqwest::Url::parse(&receiver.base_url) {
-            let auth_client = michi_receivers::authority_client::ReceiverAuthorityClient::new();
-            if let Ok(st) = auth_client
-                .state(&endpoint, receiver.token.as_deref())
-                .await
-            {
-                st.lease_epoch + 1
-            } else if let Some(g) = state
-                .receiver_manager
-                .authority_gate()
-                .get_grant(&receiver.receiver_id)
-                .await
-            {
-                g.lease_epoch + 1
-            } else {
-                1
-            }
+        let endpoint = reqwest::Url::parse(&receiver.base_url).map_err(|e| {
+            v1_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_RECEIVER_URL",
+                &format!("receiver base_url is invalid: {e}"),
+            )
+        })?;
+        let auth_client = michi_receivers::authority_client::ReceiverAuthorityClient::new();
+        if let Ok(st) = auth_client
+            .state(&endpoint, receiver.token.as_deref())
+            .await
+        {
+            st.lease_epoch + 1
+        } else if let Some(g) = state
+            .receiver_manager
+            .authority_gate()
+            .get_grant(&receiver.receiver_id)
+            .await
+        {
+            g.lease_epoch + 1
         } else {
-            1
+            return Err(v1_error(
+                StatusCode::FAILED_DEPENDENCY,
+                "AUTHORITY_STATE_UNAVAILABLE",
+                "receiver supports authority but authority state could not be resolved; failing closed",
+            ));
         }
     } else {
         1
