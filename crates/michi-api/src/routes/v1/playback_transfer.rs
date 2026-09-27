@@ -1,8 +1,4 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use uuid::Uuid;
@@ -12,8 +8,7 @@ use crate::playback_queue::get_or_create_active_queue;
 use crate::AppState;
 use michi_sync::content_identity::{ContentIdentityResolver, ContentResolutionError};
 use michi_sync::playback_transfer::{
-    sign_target_ready_proof, PendingPlaybackTransfer, TailSyncV1,
-    DEFAULT_TRANSFER_TTL,
+    sign_target_ready_proof, PendingPlaybackTransfer, TailSyncV1, DEFAULT_TRANSFER_TTL,
 };
 
 fn v1_error(
@@ -116,7 +111,10 @@ pub async fn playback_transfer_prepare_handler(
             v1_error(
                 StatusCode::NOT_FOUND,
                 "RECEIVER_NOT_FOUND",
-                &format!("receiver '{}' not found in registry", body.receiver_michi_id),
+                &format!(
+                    "receiver '{}' not found in registry",
+                    body.receiver_michi_id
+                ),
             )
         })?
         .clone();
@@ -288,12 +286,20 @@ pub async fn playback_transfer_commit_handler(
         })?;
 
     // 5. Install queue in database transaction
-    let queue_id = get_or_create_active_queue(&state.db)
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
+    let queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     let mut tx = state.db.begin().await.map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string())
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
     })?;
 
     sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
@@ -301,7 +307,11 @@ pub async fn playback_transfer_commit_handler(
         .execute(&mut *tx)
         .await
         .map_err(|e| {
-            v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string())
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
         })?;
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -329,7 +339,11 @@ pub async fn playback_transfer_commit_handler(
     }
 
     tx.commit().await.map_err(|e| {
-        v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string())
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
     })?;
 
     // 6. Synchronize PlaybackEngine

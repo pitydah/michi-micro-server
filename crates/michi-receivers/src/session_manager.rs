@@ -504,7 +504,19 @@ impl ReceiverSessionManager {
 
         // If grant not explicitly passed, attempt to ensure claim via AuthorityGate
         let claimed_grant = if authority.is_none() {
-            self.authority_gate.ensure_claim(&entry).await.ok().flatten()
+            if entry.supports_authority_v1() {
+                match self.authority_gate.ensure_claim(&entry).await {
+                    Ok(grant) => grant,
+                    Err(crate::authority_models::AuthorityError::Unsupported) => None,
+                    Err(err) => {
+                        return Err(format!(
+                            "PERCH_AUTHORITY_FAILED: authority claim failed ({err:?})"
+                        ));
+                    }
+                }
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -531,13 +543,16 @@ impl ReceiverSessionManager {
         let ssrc = negotiated.ssrc;
 
         // Create and start RtpReceiverTransport targeting receiver_host:effective_port with EXACT negotiated SSRC
-        let host = base_url
-            .trim_start_matches("http://")
-            .trim_start_matches("https://")
-            .split(':')
-            .next()
-            .unwrap_or("127.0.0.1");
-        let target_addr = format!("{host}:{effective_port}");
+        let endpoint = url::Url::parse(&base_url)
+            .map_err(|e| format!("Invalid receiver base_url '{base_url}': {e}"))?;
+        let host = endpoint
+            .host_str()
+            .ok_or_else(|| format!("Invalid receiver endpoint host in '{base_url}'"))?;
+        let target_addr = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]:{effective_port}")
+        } else {
+            format!("{host}:{effective_port}")
+        };
 
         let mut transport = RtpReceiverTransport::new(&target_addr, ssrc);
         let config = TransportStreamConfig {

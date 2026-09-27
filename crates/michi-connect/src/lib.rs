@@ -28,6 +28,15 @@ pub struct MichiConnect {
 
 impl MichiConnect {
     pub fn new(identity: Arc<IdentityManager>, port: u16, host: Option<String>) -> Self {
+        Self::new_with_scent(identity, port, host, Arc::new(ScentStore::new()))
+    }
+
+    pub fn new_with_scent(
+        identity: Arc<IdentityManager>,
+        port: u16,
+        host: Option<String>,
+        scent_store: Arc<ScentStore>,
+    ) -> Self {
         let host = host.unwrap_or_else(|| "localhost".to_string());
         let server_url = format!("http://{host}:{port}");
         Self {
@@ -35,7 +44,7 @@ impl MichiConnect {
             server_url: Arc::new(RwLock::new(server_url)),
             service_name: Arc::new(RwLock::new(String::new())),
             mdns_daemon: Arc::new(RwLock::new(None)),
-            scent_store: Arc::new(ScentStore::new()),
+            scent_store,
         }
     }
 

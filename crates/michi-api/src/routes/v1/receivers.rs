@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -281,7 +282,8 @@ pub async fn get_receiver_handler(
         )
     })?;
     let online = entry.presence == michi_receivers::models::ReceiverPresence::VerifiedOnline
-        || entry.last_seen
+        || entry
+            .last_seen
             .map(|ls| (chrono::Utc::now() - ls).num_seconds() < 90)
             .unwrap_or(false);
     Ok(Json(serde_json::json!({
@@ -314,7 +316,11 @@ pub async fn receiver_takeover_handler(
     let reg = reg_arc.read().await;
     let entry = reg
         .get(&id)
-        .or_else(|| reg.list().into_iter().find(|e| e.michi_id.as_deref() == Some(&id)))
+        .or_else(|| {
+            reg.list()
+                .into_iter()
+                .find(|e| e.michi_id.as_deref() == Some(&id))
+        })
         .ok_or_else(|| {
             v1_error(
                 StatusCode::NOT_FOUND,
@@ -429,7 +435,8 @@ async fn persist_paired_receiver(state: &AppState, device_id: &str) -> Result<()
         .get(device_id)
         .ok_or_else(|| format!("receiver {device_id} not found in registry"))?;
     let now = chrono::Utc::now().to_rfc3339();
-    let caps_json = serde_json::to_string(&entry.capabilities).unwrap_or_else(|_| "{}".into());
+    let caps = entry.to_capabilities();
+    let caps_json = serde_json::to_string(&caps).unwrap_or_else(|_| "{}".into());
 
     let token = entry
         .token
@@ -739,57 +746,84 @@ pub async fn receiver_stream_test_pcm_handler(
 }
 
 pub async fn discover_mdns_handler(
+    State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    match discover_mdns_receivers().await {
-        Ok(receivers) => Ok(Json(serde_json::json!({ "receivers": receivers }))),
-        Err(e) => Err(v1_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "DISCOVERY_FAILED",
-            &e,
-        )),
+    let registry_arc = state.receiver_manager.registry().await;
+    let reg = registry_arc.read().await;
+
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut receivers = Vec::new();
+
+    for entry in reg.receivers.values() {
+        let stable_id = entry.michi_id.as_deref().unwrap_or(&entry.receiver_id);
+        seen_ids.insert(stable_id.to_string());
+        seen_ids.insert(entry.receiver_id.clone());
+
+        let presence_str = match entry.presence {
+            michi_receivers::ReceiverPresence::VerifiedOnline => "verified_online",
+            michi_receivers::ReceiverPresence::Offline => "offline",
+            michi_receivers::ReceiverPresence::Degraded => "degraded",
+            michi_receivers::ReceiverPresence::Unknown => "unknown",
+        };
+        let is_online = entry.presence == michi_receivers::ReceiverPresence::VerifiedOnline;
+        let host_or_addr = Url::parse(&entry.base_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_string()))
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+
+        receivers.push(serde_json::json!({
+            "receiver_id": entry.receiver_id,
+            "michi_id": entry.michi_id.clone().unwrap_or_else(|| entry.receiver_id.clone()),
+            "name": entry.name,
+            "service": if entry.device_type == "hifi" { "michi-stream-hifi" } else { "michi-stream-standard" },
+            "device_type": entry.device_type,
+            "base_url": entry.base_url,
+            "host": entry.base_url,
+            "addresses": vec![host_or_addr],
+            "verified": true,
+            "online": is_online,
+            "paired": entry.paired,
+            "presence": presence_str,
+            "last_seen": entry.last_seen.map(|d| d.to_rfc3339()),
+            "pairable": !entry.paired,
+        }));
     }
-}
 
-async fn discover_mdns_receivers() -> Result<Vec<serde_json::Value>, String> {
-    use mdns_sd::{ServiceDaemon, ServiceEvent};
-    use std::time::Duration;
-
-    let daemon = ServiceDaemon::new().map_err(|e| format!("mDNS daemon: {e}"))?;
-    let service_type = "_michi-link._tcp.local.";
-    let receiver = daemon
-        .browse(service_type)
-        .map_err(|e| format!("mDNS browse: {e}"))?;
-
-    let result: Vec<serde_json::Value> = Vec::new();
-    let discovered = std::sync::Mutex::new(result);
-    let _ = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if let Ok(event) = receiver.recv_async().await {
-                match event {
-                    ServiceEvent::ServiceResolved(info) => {
-                        let host = info.get_hostname().to_string();
-                        let port = info.get_port();
-                        let fullname = info.get_fullname().to_string();
-                        let addresses: Vec<String> =
-                            info.get_addresses().iter().map(|a| a.to_string()).collect();
-                        let addr = format!("http://{}:{}", host.trim_end_matches('.'), port);
-                        discovered.lock().unwrap().push(serde_json::json!({
-                            "name": fullname,
-                            "host": addr,
-                            "port": port,
-                            "addresses": addresses,
-                        }));
-                    }
-                    ServiceEvent::ServiceRemoved(_, _) => {}
-                    _ => {}
-                }
-            }
+    for rec in state.scent_store.list_online() {
+        if seen_ids.contains(&rec.michi_id) || seen_ids.contains(&rec.device_id) {
+            continue;
         }
-    })
-    .await;
+        let base_url_str = rec
+            .base_url
+            .as_ref()
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        let host_or_addr = rec
+            .endpoints
+            .first()
+            .map(|e| e.ip().to_string())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
 
-    let _ = daemon.shutdown();
-    Ok(discovered.into_inner().unwrap())
+        seen_ids.insert(rec.michi_id.clone());
+        receivers.push(serde_json::json!({
+            "receiver_id": rec.michi_id.clone(),
+            "michi_id": rec.michi_id.clone(),
+            "name": rec.name.clone(),
+            "service": rec.service.clone(),
+            "device_type": if rec.service.contains("hifi") { "hifi" } else { "standard" },
+            "base_url": base_url_str.clone(),
+            "host": base_url_str,
+            "addresses": vec![host_or_addr],
+            "verified": rec.verified,
+            "online": rec.online,
+            "paired": false,
+            "presence": if rec.online { "verified_online" } else { "offline" },
+            "last_seen": Some(chrono::Utc::now().to_rfc3339()),
+            "pairable": true,
+        }));
+    }
+
+    Ok(Json(serde_json::json!({ "receivers": receivers })))
 }
 
 // ── Room Groups (Persistent) ─────────────────────────────────────

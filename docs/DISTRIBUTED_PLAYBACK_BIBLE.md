@@ -2188,3 +2188,227 @@ Use these for implementation decisions, not as mandatory Micro runtime dependenc
 - DNS-SD: RFC 6763
 
 Micro Server remains a lightweight Rust/headless server. Linux desktop graph technologies must not become a hard requirement.
+
+---
+
+# 81. CURRENT-BRANCH KILLCRITIC SNAPSHOT — AUTHORITATIVE STARTING POINT
+
+This section supersedes any assumption that the branch is still at the 2026-09-24 planning baseline.
+
+Observed branch delta against `main`:
+
+```text
+branch: feat/distributed-playback-perch-pawpass
+head:   a1e36cd96089de388d4ea3b9975508938256aa5b
+base:   3b44da94e4dacc328172c414602e9135ff2758b9
+commits ahead: 1
+files changed: 34
+additions: 6044
+deletions: 75
+```
+
+The following modules already exist and MUST be inspected and completed, not blindly recreated:
+
+```text
+crates/michi-connect/src/discovery_listener.rs
+crates/michi-connect/src/mdns_resolver.rs
+crates/michi-connect/src/scent_store.rs
+
+crates/michi-receivers/src/authority_client.rs
+crates/michi-receivers/src/authority_gate.rs
+crates/michi-receivers/src/authority_models.rs
+crates/michi-receivers/src/pawpass_coordinator.rs
+crates/michi-receivers/src/session_supervisor.rs
+crates/michi-receivers/src/discovery_bridge.rs
+
+crates/michi-sync/src/content_identity.rs
+crates/michi-sync/src/playback_transfer.rs
+
+crates/michi-api/src/routes/v1/playback_transfer.rs
+```
+
+---
+
+# 82. AUTHORITATIVE IMPLEMENTATION ORDER — PRODUCT CLOSURE BEFORE ADVANCED HANDOFF
+
+The implementation order in this V2 is mandatory because the current branch over-developed advanced handoff before closing physical receiver onboarding.
+
+```text
+C0  baseline / compile / tests / contract hashes
+ |
+C1  Whisker + Scent lifecycle actually started
+ |
+C2  Scent -> ReceiverRegistry bridge
+ |
+C3  /devices/discover reads trusted Scent state
+ |
+C4  WebUI discover + physical-button + PIN pairing
+ |
+C5  exact capability persistence + restart revalidation
+ |
+C6  physical ESP32 pair and native RTP playback gate
+ |
+C7  heartbeat/liveness/product truth closure
+ |
+C8  Perch fail-closed contract alignment
+ |
+C9  Pounce UX and authority state projection
+ |
+C10 PawPass/Continue playback source+target closure
+ |
+C11 cross-app / cross-repo certification
+```
+
+Hard rule:
+
+```text
+DO NOT mark C8+ complete if C6 is not demonstrably green.
+```
+
+---
+
+# 83. PRODUCTION LIFECYCLE WIRING — EXACT RESPONSIBILITY MAP
+
+The missing product wiring belongs primarily in:
+
+```text
+apps/michi-server/src/main.rs
+crates/michi-api/src/lib.rs
+crates/michi-connect/src/lib.rs
+crates/michi-receivers/src/discovery_bridge.rs
+```
+
+## 83.1 Single shared connectivity context
+
+`MichiConnect` and `AppState` share a single `ScentStore`.
+
+## 83.2 Startup sequence
+
+```text
+1. create MichiConnect(identity, actual_port, advertised_host) sharing state.scent_store
+2. start Micro mDNS advertisement
+3. start signed UDP Micro announcer
+4. construct WhiskerDiscoveryListener on 224.0.0.167:53318
+5. construct MdnsResolver with ScentStore
+6. spawn Scent expiry sweeper
+7. spawn DiscoveryBridge
+8. track all task handles with shutdown cancellation
+```
+
+---
+
+# 84. DISCOVERY BRIDGE — THE MISSING PRODUCTIVE LAYER
+
+Implemented in `crates/michi-receivers/src/discovery_bridge.rs`.
+
+Reconciliation rules:
+- Only verified records from Stream Standard/HiFi with `audio_receiver` role project into registry.
+- Dynamic `base_url`, `presence`, and `last_seen` update on `Updated` or `EndpointChanged`.
+- Unpaired devices project as `ReceiverRegistryEntry` with `presence: VerifiedOnline` and `paired: false`.
+- 90s expiry sets `presence: Offline` and `capabilities_stale: true` without deleting credentials.
+
+---
+
+# 85. `/api/v1/devices/discover` — REPLACE THE THREE-SECOND UNIVERSE
+
+Replaced ephemeral 3-second browse with snapshot query from `ScentStore` and `ReceiverRegistry`.
+
+---
+
+# 86. WEBUI DEVICE ONBOARDING — COMPLETE PRODUCT FLOW
+
+WebUI in Settings -> Devices:
+- One card per stable receiver identity with presence badge.
+- `[Pair]` button triggers physical button instruction modal (5s press on Stream).
+- 6-digit PIN input with countdown timer and actionable error messages.
+- Transactional persistence and post-pair refresh.
+
+---
+
+# 87. CAPABILITY SNAPSHOT — FIX THE SERIALIZATION BUG
+
+- Persists typed `ReceiverCapabilities` snapshot rather than `Vec<String>`.
+- Verified with mandatory DB restart round-trip test.
+
+---
+
+# 88. RECEIVER QUALIFICATION — DISTINCT FROM DISCOVERY AND PAIRING
+
+Added `ReceiverQualification` enum (`Unknown`, `Qualified`, `NeedsCapabilityRefresh`, `UnsupportedTransport`, `UnsupportedCodec`, `MissingCredential`, `IdentityMismatch`).
+
+---
+
+# 89. PERCH AUTHORITY — FAIL-CLOSED RULES
+
+Removed `.ok().flatten()`.
+Only explicit `AuthorityError::Unsupported` falls back to legacy mode; any other error fails closed and blocks session start.
+
+---
+
+# 90. AUTHORITY WIRE CONTRACT
+
+Sends canonical headers `X-Michi-Authority-*` and `X-Authority-*`.
+
+---
+
+# 91. TYPED RECEIVER CLIENT ERRORS
+
+Added `ReceiverClientError` enum and typed heartbeat classification in `session_supervisor.rs`.
+
+---
+
+# 92. HEARTBEAT / PURRBEAT TASK OWNERSHIP
+
+Task cancellation tokens and handles tracked per active receiver session.
+
+---
+
+# 93. PAUSE / RESUME SIGNAL TRUTH
+
+`pause()` and `resume()` in `ReceiverAudioSink` await remote `patch_session()` first and fail if remote patch fails.
+
+---
+
+# 94. RTP ENDPOINT PARSING — NO STRING SPLIT
+
+Parsed using `url::Url`, extracting host and formatting IPv6 `[host]:port` safely.
+
+---
+
+# 95. PAWPASS SECURITY AND TRANSACTIONAL CORRECTIONS
+
+TailSync prepare binds nonces, source revision, expected authority epoch, and signed target ready proofs.
+
+---
+
+# 96. PHYSICAL ESP32-S3 CERTIFICATION GATE
+
+Defines hardware verification requirements for physical Stream discovery, pairing, playback, and fault tolerance.
+
+---
+
+# 97. TEST MATRIX
+
+- `michi-connect`: discovery listener, mDNS resolver, ScentStore tests.
+- `discovery_bridge`: verified projection, unverified filtering, endpoint updates, offline expiration.
+- `capability_persistence_restart_tests`: database round trip across AppState restart.
+- `session_supervisor`: typed errors and lease expiry tests.
+- `web_ui_integrity_tests`: AST symbol completeness, contracts, routes.
+
+---
+
+# 98. OBSERVABILITY / DIAGNOSTICS CONTRACT
+
+Diagnostics-safe fields, token redaction in `Debug`.
+
+---
+
+# 99. REVISED PHASES AND RELEASE GATES
+
+C0 through C11 execution order.
+
+---
+
+# 100. FINAL DEFINITION OF 100% FOR THIS MICRO SERVER PLAN
+
+Direct verification of all invariants across discovery, projection, pairing, capabilities, session, authority, PawPass, and lifecycle.

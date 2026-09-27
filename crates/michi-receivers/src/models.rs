@@ -383,6 +383,37 @@ impl ReceiverRegistryEntry {
     pub fn supports_authority_v1(&self) -> bool {
         self.authority_supported
     }
+
+    pub fn to_capabilities(&self) -> ReceiverCapabilities {
+        ReceiverCapabilities {
+            device_type: self.device_type.clone(),
+            supported_codecs: self.supported_codecs.clone(),
+            max_sample_rate: self.max_sample_rate,
+            max_bit_depth: self.max_bit_depth,
+            supported_transports: self.supported_transports.clone(),
+            supported_sample_rates: self.supported_sample_rates.clone(),
+            supported_bit_depths: self.supported_bit_depths.clone(),
+            supported_channels: self.supported_channels.clone(),
+            features: self.capabilities.clone(),
+            authority_features: if self.authority_supported {
+                vec!["authority-v1".to_string()]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+}
+
+/// Operational qualification state of a receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReceiverQualification {
+    Unknown,
+    Qualified,
+    NeedsCapabilityRefresh,
+    UnsupportedTransport,
+    UnsupportedCodec,
+    MissingCredential,
+    IdentityMismatch,
 }
 
 impl Default for ReceiverRegistryEntry {
@@ -440,16 +471,22 @@ impl ReceiverRegistry {
         if self.receivers.contains_key(id) {
             self.receivers.get_mut(id)
         } else {
-            self.receivers.values_mut().find(|r| r.michi_id.as_deref() == Some(id))
+            self.receivers
+                .values_mut()
+                .find(|r| r.michi_id.as_deref() == Some(id))
         }
     }
 
     pub fn get_by_michi_id(&self, michi_id: &str) -> Option<&ReceiverRegistryEntry> {
-        self.receivers.values().find(|r| r.michi_id.as_deref() == Some(michi_id) || r.receiver_id == michi_id)
+        self.receivers
+            .values()
+            .find(|r| r.michi_id.as_deref() == Some(michi_id) || r.receiver_id == michi_id)
     }
 
     pub fn get_by_michi_id_mut(&mut self, michi_id: &str) -> Option<&mut ReceiverRegistryEntry> {
-        self.receivers.values_mut().find(|r| r.michi_id.as_deref() == Some(michi_id) || r.receiver_id == michi_id)
+        self.receivers
+            .values_mut()
+            .find(|r| r.michi_id.as_deref() == Some(michi_id) || r.receiver_id == michi_id)
     }
 
     pub fn list(&self) -> Vec<&ReceiverRegistryEntry> {

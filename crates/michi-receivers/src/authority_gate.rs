@@ -18,11 +18,7 @@ pub struct AuthorityGate {
 }
 
 impl AuthorityGate {
-    pub fn new(
-        claimant_michi_id: String,
-        claimant_name: String,
-        claimant_service: String,
-    ) -> Self {
+    pub fn new(claimant_michi_id: String, claimant_name: String, claimant_service: String) -> Self {
         Self {
             client: Arc::new(ReceiverAuthorityClient::new()),
             active_grants: Arc::new(RwLock::new(HashMap::new())),
@@ -122,8 +118,15 @@ impl AuthorityGate {
     }
 
     /// Release authority on a receiver.
-    pub async fn release_grant(&self, receiver: &ReceiverRegistryEntry) -> Result<(), AuthorityError> {
-        let grant_opt = self.active_grants.write().await.remove(&receiver.receiver_id);
+    pub async fn release_grant(
+        &self,
+        receiver: &ReceiverRegistryEntry,
+    ) -> Result<(), AuthorityError> {
+        let grant_opt = self
+            .active_grants
+            .write()
+            .await
+            .remove(&receiver.receiver_id);
         if let Some(grant) = grant_opt {
             let endpoint = Url::parse(&receiver.base_url)
                 .map_err(|e| AuthorityError::Protocol(format!("invalid base_url: {e}")))?;

@@ -45,7 +45,7 @@ pub enum ScentEvent {
     },
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ScentStore {
     records: Arc<RwLock<HashMap<String, ScentRecord>>>,
     event_tx: broadcast::Sender<ScentEvent>,
@@ -147,7 +147,13 @@ impl ScentStore {
     }
 
     /// Update the base_url for a peer upon verified mDNS / server-info resolution.
-    pub fn update_base_url(&self, michi_id: &str, new_url: Url, source_endpoint: Option<SocketAddr>, now: Instant) {
+    pub fn update_base_url(
+        &self,
+        michi_id: &str,
+        new_url: Url,
+        source_endpoint: Option<SocketAddr>,
+        now: Instant,
+    ) {
         let mut to_send = Vec::new();
 
         {
@@ -197,7 +203,8 @@ impl ScentStore {
         let mut store = self.records.write().unwrap();
 
         for (michi_id, record) in store.iter_mut() {
-            if record.online && now.duration_since(record.last_signed_seen) >= SCENT_EXPIRY_TIMEOUT {
+            if record.online && now.duration_since(record.last_signed_seen) >= SCENT_EXPIRY_TIMEOUT
+            {
                 record.online = false;
                 warn!(michi_id = %michi_id, "Scent: peer expired after 90s without signed presence; marked offline");
                 events.push(ScentEvent::Offline {
@@ -228,11 +235,18 @@ impl ScentStore {
     /// List online verified scent records.
     pub fn list_online(&self) -> Vec<ScentRecord> {
         let store = self.records.read().unwrap();
-        store.values().filter(|r| r.online && r.verified).cloned().collect()
+        store
+            .values()
+            .filter(|r| r.online && r.verified)
+            .cloned()
+            .collect()
     }
 
     /// Spawn periodic background sweeper task that checks expirations every 5 seconds.
-    pub fn spawn_expiry_sweeper(&self, cancel_token: CancellationToken) -> tokio::task::JoinHandle<()> {
+    pub fn spawn_expiry_sweeper(
+        &self,
+        cancel_token: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
         let store = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));

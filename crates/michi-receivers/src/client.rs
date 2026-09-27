@@ -280,6 +280,9 @@ impl ReceiverClient {
 
         if let Some(grant) = authority {
             req = req
+                .header("X-Michi-Authority-Grant", &grant.grant_token)
+                .header("X-Michi-Authority-Instance", &grant.authority_instance_id)
+                .header("X-Michi-Authority-Epoch", grant.lease_epoch.to_string())
                 .header("X-Authority-Grant", &grant.grant_token)
                 .header("X-Authority-Instance", &grant.authority_instance_id)
                 .header("X-Authority-Epoch", grant.lease_epoch.to_string());
@@ -373,7 +376,10 @@ impl ReceiverClient {
     /// PATCH /api/v1/receiver-lite/session {"paused": bool}
     pub async fn session_pause(&mut self, paused: bool) -> Result<(), String> {
         if self.active_session_id.is_none() {
-            return Err("NoActiveSession: cannot pause/resume session when no session is active".to_string());
+            return Err(
+                "NoActiveSession: cannot pause/resume session when no session is active"
+                    .to_string(),
+            );
         }
         let payload = serde_json::json!({
             "paused": paused,

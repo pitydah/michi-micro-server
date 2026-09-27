@@ -23,10 +23,7 @@ impl ContentIdentityResolver {
     }
 
     /// Resolve a ContentRefV1 to a concrete database Track.
-    pub async fn resolve(
-        &self,
-        content: &ContentRefV1,
-    ) -> Result<Track, ContentResolutionError> {
+    pub async fn resolve(&self, content: &ContentRefV1) -> Result<Track, ContentResolutionError> {
         // 1. Direct UUID resolution if provided
         if let Some(ref tid_str) = content.track_id {
             if let Ok(uid) = Uuid::parse_str(tid_str) {
@@ -246,7 +243,7 @@ mod tests {
                 uploaded_at TEXT NOT NULL,
                 uploaded_by TEXT NOT NULL,
                 checksum_verified INTEGER NOT NULL DEFAULT 1
-            );"
+            );",
         )
         .execute(&pool)
         .await

@@ -147,7 +147,10 @@ impl ReceiverAuthorityClient {
         }
 
         if !resp.status().is_success() {
-            return Err(AuthorityError::Http(format!("claim status {}", resp.status())));
+            return Err(AuthorityError::Http(format!(
+                "claim status {}",
+                resp.status()
+            )));
         }
 
         resp.json::<AuthorityGrant>()
@@ -184,7 +187,10 @@ impl ReceiverAuthorityClient {
             .map_err(|e| AuthorityError::Http(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(AuthorityError::Http(format!("release status {}", resp.status())));
+            return Err(AuthorityError::Http(format!(
+                "release status {}",
+                resp.status()
+            )));
         }
 
         resp.json::<AuthorityState>()
@@ -230,7 +236,10 @@ impl ReceiverAuthorityClient {
             .map_err(|e| AuthorityError::Http(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(AuthorityError::Http(format!("takeover status {}", resp.status())));
+            return Err(AuthorityError::Http(format!(
+                "takeover status {}",
+                resp.status()
+            )));
         }
 
         resp.json::<AuthorityGrant>()
@@ -271,7 +280,10 @@ impl ReceiverAuthorityClient {
             .map_err(|e| AuthorityError::Http(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(AuthorityError::Http(format!("handoff status {}", resp.status())));
+            return Err(AuthorityError::Http(format!(
+                "handoff status {}",
+                resp.status()
+            )));
         }
 
         resp.json::<AuthorityGrant>()

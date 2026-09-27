@@ -143,14 +143,32 @@ impl AudioSink for ReceiverAudioSink {
     }
 
     async fn pause(&mut self) -> Result<(), PlaybackError> {
+        self.session_manager
+            .patch_session(&self.receiver_id, true)
+            .await
+            .map_err(|e| {
+                self.last_error = Some(e.clone());
+                PlaybackError::PlaybackFailed(format!(
+                    "failed to pause remote receiver session for {}: {}",
+                    self.receiver_id, e
+                ))
+            })?;
         self.state = SinkState::Paused;
-        let _ = self.session_manager.patch_session(&self.receiver_id, true).await;
         Ok(())
     }
 
     async fn resume(&mut self) -> Result<(), PlaybackError> {
+        self.session_manager
+            .patch_session(&self.receiver_id, false)
+            .await
+            .map_err(|e| {
+                self.last_error = Some(e.clone());
+                PlaybackError::PlaybackFailed(format!(
+                    "failed to resume remote receiver session for {}: {}",
+                    self.receiver_id, e
+                ))
+            })?;
         self.state = SinkState::AudioFlowing;
-        let _ = self.session_manager.patch_session(&self.receiver_id, false).await;
         Ok(())
     }
 
@@ -171,9 +189,9 @@ impl AudioSink for ReceiverAudioSink {
     async fn health(&self) -> Result<(), PlaybackError> {
         let registry_arc = self.session_manager.registry().await;
         let registry = registry_arc.read().await;
-        let entry = registry.get(&self.receiver_id).ok_or_else(|| {
-            PlaybackError::ReceiverNotPaired(self.receiver_id.clone())
-        })?;
+        let entry = registry
+            .get(&self.receiver_id)
+            .ok_or_else(|| PlaybackError::ReceiverNotPaired(self.receiver_id.clone()))?;
 
         if !entry.paired {
             return Err(PlaybackError::ReceiverNotPaired(self.receiver_id.clone()));

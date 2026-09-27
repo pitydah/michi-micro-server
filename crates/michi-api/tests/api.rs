@@ -8445,10 +8445,11 @@ async fn test_playback_transfer_commit_validation_and_takeover() {
         .unwrap();
     let list_res: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let recs = list_res["receivers"].as_array().expect("receivers array");
-    let unp = recs.iter().find(|r| r["id"] == "unpaired-rec").expect("found unpaired");
+    let unp = recs
+        .iter()
+        .find(|r| r["id"] == "unpaired-rec")
+        .expect("found unpaired");
     assert_eq!(unp["paired"], false);
     assert!(unp.get("presence").is_some());
     assert!(unp.get("authority_supported").is_some());
 }
-
-

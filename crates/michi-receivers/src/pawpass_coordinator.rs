@@ -42,10 +42,7 @@ pub struct PawPassCoordinator {
 }
 
 impl PawPassCoordinator {
-    pub fn new(
-        identity: Arc<IdentityManager>,
-        receiver_manager: ReceiverSessionManager,
-    ) -> Self {
+    pub fn new(identity: Arc<IdentityManager>, receiver_manager: ReceiverSessionManager) -> Self {
         Self {
             identity,
             receiver_manager,
@@ -80,7 +77,10 @@ impl PawPassCoordinator {
             return Err(PawPassError::ReceiverNotPaired(receiver_id.to_string()));
         }
 
-        let receiver_michi_id = entry.michi_id.clone().unwrap_or_else(|| receiver_id.to_string());
+        let receiver_michi_id = entry
+            .michi_id
+            .clone()
+            .unwrap_or_else(|| receiver_id.to_string());
         let transfer_id = format!("pawpass-{}", uuid::Uuid::new_v4());
         let nonce = format!("{}", rand::random::<u64>());
 
@@ -101,7 +101,10 @@ impl PawPassCoordinator {
         };
 
         // 1. POST target /playback-transfer/prepare
-        let prepare_url = format!("{}/api/v1/playback-transfer/prepare", target_base_url.trim_end_matches('/'));
+        let prepare_url = format!(
+            "{}/api/v1/playback-transfer/prepare",
+            target_base_url.trim_end_matches('/')
+        );
         let prepare_body = serde_json::json!({
             "transfer_id": transfer_id,
             "source_michi_id": self.identity.michi_id(),
@@ -160,7 +163,10 @@ impl PawPassCoordinator {
             .await?;
 
         // 4. POST target /playback-transfer/commit
-        let commit_url = format!("{}/api/v1/playback-transfer/commit", target_base_url.trim_end_matches('/'));
+        let commit_url = format!(
+            "{}/api/v1/playback-transfer/commit",
+            target_base_url.trim_end_matches('/')
+        );
         let commit_body = serde_json::json!({
             "transfer_id": transfer_id,
             "grant": target_grant,

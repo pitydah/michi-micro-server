@@ -31,15 +31,14 @@ pub struct WhiskerDiscoveryListener {
 }
 
 impl WhiskerDiscoveryListener {
-    pub fn new(
-        engine: Arc<DiscoveryEngine>,
-        scent: Arc<ScentStore>,
-    ) -> Self {
+    pub fn new(engine: Arc<DiscoveryEngine>, scent: Arc<ScentStore>) -> Self {
         Self {
             engine,
             scent,
             metrics: Arc::new(WhiskerMetrics::default()),
-            multicast_group: MULTICAST_GROUP.parse().expect("valid canonical multicast IP"),
+            multicast_group: MULTICAST_GROUP
+                .parse()
+                .expect("valid canonical multicast IP"),
             multicast_port: MULTICAST_PORT,
         }
     }
@@ -84,19 +83,18 @@ impl WhiskerDiscoveryListener {
     }
 
     /// Process a raw received datagram buffer. Returns true if accepted into Scent.
-    pub fn handle_packet(
-        &self,
-        buf: &[u8],
-        source: SocketAddr,
-        now: Instant,
-    ) -> bool {
-        self.metrics.packets_received.fetch_add(1, Ordering::Relaxed);
+    pub fn handle_packet(&self, buf: &[u8], source: SocketAddr, now: Instant) -> bool {
+        self.metrics
+            .packets_received
+            .fetch_add(1, Ordering::Relaxed);
 
         let announce: Announce = match serde_json::from_slice(buf) {
             Ok(ann) => ann,
             Err(e) => {
                 debug!(err = %e, "Whisker: failed to parse announce JSON");
-                self.metrics.signature_rejected.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .signature_rejected
+                    .fetch_add(1, Ordering::Relaxed);
                 return false;
             }
         };
@@ -116,11 +114,15 @@ impl WhiskerDiscoveryListener {
                         roles = ?announce.roles,
                         "Whisker: verified peer is not a Michi Music Stream receiver, filtered"
                     );
-                    self.metrics.non_stream_filtered.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .non_stream_filtered
+                        .fetch_add(1, Ordering::Relaxed);
                     return false;
                 }
 
-                self.metrics.announces_verified.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .announces_verified
+                    .fetch_add(1, Ordering::Relaxed);
                 let service_str = match announce.service {
                     Service::StreamStandard => "michi-stream-standard",
                     Service::StreamHiFi => "michi-stream-hifi",
@@ -148,17 +150,23 @@ impl WhiskerDiscoveryListener {
             }
             Ok(TrustLevel::Untrusted(dev_id)) => {
                 debug!(device_id = %dev_id, "Whisker: rejected untrusted/unsigned announce");
-                self.metrics.signature_rejected.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .signature_rejected
+                    .fetch_add(1, Ordering::Relaxed);
                 false
             }
             Ok(TrustLevel::Invalid) => {
                 warn!("Whisker: rejected invalid announce signature or payload tampering");
-                self.metrics.signature_rejected.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .signature_rejected
+                    .fetch_add(1, Ordering::Relaxed);
                 false
             }
             Err(michi_identity::error::IdentityError::TimestampOutOfWindow) => {
                 warn!("Whisker: rejected announce with stale/future timestamp");
-                self.metrics.timestamp_rejected.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .timestamp_rejected
+                    .fetch_add(1, Ordering::Relaxed);
                 false
             }
             Err(michi_identity::error::IdentityError::ReplayDetected) => {
@@ -168,18 +176,16 @@ impl WhiskerDiscoveryListener {
             }
             Err(e) => {
                 warn!(err = %e, "Whisker: announce verification error");
-                self.metrics.signature_rejected.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .signature_rejected
+                    .fetch_add(1, Ordering::Relaxed);
                 false
             }
         }
     }
 
     /// Run the persistent UDP multicast receive loop until cancelled.
-    pub async fn run(
-        &self,
-        socket: UdpSocket,
-        cancel_token: CancellationToken,
-    ) {
+    pub async fn run(&self, socket: UdpSocket, cancel_token: CancellationToken) {
         let mut buf = [0u8; MAX_ANNOUNCE_BYTES];
         info!(
             group = %self.multicast_group,
@@ -212,8 +218,8 @@ impl WhiskerDiscoveryListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use michi_identity::IdentityManager;
     use michi_identity::types::{AnnounceProfile, ApiVersion};
+    use michi_identity::IdentityManager;
 
     fn make_test_identity() -> Arc<IdentityManager> {
         let dir = std::env::temp_dir().join(format!("whisker-test-{}", uuid::Uuid::new_v4()));
@@ -248,7 +254,9 @@ mod tests {
             features: make_test_features("pcm_s16le"),
         };
 
-        let announce = engine.build_signed_announce(&profile).expect("signed announce");
+        let announce = engine
+            .build_signed_announce(&profile)
+            .expect("signed announce");
         let bytes = serde_json::to_vec(&announce).unwrap();
 
         let source = "192.168.1.50:53318".parse().unwrap();
@@ -281,7 +289,9 @@ mod tests {
             features: make_test_features("pcm_s16le"),
         };
 
-        let mut announce = engine.build_signed_announce(&profile).expect("signed announce");
+        let mut announce = engine
+            .build_signed_announce(&profile)
+            .expect("signed announce");
         // Tamper with name after signing
         announce.name = "Tampered Speaker".into();
         let bytes = serde_json::to_vec(&announce).unwrap();
@@ -289,7 +299,13 @@ mod tests {
         let source = "192.168.1.51:53318".parse().unwrap();
         let ok = listener.handle_packet(&bytes, source, Instant::now());
         assert!(!ok);
-        assert_eq!(listener.metrics().signature_rejected.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            listener
+                .metrics()
+                .signature_rejected
+                .load(Ordering::Relaxed),
+            1
+        );
         assert!(scent.list().is_empty());
     }
 
@@ -311,7 +327,9 @@ mod tests {
             features: make_test_features("pcm_s16le"),
         };
 
-        let announce = engine.build_signed_announce(&profile).expect("signed announce");
+        let announce = engine
+            .build_signed_announce(&profile)
+            .expect("signed announce");
         let bytes = serde_json::to_vec(&announce).unwrap();
         let source = "192.168.1.52:53318".parse().unwrap();
 
@@ -320,7 +338,10 @@ mod tests {
 
         // Exact same replay rejected
         assert!(!listener.handle_packet(&bytes, source, Instant::now()));
-        assert_eq!(listener.metrics().replay_rejected.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            listener.metrics().replay_rejected.load(Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
@@ -341,14 +362,22 @@ mod tests {
             features: make_test_features("flac"),
         };
 
-        let announce = engine.build_signed_announce(&profile).expect("signed announce");
+        let announce = engine
+            .build_signed_announce(&profile)
+            .expect("signed announce");
         let bytes = serde_json::to_vec(&announce).unwrap();
         let source = "192.168.1.10:53318".parse().unwrap();
 
         // Valid signature for a MusicPlayer, but must be filtered from receiver scent
         let ok = listener.handle_packet(&bytes, source, Instant::now());
         assert!(!ok);
-        assert_eq!(listener.metrics().non_stream_filtered.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            listener
+                .metrics()
+                .non_stream_filtered
+                .load(Ordering::Relaxed),
+            1
+        );
         assert!(scent.list().is_empty());
     }
 }

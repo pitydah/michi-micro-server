@@ -1467,7 +1467,10 @@ pub async fn list_receivers_db(pool: &SqlitePool) -> Result<Vec<PersistedReceive
         let michi_id: Option<String> = row.try_get("michi_id").ok();
         let capabilities_json: Option<String> = row.try_get("capabilities_json").ok();
         let capabilities_observed_at: Option<String> = row.try_get("capabilities_observed_at").ok();
-        let authority_supported: bool = row.try_get::<i64, _>("authority_supported").map(|v| v != 0).unwrap_or(false);
+        let authority_supported: bool = row
+            .try_get::<i64, _>("authority_supported")
+            .map(|v| v != 0)
+            .unwrap_or(false);
 
         receivers.push(PersistedReceiver {
             id,
@@ -1519,7 +1522,10 @@ pub async fn get_receiver_db(
         let michi_id: Option<String> = row.try_get("michi_id").ok();
         let capabilities_json: Option<String> = row.try_get("capabilities_json").ok();
         let capabilities_observed_at: Option<String> = row.try_get("capabilities_observed_at").ok();
-        let authority_supported: bool = row.try_get::<i64, _>("authority_supported").map(|v| v != 0).unwrap_or(false);
+        let authority_supported: bool = row
+            .try_get::<i64, _>("authority_supported")
+            .map(|v| v != 0)
+            .unwrap_or(false);
 
         Ok(Some(PersistedReceiver {
             id,

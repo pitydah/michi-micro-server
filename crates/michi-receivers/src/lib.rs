@@ -3,11 +3,14 @@ pub mod authority_gate;
 pub mod authority_models;
 pub mod client;
 pub mod credentials;
+pub mod discovery_bridge;
 pub mod models;
 pub mod pawpass_coordinator;
 pub mod session_manager;
 pub mod session_supervisor;
 pub mod transport;
+
+pub use discovery_bridge::*;
 
 pub use authority_client::ReceiverAuthorityClient;
 pub use authority_gate::AuthorityGate;

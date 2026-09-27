@@ -22,10 +22,7 @@ impl MdnsResolver {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
-        Self {
-            scent,
-            http_client,
-        }
+        Self { scent, http_client }
     }
 
     /// Construct a valid URL from an IP and port. Handles IPv6 brackets correctly.
@@ -120,7 +117,10 @@ impl MdnsResolver {
                 "MdnsResolver: probing candidate endpoint via server/info"
             );
 
-            match self.verify_identity_endpoint(&candidate_url, &michi_id).await {
+            match self
+                .verify_identity_endpoint(&candidate_url, &michi_id)
+                .await
+            {
                 Ok(true) => {
                     info!(
                         michi_id = %michi_id,
@@ -128,7 +128,8 @@ impl MdnsResolver {
                         "MdnsResolver: verified identity endpoint; updating Scent base_url"
                     );
                     let now = Instant::now();
-                    self.scent.update_base_url(&michi_id, candidate_url, Some(socket_addr), now);
+                    self.scent
+                        .update_base_url(&michi_id, candidate_url, Some(socket_addr), now);
                     self.scent.mark_server_info_verified(&michi_id, now);
                     break;
                 }
@@ -148,11 +149,7 @@ impl MdnsResolver {
     }
 
     /// Run the persistent mDNS resolver loop until cancelled.
-    pub async fn run(
-        &self,
-        daemon: ServiceDaemon,
-        cancel_token: CancellationToken,
-    ) {
+    pub async fn run(&self, daemon: ServiceDaemon, cancel_token: CancellationToken) {
         let receiver = match daemon.browse(MDNS_SERVICE_TYPE) {
             Ok(rx) => rx,
             Err(e) => {
