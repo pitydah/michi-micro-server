@@ -7,11 +7,30 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use url::Url;
 
-/// Canonical expiration timeout for signed presence (90 seconds).
+/// Canonical expiration timeout for presence (90 seconds).
 pub const SCENT_EXPIRY_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Channel capacity for broadcast Scent events.
 const SCENT_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// Provenance of the active presence information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScentPresenceSource {
+    /// Peer announced via signed Whisker UDP multicast packet.
+    WhiskerSigned,
+    /// Peer discovered via mDNS and verified via GET /api/v1/server/info.
+    MdnsProvisional,
+}
+
+/// Verified server info returned from GET /api/v1/server/info.
+#[derive(Debug, Clone)]
+pub struct VerifiedServerInfo {
+    pub michi_id: String,
+    pub device_id: String,
+    pub name: String,
+    pub service: String,
+    pub roles: Vec<String>,
+}
 
 /// Dynamic presence record for a verified or discovered peer.
 #[derive(Debug, Clone)]
@@ -22,9 +41,10 @@ pub struct ScentRecord {
     pub service: String,
     pub roles: Vec<String>,
     pub verified: bool,
+    pub presence_source: ScentPresenceSource,
     pub endpoints: Vec<SocketAddr>,
     pub base_url: Option<Url>,
-    pub last_signed_seen: Instant,
+    pub last_signed_seen: Option<Instant>,
     pub last_mdns_seen: Option<Instant>,
     pub server_info_verified_at: Option<Instant>,
     pub online: bool,
@@ -93,7 +113,8 @@ impl ScentStore {
                 std::collections::hash_map::Entry::Occupied(mut occ) => {
                     let record = occ.get_mut();
                     let was_offline = !record.online;
-                    record.last_signed_seen = now;
+                    record.last_signed_seen = Some(now);
+                    record.presence_source = ScentPresenceSource::WhiskerSigned;
                     record.online = true;
                     record.verified = true;
                     record.device_id = device_id;
@@ -127,14 +148,100 @@ impl ScentStore {
                         service,
                         roles,
                         verified: true,
+                        presence_source: ScentPresenceSource::WhiskerSigned,
                         endpoints,
                         base_url: None,
-                        last_signed_seen: now,
+                        last_signed_seen: Some(now),
                         last_mdns_seen: None,
                         server_info_verified_at: None,
                         online: true,
                     };
                     info!(michi_id = %michi_id, "Scent: discovered new signed peer");
+                    vac.insert(record.clone());
+                    to_send.push(ScentEvent::Discovered(record));
+                }
+            }
+        }
+
+        for ev in to_send {
+            let _ = self.event_tx.send(ev);
+        }
+    }
+
+    /// Record a verified mDNS candidate peer. If unknown, creates a provisional entry;
+    /// if already known, updates base_url and refreshes mDNS presence.
+    pub fn observe_mdns_candidate(
+        &self,
+        info: VerifiedServerInfo,
+        base_url: Url,
+        source: Option<SocketAddr>,
+        now: Instant,
+    ) {
+        let mut to_send = Vec::new();
+
+        {
+            let mut store = self.records.write().unwrap();
+            let entry = store.entry(info.michi_id.clone());
+
+            match entry {
+                std::collections::hash_map::Entry::Occupied(mut occ) => {
+                    let record = occ.get_mut();
+                    let was_offline = !record.online;
+                    record.last_mdns_seen = Some(now);
+                    record.server_info_verified_at = Some(now);
+                    record.online = true;
+
+                    if let Some(src) = source {
+                        if !record.endpoints.contains(&src) {
+                            record.endpoints.push(src);
+                        }
+                    }
+
+                    let old_url = record.base_url.clone();
+                    let url_changed = old_url.as_ref() != Some(&base_url);
+                    record.base_url = Some(base_url.clone());
+
+                    if was_offline {
+                        info!(michi_id = %info.michi_id, "Scent: provisional mDNS peer transitioned to online");
+                        to_send.push(ScentEvent::Discovered(record.clone()));
+                    } else if url_changed {
+                        info!(
+                            michi_id = %info.michi_id,
+                            old = ?old_url.as_ref().map(|u| u.as_str()),
+                            new = %base_url.as_str(),
+                            "Scent: peer base_url updated via mDNS candidate"
+                        );
+                        to_send.push(ScentEvent::EndpointChanged {
+                            michi_id: info.michi_id.clone(),
+                            old: old_url,
+                            new: base_url,
+                        });
+                    } else {
+                        debug!(michi_id = %info.michi_id, "Scent: peer refreshed mDNS presence");
+                        to_send.push(ScentEvent::Updated(record.clone()));
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(vac) => {
+                    let mut endpoints = Vec::new();
+                    if let Some(src) = source {
+                        endpoints.push(src);
+                    }
+                    let record = ScentRecord {
+                        michi_id: info.michi_id.clone(),
+                        device_id: info.device_id,
+                        name: info.name,
+                        service: info.service,
+                        roles: info.roles,
+                        verified: true,
+                        presence_source: ScentPresenceSource::MdnsProvisional,
+                        endpoints,
+                        base_url: Some(base_url),
+                        last_signed_seen: None,
+                        last_mdns_seen: Some(now),
+                        server_info_verified_at: Some(now),
+                        online: true,
+                    };
+                    info!(michi_id = %info.michi_id, "Scent: discovered new provisional mDNS peer");
                     vac.insert(record.clone());
                     to_send.push(ScentEvent::Discovered(record));
                 }
@@ -203,10 +310,24 @@ impl ScentStore {
         let mut store = self.records.write().unwrap();
 
         for (michi_id, record) in store.iter_mut() {
-            if record.online && now.duration_since(record.last_signed_seen) >= SCENT_EXPIRY_TIMEOUT
-            {
+            if !record.online {
+                continue;
+            }
+            let is_expired = match record.presence_source {
+                ScentPresenceSource::WhiskerSigned => record
+                    .last_signed_seen
+                    .is_none_or(|t| now.duration_since(t) >= SCENT_EXPIRY_TIMEOUT),
+                ScentPresenceSource::MdnsProvisional => record
+                    .last_mdns_seen
+                    .is_none_or(|t| now.duration_since(t) >= SCENT_EXPIRY_TIMEOUT),
+            };
+            if is_expired {
                 record.online = false;
-                warn!(michi_id = %michi_id, "Scent: peer expired after 90s without signed presence; marked offline");
+                warn!(
+                    michi_id = %michi_id,
+                    source = ?record.presence_source,
+                    "Scent: peer expired after timeout without refresh; marked offline"
+                );
                 events.push(ScentEvent::Offline {
                     michi_id: michi_id.clone(),
                 });
@@ -345,6 +466,92 @@ mod tests {
         let ev = rx.try_recv().expect("should receive Offline event");
         match ev {
             ScentEvent::Offline { michi_id } => assert_eq!(michi_id, "michi-id-2"),
+            _ => panic!("unexpected event"),
+        }
+    }
+
+    #[test]
+    fn test_observe_mdns_candidate_and_upgrade_to_signed() {
+        let store = ScentStore::new();
+        let mut rx = store.subscribe();
+        let t0 = Instant::now();
+
+        let info = VerifiedServerInfo {
+            michi_id: "michi-mdns-1".into(),
+            device_id: "dev-mdns-1".into(),
+            name: "Kitchen Stream".into(),
+            service: "michi-stream-standard".into(),
+            roles: vec!["audio_receiver".into()],
+        };
+        let url: Url = "http://192.168.1.150:8080/".parse().unwrap();
+        let ep = "192.168.1.150:8080".parse().unwrap();
+
+        store.observe_mdns_candidate(info, url.clone(), Some(ep), t0);
+
+        let rec = store.get("michi-mdns-1").expect("must exist");
+        assert!(rec.online);
+        assert!(rec.verified);
+        assert_eq!(rec.presence_source, ScentPresenceSource::MdnsProvisional);
+        assert_eq!(rec.base_url, Some(url.clone()));
+        assert_eq!(rec.endpoints, vec![ep]);
+
+        let ev = rx.try_recv().expect("should receive Discovered");
+        match ev {
+            ScentEvent::Discovered(r) => {
+                assert_eq!(r.michi_id, "michi-mdns-1");
+                assert_eq!(r.presence_source, ScentPresenceSource::MdnsProvisional);
+            }
+            _ => panic!("unexpected event"),
+        }
+
+        // Now signed announce arrives: upgrades presence_source to WhiskerSigned
+        let t1 = t0 + Duration::from_secs(5);
+        store.observe_signed(
+            "michi-mdns-1".into(),
+            "dev-mdns-1".into(),
+            "Kitchen Stream".into(),
+            "michi-stream-standard".into(),
+            vec!["audio_receiver".into()],
+            Some("192.168.1.150:53318".parse().unwrap()),
+            t1,
+        );
+
+        let upgraded = store.get("michi-mdns-1").expect("must exist");
+        assert_eq!(upgraded.presence_source, ScentPresenceSource::WhiskerSigned);
+        assert_eq!(upgraded.base_url, Some(url)); // base_url preserved!
+        assert_eq!(upgraded.endpoints.len(), 2);
+    }
+
+    #[test]
+    fn test_mdns_provisional_expiration() {
+        let store = ScentStore::new();
+        let mut rx = store.subscribe();
+        let t0 = Instant::now();
+
+        let info = VerifiedServerInfo {
+            michi_id: "michi-mdns-exp".into(),
+            device_id: "dev-exp".into(),
+            name: "Patio Stream".into(),
+            service: "michi-stream-standard".into(),
+            roles: vec!["audio_receiver".into()],
+        };
+        let url: Url = "http://192.168.1.160:8080/".parse().unwrap();
+        store.observe_mdns_candidate(info, url, None, t0);
+        let _ = rx.try_recv();
+
+        // 89s later: still online
+        let events = store.check_expirations(t0 + Duration::from_secs(89));
+        assert!(events.is_empty());
+        assert!(store.get("michi-mdns-exp").unwrap().online);
+
+        // 91s later: expired
+        let events = store.check_expirations(t0 + Duration::from_secs(91));
+        assert_eq!(events.len(), 1);
+        assert!(!store.get("michi-mdns-exp").unwrap().online);
+
+        let ev = rx.try_recv().expect("should receive Offline event");
+        match ev {
+            ScentEvent::Offline { michi_id } => assert_eq!(michi_id, "michi-mdns-exp"),
             _ => panic!("unexpected event"),
         }
     }

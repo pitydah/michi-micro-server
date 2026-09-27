@@ -1,5 +1,6 @@
-use crate::scent_store::ScentStore;
+use crate::scent_store::{ScentStore, VerifiedServerInfo};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
+use michi_identity::IdentityManager;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,13 +35,13 @@ impl MdnsResolver {
         }
     }
 
-    /// Query the peer's GET /api/v1/server/info and verify that the returned michi_id
-    /// exactly matches the expected michi_id before trusting this base_url.
+    /// Query the peer's GET /api/v1/server/info and verify that the returned michi_id,
+    /// Ed25519 public key, service type, and audio_receiver role match before trusting this base_url.
     pub async fn verify_identity_endpoint(
         &self,
         base_url: &Url,
         expected_michi_id: &str,
-    ) -> Result<bool, String> {
+    ) -> Result<Option<VerifiedServerInfo>, String> {
         let info_url = base_url
             .join("api/v1/server/info")
             .map_err(|e| format!("invalid URL join: {e}"))?;
@@ -70,17 +71,107 @@ impl MdnsResolver {
             return Err("server/info did not return a michi_id".into());
         }
 
-        if returned_michi_id == expected_michi_id {
-            Ok(true)
-        } else {
+        if returned_michi_id != expected_michi_id {
             warn!(
                 expected = %expected_michi_id,
                 actual = %returned_michi_id,
                 url = %base_url,
                 "MdnsResolver: server/info returned mismatching michi_id! Rejecting endpoint."
             );
-            Ok(false)
+            return Ok(None);
         }
+
+        let public_key = body
+            .get("public_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        if public_key.is_empty() {
+            warn!(
+                url = %base_url,
+                "MdnsResolver: server/info missing public_key! Rejecting endpoint."
+            );
+            return Ok(None);
+        }
+
+        let derived_michi_id = match IdentityManager::derive_michi_id(public_key) {
+            Ok(id) => id.to_base64url(),
+            Err(e) => {
+                warn!(
+                    err = %e,
+                    url = %base_url,
+                    "MdnsResolver: failed to derive michi_id from public_key! Rejecting endpoint."
+                );
+                return Ok(None);
+            }
+        };
+
+        if derived_michi_id != expected_michi_id {
+            warn!(
+                expected = %expected_michi_id,
+                derived = %derived_michi_id,
+                url = %base_url,
+                "MdnsResolver: derived michi_id does not match expected_michi_id! Rejecting endpoint."
+            );
+            return Ok(None);
+        }
+
+        let service = body
+            .get("service")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        if !service.starts_with("michi-stream") {
+            debug!(
+                service = %service,
+                url = %base_url,
+                "MdnsResolver: service is not a michi-stream receiver; ignoring"
+            );
+            return Ok(None);
+        }
+
+        let roles: Vec<String> = body
+            .get("roles")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !roles.iter().any(|r| r == "audio_receiver") {
+            debug!(
+                roles = ?roles,
+                url = %base_url,
+                "MdnsResolver: receiver does not declare audio_receiver role; ignoring"
+            );
+            return Ok(None);
+        }
+
+        let device_id = body
+            .get("server_id")
+            .or_else(|| body.get("device_id"))
+            .or_else(|| body.get("id"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(expected_michi_id)
+            .to_string();
+
+        let name = body
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Michi Stream")
+            .to_string();
+
+        Ok(Some(VerifiedServerInfo {
+            michi_id: expected_michi_id.to_string(),
+            device_id,
+            name,
+            service: service.to_string(),
+            roles,
+        }))
     }
 
     /// Process a resolved mDNS service info.
@@ -121,20 +212,23 @@ impl MdnsResolver {
                 .verify_identity_endpoint(&candidate_url, &michi_id)
                 .await
             {
-                Ok(true) => {
+                Ok(Some(server_info)) => {
                     info!(
                         michi_id = %michi_id,
                         url = %candidate_url,
-                        "MdnsResolver: verified identity endpoint; updating Scent base_url"
+                        "MdnsResolver: verified identity endpoint; updating Scent presence"
                     );
                     let now = Instant::now();
-                    self.scent
-                        .update_base_url(&michi_id, candidate_url, Some(socket_addr), now);
-                    self.scent.mark_server_info_verified(&michi_id, now);
+                    self.scent.observe_mdns_candidate(
+                        server_info,
+                        candidate_url,
+                        Some(socket_addr),
+                        now,
+                    );
                     break;
                 }
-                Ok(false) => {
-                    // Identity mismatch, skip this endpoint
+                Ok(None) => {
+                    // Identity mismatch or non-stream receiver, skip this endpoint
                 }
                 Err(e) => {
                     debug!(

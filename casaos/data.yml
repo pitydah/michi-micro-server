@@ -1,5 +1,5 @@
 name: Michi Micro Server
-version: 1.0.0-rc.3
+version: 1.0.0-rc.4
 slug: michi-micro-server
 description: Lightweight, robust home music server. Stream your local music library over your home network or Tailscale.
 developer: pitydah

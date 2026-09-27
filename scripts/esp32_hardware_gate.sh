@@ -33,7 +33,10 @@ ESP32_IP="${1:-${ESP32_IP:-}}"
 MICHI_SERVER="${2:-${MICHI_SERVER_URL:-http://127.0.0.1:9090}}"
 PAIRING_PIN="${3:-${PAIRING_PIN:-}}"
 MICHI_API_TOKEN="${MICHI_API_TOKEN:-}"
-MICHI_IFACE_IP="${MICHI_WHISKER_IFACE_IP:-192.168.31.224}"
+MICHI_IFACE_IP="${MICHI_WHISKER_IFACE_IP:-}"
+if [[ -z "${MICHI_IFACE_IP}" && -n "${ESP32_IP}" ]]; then
+    MICHI_IFACE_IP=$(ip -4 route get "${ESP32_IP}" 2>/dev/null | awk '{print $7; exit}' || true)
+fi
 
 echo -e "${COLOR_BOLD}==================================================================${COLOR_RESET}"
 echo -e "${COLOR_BOLD}    MICHI ESP32-S3 PHYSICAL HARDWARE CERTIFICATION GATE          ${COLOR_RESET}"
@@ -48,7 +51,7 @@ if [[ -z "${ESP32_IP}" ]]; then
     echo "  MICHI_SERVER_URL          URL of Michi Micro Server (default: http://127.0.0.1:9090)"
     echo "  PAIRING_PIN               6-digit numeric pairing PIN (prompted interactively if omitted)"
     echo "  MICHI_API_TOKEN           Bearer token for authenticated Micro routes (optional)"
-    echo "  MICHI_WHISKER_IFACE_IP    Host LAN interface IP for Whisker multicast (default: 192.168.31.224)"
+    echo "  MICHI_WHISKER_IFACE_IP    Host LAN interface IP for Whisker multicast (auto-detected if omitted)"
     exit 1
 fi
 
@@ -153,10 +156,14 @@ HEALTH_RESP=$(micro_request "GET" "/health/ready" 200)
 log_ok "Michi Micro Server is ready: ${HEALTH_RESP}"
 
 log_info "Checking host LAN interface binding for Whisker multicast (224.0.0.167:53318) ..."
-if ip addr show 2>/dev/null | grep -q "${MICHI_IFACE_IP}"; then
-    log_ok "Host LAN interface IP ${MICHI_IFACE_IP} verified on physical adapter."
+if [[ -n "${MICHI_IFACE_IP}" ]]; then
+    if ip addr show 2>/dev/null | grep -q "${MICHI_IFACE_IP}"; then
+        log_ok "Host LAN interface IP ${MICHI_IFACE_IP} verified on physical adapter."
+    else
+        log_warn "Host IP ${MICHI_IFACE_IP} not directly matched on local adapters; multi-interface multicast join will handle discovery."
+    fi
 else
-    log_warn "Host IP ${MICHI_IFACE_IP} not directly matched on local adapters; ensure MICHI_WHISKER_IFACE_IP matches your LAN interface."
+    log_info "No explicit host LAN IP specified; multi-interface multicast join will handle discovery across all interfaces."
 fi
 
 # ------------------------------------------------------------------------------
