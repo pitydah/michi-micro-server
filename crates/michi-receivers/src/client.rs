@@ -1,4 +1,5 @@
 use crate::models::*;
+use crate::session_supervisor::ReceiverClientError;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -202,9 +203,11 @@ impl ReceiverClient {
     }
 
     /// POST /api/v1/receiver-lite/heartbeat (canonical)
-    pub async fn heartbeat(&self) -> Result<HeartbeatResponse, String> {
+    pub async fn heartbeat(&self) -> Result<HeartbeatResponse, ReceiverClientError> {
         let session_id = self.active_session_id.as_ref().ok_or_else(|| {
-            "NoActiveSession: cannot heartbeat without active session".to_string()
+            ReceiverClientError::Protocol(
+                "NoActiveSession: cannot heartbeat without active session".to_string(),
+            )
         })?;
 
         let seq = self.heartbeat_sequence.fetch_add(1, Ordering::SeqCst) + 1;
@@ -224,19 +227,25 @@ impl ReceiverClient {
             .post(format!("{}/api/v1/receiver-lite/heartbeat", self.base_url));
         req = self.apply_session_headers(req);
 
-        let resp = req
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| format!("heartbeat request failed: {e}"))?;
+        let resp = req.json(&payload).send().await.map_err(|e| {
+            if e.is_timeout() {
+                ReceiverClientError::Timeout
+            } else {
+                ReceiverClientError::Offline(e.to_string())
+            }
+        })?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            return Err(format!("heartbeat failed with status {status}"));
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ReceiverClientError::from_response_parts(
+                status.as_u16(),
+                &body,
+            ));
         }
         resp.json()
             .await
-            .map_err(|e| format!("heartbeat parse failed: {e}"))
+            .map_err(|e| ReceiverClientError::Protocol(format!("heartbeat parse failed: {e}")))
     }
 
     /// POST /api/v1/receiver-lite/session with optional Perch authority grant

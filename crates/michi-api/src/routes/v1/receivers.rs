@@ -260,6 +260,7 @@ pub async fn receivers_handler(
                 "authority_supported": e.authority_supported,
                 "session_active": e.active_session_id.is_some(),
                 "capabilities": e.capabilities,
+                "qualification": e.compute_qualification(),
                 "active_session_id": e.active_session_id,
                 "last_seen": e.last_seen,
             })
@@ -299,6 +300,7 @@ pub async fn get_receiver_handler(
         "authority_supported": entry.authority_supported,
         "session_active": entry.active_session_id.is_some(),
         "capabilities": entry.capabilities,
+        "qualification": entry.compute_qualification(),
         "max_sample_rate": entry.max_sample_rate,
         "max_bit_depth": entry.max_bit_depth,
         "supported_codecs": entry.supported_codecs,
@@ -501,11 +503,12 @@ pub async fn receiver_pair_confirm_handler(
         ));
     }
 
-    if body.pin.trim().is_empty() {
+    let pin_trimmed = body.pin.trim();
+    if pin_trimmed.len() != 6 || !pin_trimmed.chars().all(|c| c.is_ascii_digit()) {
         return Err(v1_error_code(
             StatusCode::BAD_REQUEST,
             michi_link::MichiLinkErrorCode::InvalidRequest,
-            "PIN is required to confirm pairing",
+            "PIN must be exactly 6 numeric digits",
         ));
     }
 
@@ -521,7 +524,7 @@ pub async fn receiver_pair_confirm_handler(
 
     match state
         .receiver_manager
-        .confirm_pairing(&pairing_id, &body.pin)
+        .confirm_pairing(&pairing_id, pin_trimmed)
         .await
     {
         Ok(device_id) => match persist_paired_receiver(&state, &device_id).await {
@@ -566,12 +569,14 @@ pub async fn discover_receiver_handler(
         .initiator_id
         .unwrap_or_else(|| "michi-micro-server".into());
     let pin = match body.pin {
-        Some(p) if !p.trim().is_empty() => p,
+        Some(ref p) if p.trim().len() == 6 && p.trim().chars().all(|c| c.is_ascii_digit()) => {
+            p.trim().to_string()
+        }
         _ => {
             return Err(v1_error_code(
                 StatusCode::BAD_REQUEST,
                 michi_link::MichiLinkErrorCode::InvalidRequest,
-                "PIN is required to pair with receiver",
+                "PIN must be exactly 6 numeric digits",
             ));
         }
     };
@@ -697,7 +702,11 @@ pub async fn receiver_heartbeat_handler(
         Ok(resp) => Ok(Json(
             serde_json::json!({ "status": resp.status, "uptime_seconds": resp.uptime_seconds }),
         )),
-        Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "HEARTBEAT_FAILED", &e)),
+        Err(e) => Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "HEARTBEAT_FAILED",
+            &e.to_string(),
+        )),
     }
 }
 
@@ -766,6 +775,12 @@ pub async fn discover_mdns_handler(
             michi_receivers::ReceiverPresence::Unknown => "unknown",
         };
         let is_online = entry.presence == michi_receivers::ReceiverPresence::VerifiedOnline;
+        let verified = entry.capabilities_verified_at.is_some()
+            || state
+                .scent_store
+                .get(entry.michi_id())
+                .map(|r| r.verified)
+                .unwrap_or(false);
         let host_or_addr = Url::parse(&entry.base_url)
             .ok()
             .and_then(|u| u.host_str().map(|h| h.to_string()))
@@ -780,11 +795,12 @@ pub async fn discover_mdns_handler(
             "base_url": entry.base_url,
             "host": entry.base_url,
             "addresses": vec![host_or_addr],
-            "verified": true,
+            "verified": verified,
             "online": is_online,
             "paired": entry.paired,
             "presence": presence_str,
             "last_seen": entry.last_seen.map(|d| d.to_rfc3339()),
+            "qualification": entry.compute_qualification(),
             "pairable": !entry.paired,
         }));
     }
@@ -818,7 +834,8 @@ pub async fn discover_mdns_handler(
             "online": rec.online,
             "paired": false,
             "presence": if rec.online { "verified_online" } else { "offline" },
-            "last_seen": Some(chrono::Utc::now().to_rfc3339()),
+            "last_seen": if rec.online { Some(chrono::Utc::now().to_rfc3339()) } else { None },
+            "qualification": michi_receivers::models::ReceiverQualification::NeedsCapabilityRefresh,
             "pairable": true,
         }));
     }

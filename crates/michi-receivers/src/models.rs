@@ -369,6 +369,7 @@ pub struct ReceiverRegistryEntry {
     pub supported_bit_depths: Vec<u32>,
     pub supported_channels: Vec<u8>,
     pub maximum_safe_volume: Option<u32>,
+    pub qualification: ReceiverQualification,
 }
 
 impl ReceiverRegistryEntry {
@@ -382,6 +383,31 @@ impl ReceiverRegistryEntry {
 
     pub fn supports_authority_v1(&self) -> bool {
         self.authority_supported
+    }
+
+    pub fn compute_qualification(&self) -> ReceiverQualification {
+        if self.qualification == ReceiverQualification::IdentityMismatch {
+            return ReceiverQualification::IdentityMismatch;
+        }
+        if self.paired
+            && self
+                .token
+                .as_ref()
+                .map(|t| t.trim().is_empty())
+                .unwrap_or(true)
+        {
+            return ReceiverQualification::MissingCredential;
+        }
+        if self.capabilities_stale || self.capabilities_verified_at.is_none() {
+            return ReceiverQualification::NeedsCapabilityRefresh;
+        }
+        if self.supported_transports.is_empty() {
+            return ReceiverQualification::UnsupportedTransport;
+        }
+        if self.supported_codecs.is_empty() {
+            return ReceiverQualification::UnsupportedCodec;
+        }
+        ReceiverQualification::Qualified
     }
 
     pub fn to_capabilities(&self) -> ReceiverCapabilities {
@@ -405,8 +431,9 @@ impl ReceiverRegistryEntry {
 }
 
 /// Operational qualification state of a receiver.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ReceiverQualification {
+    #[default]
     Unknown,
     Qualified,
     NeedsCapabilityRefresh,
@@ -430,19 +457,20 @@ impl Default for ReceiverRegistryEntry {
             last_seen: None,
             capabilities: Vec::new(),
             capabilities_verified_at: None,
-            capabilities_stale: false,
+            capabilities_stale: true,
             authority_supported: false,
             owner_michi_id: None,
             owner_name: None,
             active_session_id: None,
-            max_sample_rate: 48000,
-            max_bit_depth: 16,
-            supported_transports: vec!["rtp_udp".to_string()],
-            supported_codecs: vec!["pcm_s16le".to_string()],
-            supported_sample_rates: vec![48000],
-            supported_bit_depths: vec![16],
-            supported_channels: vec![2],
-            maximum_safe_volume: Some(100),
+            max_sample_rate: 0,
+            max_bit_depth: 0,
+            supported_transports: Vec::new(),
+            supported_codecs: Vec::new(),
+            supported_sample_rates: Vec::new(),
+            supported_bit_depths: Vec::new(),
+            supported_channels: Vec::new(),
+            maximum_safe_volume: None,
+            qualification: ReceiverQualification::Unknown,
         }
     }
 }

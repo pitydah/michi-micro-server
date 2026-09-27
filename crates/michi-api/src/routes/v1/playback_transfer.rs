@@ -178,14 +178,49 @@ pub async fn playback_transfer_prepare_handler(
     }
 
     // 5. Generate Target Ready Proof
-    let nonce = body.nonce.clone().unwrap_or_else(|| "0".into());
+    let nonce = match &body.nonce {
+        Some(n) if !n.trim().is_empty() && n.trim() != "0" => n.trim().to_string(),
+        _ => {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_NONCE",
+                "nonce must be provided and non-trivial (cannot be empty or '0')",
+            ));
+        }
+    };
+
+    let expected_epoch = if receiver.authority_supported {
+        if let Ok(endpoint) = reqwest::Url::parse(&receiver.base_url) {
+            let auth_client = michi_receivers::authority_client::ReceiverAuthorityClient::new();
+            if let Ok(st) = auth_client
+                .state(&endpoint, receiver.token.as_deref())
+                .await
+            {
+                st.lease_epoch + 1
+            } else if let Some(g) = state
+                .receiver_manager
+                .authority_gate()
+                .get_grant(&receiver.receiver_id)
+                .await
+            {
+                g.lease_epoch + 1
+            } else {
+                1
+            }
+        } else {
+            1
+        }
+    } else {
+        1
+    };
+
     let ready_proof = sign_target_ready_proof(
         &state.identity,
         &body.transfer_id,
         &body.source_michi_id,
         &our_michi_id,
         &body.receiver_michi_id,
-        1, // expected_epoch
+        expected_epoch,
         &nonce,
     );
 

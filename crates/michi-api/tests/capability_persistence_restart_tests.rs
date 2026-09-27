@@ -106,6 +106,7 @@ async fn test_receiver_capability_persistence_and_restart_round_trip() {
         supported_bit_depths: custom_caps.supported_bit_depths.clone(),
         supported_channels: custom_caps.supported_channels.clone(),
         maximum_safe_volume: Some(100),
+        qualification: michi_receivers::ReceiverQualification::Qualified,
     };
 
     // Encrypt and persist

@@ -353,6 +353,8 @@ impl AppState {
                         supported_bit_depths,
                         supported_channels,
                         maximum_safe_volume: Some(100),
+                        qualification:
+                            michi_receivers::models::ReceiverQualification::NeedsCapabilityRefresh,
                     };
 
                     registry.add(entry);

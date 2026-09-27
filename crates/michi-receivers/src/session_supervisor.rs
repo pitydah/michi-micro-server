@@ -63,7 +63,11 @@ impl ReceiverClientError {
             Self::SessionNotFound
         } else if status == 409 || lower.contains("conflict") || lower.contains("sessionconflict") {
             Self::SessionConflict
-        } else if lower.contains("authority_revoked") || lower.contains("revoked") {
+        } else if status == 403
+            || lower.contains("authority_revoked")
+            || lower.contains("revoked")
+            || lower.contains("forbidden")
+        {
             Self::AuthorityRevoked
         } else if status == 408 || lower.contains("timeout") || lower.contains("timed out") {
             Self::Timeout
@@ -224,6 +228,22 @@ mod tests {
         assert_eq!(
             disp,
             HeartbeatDisposition::SessionLost(SessionLossReason::LeaseExpired)
+        );
+    }
+
+    #[test]
+    fn test_heartbeat_403_status_raw() {
+        let err = ReceiverClientError::from_response_parts(403, "access forbidden");
+        assert_eq!(err, ReceiverClientError::AuthorityRevoked);
+        let disp = classify_heartbeat_error_typed(
+            &err,
+            1,
+            Duration::from_secs(1),
+            Duration::from_secs(30),
+        );
+        assert_eq!(
+            disp,
+            HeartbeatDisposition::SessionLost(SessionLossReason::AuthorityRevoked)
         );
     }
 }

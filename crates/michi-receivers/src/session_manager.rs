@@ -5,9 +5,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::ReceiverClient;
 use crate::models::*;
+use crate::session_supervisor::ReceiverClientError;
 use crate::transport::{AudioTransport, RtpReceiverTransport, TransportStreamConfig};
 
 pub type SharedAudioTransport = Arc<tokio::sync::Mutex<Box<dyn AudioTransport>>>;
+
+/// Supervised heartbeat task handle holding cancellation token and background join handle.
+#[derive(Debug)]
+pub struct ReceiverSupervisorHandle {
+    pub cancel: CancellationToken,
+    pub join: tokio::task::JoinHandle<()>,
+}
 
 /// Manages receiver sessions: pairing, heartbeat, session start/stop, volume.
 #[derive(Clone)]
@@ -17,7 +25,7 @@ pub struct ReceiverSessionManager {
     pending_pairings: Arc<RwLock<HashMap<String, PendingReceiverPairing>>>,
     active_sessions: Arc<RwLock<HashMap<String, ReceiverActiveSession>>>,
     active_transports: Arc<RwLock<HashMap<String, SharedAudioTransport>>>,
-    heartbeat_tokens: Arc<RwLock<HashMap<String, CancellationToken>>>,
+    heartbeat_handles: Arc<RwLock<HashMap<String, ReceiverSupervisorHandle>>>,
     authority_gate: Arc<crate::authority_gate::AuthorityGate>,
 }
 
@@ -43,7 +51,7 @@ impl ReceiverSessionManager {
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
-            heartbeat_tokens: Arc::new(RwLock::new(HashMap::new())),
+            heartbeat_handles: Arc::new(RwLock::new(HashMap::new())),
             authority_gate,
         }
     }
@@ -61,7 +69,7 @@ impl ReceiverSessionManager {
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
-            heartbeat_tokens: Arc::new(RwLock::new(HashMap::new())),
+            heartbeat_handles: Arc::new(RwLock::new(HashMap::new())),
             authority_gate,
         }
     }
@@ -79,7 +87,7 @@ impl ReceiverSessionManager {
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
-            heartbeat_tokens: Arc::new(RwLock::new(HashMap::new())),
+            heartbeat_handles: Arc::new(RwLock::new(HashMap::new())),
             authority_gate,
         }
     }
@@ -378,6 +386,7 @@ impl ReceiverSessionManager {
             supported_bit_depths: bit_depths,
             supported_channels: channels,
             maximum_safe_volume: Some(100),
+            qualification: ReceiverQualification::Qualified,
         };
 
         self.registry.write().await.add(entry);
@@ -620,26 +629,25 @@ impl ReceiverSessionManager {
     }
 
     async fn spawn_heartbeat_task(&self, receiver_id: &str, lease_seconds: u64) {
-        // Cancel existing task if any
-        {
-            let mut tokens = self.heartbeat_tokens.write().await;
-            if let Some(old_token) = tokens.remove(receiver_id) {
-                old_token.cancel();
-            }
+        // Cancel existing task and join if any
+        let old_handle = {
+            let mut handles = self.heartbeat_handles.write().await;
+            handles.remove(receiver_id)
+        };
+        if let Some(h) = old_handle {
+            h.cancel.cancel();
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), h.join).await;
         }
 
         let cancel_token = CancellationToken::new();
-        {
-            let mut tokens = self.heartbeat_tokens.write().await;
-            tokens.insert(receiver_id.to_string(), cancel_token.clone());
-        }
+        let loop_token = cancel_token.clone();
 
         let mgr = self.clone();
         let rec_id = receiver_id.to_string();
         let interval_secs = (lease_seconds / 6).clamp(1, 4);
         let lease_dur = std::time::Duration::from_secs(lease_seconds);
 
-        tokio::spawn(async move {
+        let join_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // Skip the immediate first tick so interval starts ticking at interval_secs
@@ -650,7 +658,7 @@ impl ReceiverSessionManager {
 
             loop {
                 tokio::select! {
-                    _ = cancel_token.cancelled() => {
+                    _ = loop_token.cancelled() => {
                         break;
                     }
                     _ = interval.tick() => {
@@ -662,7 +670,7 @@ impl ReceiverSessionManager {
                             Err(e) => {
                                 consecutive_failures += 1;
                                 let elapsed = last_success.elapsed();
-                                let disp = crate::session_supervisor::classify_heartbeat_error(
+                                let disp = crate::session_supervisor::classify_heartbeat_error_typed(
                                     &e,
                                     consecutive_failures,
                                     elapsed,
@@ -696,6 +704,17 @@ impl ReceiverSessionManager {
                 }
             }
         });
+
+        {
+            let mut handles = self.heartbeat_handles.write().await;
+            handles.insert(
+                receiver_id.to_string(),
+                ReceiverSupervisorHandle {
+                    cancel: cancel_token,
+                    join: join_handle,
+                },
+            );
+        }
     }
 
     /// Tear down local session in RAM and stop RTP transport when session is lost or revoked
@@ -718,13 +737,18 @@ impl ReceiverSessionManager {
             }
         }
 
-        // 4. Cancel heartbeat token
-        {
-            let mut tokens = self.heartbeat_tokens.write().await;
-            if let Some(token) = tokens.remove(receiver_id) {
-                token.cancel();
-            }
+        // 4. Cancel and await heartbeat handle
+        let handle_opt = {
+            let mut handles = self.heartbeat_handles.write().await;
+            handles.remove(receiver_id)
+        };
+        if let Some(h) = handle_opt {
+            h.cancel.cancel();
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), h.join).await;
         }
+
+        // 5. Invalidate Perch authority grant in RAM
+        self.authority_gate.invalidate_grant(receiver_id).await;
     }
 
     /// Propagate pause / resume to active receiver session
@@ -775,12 +799,14 @@ impl ReceiverSessionManager {
             let _ = tr.pause().await;
         }
 
-        // 3. Cancel heartbeat task
-        {
-            let mut tokens = self.heartbeat_tokens.write().await;
-            if let Some(token) = tokens.remove(receiver_id) {
-                token.cancel();
-            }
+        // 3. Cancel and await heartbeat task
+        let handle_opt = {
+            let mut handles = self.heartbeat_handles.write().await;
+            handles.remove(receiver_id)
+        };
+        if let Some(h) = handle_opt {
+            h.cancel.cancel();
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), h.join).await;
         }
 
         let entry = {
@@ -865,17 +891,24 @@ impl ReceiverSessionManager {
         client.set_volume(volume).await
     }
 
-    pub async fn heartbeat(&self, receiver_id: &str) -> Result<HeartbeatResponse, String> {
+    pub async fn heartbeat(
+        &self,
+        receiver_id: &str,
+    ) -> Result<HeartbeatResponse, ReceiverClientError> {
         let entry = {
             let reg = self.registry.read().await;
             reg.get(receiver_id).cloned()
         }
-        .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
+        .ok_or_else(|| {
+            ReceiverClientError::Offline(format!("receiver not found: {receiver_id}"))
+        })?;
 
         let active_sess = {
             let sessions = self.active_sessions.read().await;
             sessions.get(receiver_id).cloned().ok_or_else(|| {
-                "NoActiveSession: cannot heartbeat without active session".to_string()
+                ReceiverClientError::Protocol(
+                    "NoActiveSession: cannot heartbeat without active session".to_string(),
+                )
             })?
         };
 
@@ -1068,7 +1101,7 @@ mod tests {
 
         let res = mgr.heartbeat("rec-test-3").await;
         assert!(res.is_err());
-        assert!(res.unwrap_err().contains("NoActiveSession"));
+        assert!(res.unwrap_err().to_string().contains("NoActiveSession"));
     }
 
     #[tokio::test]

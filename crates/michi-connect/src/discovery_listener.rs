@@ -63,7 +63,16 @@ impl WhiskerDiscoveryListener {
     }
 
     /// Bind the multicast UDP socket with SO_REUSEADDR and SO_REUSEPORT.
+    /// Checks the `MICHI_WHISKER_IFACE_IP` environment variable if set, otherwise defaults to UNSPECIFIED.
     pub fn bind_socket(&self) -> std::io::Result<UdpSocket> {
+        let env_iface = std::env::var("MICHI_WHISKER_IFACE_IP")
+            .ok()
+            .and_then(|s| s.parse::<Ipv4Addr>().ok());
+        self.bind_socket_on(env_iface)
+    }
+
+    /// Bind the multicast UDP socket on a specific network interface IP (e.g. physical LAN IP).
+    pub fn bind_socket_on(&self, interface_ip: Option<Ipv4Addr>) -> std::io::Result<UdpSocket> {
         let domain = socket2::Domain::IPV4;
         let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, None)?;
 
@@ -76,7 +85,15 @@ impl WhiskerDiscoveryListener {
         let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, self.multicast_port);
         socket.bind(&bind_addr.into())?;
 
-        socket.join_multicast_v4(&self.multicast_group, &Ipv4Addr::UNSPECIFIED)?;
+        let iface = interface_ip.unwrap_or(Ipv4Addr::UNSPECIFIED);
+        socket.join_multicast_v4(&self.multicast_group, &iface)?;
+
+        info!(
+            group = %self.multicast_group,
+            port = self.multicast_port,
+            interface = %iface,
+            "Whisker discovery socket bound and joined multicast group"
+        );
 
         let std_socket: std::net::UdpSocket = socket.into();
         UdpSocket::from_std(std_socket)

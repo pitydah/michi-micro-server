@@ -117,6 +117,11 @@ impl AuthorityGate {
             .insert(receiver_id.to_string(), grant);
     }
 
+    /// Invalidate/remove active grant in RAM without remote network call (e.g. on terminal session loss).
+    pub async fn invalidate_grant(&self, receiver_id: &str) {
+        self.active_grants.write().await.remove(receiver_id);
+    }
+
     /// Release authority on a receiver.
     pub async fn release_grant(
         &self,

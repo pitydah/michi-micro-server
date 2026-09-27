@@ -265,7 +265,7 @@ const ALWAYS_ON_FEATURES: &[(&str, &str, &str, FeatureMaturity, EvidenceLevel)] 
         "1.0",
         "PawPass distributed playback transfer target and source",
         FeatureMaturity::Beta,
-        EvidenceLevel::EffectVerified,
+        EvidenceLevel::IntegrationCertified,
     ),
     (
         "perch_client_v1",

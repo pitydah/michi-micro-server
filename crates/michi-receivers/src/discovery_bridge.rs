@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::models::{ReceiverPresence, ReceiverRegistryEntry};
+use crate::models::{ReceiverPresence, ReceiverQualification, ReceiverRegistryEntry};
 use crate::session_manager::ReceiverSessionManager;
 use michi_connect::{ScentEvent, ScentRecord, ScentStore};
 
@@ -131,14 +131,15 @@ impl ReceiverDiscoveryBridge {
                     owner_michi_id: None,
                     owner_name: None,
                     active_session_id: None,
-                    max_sample_rate: 48000,
-                    max_bit_depth: 16,
-                    supported_transports: vec!["rtp_udp".to_string()],
-                    supported_codecs: vec!["pcm_s16le".to_string()],
-                    supported_sample_rates: vec![48000],
-                    supported_bit_depths: vec![16],
-                    supported_channels: vec![2],
-                    maximum_safe_volume: Some(100),
+                    max_sample_rate: 0,
+                    max_bit_depth: 0,
+                    supported_transports: Vec::new(),
+                    supported_codecs: Vec::new(),
+                    supported_sample_rates: Vec::new(),
+                    supported_bit_depths: Vec::new(),
+                    supported_channels: Vec::new(),
+                    maximum_safe_volume: None,
+                    qualification: ReceiverQualification::NeedsCapabilityRefresh,
                 };
                 info!(michi_id = %record.michi_id, name = %record.name, "ReceiverDiscoveryBridge: projected new unpaired receiver");
                 reg.add(entry);

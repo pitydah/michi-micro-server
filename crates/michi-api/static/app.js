@@ -3579,8 +3579,8 @@ async function submitReceiverPairPin() {
   var pinErr = $('#pair-pin-error');
   var confirmBtn = $('#btn-pair-confirm');
 
-  if (!pin || pin.length < 4) {
-    if (pinErr) pinErr.textContent = 'Ingresa un PIN válido (4 a 6 dígitos).';
+  if (!pin || !/^\d{6}$/.test(pin)) {
+    if (pinErr) pinErr.textContent = 'Ingresa un PIN válido de exactamente 6 dígitos numéricos.';
     return;
   }
 
@@ -3716,6 +3716,11 @@ window.startReceiverPair = startReceiverPair;
 
 async function confirmReceiverPair(pairingIdOrDeviceId, pin) {
   if (!canPerformProtectedAction()) return;
+  var pinVal = typeof pairingIdOrDeviceId === 'object' && pairingIdOrDeviceId !== null ? pairingIdOrDeviceId.pin : pin;
+  if (!pinVal || !/^\d{6}$/.test(String(pinVal).trim())) {
+    showToast('PIN must be exactly 6 numeric digits', true);
+    return;
+  }
   try {
     var payload;
     if (typeof pairingIdOrDeviceId === 'object' && pairingIdOrDeviceId !== null) {

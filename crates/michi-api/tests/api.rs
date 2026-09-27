@@ -8324,6 +8324,7 @@ async fn test_playback_transfer_prepare_and_abort() {
         "target_michi_id": state.identity.michi_id().to_string(),
         "receiver_michi_id": receiver_id,
         "tailsync": tailsync,
+        "nonce": "nonce-test-123456",
     });
 
     // 1. Prepare
