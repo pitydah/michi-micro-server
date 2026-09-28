@@ -59,8 +59,11 @@ impl ReceiverDiscoveryBridge {
     }
 
     async fn reconcile_record(&self, record: &ScentRecord) {
-        // Only verified records from Music Stream services with audio_receiver role
-        if !record.verified {
+        // Verified signed records or verified mDNS provisional candidates
+        if !record.verified
+            && record.presence_source
+                != michi_connect::scent_store::ScentPresenceSource::MdnsProvisional
+        {
             return;
         }
         let is_stream_service = record.service == "michi-stream-standard"

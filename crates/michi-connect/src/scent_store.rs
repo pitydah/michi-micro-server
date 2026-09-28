@@ -196,6 +196,7 @@ impl ScentStore {
                         record.name = info.name;
                         record.service = info.service;
                         record.roles = info.roles;
+                        record.verified = false;
                     }
 
                     if let Some(src) = source {
@@ -239,7 +240,7 @@ impl ScentStore {
                         name: info.name,
                         service: info.service,
                         roles: info.roles,
-                        verified: true,
+                        verified: false,
                         presence_source: ScentPresenceSource::MdnsProvisional,
                         endpoints,
                         base_url: Some(base_url),
@@ -360,14 +361,27 @@ impl ScentStore {
         store.values().cloned().collect()
     }
 
-    /// List online verified scent records.
-    pub fn list_online(&self) -> Vec<ScentRecord> {
+    /// List all currently active scent records (both WhiskerSigned and MdnsProvisional).
+    pub fn list_active(&self) -> Vec<ScentRecord> {
+        let store = self.records.read().unwrap();
+        store.values().filter(|r| r.online).cloned().collect()
+    }
+
+    /// List only cryptographically verified signed scent records.
+    pub fn list_signed_verified(&self) -> Vec<ScentRecord> {
         let store = self.records.read().unwrap();
         store
             .values()
-            .filter(|r| r.online && r.verified)
+            .filter(|r| {
+                r.online && r.verified && r.presence_source == ScentPresenceSource::WhiskerSigned
+            })
             .cloned()
             .collect()
+    }
+
+    /// List active online scent records (equivalent to list_active).
+    pub fn list_online(&self) -> Vec<ScentRecord> {
+        self.list_active()
     }
 
     /// Spawn periodic background sweeper task that checks expirations every 5 seconds.
@@ -497,7 +511,9 @@ mod tests {
 
         let rec = store.get("michi-mdns-1").expect("must exist");
         assert!(rec.online);
-        assert!(rec.verified);
+        assert!(!rec.verified);
+        assert_eq!(store.list_signed_verified().len(), 0);
+        assert_eq!(store.list_active().len(), 1);
         assert_eq!(rec.presence_source, ScentPresenceSource::MdnsProvisional);
         assert_eq!(rec.base_url, Some(url.clone()));
         assert_eq!(rec.endpoints, vec![ep]);
@@ -524,6 +540,9 @@ mod tests {
         );
 
         let upgraded = store.get("michi-mdns-1").expect("must exist");
+        assert!(upgraded.verified);
+        assert_eq!(store.list_signed_verified().len(), 1);
+        assert_eq!(store.list_active().len(), 1);
         assert_eq!(upgraded.presence_source, ScentPresenceSource::WhiskerSigned);
         assert_eq!(upgraded.base_url, Some(url)); // base_url preserved!
         assert_eq!(upgraded.endpoints.len(), 2);

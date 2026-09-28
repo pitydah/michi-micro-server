@@ -161,6 +161,49 @@ impl ReceiverSessionManager {
 
         let pairing_id = uuid::Uuid::new_v4().to_string();
 
+        let pinned_michi_id = start_resp
+            .server_michi_id
+            .clone()
+            .or_else(|| info.michi_id.clone());
+        let pinned_public_key = start_resp
+            .server_public_key
+            .clone()
+            .or_else(|| info.public_key.clone());
+
+        if let Some(ref pk_b64) = pinned_public_key {
+            let pk_bytes = michi_identity::decode_base64url_strict(pk_b64).map_err(|e| {
+                format!("INVALID_RECEIVER_IDENTITY: invalid public_key base64url: {e}")
+            })?;
+            if pk_bytes.len() != 32 {
+                return Err("INVALID_RECEIVER_IDENTITY: public_key must be 32 bytes".to_string());
+            }
+            let key_bytes: [u8; 32] = pk_bytes.as_slice().try_into().map_err(|_| {
+                "INVALID_RECEIVER_IDENTITY: failed converting public key bytes".to_string()
+            })?;
+            let verifying_key =
+                ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).map_err(|e| {
+                    format!("INVALID_RECEIVER_IDENTITY: invalid Ed25519 public key: {e}")
+                })?;
+            let derived_id =
+                michi_identity::types::MichiId::from_public_key(&verifying_key).to_base64url();
+
+            if let Some(ref mid) = pinned_michi_id {
+                if mid != &derived_id {
+                    return Err(format!(
+                        "INVALID_RECEIVER_IDENTITY: michi_id '{mid}' does not match derived public_key identity '{derived_id}'"
+                    ));
+                }
+            }
+        }
+
+        if let (Some(ref s_id), Some(ref i_id)) = (&start_resp.server_michi_id, &info.michi_id) {
+            if s_id != i_id {
+                return Err(format!(
+                    "INVALID_RECEIVER_IDENTITY: pair_start server_michi_id '{s_id}' does not match server/info michi_id '{i_id}'"
+                ));
+            }
+        }
+
         let pending = PendingReceiverPairing {
             pairing_id: pairing_id.clone(),
             receiver_base_url: base_url.trim_end_matches('/').to_string(),
@@ -169,6 +212,8 @@ impl ReceiverSessionManager {
             initiator_id: initiator_id.to_string(),
             created_at: now,
             expires_at,
+            server_michi_id: pinned_michi_id,
+            server_public_key: pinned_public_key,
         };
 
         // Clean expired pairings and save new pending pairing
@@ -256,7 +301,29 @@ impl ReceiverSessionManager {
             p.remove(pairing_id);
         }
 
-        let info = pending.receiver_info;
+        // Re-fetch fresh info to enforce identity pinning
+        let fresh_info = client.get_info().await?;
+        if let Some(ref pinned_id) = pending.server_michi_id {
+            let actual_id = fresh_info
+                .michi_id
+                .as_ref()
+                .or(fresh_info.server_id.as_ref());
+            if actual_id != Some(pinned_id) {
+                return Err(format!(
+                    "IDENTITY_MISMATCH: receiver michi_id changed between pair/start and pair/confirm (expected '{pinned_id}', got '{actual_id:?}')"
+                ));
+            }
+        }
+        if let Some(ref pinned_pk) = pending.server_public_key {
+            if fresh_info.public_key.as_ref() != Some(pinned_pk) {
+                return Err(format!(
+                    "IDENTITY_MISMATCH: receiver public_key changed between pair/start and pair/confirm (expected '{pinned_pk}', got '{:?}')",
+                    fresh_info.public_key
+                ));
+            }
+        }
+
+        let info = fresh_info;
         let device_id = info
             .michi_id
             .clone()

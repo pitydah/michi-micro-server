@@ -66,6 +66,8 @@ pub struct PendingReceiverPairing {
     pub initiator_id: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub server_michi_id: Option<String>,
+    pub server_public_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

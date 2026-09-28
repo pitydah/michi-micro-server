@@ -22,6 +22,71 @@ pub struct WhiskerMetrics {
     pub non_stream_filtered: AtomicU64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MulticastInterfaceCandidate {
+    pub name: String,
+    pub ip: Ipv4Addr,
+    pub is_loopback: bool,
+}
+
+pub fn is_rfc1918(ip: &Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 10
+        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 168)
+}
+
+pub fn is_virtual_or_docker(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("docker")
+        || lower.starts_with("br-")
+        || lower.starts_with("veth")
+        || lower.starts_with("virbr")
+        || lower.starts_with("cni")
+        || lower.starts_with("flannel")
+}
+
+/// Filter and prioritize network interfaces for multicast listening.
+/// Excludes loopback, link-local (169.254/16), unspecified, and broadcast.
+/// Prioritizes physical RFC1918 interfaces over virtual bridges/docker.
+pub fn select_multicast_interfaces(
+    candidates: &[MulticastInterfaceCandidate],
+) -> Vec<MulticastInterfaceCandidate> {
+    let mut filtered: Vec<MulticastInterfaceCandidate> = candidates
+        .iter()
+        .filter(|c| {
+            let octets = c.ip.octets();
+            if c.is_loopback || c.ip.is_loopback() || octets[0] == 127 {
+                return false;
+            }
+            if c.ip.is_unspecified() || octets == [0, 0, 0, 0] {
+                return false;
+            }
+            if c.ip.is_broadcast() || octets == [255, 255, 255, 255] {
+                return false;
+            }
+            if octets[0] == 169 && octets[1] == 254 {
+                return false;
+            }
+            true
+        })
+        .cloned()
+        .collect();
+
+    filtered.sort_by_key(|c| {
+        let is_virt = is_virtual_or_docker(&c.name);
+        let rfc1918 = is_rfc1918(&c.ip);
+        match (is_virt, rfc1918) {
+            (false, true) => 0,  // Physical RFC1918
+            (false, false) => 1, // Physical Other
+            (true, true) => 2,   // Virtual RFC1918 (docker/bridges)
+            (true, false) => 3,  // Virtual Other
+        }
+    });
+
+    filtered
+}
+
 pub struct WhiskerDiscoveryListener {
     engine: Arc<DiscoveryEngine>,
     scent: Arc<ScentStore>,
@@ -32,10 +97,18 @@ pub struct WhiskerDiscoveryListener {
 
 impl WhiskerDiscoveryListener {
     pub fn new(engine: Arc<DiscoveryEngine>, scent: Arc<ScentStore>) -> Self {
+        Self::new_with_metrics(engine, scent, Arc::new(WhiskerMetrics::default()))
+    }
+
+    pub fn new_with_metrics(
+        engine: Arc<DiscoveryEngine>,
+        scent: Arc<ScentStore>,
+        metrics: Arc<WhiskerMetrics>,
+    ) -> Self {
         Self {
             engine,
             scent,
-            metrics: Arc::new(WhiskerMetrics::default()),
+            metrics,
             multicast_group: MULTICAST_GROUP
                 .parse()
                 .expect("valid canonical multicast IP"),
@@ -98,28 +171,40 @@ impl WhiskerDiscoveryListener {
 
             let mut joined_count = 0;
             if let Ok(ifaces) = if_addrs::get_if_addrs() {
-                for iface in ifaces {
-                    if iface.is_loopback() {
-                        continue;
-                    }
-                    if let std::net::IpAddr::V4(ipv4) = iface.addr.ip() {
-                        match socket.join_multicast_v4(&self.multicast_group, &ipv4) {
-                            Ok(_) => {
-                                debug!(
-                                    interface = %iface.name,
-                                    ip = %ipv4,
-                                    "Whisker joined multicast group on interface"
-                                );
-                                joined_count += 1;
-                            }
-                            Err(e) => {
-                                debug!(
-                                    interface = %iface.name,
-                                    ip = %ipv4,
-                                    err = %e,
-                                    "Whisker could not join multicast group on interface"
-                                );
-                            }
+                let candidates: Vec<MulticastInterfaceCandidate> = ifaces
+                    .into_iter()
+                    .filter_map(|iface| {
+                        if let std::net::IpAddr::V4(ipv4) = iface.addr.ip() {
+                            let is_loopback = iface.is_loopback();
+                            Some(MulticastInterfaceCandidate {
+                                name: iface.name,
+                                ip: ipv4,
+                                is_loopback,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                let selected = select_multicast_interfaces(&candidates);
+                for iface in selected {
+                    match socket.join_multicast_v4(&self.multicast_group, &iface.ip) {
+                        Ok(_) => {
+                            debug!(
+                                interface = %iface.name,
+                                ip = %iface.ip,
+                                "Whisker joined multicast group on interface"
+                            );
+                            joined_count += 1;
+                        }
+                        Err(e) => {
+                            debug!(
+                                interface = %iface.name,
+                                ip = %iface.ip,
+                                err = %e,
+                                "Whisker could not join multicast group on interface"
+                            );
                         }
                     }
                 }
@@ -434,5 +519,57 @@ mod tests {
             1
         );
         assert!(scent.list().is_empty());
+    }
+
+    #[test]
+    fn test_select_multicast_interfaces_filtering_and_priority() {
+        let candidates = vec![
+            MulticastInterfaceCandidate {
+                name: "lo".into(),
+                ip: "127.0.0.1".parse().unwrap(),
+                is_loopback: true,
+            },
+            MulticastInterfaceCandidate {
+                name: "docker0".into(),
+                ip: "172.17.0.1".parse().unwrap(),
+                is_loopback: false,
+            },
+            MulticastInterfaceCandidate {
+                name: "eth0".into(),
+                ip: "192.168.1.100".parse().unwrap(),
+                is_loopback: false,
+            },
+            MulticastInterfaceCandidate {
+                name: "eth1:linklocal".into(),
+                ip: "169.254.12.34".parse().unwrap(),
+                is_loopback: false,
+            },
+            MulticastInterfaceCandidate {
+                name: "br-lan".into(),
+                ip: "10.0.0.1".parse().unwrap(),
+                is_loopback: false,
+            },
+            MulticastInterfaceCandidate {
+                name: "wan0".into(),
+                ip: "203.0.113.5".parse().unwrap(),
+                is_loopback: false,
+            },
+        ];
+
+        let selected = select_multicast_interfaces(&candidates);
+
+        // Loopback and link-local must be completely filtered out
+        assert!(!selected.iter().any(|c| c.name == "lo"));
+        assert!(!selected.iter().any(|c| c.name == "eth1:linklocal"));
+
+        // Priority order:
+        // 1. eth0 (Physical RFC1918)
+        // 2. wan0 (Physical Other)
+        // 3. docker0 / br-lan (Virtual RFC1918)
+        assert_eq!(selected[0].name, "eth0");
+        assert_eq!(selected[1].name, "wan0");
+        let virt_names: Vec<String> = selected[2..].iter().map(|c| c.name.clone()).collect();
+        assert!(virt_names.contains(&"docker0".to_string()));
+        assert!(virt_names.contains(&"br-lan".to_string()));
     }
 }

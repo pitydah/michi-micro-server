@@ -3199,7 +3199,30 @@ async fn test_v1_diagnostics_endpoint() {
         json.get("warnings").is_some(),
         "diagnostics must have warnings"
     );
+    assert!(
+        json.get("whisker").is_some(),
+        "diagnostics must have whisker"
+    );
     assert!(json["healthy"].as_bool().is_some());
+}
+
+#[tokio::test]
+async fn test_v1_discovery_whisker_endpoint() {
+    let (app, _) = make_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/discovery/whisker")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert!(json.get("packets_received").is_some());
+    assert!(json.get("active_scent").is_some());
 }
 
 #[tokio::test]

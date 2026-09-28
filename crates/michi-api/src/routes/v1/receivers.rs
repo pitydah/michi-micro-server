@@ -823,6 +823,21 @@ pub async fn discover_mdns_handler(
             .map(|e| e.ip().to_string())
             .unwrap_or_else(|| "127.0.0.1".to_string());
 
+        let (presence_str, is_online, is_verified) = match rec.presence_source {
+            michi_connect::scent_store::ScentPresenceSource::MdnsProvisional => {
+                ("provisional_mdns", false, false)
+            }
+            michi_connect::scent_store::ScentPresenceSource::WhiskerSigned => (
+                if rec.online {
+                    "verified_online"
+                } else {
+                    "offline"
+                },
+                rec.online,
+                rec.verified,
+            ),
+        };
+
         seen_ids.insert(rec.michi_id.clone());
         receivers.push(serde_json::json!({
             "receiver_id": rec.michi_id.clone(),
@@ -833,11 +848,11 @@ pub async fn discover_mdns_handler(
             "base_url": base_url_str.clone(),
             "host": base_url_str,
             "addresses": vec![host_or_addr],
-            "verified": rec.verified,
-            "online": rec.online,
+            "verified": is_verified,
+            "online": is_online,
             "paired": false,
-            "presence": if rec.online { "verified_online" } else { "offline" },
-            "last_seen": if rec.online { Some(chrono::Utc::now().to_rfc3339()) } else { None },
+            "presence": presence_str,
+            "last_seen": if is_online { Some(chrono::Utc::now().to_rfc3339()) } else { None },
             "qualification": michi_receivers::models::ReceiverQualification::NeedsCapabilityRefresh,
             "pairable": true,
         }));
@@ -1387,4 +1402,39 @@ pub async fn set_room_mode_handler(
             "group not found",
         )),
     }
+}
+
+pub async fn whisker_discovery_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let metrics = &state.whisker_metrics;
+    let active_scent = state.scent_store.list_active();
+    let scent_items: Vec<serde_json::Value> = active_scent
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "michi_id": r.michi_id,
+                "device_id": r.device_id,
+                "name": r.name,
+                "service": r.service,
+                "roles": r.roles,
+                "verified": r.verified,
+                "presence_source": match r.presence_source {
+                    michi_connect::scent_store::ScentPresenceSource::WhiskerSigned => "whisker_signed",
+                    michi_connect::scent_store::ScentPresenceSource::MdnsProvisional => "mdns_provisional",
+                },
+                "base_url": r.base_url.map(|u| u.to_string()),
+                "online": r.online,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({
+        "status": "ok",
+        "packets_received": metrics.packets_received.load(std::sync::atomic::Ordering::Relaxed),
+        "announces_verified": metrics.announces_verified.load(std::sync::atomic::Ordering::Relaxed),
+        "signature_rejected": metrics.signature_rejected.load(std::sync::atomic::Ordering::Relaxed),
+        "timestamp_rejected": metrics.timestamp_rejected.load(std::sync::atomic::Ordering::Relaxed),
+        "replay_rejected": metrics.replay_rejected.load(std::sync::atomic::Ordering::Relaxed),
+        "non_stream_filtered": metrics.non_stream_filtered.load(std::sync::atomic::Ordering::Relaxed),
+        "active_scent_count": scent_items.len(),
+        "active_scent": scent_items,
+    }))
 }

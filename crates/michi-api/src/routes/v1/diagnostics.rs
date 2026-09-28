@@ -158,11 +158,23 @@ pub struct DiagnosticsReport {
     pub queues: QueuesStatus,
     pub disk: DiskStatus,
     pub receiver: ReceiverStatus,
+    pub whisker: WhiskerStatus,
     pub player_compatibility: PlayerCompatibility,
     pub config: ConfigStatus,
     pub homeassistant: michi_homeassistant::HaRuntimeStatus,
     pub system: SystemStatus,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WhiskerStatus {
+    pub packets_received: u64,
+    pub announces_verified: u64,
+    pub signature_rejected: u64,
+    pub timestamp_rejected: u64,
+    pub replay_rejected: u64,
+    pub non_stream_filtered: u64,
+    pub scent_entries: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -536,6 +548,33 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
         receiver: ReceiverStatus {
             client_available: registered_receivers > 0,
             registered_receivers,
+        },
+        whisker: WhiskerStatus {
+            packets_received: state
+                .whisker_metrics
+                .packets_received
+                .load(std::sync::atomic::Ordering::Relaxed),
+            announces_verified: state
+                .whisker_metrics
+                .announces_verified
+                .load(std::sync::atomic::Ordering::Relaxed),
+            signature_rejected: state
+                .whisker_metrics
+                .signature_rejected
+                .load(std::sync::atomic::Ordering::Relaxed),
+            timestamp_rejected: state
+                .whisker_metrics
+                .timestamp_rejected
+                .load(std::sync::atomic::Ordering::Relaxed),
+            replay_rejected: state
+                .whisker_metrics
+                .replay_rejected
+                .load(std::sync::atomic::Ordering::Relaxed),
+            non_stream_filtered: state
+                .whisker_metrics
+                .non_stream_filtered
+                .load(std::sync::atomic::Ordering::Relaxed),
+            scent_entries: state.scent_store.list_active().len(),
         },
         player_compatibility: PlayerCompatibility::new(
             total_queues > 0,

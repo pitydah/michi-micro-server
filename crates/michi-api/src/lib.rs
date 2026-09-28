@@ -101,6 +101,8 @@ pub struct AppState {
     pub pending_transfers: Arc<michi_sync::playback_transfer::PendingTransferStore>,
     /// Shared in-memory Scent presence store tracking live signed peer announcements.
     pub scent_store: Arc<michi_connect::ScentStore>,
+    /// Observable metrics for Whisker UDP multicast discovery.
+    pub whisker_metrics: Arc<michi_connect::WhiskerMetrics>,
     /// Per-module transition mutexes to serialize lifecycle changes without holding global locks during I/O.
     pub module_transition_locks:
         Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
@@ -169,9 +171,10 @@ impl AppState {
         let engine = Arc::new(michi_identity::discovery::DiscoveryEngine::new(
             self.identity.clone(),
         ));
-        let whisker = Arc::new(michi_connect::WhiskerDiscoveryListener::new(
+        let whisker = Arc::new(michi_connect::WhiskerDiscoveryListener::new_with_metrics(
             engine,
             self.scent_store.clone(),
+            self.whisker_metrics.clone(),
         ));
         match whisker.bind_socket() {
             Ok(socket) => {
@@ -583,6 +586,7 @@ impl AppState {
             transcode_semaphore,
             pending_transfers: Arc::new(michi_sync::playback_transfer::PendingTransferStore::new()),
             scent_store: Arc::new(michi_connect::ScentStore::new()),
+            whisker_metrics: Arc::new(michi_connect::WhiskerMetrics::default()),
             module_transition_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             module_runtime_info,
         };
@@ -1863,6 +1867,10 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/queue/saved",
             get(routes::v1::queue::queue_saved_handler),
+        )
+        .route(
+            "/api/v1/discovery/whisker",
+            get(routes::v1::receivers::whisker_discovery_handler),
         )
         .route(
             "/api/v1/receivers",

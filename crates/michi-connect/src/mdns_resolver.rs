@@ -121,11 +121,25 @@ impl MdnsResolver {
             .and_then(|v| v.as_str())
             .unwrap_or_default();
 
-        if !service.starts_with("michi-stream") {
+        if service != "michi-stream-standard" && service != "michi-stream-hifi" {
             debug!(
                 service = %service,
                 url = %base_url,
-                "MdnsResolver: service is not a michi-stream receiver; ignoring"
+                "MdnsResolver: service is not an exact canonical match (michi-stream-standard or michi-stream-hifi); ignoring"
+            );
+            return Ok(None);
+        }
+
+        let api_version = body
+            .get("api_version")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        if api_version != "v1-lite" {
+            warn!(
+                api_version = %api_version,
+                url = %base_url,
+                "MdnsResolver: server/info api_version is not v1-lite; rejecting endpoint."
             );
             return Ok(None);
         }
@@ -149,14 +163,20 @@ impl MdnsResolver {
             return Ok(None);
         }
 
-        let device_id = body
+        let server_id = match body
             .get("server_id")
-            .or_else(|| body.get("device_id"))
-            .or_else(|| body.get("id"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or(expected_michi_id)
-            .to_string();
+        {
+            Some(s) => s.to_string(),
+            None => {
+                warn!(
+                    url = %base_url,
+                    "MdnsResolver: server/info missing non-empty server_id; rejecting endpoint."
+                );
+                return Ok(None);
+            }
+        };
 
         let name = body
             .get("name")
@@ -167,7 +187,7 @@ impl MdnsResolver {
 
         Ok(Some(VerifiedServerInfo {
             michi_id: expected_michi_id.to_string(),
-            device_id,
+            device_id: server_id,
             name,
             service: service.to_string(),
             roles,
