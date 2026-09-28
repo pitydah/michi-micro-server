@@ -35,8 +35,12 @@ class ReceiverState:
         self.type_name = "michi_stream_standard" if device_type == "standard" else "michi_stream_hifi"
         self.output_connector = "jack_3_5" if device_type == "standard" else "rca_stereo"
         self.supported_codecs = ["pcm_s16le"]
-        self.server_pubkey_b64 = "KJN5aOu4gWhA0clmvmwqprYcwYI013vDNPx1jf90CpQ"
-        self.server_michi_id = "QlGQosQszLQse057MCaw32IAHXv-I5klmAAsbivIays"
+        if device_type == "standard":
+            self.server_pubkey_b64 = "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8"
+            self.server_michi_id = "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4"
+        else:
+            self.server_pubkey_b64 = "4CggHpvLXArVU2CJypgueD9MOtNfT9l1dfbCXrNdOts"
+            self.server_michi_id = "lz4CalNVFwbIecx40oFy7Z1HCzkonqkdcBP_eG3FZjo"
 
         # Pairing & Session State
         self.pairing_sessions = {} # session_id -> {nonce, pin, expires_at, consumed}
@@ -208,7 +212,8 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "name": st.name,
                 "device_id": st.device_id,
                 "server_id": st.device_id,
-                "michi_id": st.device_id,
+                "michi_id": st.server_michi_id,
+                "public_key": st.server_pubkey_b64,
                 "id": st.device_id,
                 "version": "1.0.0-alpha.1",
                 "api_version": "v1-lite",
