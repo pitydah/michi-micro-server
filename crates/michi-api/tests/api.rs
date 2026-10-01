@@ -39,6 +39,8 @@ fn test_config_with_url(db_url: String) -> Config {
     let tmp = std::env::temp_dir().join(format!("michi-test-{}", Uuid::new_v4()));
     let music_dir = tmp.join("music");
     let _ = std::fs::create_dir_all(&music_dir);
+    let _ = std::fs::create_dir_all(tmp.join("config"));
+    let _ = std::fs::create_dir_all(tmp.join("cache"));
     Config {
         port: 9999,
         music_paths: vec![music_dir, std::env::temp_dir()],
@@ -8590,5 +8592,347 @@ async fn test_hardware_gate_routes_contract() {
         resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
         "unexpected status for session/stop: {}",
         resp.status()
+    );
+}
+
+async fn spawn_test_mock_receiver(
+    michi_id: &str,
+    server_id: &str,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::routing::{get, post};
+    let dev_id = server_id.to_string();
+    let m_id = michi_id.to_string();
+    let dev_id_clone = dev_id.clone();
+    let m_id_clone = m_id.clone();
+    let m_id_clone2 = m_id.clone();
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/server/info",
+            get(move || {
+                let d = dev_id_clone.clone();
+                let m = m_id_clone.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "service": "michi-stream-standard",
+                        "name": "Test Stream",
+                        "device_id": d,
+                        "server_id": d,
+                        "michi_id": m,
+                        "public_key": "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8",
+                        "supported_codecs": ["pcm_s16le"],
+                        "audio": {
+                            "transports": ["rtp_udp"],
+                            "codecs": ["pcm_s16le"],
+                            "sample_rates": [48000],
+                            "bit_depths": [16],
+                            "channels": [2],
+                        }
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/api/v1/pair/start",
+            post(move || {
+                let m = m_id_clone2.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "session_id": "mock-pair-sess-1",
+                        "expires_at": chrono::Utc::now().checked_add_signed(chrono::Duration::seconds(60)).unwrap().to_rfc3339(),
+                        "server_michi_id": m,
+                        "server_public_key": "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8",
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/api/v1/pair/confirm",
+            post(move || {
+                let d = dev_id.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "status": "paired",
+                        "token": "mock-token-xyz-12345",
+                        "device_id": d,
+                        "server_id": d,
+                    }))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), handle)
+}
+
+#[tokio::test]
+async fn test_real_pair_confirm_response_contracts_provisional_and_verified() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    // 1. Provisional pairing: no fresh Whisker signed announcement in ScentStore
+    let (base_url_prov, handle1) = spawn_test_mock_receiver(
+        "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4",
+        "550e8400-e29b-41d4-a716-446655440001",
+    )
+    .await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/discover/pair")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "base_url": base_url_prov,
+                "pin": "123456"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let res: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(res["status"], "paired");
+    assert_eq!(res["paired"], true);
+    assert_eq!(res["presence"], "provisional_mdns");
+    assert_eq!(res["online"], false);
+    assert_eq!(res["reachable"], true);
+    assert_eq!(res["verified"], false);
+    assert!(res.get("qualification").is_some());
+    assert!(res.get("device_id").is_some());
+    assert_eq!(res["receiver_id"], res["device_id"]);
+    handle1.abort();
+
+    // 2. Verified pairing: fresh Whisker signed announcement exists in ScentStore
+    let (app2, _pool2, state2) = make_app_with_state().await;
+    let (base_url_ver, handle2) = spawn_test_mock_receiver(
+        "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4",
+        "550e8400-e29b-41d4-a716-446655440000",
+    )
+    .await;
+
+    state2.scent_store.observe_signed(
+        "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4".to_string(),
+        "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        "Test Stream Verified".to_string(),
+        "michi-stream-standard".to_string(),
+        vec!["audio_receiver".to_string()],
+        Some("127.0.0.1:53318".parse().unwrap()),
+        std::time::Instant::now(),
+    );
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/discover/pair")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "base_url": base_url_ver,
+                "pin": "123456"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app2.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let res: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(status, StatusCode::OK, "res was: {res:?}");
+    assert_eq!(res["status"], "paired");
+    assert_eq!(res["paired"], true);
+    assert_eq!(res["presence"], "verified_online");
+    assert_eq!(res["online"], true);
+    assert_eq!(res["reachable"], true);
+    assert_eq!(res["verified"], true);
+    assert!(res.get("qualification").is_some());
+    assert_eq!(res["receiver_id"], res["device_id"]);
+    handle2.abort();
+}
+
+#[tokio::test]
+async fn test_receivers_api_presence_consistency_and_anti_elevation() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    // Add a provisional_mdns receiver with fresh last_seen (< 90 seconds ago)
+    let prov_rec_id = "test-provisional-anti-elevation";
+    let entry = michi_receivers::ReceiverRegistryEntry {
+        receiver_id: prov_rec_id.to_string(),
+        name: "Provisional Device".to_string(),
+        base_url: "http://127.0.0.1:9099".to_string(),
+        paired: true,
+        token: Some("sample-token".to_string()),
+        presence: michi_receivers::ReceiverPresence::ProvisionalMdns,
+        last_seen: Some(chrono::Utc::now()), // Fresh last_seen!
+        capabilities: vec!["stream".to_string()],
+        capabilities_verified_at: Some(chrono::Utc::now()),
+        capabilities_stale: false,
+        supported_transports: vec!["rtp_udp".to_string()],
+        supported_codecs: vec!["pcm_s16le".to_string()],
+        supported_sample_rates: vec![48000],
+        supported_bit_depths: vec![16],
+        supported_channels: vec![2],
+        max_sample_rate: 48000,
+        max_bit_depth: 16,
+        ..Default::default()
+    };
+    state
+        .receiver_manager
+        .registry()
+        .await
+        .write()
+        .await
+        .add(entry);
+
+    // 1. GET /api/v1/receivers/:id: MUST NOT elevate to online: true despite fresh last_seen
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/receivers/{prov_rec_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let single: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        single["presence"], "provisional_mdns",
+        "presence must remain provisional_mdns"
+    );
+    assert_eq!(
+        single["online"], false,
+        "provisional receiver must NOT be elevated to online=true"
+    );
+    assert_eq!(
+        single["verified"], false,
+        "provisional receiver must NOT be verified"
+    );
+    assert_eq!(
+        single["reachable"], true,
+        "provisional receiver must be reachable"
+    );
+    assert_eq!(single["base_url"], "http://127.0.0.1:9099");
+
+    // 2. GET /api/v1/receivers: MUST match identical presence semantics
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/receivers")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let list: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let recs = list["receivers"].as_array().expect("receivers array");
+    let in_list = recs
+        .iter()
+        .find(|r| r["receiver_id"] == prov_rec_id)
+        .expect("receiver found in list");
+    assert_eq!(in_list["presence"], single["presence"]);
+    assert_eq!(in_list["online"], single["online"]);
+    assert_eq!(in_list["verified"], single["verified"]);
+    assert_eq!(in_list["reachable"], single["reachable"]);
+    assert_eq!(in_list["base_url"], single["base_url"]);
+
+    // 3. POST /api/v1/devices/discover: MUST match identical presence semantics
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/devices/discover")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let disc: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let disc_recs = disc["receivers"].as_array().expect("receivers array");
+    let in_disc = disc_recs
+        .iter()
+        .find(|r| r["receiver_id"] == prov_rec_id)
+        .expect("receiver found in discover");
+    assert_eq!(in_disc["presence"], single["presence"]);
+    assert_eq!(in_disc["online"], single["online"]);
+    assert_eq!(in_disc["verified"], single["verified"]);
+    assert_eq!(in_disc["reachable"], single["reachable"]);
+}
+
+#[tokio::test]
+async fn test_discover_freshness_stale_signed_whisker_without_sweeper() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    // Simulate a device whose signed Whisker announcement is stale (>90s)
+    // but whose mDNS discovery is fresh. No background sweeper is run.
+    let now = std::time::Instant::now();
+    let stale_instant = now - std::time::Duration::from_secs(120);
+
+    state.scent_store.observe_signed(
+        "stale_signed_michi_id".to_string(),
+        "stale_signed_device_uuid".to_string(),
+        "Stale Whisker Stream".to_string(),
+        "michi-stream-standard".to_string(),
+        vec!["audio_receiver".to_string()],
+        Some("127.0.0.1:53318".parse().unwrap()),
+        stale_instant,
+    );
+
+    state.scent_store.observe_mdns_candidate(
+        michi_connect::scent_store::VerifiedServerInfo {
+            michi_id: "stale_signed_michi_id".to_string(),
+            device_id: "stale_signed_device_uuid".to_string(),
+            name: "Stale Whisker Stream".to_string(),
+            service: "michi-stream-standard".to_string(),
+            roles: vec!["audio_receiver".to_string()],
+        },
+        "http://127.0.0.1:53318".parse().unwrap(),
+        Some("127.0.0.1:53318".parse().unwrap()),
+        now,
+    );
+
+    // Calling POST /api/v1/devices/discover evaluates effective_presence_now directly
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/devices/discover")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let disc: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let disc_recs = disc["receivers"].as_array().expect("receivers array");
+    let found = disc_recs
+        .iter()
+        .find(|r| r["michi_id"] == "stale_signed_michi_id")
+        .expect("stale signed device found via mDNS fallback");
+
+    assert_eq!(
+        found["presence"], "provisional_mdns",
+        "stale Whisker with fresh mDNS must be provisional_mdns"
+    );
+    assert_eq!(
+        found["online"], false,
+        "provisional_mdns must have online=false"
+    );
+    assert_eq!(
+        found["reachable"], true,
+        "provisional_mdns must have reachable=true"
+    );
+    assert_eq!(
+        found["verified"], false,
+        "provisional_mdns must have verified=false"
     );
 }

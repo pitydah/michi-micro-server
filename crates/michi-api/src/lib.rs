@@ -1888,6 +1888,10 @@ fn v1_link_routes() -> Router<AppState> {
             post(routes::v1::receivers::receiver_pair_confirm_handler),
         )
         .route(
+            "/api/v1/receivers/discover/pair",
+            post(routes::v1::receivers::discover_receiver_handler),
+        )
+        .route(
             "/api/v1/receivers/:id",
             get(routes::v1::receivers::get_receiver_handler),
         )

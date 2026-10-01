@@ -36,6 +36,76 @@ fn v1_error(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PresenceStateFields {
+    pub presence: &'static str,
+    pub online: bool,
+    pub verified: bool,
+    pub reachable: bool,
+}
+
+pub fn serialize_presence_state(
+    presence: michi_receivers::ReceiverPresence,
+) -> PresenceStateFields {
+    match presence {
+        michi_receivers::ReceiverPresence::VerifiedOnline => PresenceStateFields {
+            presence: "verified_online",
+            online: true,
+            verified: true,
+            reachable: true,
+        },
+        michi_receivers::ReceiverPresence::ProvisionalMdns => PresenceStateFields {
+            presence: "provisional_mdns",
+            online: false,
+            verified: false,
+            reachable: true,
+        },
+        michi_receivers::ReceiverPresence::Degraded => PresenceStateFields {
+            presence: "degraded",
+            online: false,
+            verified: false,
+            reachable: true,
+        },
+        michi_receivers::ReceiverPresence::Offline => PresenceStateFields {
+            presence: "offline",
+            online: false,
+            verified: false,
+            reachable: false,
+        },
+        michi_receivers::ReceiverPresence::Unknown => PresenceStateFields {
+            presence: "unknown",
+            online: false,
+            verified: false,
+            reachable: false,
+        },
+    }
+}
+
+pub fn serialize_effective_presence(
+    effective: michi_connect::scent_store::EffectivePresence,
+) -> PresenceStateFields {
+    match effective {
+        michi_connect::scent_store::EffectivePresence::VerifiedOnline => PresenceStateFields {
+            presence: "verified_online",
+            online: true,
+            verified: true,
+            reachable: true,
+        },
+        michi_connect::scent_store::EffectivePresence::ProvisionalMdns => PresenceStateFields {
+            presence: "provisional_mdns",
+            online: false,
+            verified: false,
+            reachable: true,
+        },
+        michi_connect::scent_store::EffectivePresence::Offline => PresenceStateFields {
+            presence: "offline",
+            online: false,
+            verified: false,
+            reachable: false,
+        },
+    }
+}
+
 // ── Speaker group management (canonical alias to persistent Room Groups) ──────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,10 +313,7 @@ pub async fn receivers_handler(
         .list()
         .iter()
         .map(|e| {
-            let online = e.presence == michi_receivers::models::ReceiverPresence::VerifiedOnline;
-            let verified = e.presence == michi_receivers::models::ReceiverPresence::VerifiedOnline;
-            let reachable = e.presence == michi_receivers::models::ReceiverPresence::VerifiedOnline
-                || e.presence == michi_receivers::models::ReceiverPresence::ProvisionalMdns;
+            let p = serialize_presence_state(e.presence);
             serde_json::json!({
                 "id": e.receiver_id,
                 "receiver_id": e.receiver_id,
@@ -256,10 +323,10 @@ pub async fn receivers_handler(
                 "host": e.base_url,
                 "base_url": e.base_url,
                 "paired": e.paired,
-                "online": online,
-                "verified": verified,
-                "reachable": reachable,
-                "presence": e.presence,
+                "online": p.online,
+                "verified": p.verified,
+                "reachable": p.reachable,
+                "presence": p.presence,
                 "authority_supported": e.authority_supported,
                 "session_active": e.active_session_id.is_some(),
                 "capabilities": e.capabilities,
@@ -285,11 +352,7 @@ pub async fn get_receiver_handler(
             &format!("receiver not found: {id}"),
         )
     })?;
-    let online = entry.presence == michi_receivers::models::ReceiverPresence::VerifiedOnline
-        || entry
-            .last_seen
-            .map(|ls| (chrono::Utc::now() - ls).num_seconds() < 90)
-            .unwrap_or(false);
+    let p = serialize_presence_state(entry.presence);
     Ok(Json(serde_json::json!({
         "id": entry.receiver_id,
         "receiver_id": entry.receiver_id,
@@ -297,9 +360,12 @@ pub async fn get_receiver_handler(
         "name": entry.name,
         "device_type": entry.device_type,
         "host": entry.base_url,
+        "base_url": entry.base_url,
         "paired": entry.paired,
-        "online": online,
-        "presence": entry.presence,
+        "online": p.online,
+        "verified": p.verified,
+        "reachable": p.reachable,
+        "presence": p.presence,
         "authority_supported": entry.authority_supported,
         "session_active": entry.active_session_id.is_some(),
         "capabilities": entry.capabilities,
@@ -531,10 +597,34 @@ pub async fn receiver_pair_confirm_handler(
         .await
     {
         Ok(device_id) => match persist_paired_receiver(&state, &device_id).await {
-            Ok(()) => Ok(Json(serde_json::json!({
-                "status": "paired",
-                "device_id": device_id,
-            }))),
+            Ok(()) => {
+                let reg = state.receiver_manager.registry().await;
+                let reg_read = reg.read().await;
+                let (p, qualification) = if let Some(entry) = reg_read.get(&device_id) {
+                    (
+                        serialize_presence_state(entry.presence),
+                        entry.compute_qualification(),
+                    )
+                } else {
+                    (
+                        serialize_presence_state(
+                            michi_receivers::ReceiverPresence::ProvisionalMdns,
+                        ),
+                        michi_receivers::models::ReceiverQualification::NeedsCapabilityRefresh,
+                    )
+                };
+                Ok(Json(serde_json::json!({
+                    "status": "paired",
+                    "device_id": device_id,
+                    "receiver_id": device_id,
+                    "paired": true,
+                    "presence": p.presence,
+                    "qualification": qualification,
+                    "online": p.online,
+                    "reachable": p.reachable,
+                    "verified": p.verified,
+                })))
+            }
             Err(e) => {
                 tracing::error!("pairing confirmed but persistence failed: {}", e);
                 rollback_pairing(&state, &device_id).await;
@@ -589,10 +679,34 @@ pub async fn discover_receiver_handler(
         .await
     {
         Ok(device_id) => match persist_paired_receiver(&state, &device_id).await {
-            Ok(()) => Ok(Json(serde_json::json!({
-                "status": "paired",
-                "device_id": device_id,
-            }))),
+            Ok(()) => {
+                let reg = state.receiver_manager.registry().await;
+                let reg_read = reg.read().await;
+                let (p, qualification) = if let Some(entry) = reg_read.get(&device_id) {
+                    (
+                        serialize_presence_state(entry.presence),
+                        entry.compute_qualification(),
+                    )
+                } else {
+                    (
+                        serialize_presence_state(
+                            michi_receivers::ReceiverPresence::ProvisionalMdns,
+                        ),
+                        michi_receivers::models::ReceiverQualification::NeedsCapabilityRefresh,
+                    )
+                };
+                Ok(Json(serde_json::json!({
+                    "status": "paired",
+                    "device_id": device_id,
+                    "receiver_id": device_id,
+                    "paired": true,
+                    "presence": p.presence,
+                    "qualification": qualification,
+                    "online": p.online,
+                    "reachable": p.reachable,
+                    "verified": p.verified,
+                })))
+            }
             Err(e) => {
                 tracing::error!("discovery pairing confirmed but persistence failed: {}", e);
                 rollback_pairing(&state, &device_id).await;
@@ -773,20 +887,10 @@ pub async fn discover_mdns_handler(
         seen_ids.insert(stable_id.to_string());
         seen_ids.insert(entry.receiver_id.clone());
 
-        let presence_str = match entry.presence {
-            michi_receivers::ReceiverPresence::VerifiedOnline => "verified_online",
-            michi_receivers::ReceiverPresence::ProvisionalMdns => "provisional_mdns",
-            michi_receivers::ReceiverPresence::Offline => "offline",
-            michi_receivers::ReceiverPresence::Degraded => "degraded",
-            michi_receivers::ReceiverPresence::Unknown => "unknown",
-        };
-        let is_online = entry.presence == michi_receivers::ReceiverPresence::VerifiedOnline;
-        let verified = entry.presence == michi_receivers::ReceiverPresence::VerifiedOnline;
-        let reachable =
-            is_online || entry.presence == michi_receivers::ReceiverPresence::ProvisionalMdns;
+        let p = serialize_presence_state(entry.presence);
         let is_valid_url = Url::parse(&entry.base_url).is_ok();
         let pairable = !entry.paired
-            && reachable
+            && p.reachable
             && is_valid_url
             && entry.qualification
                 != michi_receivers::models::ReceiverQualification::IdentityMismatch;
@@ -804,21 +908,27 @@ pub async fn discover_mdns_handler(
             "base_url": entry.base_url,
             "host": entry.base_url,
             "addresses": vec![host_or_addr],
-            "verified": verified,
-            "online": is_online,
-            "reachable": reachable,
+            "verified": p.verified,
+            "online": p.online,
+            "reachable": p.reachable,
             "paired": entry.paired,
-            "presence": presence_str,
+            "presence": p.presence,
             "last_seen": entry.last_seen.map(|d| d.to_rfc3339()),
             "qualification": entry.compute_qualification(),
             "pairable": pairable,
         }));
     }
 
-    for rec in state.scent_store.list_online() {
+    for rec in state.scent_store.list_active() {
         if seen_ids.contains(&rec.michi_id) || seen_ids.contains(&rec.device_id) {
             continue;
         }
+        let eff = state.scent_store.effective_presence_now(&rec);
+        if eff == michi_connect::scent_store::EffectivePresence::Offline {
+            continue;
+        }
+        let p = serialize_effective_presence(eff);
+
         let base_url_str = rec
             .base_url
             .as_ref()
@@ -830,26 +940,11 @@ pub async fn discover_mdns_handler(
             .map(|e| e.ip().to_string())
             .unwrap_or_else(|| "127.0.0.1".to_string());
 
-        let (presence_str, is_online, is_verified) = match rec.presence_source {
-            michi_connect::scent_store::ScentPresenceSource::MdnsProvisional => {
-                ("provisional_mdns", false, false)
-            }
-            michi_connect::scent_store::ScentPresenceSource::WhiskerSigned => (
-                if rec.online {
-                    "verified_online"
-                } else {
-                    "offline"
-                },
-                rec.online,
-                rec.verified,
-            ),
-        };
-
         let is_valid_url = Url::parse(&base_url_str).is_ok();
-        let reachable = rec.online;
-        let pairable = reachable && is_valid_url;
+        let pairable = p.reachable && is_valid_url;
 
         seen_ids.insert(rec.michi_id.clone());
+        seen_ids.insert(rec.device_id.clone());
         receivers.push(serde_json::json!({
             "receiver_id": rec.michi_id.clone(),
             "michi_id": rec.michi_id.clone(),
@@ -859,12 +954,12 @@ pub async fn discover_mdns_handler(
             "base_url": base_url_str.clone(),
             "host": base_url_str,
             "addresses": vec![host_or_addr],
-            "verified": is_verified,
-            "online": is_online,
-            "reachable": reachable,
+            "verified": p.verified,
+            "online": p.online,
+            "reachable": p.reachable,
             "paired": false,
-            "presence": presence_str,
-            "last_seen": if is_online { Some(chrono::Utc::now().to_rfc3339()) } else { None },
+            "presence": p.presence,
+            "last_seen": if p.online { Some(chrono::Utc::now().to_rfc3339()) } else { None },
             "qualification": michi_receivers::models::ReceiverQualification::NeedsCapabilityRefresh,
             "pairable": pairable,
         }));
