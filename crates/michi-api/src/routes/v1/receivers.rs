@@ -606,12 +606,18 @@ pub async fn receiver_pair_confirm_handler(
                         entry.compute_qualification(),
                     )
                 } else {
-                    (
-                        serialize_presence_state(
-                            michi_receivers::ReceiverPresence::ProvisionalMdns,
-                        ),
-                        michi_receivers::models::ReceiverQualification::NeedsCapabilityRefresh,
-                    )
+                    tracing::error!(
+                        "PAIRING_REGISTRY_INVARIANT_VIOLATION: receiver {} missing from registry after confirmation and persistence; remote pairing may have completed but local registry convergence failed",
+                        device_id
+                    );
+                    drop(reg_read);
+                    rollback_pairing(&state, &device_id).await;
+                    let _ = michi_db::delete_receiver_db(&state.db, &device_id).await;
+                    return Err(v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "PAIRING_REGISTRY_INVARIANT_VIOLATION",
+                        "Receiver registry invariant violation: entry unexpectedly absent after pairing confirmation. Remote pairing may have completed but local registry convergence failed.",
+                    ));
                 };
                 Ok(Json(serde_json::json!({
                     "status": "paired",
@@ -688,12 +694,18 @@ pub async fn discover_receiver_handler(
                         entry.compute_qualification(),
                     )
                 } else {
-                    (
-                        serialize_presence_state(
-                            michi_receivers::ReceiverPresence::ProvisionalMdns,
-                        ),
-                        michi_receivers::models::ReceiverQualification::NeedsCapabilityRefresh,
-                    )
+                    tracing::error!(
+                        "PAIRING_REGISTRY_INVARIANT_VIOLATION: receiver {} missing from registry after discovery pairing and persistence; remote pairing may have completed but local registry convergence failed",
+                        device_id
+                    );
+                    drop(reg_read);
+                    rollback_pairing(&state, &device_id).await;
+                    let _ = michi_db::delete_receiver_db(&state.db, &device_id).await;
+                    return Err(v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "PAIRING_REGISTRY_INVARIANT_VIOLATION",
+                        "Receiver registry invariant violation: entry unexpectedly absent after discovery pairing confirmation. Remote pairing may have completed but local registry convergence failed.",
+                    ));
                 };
                 Ok(Json(serde_json::json!({
                     "status": "paired",
@@ -965,7 +977,42 @@ pub async fn discover_mdns_handler(
         }));
     }
 
-    Ok(Json(serde_json::json!({ "receivers": receivers })))
+    let joined = state
+        .whisker_metrics
+        .joined_interfaces
+        .read()
+        .map(|g| g.len())
+        .unwrap_or(0);
+    let whisker_listening = joined > 0;
+    let active = whisker_listening;
+    let degraded = !active;
+
+    let all_scent = state.scent_store.list();
+    let mut provisional_mdns_count = 0;
+    let mut verified_stream_count = 0;
+    for r in &all_scent {
+        match state.scent_store.effective_presence_now(r) {
+            michi_connect::scent_store::EffectivePresence::VerifiedOnline => {
+                verified_stream_count += 1;
+            }
+            michi_connect::scent_store::EffectivePresence::ProvisionalMdns => {
+                provisional_mdns_count += 1;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "receivers": receivers,
+        "discovery": {
+            "active": active,
+            "degraded": degraded,
+            "whisker_listening": whisker_listening,
+            "interfaces_joined": joined,
+            "provisional_mdns_count": provisional_mdns_count,
+            "verified_stream_count": verified_stream_count,
+        }
+    })))
 }
 
 // ── Room Groups (Persistent) ─────────────────────────────────────
@@ -1515,24 +1562,23 @@ pub async fn whisker_discovery_handler(State(state): State<AppState>) -> Json<se
     let metrics = &state.whisker_metrics;
     let active_scent = state.scent_store.list_active();
     let all_scent = state.scent_store.list();
-    let provisional_mdns_count = all_scent
-        .iter()
-        .filter(|r| {
-            r.online
-                && r.presence_source
-                    == michi_connect::scent_store::ScentPresenceSource::MdnsProvisional
-        })
-        .count();
-    let verified_stream_count = all_scent
-        .iter()
-        .filter(|r| {
-            r.online
-                && r.verified
-                && r.presence_source
-                    == michi_connect::scent_store::ScentPresenceSource::WhiskerSigned
-        })
-        .count();
-    let offline_stream_count = all_scent.iter().filter(|r| !r.online).count();
+    let mut provisional_mdns_count = 0;
+    let mut verified_stream_count = 0;
+    let mut offline_stream_count = 0;
+
+    for r in &all_scent {
+        match state.scent_store.effective_presence_now(r) {
+            michi_connect::scent_store::EffectivePresence::VerifiedOnline => {
+                verified_stream_count += 1;
+            }
+            michi_connect::scent_store::EffectivePresence::ProvisionalMdns => {
+                provisional_mdns_count += 1;
+            }
+            michi_connect::scent_store::EffectivePresence::Offline => {
+                offline_stream_count += 1;
+            }
+        }
+    }
 
     let joined = metrics.joined_interfaces.read().unwrap().clone();
     let interface_names: Vec<String> = joined.iter().map(|i| i.name.clone()).collect();

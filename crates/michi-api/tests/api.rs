@@ -8619,6 +8619,8 @@ async fn spawn_test_mock_receiver(
                         "server_id": d,
                         "michi_id": m,
                         "public_key": "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8",
+                        "api_version": "v1-lite",
+                        "roles": ["audio_receiver"],
                         "supported_codecs": ["pcm_s16le"],
                         "audio": {
                             "transports": ["rtp_udp"],
@@ -8934,5 +8936,83 @@ async fn test_discover_freshness_stale_signed_whisker_without_sweeper() {
     assert_eq!(
         found["verified"], false,
         "provisional_mdns must have verified=false"
+    );
+}
+
+#[tokio::test]
+async fn test_discover_devices_endpoint_returns_discovery_block() {
+    let (app, _pool, _state) = make_app_with_state().await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/devices/discover")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let val: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert!(val.get("receivers").is_some());
+    let disc = val.get("discovery").expect("discovery block present");
+    assert!(disc.get("active").is_some());
+    assert!(disc.get("degraded").is_some());
+    assert!(disc.get("whisker_listening").is_some());
+    assert!(disc.get("interfaces_joined").is_some());
+    assert!(disc.get("provisional_mdns_count").is_some());
+    assert!(disc.get("verified_stream_count").is_some());
+}
+
+#[tokio::test]
+async fn test_diagnostics_freshness_stale_signed_whisker_reflects_counts() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    let now = std::time::Instant::now();
+    let stale_instant = now - std::time::Duration::from_secs(120);
+
+    state.scent_store.observe_signed(
+        "stale_diag_michi_id".to_string(),
+        "stale_diag_device_uuid".to_string(),
+        "Stale Diag Stream".to_string(),
+        "michi-stream-standard".to_string(),
+        vec!["audio_receiver".to_string()],
+        Some("127.0.0.1:53319".parse().unwrap()),
+        stale_instant,
+    );
+
+    state.scent_store.observe_mdns_candidate(
+        michi_connect::scent_store::VerifiedServerInfo {
+            michi_id: "stale_diag_michi_id".to_string(),
+            device_id: "stale_diag_device_uuid".to_string(),
+            name: "Stale Diag Stream".to_string(),
+            service: "michi-stream-standard".to_string(),
+            roles: vec!["audio_receiver".to_string()],
+        },
+        "http://127.0.0.1:53319".parse().unwrap(),
+        Some("127.0.0.1:53319".parse().unwrap()),
+        now,
+    );
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/diagnostics")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let diag: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let whisker = &diag["whisker"];
+    assert_eq!(
+        whisker["verified_stream_count"], 0,
+        "stale whisker must not be counted as verified_stream_count"
+    );
+    assert_eq!(
+        whisker["provisional_mdns_count"], 1,
+        "fresh mDNS fallback must be counted as provisional_mdns_count"
     );
 }

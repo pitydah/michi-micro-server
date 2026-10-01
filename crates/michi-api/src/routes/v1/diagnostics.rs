@@ -516,24 +516,23 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
 
     let whisker = {
         let all_scent = state.scent_store.list();
-        let provisional_mdns_count = all_scent
-            .iter()
-            .filter(|r| {
-                r.online
-                    && r.presence_source
-                        == michi_connect::scent_store::ScentPresenceSource::MdnsProvisional
-            })
-            .count();
-        let verified_stream_count = all_scent
-            .iter()
-            .filter(|r| {
-                r.online
-                    && r.verified
-                    && r.presence_source
-                        == michi_connect::scent_store::ScentPresenceSource::WhiskerSigned
-            })
-            .count();
-        let offline_stream_count = all_scent.iter().filter(|r| !r.online).count();
+        let mut provisional_mdns_count = 0;
+        let mut verified_stream_count = 0;
+        let mut offline_stream_count = 0;
+
+        for r in &all_scent {
+            match state.scent_store.effective_presence_now(r) {
+                michi_connect::scent_store::EffectivePresence::VerifiedOnline => {
+                    verified_stream_count += 1;
+                }
+                michi_connect::scent_store::EffectivePresence::ProvisionalMdns => {
+                    provisional_mdns_count += 1;
+                }
+                michi_connect::scent_store::EffectivePresence::Offline => {
+                    offline_stream_count += 1;
+                }
+            }
+        }
 
         let joined = state
             .whisker_metrics
