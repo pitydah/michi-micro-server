@@ -772,6 +772,116 @@ body.sidebar-collapsed {
   50% { opacity: 0.3; }
 }
 
+.device-card__provisional-text {
+  font-size: 0.8rem;
+  color: var(--warning, #eab308);
+  margin-top: 0.35rem;
+}
+
+.device-icon {
+  flex-shrink: 0;
+  color: var(--primary, #6366f1);
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.devices-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 2.5rem 1.5rem;
+  background: var(--bg-panel);
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-md);
+  margin-top: 0.5rem;
+}
+
+.device-empty-icon {
+  color: var(--text-3);
+  margin-bottom: 1rem;
+  opacity: 0.7;
+}
+
+.empty-state-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 0.5rem 0;
+}
+
+.empty-state-desc {
+  font-size: 0.85rem;
+  color: var(--text-3);
+  max-width: 380px;
+  margin: 0 0 1.25rem 0;
+  line-height: 1.4;
+}
+
+.discovery-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.12);
+  padding: 0.2rem 0.55rem;
+  border-radius: 9999px;
+  border: 1px solid rgba(34, 197, 94, 0.25);
+}
+
+.discovery-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 6px #22c55e;
+  animation: discovery-pulse 2s infinite ease-in-out;
+}
+
+@keyframes discovery-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.3); opacity: 0.6; }
+}
+
+.pairing-error-friendly {
+  margin-bottom: 0.5rem;
+}
+
+.pairing-error-friendly strong {
+  display: block;
+  font-size: 0.9rem;
+  color: var(--error, #ef4444);
+  margin-bottom: 0.2rem;
+}
+
+.pairing-error-friendly p {
+  font-size: 0.82rem;
+  color: var(--text-2);
+  margin: 0;
+}
+
+.pairing-error-details {
+  font-size: 0.75rem;
+  color: var(--text-3);
+  margin-top: 0.35rem;
+}
+
+.pairing-error-details summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.pairing-error-details code {
+  display: block;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+  margin-top: 0.25rem;
+  word-break: break-all;
+}
+
 /* ── Responsive Mobile Enhancements ── */
 @media (max-width: 640px) {
   .device-card {
@@ -782,6 +892,7 @@ body.sidebar-collapsed {
   .device-card__actions {
     width: 100%;
     justify-content: flex-end;
+    flex-wrap: wrap;
   }
 }
 

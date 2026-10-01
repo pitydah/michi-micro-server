@@ -3535,6 +3535,24 @@ function setupPairingModalListeners() {
   });
 }
 
+function formatRelativeTime(isoString) {
+  if (!isoString) return '';
+  var dt = new Date(isoString);
+  var diffSec = Math.floor((Date.now() - dt.getTime()) / 1000);
+  if (isNaN(diffSec) || diffSec < 0) return '';
+  if (diffSec < 60) return 'Last seen just now';
+  var mins = Math.floor(diffSec / 60);
+  if (mins === 1) return 'Last seen 1 min ago';
+  if (mins < 60) return 'Last seen ' + mins + ' min ago';
+  var hours = Math.floor(mins / 60);
+  if (hours === 1) return 'Last seen 1 hour ago';
+  if (hours < 24) return 'Last seen ' + hours + ' hours ago';
+  var days = Math.floor(hours / 24);
+  if (days === 1) return 'Last seen 1 day ago';
+  return 'Last seen ' + days + ' days ago';
+}
+window.formatRelativeTime = formatRelativeTime;
+
 function openReceiverPairModal(receiverId, name) {
   setupPairingModalListeners();
   ReceiverPairingState.receiverId = receiverId;
@@ -3551,7 +3569,7 @@ function openReceiverPairModal(receiverId, name) {
   var pinErr = $('#pair-pin-error');
   var pinInput = $('#pair-pin-input');
 
-  if (title) title.textContent = 'Pair ' + (name || 'Michi Music Stream');
+  if (title) title.textContent = 'Preparar ' + (name || 'Michi Music Stream');
   if (stepBtn) stepBtn.classList.remove('hidden');
   if (stepPin) stepPin.classList.add('hidden');
   if (stepSuccess) stepSuccess.classList.add('hidden');
@@ -3599,8 +3617,40 @@ function formatPairTimer(sec) {
   return (mm < 10 ? '0' : '') + mm + ':' + (ss < 10 ? '0' : '') + ss;
 }
 
+function formatPairingError(raw) {
+  var rawStr = String(raw || 'PAIRING_ERROR');
+  var friendlyTitle = 'Michi Music Stream no está disponible';
+  var friendlyDesc = 'No se pudo comunicar con el receptor. Verifica que esté encendido y conectado a la red.';
+
+  if (rawStr.includes('PAIRING_PIN_MISMATCH') || rawStr.includes('401')) {
+    friendlyTitle = 'Código incorrecto';
+    friendlyDesc = 'El código ingresado no coincide con el mostrado en Michi Music Stream.';
+  } else if (rawStr.includes('PAIRING_EXPIRED') || rawStr.includes('expired')) {
+    friendlyTitle = 'La sesión expiró';
+    friendlyDesc = 'El tiempo para ingresar el código ha terminado. Inicia el proceso nuevamente.';
+  } else if (rawStr.includes('PAIRING_ATTEMPTS_EXCEEDED')) {
+    friendlyTitle = 'Demasiados intentos';
+    friendlyDesc = 'Se superó el número máximo de intentos permitidos. Reinicia el dispositivo e inténtalo de nuevo.';
+  } else if (rawStr.includes('IDENTITY_MISMATCH')) {
+    friendlyTitle = 'La identidad del dispositivo cambió';
+    friendlyDesc = 'No se pudo verificar la identidad criptográfica de Michi Music Stream.';
+  } else if (rawStr.includes('STREAM_NOT_IN_PAIRING_MODE') || rawStr.includes('WINDOW_CLOSED')) {
+    friendlyTitle = 'Michi Music Stream no está disponible';
+    friendlyDesc = 'El dispositivo no está en modo vinculación. Mantén presionado el botón durante 5 segundos.';
+  }
+
+  return {
+    title: friendlyTitle,
+    desc: friendlyDesc,
+    raw: rawStr,
+    html: '<div class="pairing-error-friendly"><strong>' + esc(friendlyTitle) + '</strong><p>' + esc(friendlyDesc) + '</p></div>' +
+          '<details class="pairing-error-details"><summary>Detalles técnicos</summary><code>' + esc(rawStr) + '</code></details>'
+  };
+}
+
 async function proceedToPairingPin() {
   if (!ReceiverPairingState.receiverId) return;
+  var title = $('#pair-modal-title');
   var stepBtn = $('#pair-step-button');
   var stepPin = $('#pair-step-pin');
   var stepSuccess = $('#pair-step-success');
@@ -3625,6 +3675,7 @@ async function proceedToPairingPin() {
     ReceiverPairingState.pairingId = pairingId;
     ReceiverPairingState.phase = 'pin_entry';
 
+    if (title) title.textContent = 'Ingresa el código';
     if (stepBtn) stepBtn.classList.add('hidden');
     if (stepPin) stepPin.classList.remove('hidden');
 
@@ -3652,7 +3703,8 @@ async function proceedToPairingPin() {
       if (expiresSec <= 0) {
         clearInterval(ReceiverPairingState.timerInterval);
         ReceiverPairingState.timerInterval = null;
-        if (pinErr) pinErr.textContent = 'PAIRING_EXPIRED: La sesión de emparejamiento ha expirado. Inténtalo nuevamente.';
+        var errInfo = formatPairingError('PAIRING_EXPIRED: La sesión de emparejamiento ha expirado.');
+        if (pinErr) pinErr.innerHTML = errInfo.html;
         var confirmBtn = $('#btn-pair-confirm');
         if (confirmBtn) confirmBtn.disabled = true;
       }
@@ -3661,17 +3713,9 @@ async function proceedToPairingPin() {
     var confirmBtn = $('#btn-pair-confirm');
     if (confirmBtn) confirmBtn.disabled = false;
   } catch (e) {
-    var raw = e.message || 'PAIRING_ERROR';
-    var msg = raw;
-    if (raw.includes('STREAM_NOT_IN_PAIRING_MODE') || raw.includes('WINDOW_CLOSED') || raw.includes('400')) {
-      msg = 'El dispositivo no está en modo emparejamiento. Mantén presionado el botón por 5 segundos.';
-    } else if (raw.includes('PAIRING_EXPIRED')) {
-      msg = 'La sesión de emparejamiento ha expirado. Inicia nuevamente el proceso.';
-    } else if (raw.includes('IDENTITY_MISMATCH')) {
-      msg = 'Error de identidad del dispositivo. No se pudo verificar la clave pública.';
-    }
-    if (pinErr) pinErr.textContent = msg;
-    showToast(msg, true);
+    var errInfo = formatPairingError(e.message || 'STREAM_NOT_IN_PAIRING_MODE');
+    if (pinErr) pinErr.innerHTML = errInfo.html;
+    showToast(errInfo.title + ': ' + errInfo.desc, true);
   } finally {
     if (readyBtn) readyBtn.disabled = false;
   }
@@ -3685,7 +3729,10 @@ async function submitReceiverPairPin() {
   var confirmBtn = $('#btn-pair-confirm');
 
   if (!pin || !/^\d{6}$/.test(pin)) {
-    if (pinErr) pinErr.textContent = 'Ingresa un PIN válido de exactamente 6 dígitos numéricos.';
+    if (pinErr) {
+      pinErr.textContent = 'Ingresa el código de 6 dígitos numéricos mostrado en Michi Music Stream.';
+      pinErr.innerHTML = '<div class="pairing-error-friendly"><strong>Código inválido</strong><p>Ingresa el código de 6 dígitos numéricos mostrado en Michi Music Stream.</p></div>';
+    }
     return;
   }
 
@@ -3715,37 +3762,25 @@ async function submitReceiverPairPin() {
     if (stepSuccess) stepSuccess.classList.remove('hidden');
 
     var pStatus = confirmResp && confirmResp.presence;
+    if (successTitle) successTitle.textContent = 'Michi Music Stream vinculado';
+
     if (pStatus === 'verified_online') {
-      if (successTitle) successTitle.textContent = 'Receiver ready';
-      if (successMsg) successMsg.textContent = 'The device is verified online and ready to receive audio streams.';
+      if (successMsg) successMsg.textContent = 'Identidad verificada. El receptor está listo para reproducir audio.';
+    } else if (pStatus === 'provisional_mdns') {
+      if (successMsg) successMsg.textContent = 'El emparejamiento se completó. Esperando presencia firmada de Michi Link.';
     } else {
-      if (successTitle) successTitle.textContent = 'Pairing completed';
-      if (successMsg) successMsg.textContent = 'Pairing completed. Waiting for signed Michi Link presence.';
+      if (successMsg) successMsg.textContent = 'El emparejamiento se completó, pero el dispositivo ya no está disponible en la red.';
     }
 
     var doneBtn = $('#btn-pair-done');
     if (doneBtn) doneBtn.focus();
 
-    showToast('✓ Dispositivo emparejado exitosamente');
+    showToast('✓ Michi Music Stream vinculado');
     discoverDevices(true);
   } catch (e) {
-    var raw = e.message || 'PAIRING_ERROR';
-    var userMsg = 'Error al confirmar PIN';
-    if (raw.includes('PAIRING_PIN_MISMATCH') || raw.includes('401') || raw.includes('PIN')) {
-      userMsg = 'PAIRING_PIN_MISMATCH: El PIN ingresado no es correcto. Verifica el código en pantalla.';
-    } else if (raw.includes('PAIRING_EXPIRED') || raw.includes('expired')) {
-      userMsg = 'PAIRING_EXPIRED: La sesión ha expirado. Inicia el emparejamiento nuevamente.';
-    } else if (raw.includes('PAIRING_ATTEMPTS_EXCEEDED')) {
-      userMsg = 'PAIRING_ATTEMPTS_EXCEEDED: Demasiados intentos fallidos. Reinicia el emparejamiento en el dispositivo.';
-    } else if (raw.includes('PAIRING_ALREADY_CONSUMED')) {
-      userMsg = 'PAIRING_ALREADY_CONSUMED: Esta sesión de emparejamiento ya fue utilizada.';
-    } else if (raw.includes('IDENTITY_MISMATCH')) {
-      userMsg = 'IDENTITY_MISMATCH: La identidad del receptor cambió durante el proceso.';
-    } else {
-      userMsg = raw;
-    }
-    if (pinErr) pinErr.textContent = userMsg;
-    showToast(userMsg, true);
+    var errInfo = formatPairingError(e.message || 'PAIRING_ERROR');
+    if (pinErr) pinErr.innerHTML = errInfo.html;
+    showToast(errInfo.title + ': ' + errInfo.desc, true);
   } finally {
     if (confirmBtn) confirmBtn.disabled = false;
   }
@@ -3781,7 +3816,16 @@ async function discoverDevices(silent) {
     if (resEl) {
       if (devs.length === 0) {
         resEl.dataset.cardsFingerprint = '';
-        resEl.innerHTML = '<div class="empty-state"><p>No Michi receivers or devices discovered yet.</p></div>';
+        resEl.innerHTML = '<div class="empty-state devices-empty-state">' +
+          '<svg class="device-empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+            '<rect x="4" y="2" width="16" height="20" rx="2" ry="2"/>' +
+            '<circle cx="12" cy="14" r="4"/>' +
+            '<line x1="12" y1="6" x2="12.01" y2="6"/>' +
+          '</svg>' +
+          '<h4 class="empty-state-title">No Michi Stream devices found</h4>' +
+          '<p class="empty-state-desc">Michi devices appear automatically when they are connected to the same network.</p>' +
+          '<button class="btn btn-primary btn-sm action-refresh-devices" onclick="discoverDevices()">Refresh Devices</button>' +
+        '</div>';
       } else {
         // Ensure event delegation listener is attached once
         if (!resEl.dataset.delegationBound) {
@@ -3809,38 +3853,47 @@ async function discoverDevices(silent) {
           });
         }
 
+        var streamIconSvg = '<svg class="device-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="2" width="16" height="20" rx="2" ry="2"/><circle cx="12" cy="14" r="4"/><line x1="12" y1="6" x2="12.01" y2="6"/></svg>';
+
         var builtCards = devs.map(function (d) {
           var name = d.name || d.device_name || 'Michi Music Stream';
           var endpoint = d.base_url || d.host || (d.addresses && d.addresses[0]) || 'Endpoint unavailable';
-          var isOnline = d.online === true || d.presence === 'verified_online';
+          var presence = typeof d.presence === 'string' ? d.presence : 'offline';
+          var isOnline = presence === 'verified_online';
           var isPaired = d.paired === true;
           var receiverId = d.receiver_id || d.michi_id || d.id || '';
           var stableId = d.michi_id || d.receiver_id || d.id || '';
           var typeLabel = d.device_type === 'hifi' ? 'Hi-Fi' : 'Standard';
-          var presence = d.presence || (isOnline ? 'verified_online' : 'offline');
           var qualification = d.qualification || 'unqualified';
           var isIdentityMismatch = qualification === 'identity_mismatch';
           var pairable = d.pairable === true;
 
           var presenceBadgeClass = 'device-badge--offline';
           var presenceText = 'Offline';
+          var statusDetailHtml = '';
+          var relativeSeen = '';
+
           if (isIdentityMismatch) {
             presenceBadgeClass = 'device-badge--danger';
             presenceText = 'Identity Conflict';
+            statusDetailHtml = '<div class="device-card__warning-text">Device identity could not be verified. Pairing and playback are disabled.</div>';
           } else if (presence === 'verified_online') {
             presenceBadgeClass = 'device-badge--verified';
             presenceText = 'Verified Online';
           } else if (presence === 'provisional_mdns') {
             presenceBadgeClass = 'device-badge--provisional';
-            presenceText = 'Provisional (mDNS)';
+            presenceText = 'Discovered · mDNS';
+            statusDetailHtml = '<div class="device-card__provisional-text">Identity endpoint verified. Waiting for signed Michi Link presence.</div>';
           } else if (presence === 'degraded') {
             presenceBadgeClass = 'device-badge--warning';
             presenceText = 'Degraded';
+          } else {
+            presenceBadgeClass = 'device-badge--offline';
+            presenceText = 'Offline';
+            relativeSeen = formatRelativeTime(d.last_seen);
           }
 
-          var conflictMsgHtml = isIdentityMismatch
-            ? '<div class="device-card__warning-text">Identity mismatch: device identity does not match cryptographic pinning.</div>'
-            : '';
+          var relativeSeenHtml = relativeSeen ? ' · ' + esc(relativeSeen) : '';
 
           var actionsHtml = '';
           if (isPaired) {
@@ -3876,16 +3929,17 @@ async function discoverDevices(silent) {
             }
           }
 
-          var fingerprint = [stableId, name, endpoint, presence, qualification, isPaired, pairable].join(';;');
+          var fingerprint = [stableId, name, endpoint, presence, qualification, isPaired, pairable, relativeSeen].join(';;');
 
           var html = '<div class="device-card chain-item" id="device-card-' + esc(stableId) + '" data-stable-id="' + esc(stableId) + '" data-fingerprint="' + esc(fingerprint) + '">' +
             '<div>' +
             '<div class="device-card__header">' +
+            streamIconSvg +
             '<span class="device-card__title">' + esc(name) + '</span> ' +
             '<span class="device-badge ' + presenceBadgeClass + '">' + esc(presenceText) + '</span>' +
             '</div>' +
-            '<div class="device-card__meta">' + esc(typeLabel) + ' · ' + esc(endpoint) + '</div>' +
-            conflictMsgHtml +
+            '<div class="device-card__meta">' + esc(typeLabel) + ' · ' + esc(endpoint) + relativeSeenHtml + '</div>' +
+            statusDetailHtml +
             '</div>' +
             actionsHtml +
             '</div>';

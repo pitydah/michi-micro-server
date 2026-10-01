@@ -414,11 +414,19 @@ function createDOM() {
   doc.body.appendChild(searchInput);
   doc.body.appendChild(authOverlay);
 
+  const stabDevices = el('div', 'stab-devices');
+  stabDevices.innerHTML = '<span class="discovery-status-badge"><span class="discovery-status-dot"></span>Discovery ● Active</span>';
+  doc.body.appendChild(stabDevices);
+
   const pairModal = el('div', 'receiver-pair-modal');
   pairModal.classList.add('hidden');
   const pairModalTitle = el('div', 'pair-modal-title');
   const stepButton = el('div', 'pair-step-button');
+  const stepButtonDesc = el('p', 'pair-step-button-desc');
+  stepButtonDesc.textContent = 'Mantén presionado el botón de Michi Music Stream durante 5 segundos hasta que el indicador comience a parpadear.';
   const btnPairReady = el('button', 'btn-pair-ready');
+  btnPairReady.textContent = 'Continuar';
+  stepButton.appendChild(stepButtonDesc);
   stepButton.appendChild(btnPairReady);
 
   const stepPin = el('div', 'pair-step-pin');
@@ -1360,7 +1368,9 @@ async function runE2E() {
 
     await window.discoverDevices();
     const text = document.querySelector('#discover-result')?.textContent || '';
-    assert(text.includes('No Michi receivers or devices discovered yet'), 'UX TEST 3: Empty receivers renders empty state');
+    const html = document.querySelector('#discover-result')?.innerHTML || '';
+    assert(text.includes('No Michi Stream devices found'), 'UX TEST 3: Empty receivers renders empty state');
+    assert(html.includes('Refresh Devices') && html.includes('device-empty-icon'), 'UX TEST 3: Empty state contains stream icon and refresh button');
   }
 
   // 4. Unpaired device with pairable: true renders enabled Pair button
@@ -1546,7 +1556,7 @@ async function runE2E() {
 
     await window.discoverDevices();
     const html = document.querySelector('#discover-result')?.innerHTML || '';
-    assert(html.includes('device-card__warning-text') && html.includes('Identity mismatch'), 'UX TEST 12: renders warning explanation message');
+    assert(html.includes('device-card__warning-text') && html.includes('Device identity could not be verified. Pairing and playback are disabled.'), 'UX TEST 12: renders warning explanation message');
   }
 
   // 13. Paired device with identity_mismatch disables Use as Output and enables Forget
@@ -1731,7 +1741,7 @@ async function runE2E() {
     assert(pinErr.includes('6 dígitos'), 'UX TEST 20: Displays validation error for invalid PIN');
   }
 
-  // 21. submitReceiverPairPin with presence='verified_online' displays "Receiver ready"
+  // 21. submitReceiverPairPin with presence='verified_online' displays truthful verified success
   {
     const fetchImpl = async (url) => {
       if (url.includes('/pair/confirm')) {
@@ -1751,10 +1761,12 @@ async function runE2E() {
 
     await window.submitReceiverPairPin();
     const title = document.querySelector('#pair-success-title')?.textContent || '';
-    assert(title.includes('Receiver ready'), `UX TEST 21: Step 3 shows Receiver ready for verified_online (${title})`);
+    const msg = document.querySelector('#pair-success-message')?.textContent || '';
+    assert(title.includes('Michi Music Stream vinculado'), `UX TEST 21: Step 3 shows Michi Music Stream vinculado (${title})`);
+    assert(msg.includes('Identidad verificada. El receptor está listo para reproducir audio.'), `UX TEST 21: Step 3 shows verified online message (${msg})`);
   }
 
-  // 22. submitReceiverPairPin with presence='provisional_mdns' displays "Pairing completed. Waiting for signed Michi Link presence."
+  // 22. submitReceiverPairPin with presence='provisional_mdns' displays truthful provisional success
   {
     const fetchImpl = async (url) => {
       if (url.includes('/pair/confirm')) {
@@ -1773,8 +1785,134 @@ async function runE2E() {
     pinInput.value = '112233';
 
     await window.submitReceiverPairPin();
+    const title = document.querySelector('#pair-success-title')?.textContent || '';
     const msg = document.querySelector('#pair-success-message')?.textContent || '';
-    assert(msg.includes('Waiting for signed Michi Link presence'), `UX TEST 22: Step 3 shows truthful provisional message (${msg})`);
+    assert(title.includes('Michi Music Stream vinculado'), `UX TEST 22: Step 3 shows Michi Music Stream vinculado (${title})`);
+    assert(msg.includes('El emparejamiento se completó. Esperando presencia firmada de Michi Link.'), `UX TEST 22: Step 3 shows truthful provisional message (${msg})`);
+  }
+
+  // 23. Discovered · mDNS badge and provisional explanatory text rendered for provisional_mdns
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-prov-test', name: 'Provisional Stream', presence: 'provisional_mdns', paired: false, pairable: true }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const html = document.querySelector('#discover-result')?.innerHTML || '';
+    assert(html.includes('Discovered · mDNS'), 'UX TEST 23: Discovered · mDNS badge rendered for provisional_mdns');
+    assert(html.includes('device-card__provisional-text') && html.includes('Identity endpoint verified. Waiting for signed Michi Link presence.'), 'UX TEST 23: provisional message rendered');
+  }
+
+  // 24. Verified Online badge rendered for verified_online
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-ver-test', name: 'Verified Stream', presence: 'verified_online', paired: true, qualification: 'qualified' }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const html = document.querySelector('#discover-result')?.innerHTML || '';
+    assert(html.includes('Verified Online'), 'UX TEST 24: Verified Online badge rendered for verified_online');
+  }
+
+  // 25. Offline badge and relative last seen rendered for offline
+  {
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-off-test', name: 'Offline Stream', presence: 'offline', last_seen: fiveMinAgo }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const html = document.querySelector('#discover-result')?.innerHTML || '';
+    assert(html.includes('Offline'), 'UX TEST 25: Offline badge rendered for offline');
+    assert(html.includes('Last seen 5 min ago'), 'UX TEST 25: relative last seen rendered');
+  }
+
+  // 26. Discovery indicator: Discovery ● Active present in DOM and index.html
+  {
+    const rawHtml = fs.readFileSync(htmlPath, 'utf8');
+    assert(rawHtml.includes('Discovery ● Active'), 'UX TEST 26: Discovery ● Active indicator in index.html');
+    const { sandbox, window, document } = makeSandbox();
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    const stabHtml = document.querySelector('#stab-devices')?.innerHTML || '';
+    assert(stabHtml.includes('Discovery ● Active'), 'UX TEST 26: Discovery ● Active indicator present in DOM');
+  }
+
+  // 27. Step 1: Preparar Michi Music Stream wording and button Continuar
+  {
+    const { sandbox, window, document } = makeSandbox();
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.openReceiverPairModal('rx-test', 'Living Room Stream');
+    const title = document.querySelector('#pair-modal-title')?.textContent || '';
+    const desc = document.querySelector('#pair-step-button-desc')?.textContent || '';
+    const readyBtn = document.querySelector('#btn-pair-ready')?.textContent || '';
+    assert(title.includes('Preparar Living Room Stream'), `UX TEST 27: Title has Preparar (${title})`);
+    assert(desc.includes('Mantén presionado el botón de Michi Music Stream durante 5 segundos'), `UX TEST 27: Step 1 description matches canonical wording (${desc})`);
+    assert(readyBtn.includes('Continuar'), `UX TEST 27: Button is Continuar (${readyBtn})`);
+  }
+
+  // 28. Step 2: Ingresa el código wording + PIN validation accepts leading zeros like 000123
+  {
+    let sentPin = null;
+    const fetchImpl = async (url, opts) => {
+      if (url.includes('/pair/start')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          pairing_id: 'sess-zeros-1', expires_at: new Date(Date.now() + 60000).toISOString()
+        }) };
+      }
+      if (url.includes('/pair/confirm')) {
+        const body = JSON.parse(opts.body);
+        sentPin = body.pin;
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          status: 'paired', presence: 'verified_online'
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.ReceiverPairingState.receiverId = 'rx-zeros';
+    await window.proceedToPairingPin();
+
+    const title = document.querySelector('#pair-modal-title')?.textContent || '';
+    assert(title.includes('Ingresa el código'), `UX TEST 28: Title changed to Ingresa el código (${title})`);
+
+    const pinInput = document.querySelector('#pair-pin-input');
+    pinInput.value = '000123'; // Leading zeros
+    await window.submitReceiverPairPin();
+
+    assert(sentPin === '000123', `UX TEST 28: PIN with leading zeros accepted and sent (${sentPin})`);
   }
 
   console.log('======================================================================');
