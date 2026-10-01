@@ -473,7 +473,7 @@ async fn persist_paired_receiver(state: &AppState, device_id: &str) -> Result<()
         device_type: entry.device_type.clone(),
         base_url: entry.base_url.clone(),
         paired: entry.paired,
-        online: entry.last_seen.is_some(),
+        online: entry.presence == michi_receivers::ReceiverPresence::VerifiedOnline,
         audio_capabilities: caps_json.clone(),
         last_seen: entry.last_seen.map(|d| d.to_rfc3339()),
         paired_at: Some(now.clone()),

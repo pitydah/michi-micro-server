@@ -478,8 +478,11 @@ impl AppState {
         });
         michi_link::spawn_token_cleanup(token_store.clone());
 
-        let receiver_manager =
-            michi_receivers::ReceiverSessionManager::new_with_identity(identity.clone());
+        let scent_store = Arc::new(michi_connect::ScentStore::new());
+        let receiver_manager = michi_receivers::ReceiverSessionManager::new_with_identity_and_scent(
+            identity.clone(),
+            scent_store.clone(),
+        );
         let pairing_registry = Arc::new(michi_identity::PairingRegistry::new());
         let pairing_display = Arc::new(RwLock::new(None));
         let pairing_sessions_display = Arc::new(RwLock::new(HashMap::new()));
@@ -585,7 +588,7 @@ impl AppState {
             receiver_credential_store,
             transcode_semaphore,
             pending_transfers: Arc::new(michi_sync::playback_transfer::PendingTransferStore::new()),
-            scent_store: Arc::new(michi_connect::ScentStore::new()),
+            scent_store,
             whisker_metrics: Arc::new(michi_connect::WhiskerMetrics::default()),
             module_transition_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             module_runtime_info,
