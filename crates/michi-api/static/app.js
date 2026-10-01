@@ -3503,6 +3503,31 @@ function setupPairingModalListeners() {
     }
   });
 
+  var btnReady = $('#btn-pair-ready');
+  if (btnReady) btnReady.addEventListener('click', proceedToPairingPin);
+
+  var btnConfirm = $('#btn-pair-confirm');
+  if (btnConfirm) btnConfirm.addEventListener('click', submitReceiverPairPin);
+
+  var btnDone = $('#btn-pair-done');
+  if (btnDone) btnDone.addEventListener('click', closeReceiverPairModal);
+
+  var btnCancel1 = $('#btn-pair-cancel-1');
+  if (btnCancel1) btnCancel1.addEventListener('click', closeReceiverPairModal);
+
+  var btnCancel2 = $('#btn-pair-cancel-2');
+  if (btnCancel2) btnCancel2.addEventListener('click', closeReceiverPairModal);
+
+  var pinInput = $('#pair-pin-input');
+  if (pinInput) {
+    pinInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submitReceiverPairPin();
+      }
+    });
+  }
+
   document.addEventListener('keydown', function (ev) {
     var m = $('#receiver-pair-modal');
     if (!m || m.classList.contains('hidden') || m.style.display === 'none') return;
@@ -3569,7 +3594,7 @@ function openReceiverPairModal(receiverId, name) {
   var pinErr = $('#pair-pin-error');
   var pinInput = $('#pair-pin-input');
 
-  if (title) title.textContent = 'Preparar ' + (name || 'Michi Music Stream');
+  if (title) title.textContent = 'Prepare ' + (name || 'Michi Music Stream');
   if (stepBtn) stepBtn.classList.remove('hidden');
   if (stepPin) stepPin.classList.add('hidden');
   if (stepSuccess) stepSuccess.classList.add('hidden');
@@ -3619,24 +3644,24 @@ function formatPairTimer(sec) {
 
 function formatPairingError(raw) {
   var rawStr = String(raw || 'PAIRING_ERROR');
-  var friendlyTitle = 'Michi Music Stream no está disponible';
-  var friendlyDesc = 'No se pudo comunicar con el receptor. Verifica que esté encendido y conectado a la red.';
+  var friendlyTitle = 'Michi Music Stream unavailable';
+  var friendlyDesc = 'Could not communicate with the receiver.';
 
   if (rawStr.includes('PAIRING_PIN_MISMATCH') || rawStr.includes('401')) {
-    friendlyTitle = 'Código incorrecto';
-    friendlyDesc = 'El código ingresado no coincide con el mostrado en Michi Music Stream.';
+    friendlyTitle = 'Incorrect code';
+    friendlyDesc = 'Check the six-digit code shown on Michi Music Stream.';
   } else if (rawStr.includes('PAIRING_EXPIRED') || rawStr.includes('expired')) {
-    friendlyTitle = 'La sesión expiró';
-    friendlyDesc = 'El tiempo para ingresar el código ha terminado. Inicia el proceso nuevamente.';
+    friendlyTitle = 'Pairing session expired';
+    friendlyDesc = 'Hold the Stream button again to open pairing mode.';
   } else if (rawStr.includes('PAIRING_ATTEMPTS_EXCEEDED')) {
-    friendlyTitle = 'Demasiados intentos';
-    friendlyDesc = 'Se superó el número máximo de intentos permitidos. Reinicia el dispositivo e inténtalo de nuevo.';
+    friendlyTitle = 'Too many attempts';
+    friendlyDesc = 'Open pairing mode on Michi Music Stream again.';
   } else if (rawStr.includes('IDENTITY_MISMATCH')) {
-    friendlyTitle = 'La identidad del dispositivo cambió';
-    friendlyDesc = 'No se pudo verificar la identidad criptográfica de Michi Music Stream.';
+    friendlyTitle = 'Device identity changed';
+    friendlyDesc = 'Pairing was stopped for security.';
   } else if (rawStr.includes('STREAM_NOT_IN_PAIRING_MODE') || rawStr.includes('WINDOW_CLOSED')) {
-    friendlyTitle = 'Michi Music Stream no está disponible';
-    friendlyDesc = 'El dispositivo no está en modo vinculación. Mantén presionado el botón durante 5 segundos.';
+    friendlyTitle = 'Pairing mode is not active';
+    friendlyDesc = 'Hold the Stream button for 5 seconds and try again.';
   }
 
   return {
@@ -3644,7 +3669,7 @@ function formatPairingError(raw) {
     desc: friendlyDesc,
     raw: rawStr,
     html: '<div class="pairing-error-friendly"><strong>' + esc(friendlyTitle) + '</strong><p>' + esc(friendlyDesc) + '</p></div>' +
-          '<details class="pairing-error-details"><summary>Detalles técnicos</summary><code>' + esc(rawStr) + '</code></details>'
+          '<details class="pairing-error-details"><summary>Technical details</summary><code>' + esc(rawStr) + '</code></details>'
   };
 }
 
@@ -3669,13 +3694,13 @@ async function proceedToPairingPin() {
 
     var pairingId = res.pairing_id || res.session_id;
     if (!pairingId) {
-      throw new Error(res.error?.message || 'STREAM_NOT_IN_PAIRING_MODE: El Stream no respondió con un ID de emparejamiento.');
+      throw new Error(res.error?.message || 'STREAM_NOT_IN_PAIRING_MODE: The Stream receiver did not return a pairing ID.');
     }
 
     ReceiverPairingState.pairingId = pairingId;
     ReceiverPairingState.phase = 'pin_entry';
 
-    if (title) title.textContent = 'Ingresa el código';
+    if (title) title.textContent = 'Enter pairing code';
     if (stepBtn) stepBtn.classList.add('hidden');
     if (stepPin) stepPin.classList.remove('hidden');
 
@@ -3694,16 +3719,19 @@ async function proceedToPairingPin() {
     }
 
     var timerEl = $('#pair-timer-val');
+    var countdownEl = $('#pair-pin-countdown');
     if (timerEl) timerEl.textContent = formatPairTimer(expiresSec);
+    if (countdownEl) countdownEl.innerHTML = 'Expires in <span id="pair-timer-val">' + formatPairTimer(expiresSec) + '</span>';
 
     if (ReceiverPairingState.timerInterval) clearInterval(ReceiverPairingState.timerInterval);
     ReceiverPairingState.timerInterval = setInterval(function () {
       expiresSec--;
-      if (timerEl) timerEl.textContent = formatPairTimer(expiresSec);
+      var tEl = $('#pair-timer-val');
+      if (tEl) tEl.textContent = formatPairTimer(expiresSec);
       if (expiresSec <= 0) {
         clearInterval(ReceiverPairingState.timerInterval);
         ReceiverPairingState.timerInterval = null;
-        var errInfo = formatPairingError('PAIRING_EXPIRED: La sesión de emparejamiento ha expirado.');
+        var errInfo = formatPairingError('PAIRING_EXPIRED: Pairing session expired');
         if (pinErr) pinErr.innerHTML = errInfo.html;
         var confirmBtn = $('#btn-pair-confirm');
         if (confirmBtn) confirmBtn.disabled = true;
@@ -3730,8 +3758,8 @@ async function submitReceiverPairPin() {
 
   if (!pin || !/^\d{6}$/.test(pin)) {
     if (pinErr) {
-      pinErr.textContent = 'Ingresa el código de 6 dígitos numéricos mostrado en Michi Music Stream.';
-      pinErr.innerHTML = '<div class="pairing-error-friendly"><strong>Código inválido</strong><p>Ingresa el código de 6 dígitos numéricos mostrado en Michi Music Stream.</p></div>';
+      pinErr.textContent = 'Enter the six-digit code shown on Michi Music Stream.';
+      pinErr.innerHTML = '<div class="pairing-error-friendly"><strong>Invalid code</strong><p>Enter the six-digit code shown on Michi Music Stream.</p></div>';
     }
     return;
   }
@@ -3762,20 +3790,20 @@ async function submitReceiverPairPin() {
     if (stepSuccess) stepSuccess.classList.remove('hidden');
 
     var pStatus = confirmResp && confirmResp.presence;
-    if (successTitle) successTitle.textContent = 'Michi Music Stream vinculado';
+    if (successTitle) successTitle.textContent = 'Michi Music Stream paired';
 
     if (pStatus === 'verified_online') {
-      if (successMsg) successMsg.textContent = 'Identidad verificada. El receptor está listo para reproducir audio.';
+      if (successMsg) successMsg.textContent = 'Identity verified. The receiver is ready for playback.';
     } else if (pStatus === 'provisional_mdns') {
-      if (successMsg) successMsg.textContent = 'El emparejamiento se completó. Esperando presencia firmada de Michi Link.';
+      if (successMsg) successMsg.textContent = 'Pairing completed. Waiting for signed Michi Link presence.';
     } else {
-      if (successMsg) successMsg.textContent = 'El emparejamiento se completó, pero el dispositivo ya no está disponible en la red.';
+      if (successMsg) successMsg.textContent = 'Pairing completed, but the receiver is no longer reachable on the network.';
     }
 
     var doneBtn = $('#btn-pair-done');
     if (doneBtn) doneBtn.focus();
 
-    showToast('✓ Michi Music Stream vinculado');
+    showToast('✓ Michi Music Stream paired');
     discoverDevices(true);
   } catch (e) {
     var errInfo = formatPairingError(e.message || 'PAIRING_ERROR');
@@ -3792,10 +3820,10 @@ async function discoverDevices(silent) {
   var resEl = $('#discover-result');
   if (resEl && !silent && !resEl.querySelector('.device-card')) {
     resEl.innerHTML = '<div style="margin-bottom:0.5rem;color:var(--text-3);font-size:0.85rem">Refreshing Michi devices...</div>' +
-      '<div style="display:flex;flex-direction:column;gap:0.75rem">' +
-        '<div class="device-card device-card--skeleton"><div style="flex:1"><div class="skeleton-line" style="width:160px;height:16px;margin-bottom:6px"></div><div class="skeleton-line" style="width:240px;height:12px"></div></div><div class="skeleton-line" style="width:90px;height:28px"></div></div>' +
-        '<div class="device-card device-card--skeleton"><div style="flex:1"><div class="skeleton-line" style="width:140px;height:16px;margin-bottom:6px"></div><div class="skeleton-line" style="width:200px;height:12px"></div></div><div class="skeleton-line" style="width:90px;height:28px"></div></div>' +
-      '</div>';
+      '<div class="devices-skeleton-container">' +
+      '<div class="device-card device-card--skeleton"><div style="flex:1"><div class="skeleton-line skeleton-line--title"></div><div class="skeleton-line skeleton-line--meta"></div></div><div class="skeleton-line skeleton-line--action"></div></div>' +
+      '<div class="device-card device-card--skeleton"><div style="flex:1"><div class="skeleton-line skeleton-line--title"></div><div class="skeleton-line skeleton-line--meta"></div></div><div class="skeleton-line skeleton-line--action"></div></div>' +
+    '</div>';
   }
   try {
     var res = await MichiAPI.discoverDevices();
@@ -3803,6 +3831,26 @@ async function discoverDevices(silent) {
       throw new Error("API contract violation: 'receivers' array field required in discovery response");
     }
     var devs = res.receivers;
+
+    var badgeEl = $('#discovery-status-badge');
+    var badgeTextEl = $('#discovery-status-text');
+    if (badgeEl && badgeTextEl) {
+      if (res.discovery) {
+        if (res.discovery.active && res.discovery.interfaces_joined > 0) {
+          badgeEl.className = 'discovery-status-badge discovery-status-badge--active';
+          badgeTextEl.textContent = 'Discovery active';
+        } else if (res.discovery.degraded || res.discovery.interfaces_joined === 0) {
+          badgeEl.className = 'discovery-status-badge discovery-status-badge--degraded';
+          badgeTextEl.textContent = 'Discovery degraded';
+        } else {
+          badgeEl.className = 'discovery-status-badge discovery-status-badge--unavailable';
+          badgeTextEl.textContent = 'Discovery unavailable';
+        }
+      } else {
+        badgeEl.className = 'discovery-status-badge discovery-status-badge--unavailable';
+        badgeTextEl.textContent = 'Discovery unavailable';
+      }
+    }
 
     var updatedEl = $('#devices-last-updated');
     if (updatedEl) {
@@ -3880,6 +3928,9 @@ async function discoverDevices(silent) {
           } else if (presence === 'verified_online') {
             presenceBadgeClass = 'device-badge--verified';
             presenceText = 'Verified Online';
+            if (qualification === 'qualified') {
+              statusDetailHtml = '<div class="device-card__qualified-text">Michi Link · Qualified</div>';
+            }
           } else if (presence === 'provisional_mdns') {
             presenceBadgeClass = 'device-badge--provisional';
             presenceText = 'Discovered · mDNS';
@@ -3984,6 +4035,12 @@ async function discoverDevices(silent) {
       showToast('Discovery complete');
     }
   } catch (e) {
+    var badgeEl = $('#discovery-status-badge');
+    var badgeTextEl = $('#discovery-status-text');
+    if (badgeEl && badgeTextEl) {
+      badgeEl.className = 'discovery-status-badge discovery-status-badge--unavailable';
+      badgeTextEl.textContent = 'Discovery unavailable';
+    }
     if (resEl) {
       resEl.dataset.cardsFingerprint = '';
       resEl.innerHTML = '<span style="color:var(--error)">✗ Discovery failed: ' + esc(e.message) + '</span>';

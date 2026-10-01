@@ -84,7 +84,6 @@ class MockElement {
   constructor(tag, id = '', className = '') {
     this.tagName = tag.toUpperCase();
     this._id = id;
-    this.className = className;
     this._innerHTML = '';
     this._textContent = '';
     this.style = {};
@@ -113,9 +112,21 @@ class MockElement {
       contains(cls) { return this._classes.has(cls); },
       toString() { return [...this._classes].join(' '); },
     };
+    this.className = className;
+  }
+
+  get className() { return this._className || ''; }
+  set className(val) {
+    this._className = String(val);
+    if (this.classList) {
+      this.classList._classes = new Set(String(val).split(/\s+/).filter(Boolean));
+    }
   }
 
   get textContent() {
+    if (this.children.length > 0) {
+      return this.children.map(c => c.textContent).join('');
+    }
     if (this._textContent) return this._textContent;
     if (this._innerHTML) return this._innerHTML.replace(/<[^>]*>/g, '');
     return '';
@@ -415,7 +426,7 @@ function createDOM() {
   doc.body.appendChild(authOverlay);
 
   const stabDevices = el('div', 'stab-devices');
-  stabDevices.innerHTML = '<span class="discovery-status-badge"><span class="discovery-status-dot"></span>Discovery ● Active</span>';
+  stabDevices.innerHTML = '<span id="discovery-status-badge" class="discovery-status-badge discovery-status-badge--unavailable"><span class="discovery-status-dot"></span><span id="discovery-status-text">Discovery unavailable</span></span>';
   doc.body.appendChild(stabDevices);
 
   const pairModal = el('div', 'receiver-pair-modal');
@@ -423,9 +434,9 @@ function createDOM() {
   const pairModalTitle = el('div', 'pair-modal-title');
   const stepButton = el('div', 'pair-step-button');
   const stepButtonDesc = el('p', 'pair-step-button-desc');
-  stepButtonDesc.textContent = 'Mantén presionado el botón de Michi Music Stream durante 5 segundos hasta que el indicador comience a parpadear.';
+  stepButtonDesc.textContent = 'Press and hold the button on your Michi Music Stream for 5 seconds until the status indicator starts flashing.';
   const btnPairReady = el('button', 'btn-pair-ready');
-  btnPairReady.textContent = 'Continuar';
+  btnPairReady.textContent = 'Continue';
   stepButton.appendChild(stepButtonDesc);
   stepButton.appendChild(btnPairReady);
 
@@ -445,6 +456,7 @@ function createDOM() {
   const successTitle = el('p', 'pair-success-title');
   const successMsg = el('p', 'pair-success-message');
   const btnPairDone = el('button', 'btn-pair-done');
+  btnPairDone.textContent = 'Done';
   stepSuccess.appendChild(successTitle);
   stepSuccess.appendChild(successMsg);
   stepSuccess.appendChild(btnPairDone);
@@ -1738,7 +1750,7 @@ async function runE2E() {
     await window.submitReceiverPairPin();
     assert(!confirmCalled, 'UX TEST 20: Short PIN rejected without API request');
     const pinErr = document.querySelector('#pair-pin-error')?.textContent || '';
-    assert(pinErr.includes('6 dígitos'), 'UX TEST 20: Displays validation error for invalid PIN');
+    assert(pinErr.includes('Enter the six-digit code'), 'UX TEST 20: Displays validation error for invalid PIN');
   }
 
   // 21. submitReceiverPairPin with presence='verified_online' displays truthful verified success
@@ -1762,8 +1774,8 @@ async function runE2E() {
     await window.submitReceiverPairPin();
     const title = document.querySelector('#pair-success-title')?.textContent || '';
     const msg = document.querySelector('#pair-success-message')?.textContent || '';
-    assert(title.includes('Michi Music Stream vinculado'), `UX TEST 21: Step 3 shows Michi Music Stream vinculado (${title})`);
-    assert(msg.includes('Identidad verificada. El receptor está listo para reproducir audio.'), `UX TEST 21: Step 3 shows verified online message (${msg})`);
+    assert(title.includes('Michi Music Stream paired'), `UX TEST 21: Step 3 shows Michi Music Stream paired (${title})`);
+    assert(msg.includes('Identity verified. The receiver is ready for playback.'), `UX TEST 21: Step 3 shows verified online message (${msg})`);
   }
 
   // 22. submitReceiverPairPin with presence='provisional_mdns' displays truthful provisional success
@@ -1787,8 +1799,8 @@ async function runE2E() {
     await window.submitReceiverPairPin();
     const title = document.querySelector('#pair-success-title')?.textContent || '';
     const msg = document.querySelector('#pair-success-message')?.textContent || '';
-    assert(title.includes('Michi Music Stream vinculado'), `UX TEST 22: Step 3 shows Michi Music Stream vinculado (${title})`);
-    assert(msg.includes('El emparejamiento se completó. Esperando presencia firmada de Michi Link.'), `UX TEST 22: Step 3 shows truthful provisional message (${msg})`);
+    assert(title.includes('Michi Music Stream paired'), `UX TEST 22: Step 3 shows Michi Music Stream paired (${title})`);
+    assert(msg.includes('Pairing completed. Waiting for signed Michi Link presence.'), `UX TEST 22: Step 3 shows truthful provisional message (${msg})`);
   }
 
   // 23. Discovered · mDNS badge and provisional explanatory text rendered for provisional_mdns
@@ -1854,18 +1866,54 @@ async function runE2E() {
     assert(html.includes('Last seen 5 min ago'), 'UX TEST 25: relative last seen rendered');
   }
 
-  // 26. Discovery indicator: Discovery ● Active present in DOM and index.html
+  // 26. Discovery indicator: dynamic discovery status badge based on res.discovery
   {
     const rawHtml = fs.readFileSync(htmlPath, 'utf8');
-    assert(rawHtml.includes('Discovery ● Active'), 'UX TEST 26: Discovery ● Active indicator in index.html');
-    const { sandbox, window, document } = makeSandbox();
+    assert(rawHtml.includes('discovery-status-badge'), 'UX TEST 26: discovery-status-badge present in index.html');
+    assert(rawHtml.includes('Discovery unavailable'), 'UX TEST 26: Discovery unavailable indicator initial in index.html');
+
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            receivers: [],
+            discovery: { active: true, degraded: false, whisker_listening: true, interfaces_joined: 2 }
+          })
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
-    const stabHtml = document.querySelector('#stab-devices')?.innerHTML || '';
-    assert(stabHtml.includes('Discovery ● Active'), 'UX TEST 26: Discovery ● Active indicator present in DOM');
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const badge = document.querySelector('#discovery-status-badge');
+    const badgeText = document.querySelector('#discovery-status-text')?.textContent || '';
+    assert(badge && badge.classList.contains('discovery-status-badge--active'), 'UX TEST 26: Active discovery sets active badge class');
+    assert(badgeText === 'Discovery active', `UX TEST 26: Active discovery sets text 'Discovery active' (${badgeText})`);
+
+    // Test degraded
+    window.MichiAPI.discoverDevices = async () => ({
+      receivers: [],
+      discovery: { active: false, degraded: true, whisker_listening: false, interfaces_joined: 0 }
+    });
+    await window.discoverDevices(true);
+    assert(badge.classList.contains('discovery-status-badge--degraded'), 'UX TEST 26: Degraded discovery sets degraded badge class');
+    assert(badge.textContent.includes('Discovery degraded'), 'UX TEST 26: Degraded discovery sets text Discovery degraded');
+
+    // Test error / unavailable
+    window.MichiAPI.discoverDevices = async () => { throw new Error('Network error'); };
+    await window.discoverDevices(true);
+    assert(badge.classList.contains('discovery-status-badge--unavailable'), 'UX TEST 26: Error sets unavailable badge class');
+    assert(badge.textContent.includes('Discovery unavailable'), 'UX TEST 26: Error sets text Discovery unavailable');
   }
 
-  // 27. Step 1: Preparar Michi Music Stream wording and button Continuar
+  // 27. Step 1: Prepare Michi Music Stream wording and button Continue
   {
     const { sandbox, window, document } = makeSandbox();
     vm.createContext(sandbox);
@@ -1875,12 +1923,12 @@ async function runE2E() {
     const title = document.querySelector('#pair-modal-title')?.textContent || '';
     const desc = document.querySelector('#pair-step-button-desc')?.textContent || '';
     const readyBtn = document.querySelector('#btn-pair-ready')?.textContent || '';
-    assert(title.includes('Preparar Living Room Stream'), `UX TEST 27: Title has Preparar (${title})`);
-    assert(desc.includes('Mantén presionado el botón de Michi Music Stream durante 5 segundos'), `UX TEST 27: Step 1 description matches canonical wording (${desc})`);
-    assert(readyBtn.includes('Continuar'), `UX TEST 27: Button is Continuar (${readyBtn})`);
+    assert(title.includes('Prepare Living Room Stream'), `UX TEST 27: Title has Prepare (${title})`);
+    assert(desc.includes('Press and hold the button on your Michi Music Stream for 5 seconds'), `UX TEST 27: Step 1 description matches canonical wording (${desc})`);
+    assert(readyBtn.includes('Continue'), `UX TEST 27: Button is Continue (${readyBtn})`);
   }
 
-  // 28. Step 2: Ingresa el código wording + PIN validation accepts leading zeros like 000123
+  // 28. Step 2: Enter pairing code wording + PIN validation accepts leading zeros like 000123
   {
     let sentPin = null;
     const fetchImpl = async (url, opts) => {
@@ -1906,7 +1954,7 @@ async function runE2E() {
     await window.proceedToPairingPin();
 
     const title = document.querySelector('#pair-modal-title')?.textContent || '';
-    assert(title.includes('Ingresa el código'), `UX TEST 28: Title changed to Ingresa el código (${title})`);
+    assert(title.includes('Enter pairing code'), `UX TEST 28: Title changed to Enter pairing code (${title})`);
 
     const pinInput = document.querySelector('#pair-pin-input');
     pinInput.value = '000123'; // Leading zeros
