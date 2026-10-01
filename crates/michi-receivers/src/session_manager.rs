@@ -158,6 +158,104 @@ impl ReceiverSessionManager {
             ReceiverClient::new(base_url)
         };
         let info = client.get_info().await?;
+
+        // Mandatory contract validation BEFORE initiating pair_start remotely:
+        // 1. server_id not empty
+        let expected_server_id = info
+            .server_id
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "CONTRACT_VIOLATION: server_id is required and non-empty in receiver info"
+                    .to_string()
+            })?
+            .to_string();
+
+        // 2. michi_id not empty
+        let expected_michi_id = info
+            .michi_id
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "CONTRACT_VIOLATION: michi_id is required and non-empty in receiver info"
+                    .to_string()
+            })?
+            .to_string();
+
+        // 3. public_key not empty, valid base64url, exactly 32 bytes, valid Ed25519
+        let expected_public_key = info
+            .public_key
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "CONTRACT_VIOLATION: public_key is required and non-empty in receiver info"
+                    .to_string()
+            })?
+            .to_string();
+
+        let pk_bytes = michi_identity::decode_base64url_strict(&expected_public_key)
+            .map_err(|e| format!("CONTRACT_VIOLATION: invalid public_key base64url: {e}"))?;
+        if pk_bytes.len() != 32 {
+            return Err("CONTRACT_VIOLATION: public_key must be exactly 32 bytes".to_string());
+        }
+        let key_bytes: [u8; 32] = pk_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| "CONTRACT_VIOLATION: failed converting public key bytes".to_string())?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|e| format!("CONTRACT_VIOLATION: invalid Ed25519 public key: {e}"))?;
+        let derived_id =
+            michi_identity::types::MichiId::from_public_key(&verifying_key).to_base64url();
+
+        if expected_michi_id != derived_id {
+            return Err(format!(
+                "CONTRACT_VIOLATION: michi_id '{expected_michi_id}' does not match derived public_key identity '{derived_id}'"
+            ));
+        }
+
+        // 4. service EXACTLY "michi-stream-standard" or "michi-stream-hifi"
+        let service = info
+            .service
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "CONTRACT_VIOLATION: service is required in receiver info".to_string()
+            })?;
+        if service != "michi-stream-standard" && service != "michi-stream-hifi" {
+            return Err(format!(
+                "CONTRACT_VIOLATION: unsupported receiver service '{service}', expected 'michi-stream-standard' or 'michi-stream-hifi'"
+            ));
+        }
+
+        // 5. api_version EXACTLY "v1-lite"
+        let api_version = info
+            .api_version
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "CONTRACT_VIOLATION: api_version is required in receiver info".to_string()
+            })?;
+        if api_version != "v1-lite" {
+            return Err(format!(
+                "CONTRACT_VIOLATION: unsupported api_version '{api_version}', expected 'v1-lite'"
+            ));
+        }
+
+        // 6. roles contains "audio_receiver"
+        let roles = info
+            .roles
+            .as_ref()
+            .ok_or_else(|| "CONTRACT_VIOLATION: roles is required in receiver info".to_string())?;
+        if !roles.iter().any(|r| r.trim() == "audio_receiver") {
+            return Err("CONTRACT_VIOLATION: roles must contain 'audio_receiver'".to_string());
+        }
+
+        // ONLY IF FULL CONTRACT IS VALID: initiate remote pair_start
         let start_resp = client.pair_start(initiator_id).await?;
         let pair_session_id = if let Some(ref s_id) = start_resp.session_id {
             s_id.clone()
@@ -188,46 +286,6 @@ impl ReceiverSessionManager {
 
         let pairing_id = uuid::Uuid::new_v4().to_string();
 
-        let expected_server_id = info
-            .server_id
-            .as_ref()
-            .ok_or_else(|| {
-                "CONTRACT_VIOLATION: server_id is required in receiver info".to_string()
-            })?
-            .clone();
-        let expected_michi_id = info
-            .michi_id
-            .as_ref()
-            .ok_or_else(|| "CONTRACT_VIOLATION: michi_id is required in receiver info".to_string())?
-            .clone();
-        let expected_public_key = info
-            .public_key
-            .as_ref()
-            .ok_or_else(|| {
-                "CONTRACT_VIOLATION: public_key is required in receiver info".to_string()
-            })?
-            .clone();
-
-        let pk_bytes = michi_identity::decode_base64url_strict(&expected_public_key)
-            .map_err(|e| format!("CONTRACT_VIOLATION: invalid public_key base64url: {e}"))?;
-        if pk_bytes.len() != 32 {
-            return Err("CONTRACT_VIOLATION: public_key must be 32 bytes".to_string());
-        }
-        let key_bytes: [u8; 32] = pk_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| "CONTRACT_VIOLATION: failed converting public key bytes".to_string())?;
-        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
-            .map_err(|e| format!("CONTRACT_VIOLATION: invalid Ed25519 public key: {e}"))?;
-        let derived_id =
-            michi_identity::types::MichiId::from_public_key(&verifying_key).to_base64url();
-
-        if expected_michi_id != derived_id {
-            return Err(format!(
-                "CONTRACT_VIOLATION: michi_id '{expected_michi_id}' does not match derived public_key identity '{derived_id}'"
-            ));
-        }
-
         let start_michi_id = start_resp.server_michi_id.as_ref().ok_or_else(|| {
             "CONTRACT_VIOLATION: server_michi_id is required in pair_start response".to_string()
         })?;
@@ -243,6 +301,30 @@ impl ReceiverSessionManager {
         if start_public_key != &expected_public_key {
             return Err(format!(
                 "CONTRACT_VIOLATION: pair_start server_public_key '{start_public_key}' does not match server/info public_key '{expected_public_key}'"
+            ));
+        }
+
+        // Verify derive(server_public_key) == server_michi_id
+        let start_pk_bytes =
+            michi_identity::decode_base64url_strict(start_public_key).map_err(|e| {
+                format!("CONTRACT_VIOLATION: invalid pair_start server_public_key base64url: {e}")
+            })?;
+        if start_pk_bytes.len() != 32 {
+            return Err(
+                "CONTRACT_VIOLATION: pair_start server_public_key must be exactly 32 bytes"
+                    .to_string(),
+            );
+        }
+        let start_key_bytes: [u8; 32] = start_pk_bytes.as_slice().try_into().map_err(|_| {
+            "CONTRACT_VIOLATION: failed converting start public key bytes".to_string()
+        })?;
+        let start_verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&start_key_bytes)
+            .map_err(|e| format!("CONTRACT_VIOLATION: invalid Ed25519 start public key: {e}"))?;
+        let start_derived_id =
+            michi_identity::types::MichiId::from_public_key(&start_verifying_key).to_base64url();
+        if start_michi_id != &start_derived_id {
+            return Err(format!(
+                "CONTRACT_VIOLATION: pair_start server_michi_id '{start_michi_id}' does not match derived identity '{start_derived_id}'"
             ));
         }
 
@@ -1415,6 +1497,7 @@ mod tests {
         info_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
         start_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
         confirm_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
+        pair_start_called: std::sync::Arc<AtomicBool>,
         pair_confirm_called: std::sync::Arc<AtomicBool>,
         info_call_count: std::sync::Arc<AtomicUsize>,
         mutate_on_confirm: std::sync::Arc<AtomicBool>,
@@ -1431,6 +1514,7 @@ mod tests {
     async fn mock_pair_start(
         AxumState(st): AxumState<MockReceiverState>,
     ) -> AxumJson<serde_json::Value> {
+        st.pair_start_called.store(true, Ordering::SeqCst);
         let val = st.start_json.read().unwrap().clone();
         AxumJson(val)
     }
@@ -1478,6 +1562,8 @@ mod tests {
             "server_id": "550e8400-e29b-41d4-a716-446655440000",
             "michi_id": "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4",
             "public_key": "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8",
+            "api_version": "v1-lite",
+            "roles": ["audio_receiver"],
             "supported_codecs": ["pcm_s16le"],
             "audio": {
                 "transports": ["rtp_udp"],
@@ -1506,6 +1592,7 @@ mod tests {
             info_json: std::sync::Arc::new(std::sync::RwLock::new(info)),
             start_json: std::sync::Arc::new(std::sync::RwLock::new(start)),
             confirm_json: std::sync::Arc::new(std::sync::RwLock::new(confirm)),
+            pair_start_called: std::sync::Arc::new(AtomicBool::new(false)),
             pair_confirm_called: std::sync::Arc::new(AtomicBool::new(false)),
             info_call_count: std::sync::Arc::new(AtomicUsize::new(0)),
             mutate_on_confirm: std::sync::Arc::new(AtomicBool::new(false)),
@@ -1556,7 +1643,7 @@ mod tests {
         assert!(reg.get(&rec_id).is_some());
     }
 
-    // 2. start_pairing fails if michi_id missing in info
+    // 2. start_pairing fails if michi_id missing in info; pair_start NOT called
     #[tokio::test]
     async fn test_pairing_2_fails_missing_michi_id() {
         let st = default_mock_state();
@@ -1566,7 +1653,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("michi_id");
-        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
         let mgr = make_test_session_manager();
 
         let res = mgr.start_pairing(&base_url, "initiator-1").await;
@@ -1577,9 +1664,13 @@ mod tests {
             "expected CONTRACT_VIOLATION, got: {err}"
         );
         assert!(err.contains("michi_id is required"), "got: {err}");
+        assert!(
+            !st.pair_start_called.load(Ordering::SeqCst),
+            "remote pair_start must NOT be called when michi_id is missing"
+        );
     }
 
-    // 3. start_pairing fails if public_key missing in info
+    // 3. start_pairing fails if public_key missing in info; pair_start NOT called
     #[tokio::test]
     async fn test_pairing_3_fails_missing_public_key() {
         let st = default_mock_state();
@@ -1589,7 +1680,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("public_key");
-        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
         let mgr = make_test_session_manager();
 
         let res = mgr.start_pairing(&base_url, "initiator-1").await;
@@ -1600,9 +1691,13 @@ mod tests {
             "expected CONTRACT_VIOLATION, got: {err}"
         );
         assert!(err.contains("public_key is required"), "got: {err}");
+        assert!(
+            !st.pair_start_called.load(Ordering::SeqCst),
+            "remote pair_start must NOT be called when public_key is missing"
+        );
     }
 
-    // 4. start_pairing fails if server_id missing in info, even if legacy device_id is present
+    // 4. start_pairing fails if server_id missing in info; pair_start NOT called
     #[tokio::test]
     async fn test_pairing_4_fails_missing_server_id() {
         let st = default_mock_state();
@@ -1615,7 +1710,7 @@ mod tests {
                 serde_json::Value::String("legacy-device-id".to_string()),
             );
         }
-        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
         let mgr = make_test_session_manager();
 
         let res = mgr.start_pairing(&base_url, "initiator-1").await;
@@ -1626,9 +1721,13 @@ mod tests {
             "expected CONTRACT_VIOLATION, got: {err}"
         );
         assert!(err.contains("server_id is required"), "got: {err}");
+        assert!(
+            !st.pair_start_called.load(Ordering::SeqCst),
+            "remote pair_start must NOT be called when server_id is missing"
+        );
     }
 
-    // 5. start_pairing fails if public_key does not derive to michi_id
+    // 5. start_pairing fails if public_key does not derive to michi_id; pair_start NOT called
     #[tokio::test]
     async fn test_pairing_5_fails_derived_michi_id_mismatch() {
         let st = default_mock_state();
@@ -1644,7 +1743,7 @@ mod tests {
                     "lz4CalNVFwbIecx40oFy7Z1HCzkonqkdcBP_eG3FZjo".to_string(),
                 ),
             );
-        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
         let mgr = make_test_session_manager();
 
         let res = mgr.start_pairing(&base_url, "initiator-1").await;
@@ -1657,6 +1756,132 @@ mod tests {
         assert!(
             err.contains("does not match derived public_key identity"),
             "got: {err}"
+        );
+        assert!(
+            !st.pair_start_called.load(Ordering::SeqCst),
+            "remote pair_start must NOT be called when derived identity mismatches"
+        );
+    }
+
+    // 5b. start_pairing fails if api_version is wrong; pair_start NOT called
+    #[tokio::test]
+    async fn test_pairing_5b_fails_wrong_api_version() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "api_version".to_string(),
+                serde_json::Value::String("v2-alpha".to_string()),
+            );
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("CONTRACT_VIOLATION"),
+            "expected CONTRACT_VIOLATION: {err}"
+        );
+        assert!(err.contains("unsupported api_version"), "got: {err}");
+        assert!(
+            !st.pair_start_called.load(Ordering::SeqCst),
+            "remote pair_start must NOT be called on unsupported api_version"
+        );
+    }
+
+    // 5c. start_pairing fails if service is unknown; pair_start NOT called
+    #[tokio::test]
+    async fn test_pairing_5c_fails_unknown_service() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "service".to_string(),
+                serde_json::Value::String("michi-stream-foo".to_string()),
+            );
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("CONTRACT_VIOLATION"),
+            "expected CONTRACT_VIOLATION: {err}"
+        );
+        assert!(err.contains("unsupported receiver service"), "got: {err}");
+        assert!(
+            !st.pair_start_called.load(Ordering::SeqCst),
+            "remote pair_start must NOT be called on unknown service"
+        );
+    }
+
+    // 5d. start_pairing fails if audio_receiver role is missing; pair_start NOT called
+    #[tokio::test]
+    async fn test_pairing_5d_fails_missing_audio_receiver_role() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "roles".to_string(),
+                serde_json::json!(["audio_transmitter"]),
+            );
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("CONTRACT_VIOLATION"),
+            "expected CONTRACT_VIOLATION: {err}"
+        );
+        assert!(
+            err.contains("roles must contain 'audio_receiver'"),
+            "got: {err}"
+        );
+        assert!(
+            !st.pair_start_called.load(Ordering::SeqCst),
+            "remote pair_start must NOT be called when audio_receiver role is missing"
+        );
+    }
+
+    // 5e. start_pairing fails if public_key is invalid base64 or length; pair_start NOT called
+    #[tokio::test]
+    async fn test_pairing_5e_fails_invalid_public_key_bytes() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "public_key".to_string(),
+                serde_json::Value::String("not-valid-base64-or-length".to_string()),
+            );
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("CONTRACT_VIOLATION"),
+            "expected CONTRACT_VIOLATION: {err}"
+        );
+        assert!(
+            !st.pair_start_called.load(Ordering::SeqCst),
+            "remote pair_start must NOT be called when public_key is invalid"
         );
     }
 
