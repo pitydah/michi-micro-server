@@ -420,22 +420,41 @@ impl ScentStore {
         store.values().cloned().collect()
     }
 
-    /// List all currently active scent records (both WhiskerSigned and MdnsProvisional).
-    pub fn list_active(&self) -> Vec<ScentRecord> {
-        let store = self.records.read().unwrap();
-        store.values().filter(|r| r.online).cloned().collect()
+    /// Query current effective presence for a record at the invocation instant.
+    pub fn effective_presence_now(&self, record: &ScentRecord) -> EffectivePresence {
+        record.effective_presence(Instant::now())
     }
 
-    /// List only cryptographically verified signed scent records.
-    pub fn list_signed_verified(&self) -> Vec<ScentRecord> {
+    /// List active records at a specific historical or simulated instant.
+    pub fn list_active_at(&self, at: Instant) -> Vec<ScentRecord> {
         let store = self.records.read().unwrap();
         store
             .values()
-            .filter(|r| {
-                r.online && r.verified && r.presence_source == ScentPresenceSource::WhiskerSigned
-            })
+            .filter(|r| r.effective_presence(at) != EffectivePresence::Offline)
             .cloned()
             .collect()
+    }
+
+    /// List all currently active scent records (both WhiskerSigned and MdnsProvisional)
+    /// whose freshness is strictly valid at the instant of invocation.
+    pub fn list_active(&self) -> Vec<ScentRecord> {
+        self.list_active_at(Instant::now())
+    }
+
+    /// List cryptographically verified signed records at a specific instant.
+    pub fn list_signed_verified_at(&self, at: Instant) -> Vec<ScentRecord> {
+        let store = self.records.read().unwrap();
+        store
+            .values()
+            .filter(|r| r.effective_presence(at) == EffectivePresence::VerifiedOnline)
+            .cloned()
+            .collect()
+    }
+
+    /// List only cryptographically verified signed scent records whose Whisker announcement
+    /// is strictly fresh (<90s) at the instant of invocation.
+    pub fn list_signed_verified(&self) -> Vec<ScentRecord> {
+        self.list_signed_verified_at(Instant::now())
     }
 
     /// List active online scent records (equivalent to list_active).
@@ -739,5 +758,41 @@ mod tests {
         let rec = store.get("michi-stream-1").unwrap();
         assert!(!rec.online);
         assert!(!rec.verified);
+    }
+
+    #[test]
+    fn test_freshness_queries_without_stale_window() {
+        let store = ScentStore::new();
+        let t0 = Instant::now();
+
+        // 1. Announce signed Whisker presence at t0
+        store.observe_signed(
+            "michi-stream-fresh".into(),
+            "dev-fresh".into(),
+            "Fresh Stream".into(),
+            "michi-stream-standard".into(),
+            vec!["audio_receiver".into()],
+            Some("192.168.1.180:53318".parse().unwrap()),
+            t0,
+        );
+
+        // At t0: verified and active
+        assert_eq!(store.list_signed_verified_at(t0).len(), 1);
+        assert_eq!(store.list_active_at(t0).len(), 1);
+
+        // At t0 + 95s (whisker expired > 90s, no mDNS seen):
+        // Even BEFORE check_expirations() has run, list_signed_verified_at and list_active_at
+        // evaluate freshness directly and must NOT return stale records!
+        let t_stale = t0 + Duration::from_secs(95);
+        assert_eq!(
+            store.list_signed_verified_at(t_stale).len(),
+            0,
+            "stale signed record must not appear in list_signed_verified before sweeper"
+        );
+        assert_eq!(
+            store.list_active_at(t_stale).len(),
+            0,
+            "stale record must not appear in list_active before sweeper"
+        );
     }
 }

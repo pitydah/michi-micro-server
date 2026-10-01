@@ -22,6 +22,7 @@ pub struct ReceiverSupervisorHandle {
 pub struct ReceiverSessionManager {
     registry: Arc<RwLock<ReceiverRegistry>>,
     identity: Option<Arc<michi_identity::IdentityManager>>,
+    scent_store: Option<Arc<michi_connect::ScentStore>>,
     pending_pairings: Arc<RwLock<HashMap<String, PendingReceiverPairing>>>,
     active_sessions: Arc<RwLock<HashMap<String, ReceiverActiveSession>>>,
     active_transports: Arc<RwLock<HashMap<String, SharedAudioTransport>>>,
@@ -33,6 +34,7 @@ impl std::fmt::Debug for ReceiverSessionManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReceiverSessionManager")
             .field("identity", &self.identity.is_some())
+            .field("scent_store", &self.scent_store.is_some())
             .finish()
     }
 }
@@ -48,6 +50,7 @@ impl ReceiverSessionManager {
         Self {
             registry: Arc::new(RwLock::new(ReceiverRegistry::new())),
             identity: None,
+            scent_store: None,
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
@@ -66,12 +69,22 @@ impl ReceiverSessionManager {
         Self {
             registry: Arc::new(RwLock::new(ReceiverRegistry::new())),
             identity: Some(identity),
+            scent_store: None,
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
             heartbeat_handles: Arc::new(RwLock::new(HashMap::new())),
             authority_gate,
         }
+    }
+
+    pub fn new_with_identity_and_scent(
+        identity: Arc<michi_identity::IdentityManager>,
+        scent_store: Arc<michi_connect::ScentStore>,
+    ) -> Self {
+        let mut mgr = Self::new_with_identity(identity);
+        mgr.set_scent_store(scent_store);
+        mgr
     }
 
     pub fn new_with(registry: Arc<RwLock<ReceiverRegistry>>) -> Self {
@@ -84,6 +97,7 @@ impl ReceiverSessionManager {
         Self {
             registry,
             identity: None,
+            scent_store: None,
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
@@ -94,6 +108,19 @@ impl ReceiverSessionManager {
 
     pub fn set_identity(&mut self, identity: Arc<michi_identity::IdentityManager>) {
         self.identity = Some(identity);
+    }
+
+    pub fn set_scent_store(&mut self, scent_store: Arc<michi_connect::ScentStore>) {
+        self.scent_store = Some(scent_store);
+    }
+
+    pub fn with_scent_store(mut self, scent_store: Arc<michi_connect::ScentStore>) -> Self {
+        self.scent_store = Some(scent_store);
+        self
+    }
+
+    pub fn scent_store(&self) -> Option<Arc<michi_connect::ScentStore>> {
+        self.scent_store.clone()
     }
 
     pub async fn registry(&self) -> Arc<RwLock<ReceiverRegistry>> {
@@ -164,7 +191,6 @@ impl ReceiverSessionManager {
         let expected_server_id = info
             .server_id
             .as_ref()
-            .or(info.device_id.as_ref())
             .ok_or_else(|| {
                 "CONTRACT_VIOLATION: server_id is required in receiver info".to_string()
             })?
@@ -267,10 +293,12 @@ impl ReceiverSessionManager {
 
         // Enforce identity pre-verification BEFORE calling pair_confirm
         let pre_info = client.get_info().await?;
-        let pre_server_id = pre_info.server_id.as_ref().or(pre_info.device_id.as_ref());
-        if pre_server_id != Some(&pending.expected_server_id) {
+        let pre_server_id = pre_info.server_id.as_ref().ok_or_else(|| {
+            "CONTRACT_VIOLATION: server_id is required in receiver info".to_string()
+        })?;
+        if pre_server_id != &pending.expected_server_id {
             return Err(format!(
-                "IDENTITY_MISMATCH: receiver server_id changed before pair_confirm (expected '{}', got '{:?}')",
+                "IDENTITY_MISMATCH: receiver server_id changed before pair_confirm (expected '{}', got '{}')",
                 pending.expected_server_id, pre_server_id
             ));
         }
@@ -344,13 +372,12 @@ impl ReceiverSessionManager {
 
         // Re-fetch fresh info to enforce identity pinning post-confirmation
         let fresh_info = client.get_info().await?;
-        let fresh_server_id = fresh_info
-            .server_id
-            .as_ref()
-            .or(fresh_info.device_id.as_ref());
-        if fresh_server_id != Some(&pending.expected_server_id) {
+        let fresh_server_id = fresh_info.server_id.as_ref().ok_or_else(|| {
+            "CONTRACT_VIOLATION: server_id is required in receiver info".to_string()
+        })?;
+        if fresh_server_id != &pending.expected_server_id {
             return Err(format!(
-                "IDENTITY_MISMATCH: receiver server_id changed post-confirmation (expected '{}', got '{:?}')",
+                "IDENTITY_MISMATCH: receiver server_id changed post-confirmation (expected '{}', got '{}')",
                 pending.expected_server_id, fresh_server_id
             ));
         }
@@ -372,7 +399,6 @@ impl ReceiverSessionManager {
             .michi_id
             .clone()
             .or_else(|| info.server_id.clone())
-            .or_else(|| info.device_id.clone())
             .ok_or_else(|| {
                 "IDENTITY_MISMATCH: missing device identifier post-confirmation".to_string()
             })?;
@@ -474,6 +500,26 @@ impl ReceiverSessionManager {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        let target_presence = if let Some(ref scent) = self.scent_store {
+            if let Some(record) = scent.get(&pending.expected_michi_id) {
+                match record.effective_presence(std::time::Instant::now()) {
+                    michi_connect::scent_store::EffectivePresence::VerifiedOnline => {
+                        ReceiverPresence::VerifiedOnline
+                    }
+                    michi_connect::scent_store::EffectivePresence::ProvisionalMdns => {
+                        ReceiverPresence::ProvisionalMdns
+                    }
+                    michi_connect::scent_store::EffectivePresence::Offline => {
+                        ReceiverPresence::Offline
+                    }
+                }
+            } else {
+                ReceiverPresence::ProvisionalMdns
+            }
+        } else {
+            ReceiverPresence::ProvisionalMdns
+        };
+
         let entry = ReceiverRegistryEntry {
             receiver_id: device_id.clone(),
             michi_id: info.michi_id.clone(),
@@ -482,7 +528,7 @@ impl ReceiverSessionManager {
             base_url: pending.receiver_base_url,
             paired: true,
             token: client.token.clone(),
-            presence: ReceiverPresence::VerifiedOnline,
+            presence: target_presence,
             last_seen: Some(chrono::Utc::now()),
             capabilities: caps,
             capabilities_verified_at: Some(chrono::Utc::now()),
@@ -1556,7 +1602,7 @@ mod tests {
         assert!(err.contains("public_key is required"), "got: {err}");
     }
 
-    // 4. start_pairing fails if server_id missing in info
+    // 4. start_pairing fails if server_id missing in info, even if legacy device_id is present
     #[tokio::test]
     async fn test_pairing_4_fails_missing_server_id() {
         let st = default_mock_state();
@@ -1564,7 +1610,10 @@ mod tests {
             let mut info = st.info_json.write().unwrap();
             let obj = info.as_object_mut().unwrap();
             obj.remove("server_id");
-            obj.remove("device_id");
+            obj.insert(
+                "device_id".to_string(),
+                serde_json::Value::String("legacy-device-id".to_string()),
+            );
         }
         let (base_url, _handle) = spawn_mock_receiver(st).await;
         let mgr = make_test_session_manager();
@@ -1755,5 +1804,150 @@ mod tests {
             0,
             "registry must remain empty on identity mismatch"
         );
+    }
+
+    // 11. confirm_pairing sets ProvisionalMdns when no fresh Whisker signed announcement in ScentStore
+    #[tokio::test]
+    async fn test_pairing_11_provisional_presence_when_no_whisker_scent() {
+        let st = default_mock_state();
+        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let scent = Arc::new(michi_connect::ScentStore::new());
+        let mgr = make_test_session_manager().with_scent_store(scent);
+
+        let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
+        let dev_id = mgr
+            .confirm_pairing(&pending.pairing_id, "123456")
+            .await
+            .unwrap();
+
+        let reg = mgr.registry.read().await;
+        let entry = reg.get(&dev_id).expect("receiver must exist in registry");
+        assert!(entry.paired, "receiver must be marked paired");
+        assert_eq!(
+            entry.presence,
+            ReceiverPresence::ProvisionalMdns,
+            "presence must be ProvisionalMdns when only paired via HTTP without fresh Whisker signed announce"
+        );
+    }
+
+    // 12. confirm_pairing sets VerifiedOnline when fresh Whisker signed announcement exists in ScentStore
+    #[tokio::test]
+    async fn test_pairing_12_verified_presence_when_whisker_scent_fresh() {
+        let st = default_mock_state();
+        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let scent = Arc::new(michi_connect::ScentStore::new());
+        let now = std::time::Instant::now();
+        scent.observe_signed(
+            "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4".to_string(),
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            "Test Stream".to_string(),
+            "michi-stream-standard".to_string(),
+            vec!["audio_receiver".to_string()],
+            Some("127.0.0.1:53318".parse().unwrap()),
+            now,
+        );
+
+        let mgr = make_test_session_manager().with_scent_store(scent);
+        let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
+        let dev_id = mgr
+            .confirm_pairing(&pending.pairing_id, "123456")
+            .await
+            .unwrap();
+
+        let reg = mgr.registry.read().await;
+        let entry = reg.get(&dev_id).expect("receiver must exist in registry");
+        assert!(entry.paired, "receiver must be marked paired");
+        assert_eq!(
+            entry.presence,
+            ReceiverPresence::VerifiedOnline,
+            "presence must be VerifiedOnline when fresh Whisker announcement exists"
+        );
+    }
+
+    // 13. paired receiver truth lifecycle: provisional -> verified upgrade -> degraded to provisional -> offline
+    #[tokio::test]
+    async fn test_pairing_13_truth_lifecycle_upgrade_and_degradation() {
+        let st = default_mock_state();
+        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let scent = Arc::new(michi_connect::ScentStore::new());
+        let mgr = make_test_session_manager().with_scent_store(scent.clone());
+        let bridge =
+            crate::discovery_bridge::ReceiverDiscoveryBridge::new(scent.clone(), mgr.clone());
+
+        let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
+        let dev_id = mgr
+            .confirm_pairing(&pending.pairing_id, "123456")
+            .await
+            .unwrap();
+
+        // 1. Initially provisional
+        {
+            let reg = mgr.registry.read().await;
+            let entry = reg.get(&dev_id).unwrap();
+            assert!(entry.paired);
+            assert_eq!(entry.presence, ReceiverPresence::ProvisionalMdns);
+        }
+
+        // 2. Fresh signed Whisker announcement arrives: upgrades to VerifiedOnline without duplicate
+        let signed_rec = michi_connect::ScentRecord {
+            michi_id: "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4".to_string(),
+            device_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            name: "Test Stream".to_string(),
+            service: "michi-stream-standard".to_string(),
+            roles: vec!["audio_receiver".to_string()],
+            verified: true,
+            presence_source: michi_connect::scent_store::ScentPresenceSource::WhiskerSigned,
+            endpoints: vec!["127.0.0.1:8080".parse().unwrap()],
+            base_url: Some(url::Url::parse(&base_url).unwrap()),
+            last_signed_seen: Some(std::time::Instant::now()),
+            last_mdns_seen: None,
+            server_info_verified_at: Some(std::time::Instant::now()),
+            online: true,
+        };
+        bridge
+            .handle_event(michi_connect::ScentEvent::Discovered(signed_rec.clone()))
+            .await;
+
+        {
+            let reg = mgr.registry.read().await;
+            assert_eq!(
+                reg.list().len(),
+                1,
+                "must not create duplicate registry entry"
+            );
+            let entry = reg.get(&dev_id).unwrap();
+            assert!(entry.paired);
+            assert_eq!(entry.presence, ReceiverPresence::VerifiedOnline);
+        }
+
+        // 3. Whisker expires, but mDNS still fresh: degrades to ProvisionalMdns while remaining paired
+        let mut degraded_rec = signed_rec.clone();
+        degraded_rec.presence_source =
+            michi_connect::scent_store::ScentPresenceSource::MdnsProvisional;
+        degraded_rec.verified = false;
+        bridge
+            .handle_event(michi_connect::ScentEvent::Updated(degraded_rec))
+            .await;
+
+        {
+            let reg = mgr.registry.read().await;
+            let entry = reg.get(&dev_id).unwrap();
+            assert!(entry.paired);
+            assert_eq!(entry.presence, ReceiverPresence::ProvisionalMdns);
+        }
+
+        // 4. Both expire: degrades to Offline while remaining paired
+        bridge
+            .handle_event(michi_connect::ScentEvent::Offline {
+                michi_id: "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4".to_string(),
+            })
+            .await;
+
+        {
+            let reg = mgr.registry.read().await;
+            let entry = reg.get(&dev_id).unwrap();
+            assert!(entry.paired);
+            assert_eq!(entry.presence, ReceiverPresence::Offline);
+        }
     }
 }
