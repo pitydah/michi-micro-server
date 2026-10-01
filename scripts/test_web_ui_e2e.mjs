@@ -51,6 +51,12 @@ window.computeBytesSha256 = computeBytesSha256;
 window.toggleShuffle    = toggleShuffle;
 window.toggleRepeat     = toggleRepeat;
 window.discoverDevices  = discoverDevices;
+window.ReceiverPairingState  = ReceiverPairingState;
+window.openReceiverPairModal = openReceiverPairModal;
+window.closeReceiverPairModal = closeReceiverPairModal;
+window.proceedToPairingPin   = proceedToPairingPin;
+window.submitReceiverPairPin = submitReceiverPairPin;
+window.formatPairTimer       = formatPairTimer;
 window.handleSearch     = handleSearch;
 window.toggleStar       = toggleStar;
 window.reevaluateCurrentSectionAccess = reevaluateCurrentSectionAccess;
@@ -84,12 +90,29 @@ class MockElement {
     this.style = {};
     this.children = [];
     this.parentNode = null;
+    this.ownerDocument = null;
     this.attributes = {};
     this.value = '';
     this.onclick = null;
     this.eventListeners = {};
     this.dataset = {};
     this.offsetHeight = 0;
+    this.disabled = false;
+    this.classList = {
+      _classes: new Set(className.split(/\s+/).filter(Boolean)),
+      add(...cls) { for (const c of cls) this._classes.add(c); },
+      remove(...cls) { for (const c of cls) this._classes.delete(c); },
+      toggle(cls, force) {
+        if (force === undefined) {
+          if (this._classes.has(cls)) { this._classes.delete(cls); return false; }
+          this._classes.add(cls); return true;
+        }
+        if (force) { this._classes.add(cls); return true; }
+        this._classes.delete(cls); return false;
+      },
+      contains(cls) { return this._classes.has(cls); },
+      toString() { return [...this._classes].join(' '); },
+    };
   }
 
   get textContent() {
@@ -100,41 +123,61 @@ class MockElement {
   set textContent(val) {
     this._textContent = String(val);
     this._innerHTML = String(val);
+    this.children = [];
   }
 
   get innerHTML() { return this._innerHTML || ''; }
   set innerHTML(val) {
     this._innerHTML = String(val);
     this._textContent = String(val).replace(/<[^>]*>/g, '');
+    this.children = [];
+    parseHTMLInto(this, String(val), this.ownerDocument);
   }
 
   get id() { return this._id || ''; }
   set id(val) { this._id = val; }
 
-  getAttribute(name) { return this.attributes[name] || null; }
+  getAttribute(name) {
+    if (name === 'id') return this.id || null;
+    if (name === 'class') return this.className || null;
+    return this.attributes[name] !== undefined ? this.attributes[name] : null;
+  }
   setAttribute(name, val) {
     this.attributes[name] = String(val);
     if (name === 'id') this._id = String(val);
+    if (name === 'class') {
+      this.className = String(val);
+      this.classList._classes = new Set(String(val).split(/\s+/).filter(Boolean));
+    }
+    if (name.startsWith('data-')) {
+      const camel = name.slice(5).replace(/-([a-z])/g, (_, l) => l.toUpperCase());
+      this.dataset[camel] = String(val);
+    }
+    if (name === 'disabled') this.disabled = true;
   }
   removeAttribute(name) {
     delete this.attributes[name];
     if (name === 'id') this._id = '';
+    if (name === 'disabled') this.disabled = false;
   }
 
   appendChild(child) {
     child.parentNode = this;
+    child.ownerDocument = this.ownerDocument;
     this.children.push(child);
     return child;
   }
 
   prepend(child) {
     child.parentNode = this;
+    child.ownerDocument = this.ownerDocument;
     this.children.unshift(child);
     return child;
   }
 
   insertBefore(newNode, referenceNode) {
     newNode.parentNode = this;
+    newNode.ownerDocument = this.ownerDocument;
     const idx = this.children.indexOf(referenceNode);
     if (idx >= 0) {
       this.children.splice(idx, 0, newNode);
@@ -154,21 +197,61 @@ class MockElement {
     for (const fn of list) fn(event);
   }
 
-  classList = {
-    _classes: new Set(),
-    add(...cls) { for (const c of cls) this._classes.add(c); },
-    remove(...cls) { for (const c of cls) this._classes.delete(c); },
-    toggle(cls, force) {
-      if (force === undefined) {
-        if (this._classes.has(cls)) { this._classes.delete(cls); return false; }
-        this._classes.add(cls); return true;
+  focus() {
+    if (this.ownerDocument) {
+      this.ownerDocument.activeElement = this;
+    }
+  }
+
+  closest(sel) {
+    let curr = this;
+    while (curr) {
+      if (curr._matches && curr._matches(sel)) return curr;
+      curr = curr.parentNode;
+    }
+    return null;
+  }
+
+  _matches(sel) {
+    if (!sel) return false;
+    let remaining = sel;
+    const tagMatch = remaining.match(/^([a-zA-Z0-9]+)/);
+    if (tagMatch) {
+      if (this.tagName !== tagMatch[1].toUpperCase()) return false;
+      remaining = remaining.slice(tagMatch[0].length);
+    }
+    while (remaining.length > 0) {
+      if (remaining.startsWith('#')) {
+        const m = remaining.match(/^#([a-zA-Z0-9_-]+)/);
+        if (!m) return false;
+        if (this.id !== m[1]) return false;
+        remaining = remaining.slice(m[0].length);
+      } else if (remaining.startsWith('.')) {
+        const m = remaining.match(/^\.([a-zA-Z0-9_-]+)/);
+        if (!m) return false;
+        if (!this.classList.contains(m[1]) && !this.className.split(/\s+/).includes(m[1])) return false;
+        remaining = remaining.slice(m[0].length);
+      } else if (remaining.startsWith('[')) {
+        const m = remaining.match(/^\[([a-zA-Z0-9_-]+)(?:=("[^"]*"|'[^']*'|[^\]]+))?\]/);
+        if (!m) return false;
+        const attrName = m[1];
+        const rawExpected = m[2];
+        const val = this.getAttribute(attrName);
+        if (rawExpected === undefined) {
+          if (val === null && !this[attrName]) return false;
+        } else {
+          const expected = (rawExpected.startsWith('"') && rawExpected.endsWith('"')) ||
+                           (rawExpected.startsWith("'") && rawExpected.endsWith("'"))
+                           ? rawExpected.slice(1, -1) : rawExpected;
+          if (String(val) !== expected) return false;
+        }
+        remaining = remaining.slice(m[0].length);
+      } else {
+        return false;
       }
-      if (force) { this._classes.add(cls); return true; }
-      this._classes.delete(cls); return false;
-    },
-    contains(cls) { return this._classes.has(cls); },
-    toString() { return [...this._classes].join(' '); },
-  };
+    }
+    return true;
+  }
 
   querySelector(sel) { return this._query(sel); }
   querySelectorAll(sel) {
@@ -179,49 +262,24 @@ class MockElement {
 
   _query(sel) {
     if (sel.includes(' ')) {
-      const parts = sel.split(' ');
+      const parts = sel.trim().split(/\s+/);
       const first = this._query(parts[0]);
       if (first) return first._query(parts.slice(1).join(' '));
       return null;
     }
-    if (sel.startsWith('#')) {
-      const id = sel.slice(1);
-      if (this.id === id) return this;
-      for (const c of this.children) {
-        const found = c._query(sel);
-        if (found) return found;
-      }
-    } else if (sel.startsWith('.')) {
-      const cls = sel.slice(1);
-      if (this.className.includes(cls) || this.classList._classes.has(cls)) return this;
-      for (const c of this.children) {
-        const found = c._query(sel);
-        if (found) return found;
-      }
-    } else {
-      if (sel.includes('[')) {
-        return null;
-      }
-      if (this.tagName === sel.toUpperCase()) return this;
-      for (const c of this.children) {
-        const found = c._query(sel);
-        if (found) return found;
-      }
+    for (const c of this.children) {
+      if (c._matches(sel)) return c;
+      const found = c._query(sel);
+      if (found) return found;
     }
     return null;
   }
 
   _queryAll(sel, results) {
-    if (sel.startsWith('.')) {
-      const cls = sel.slice(1);
-      if (this.className.includes(cls) || this.classList._classes.has(cls)) results.push(this);
-    } else if (sel.startsWith('#')) {
-      const id = sel.slice(1);
-      if (this.id === id) results.push(this);
-    } else {
-      if (this.tagName === sel.toUpperCase()) results.push(this);
+    for (const c of this.children) {
+      if (c._matches(sel)) results.push(c);
+      c._queryAll(sel, results);
     }
-    for (const c of this.children) c._queryAll(sel, results);
   }
 
   remove() {
@@ -233,24 +291,94 @@ class MockElement {
   }
 }
 
+function parseHTMLInto(parent, html, doc) {
+  const tagRegex = /<\/?([a-zA-Z0-9-]+)((?:\s+[^=>\/\s]+(?:=(?:"[^"]*"|'[^']*'|[^>\s]+))?)*)\s*(\/?)>|([^<]+)/g;
+  let match;
+  let current = parent;
+  const stack = [parent];
+  const VOID_TAGS = new Set(['IMG', 'INPUT', 'BR', 'HR', 'META', 'LINK']);
+
+  while ((match = tagRegex.exec(html)) !== null) {
+    const [full, tagName, attrStr, selfClose, textContent] = match;
+    if (textContent) {
+      if (textContent.trim()) {
+        current._textContent = (current._textContent || '') + textContent;
+      }
+      continue;
+    }
+    if (full.startsWith('</')) {
+      if (stack.length > 1) {
+        const closeTag = tagName.toUpperCase();
+        let idx = stack.length - 1;
+        while (idx > 0 && stack[idx].tagName !== closeTag) {
+          idx--;
+        }
+        if (idx > 0) {
+          stack.splice(idx);
+          current = stack[stack.length - 1];
+        } else {
+          stack.pop();
+          current = stack[stack.length - 1];
+        }
+      }
+      continue;
+    }
+    const tag = tagName.toUpperCase();
+    const el = new MockElement(tag);
+    el.parentNode = current;
+    el.ownerDocument = doc || parent.ownerDocument;
+
+    if (attrStr) {
+      const attrRegex = /([a-zA-Z0-9_-]+)(?:=(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
+      let am;
+      while ((am = attrRegex.exec(attrStr)) !== null) {
+        const name = am[1];
+        const val = am[2] !== undefined ? am[2] : (am[3] !== undefined ? am[3] : (am[4] !== undefined ? am[4] : ''));
+        el.attributes[name] = val;
+        if (name === 'id') el.id = val;
+        if (name === 'class') {
+          el.className = val;
+          val.split(/\s+/).filter(Boolean).forEach(c => el.classList.add(c));
+        }
+        if (name === 'disabled') el.disabled = true;
+        if (name.startsWith('data-')) {
+          const camel = name.slice(5).replace(/-([a-z])/g, (_, l) => l.toUpperCase());
+          el.dataset[camel] = val;
+        }
+      }
+    }
+    current.children.push(el);
+    if (!selfClose && !VOID_TAGS.has(tag)) {
+      stack.push(el);
+      current = el;
+    }
+  }
+}
+
 function createDOM() {
   function el(tag, id = '', cls = '') {
-    return new MockElement(tag, id, cls);
+    const node = new MockElement(tag, id, cls);
+    node.ownerDocument = doc;
+    return node;
   }
 
   const doc = {
-    documentElement: el('html'),
-    body: el('body'),
-    head: el('head'),
+    documentElement: null,
+    body: null,
+    head: null,
+    activeElement: null,
     createElement: (tag) => el(tag),
     getElementById: (id) => doc.body.querySelector('#' + id),
     querySelector: (sel) => {
-      if (sel.startsWith('#')) return doc.body.querySelector(sel);
-      return doc.body.querySelector(sel);
+      if (doc.body && doc.body._matches(sel)) return doc.body;
+      return doc.body ? doc.body.querySelector(sel) : null;
     },
-    querySelectorAll: (sel) => doc.body.querySelectorAll(sel),
+    querySelectorAll: (sel) => doc.body ? doc.body.querySelectorAll(sel) : [],
     addEventListener: () => {},
   };
+  doc.documentElement = el('html');
+  doc.body = el('body');
+  doc.head = el('head');
 
   // Seed core DOM nodes expected by app.js
   const toast = el('div', 'toast');
@@ -285,6 +413,41 @@ function createDOM() {
   authOverlay.classList.add('hidden');
   doc.body.appendChild(searchInput);
   doc.body.appendChild(authOverlay);
+
+  const pairModal = el('div', 'receiver-pair-modal');
+  pairModal.classList.add('hidden');
+  const pairModalTitle = el('div', 'pair-modal-title');
+  const stepButton = el('div', 'pair-step-button');
+  const btnPairReady = el('button', 'btn-pair-ready');
+  stepButton.appendChild(btnPairReady);
+
+  const stepPin = el('div', 'pair-step-pin');
+  stepPin.classList.add('hidden');
+  const pinInput = el('input', 'pair-pin-input');
+  const pinTimerVal = el('span', 'pair-timer-val');
+  const pinError = el('div', 'pair-pin-error');
+  const btnPairConfirm = el('button', 'btn-pair-confirm');
+  stepPin.appendChild(pinInput);
+  stepPin.appendChild(pinTimerVal);
+  stepPin.appendChild(pinError);
+  stepPin.appendChild(btnPairConfirm);
+
+  const stepSuccess = el('div', 'pair-step-success');
+  stepSuccess.classList.add('hidden');
+  const successTitle = el('p', 'pair-success-title');
+  const successMsg = el('p', 'pair-success-message');
+  const btnPairDone = el('button', 'btn-pair-done');
+  stepSuccess.appendChild(successTitle);
+  stepSuccess.appendChild(successMsg);
+  stepSuccess.appendChild(btnPairDone);
+
+  pairModal.appendChild(pairModalTitle);
+  pairModal.appendChild(stepButton);
+  pairModal.appendChild(stepPin);
+  pairModal.appendChild(stepSuccess);
+
+  doc.body.appendChild(pairModal);
+  doc.body.appendChild(el('span', 'devices-last-updated'));
 
   doc.body.appendChild(pageSettings);
 
@@ -1134,6 +1297,484 @@ async function runE2E() {
     assert(outputCalls.length === 0, 'PERIMETER: Anonymous showOutputSelectorModal must not issue protected network requests');
     const authOverlay = document.getElementById('auth-overlay');
     assert(authOverlay && !authOverlay.classList.contains('hidden'), 'PERIMETER: Anonymous showOutputSelectorModal opens auth modal');
+  }
+
+  // ── 22 Explicit Devices & Pairing UX Integrity Tests ──────────
+  
+  // 1. Initial non-silent discoverDevices shows "Refreshing Michi devices..." before resolution
+  {
+    let resolveDiscover;
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        await new Promise((r) => { resolveDiscover = r; });
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ receivers: [] }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    const p = window.discoverDevices(false);
+    const text = document.querySelector('#discover-result')?.textContent || '';
+    assert(text.includes('Refreshing Michi devices...'), 'UX TEST 1: Initial load shows "Refreshing Michi devices..."');
+    if (resolveDiscover) resolveDiscover();
+    await p;
+  }
+
+  // 2. Initial non-silent discoverDevices shows skeleton cards before resolution
+  {
+    let resolveDiscover;
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        await new Promise((r) => { resolveDiscover = r; });
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ receivers: [] }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    const p = window.discoverDevices(false);
+    const html = document.querySelector('#discover-result')?.innerHTML || '';
+    assert(html.includes('device-card--skeleton'), 'UX TEST 2: Initial load shows skeleton cards');
+    if (resolveDiscover) resolveDiscover();
+    await p;
+  }
+
+  // 3. Empty receivers array renders empty state message
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ receivers: [] }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const text = document.querySelector('#discover-result')?.textContent || '';
+    assert(text.includes('No Michi receivers or devices discovered yet'), 'UX TEST 3: Empty receivers renders empty state');
+  }
+
+  // 4. Unpaired device with pairable: true renders enabled Pair button
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-pairable', name: 'Pairable Stream', paired: false, pairable: true }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const pairBtn = document.querySelector('.action-pair[data-receiver-id="rx-pairable"]');
+    assert(pairBtn && !pairBtn.disabled, 'UX TEST 4: pairable=true renders enabled Pair button');
+  }
+
+  // 5. Unpaired device with pairable: false renders disabled Pair button
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-unpairable', name: 'Unpairable Stream', paired: false, pairable: false }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const pairBtn = document.querySelector('.action-pair[data-receiver-id="rx-unpairable"]');
+    assert(pairBtn && pairBtn.disabled, 'UX TEST 5: pairable=false renders disabled Pair button');
+  }
+
+  // 6. Unpaired device with pairable omitted defaults to disabled (strict fail-closed)
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-omit-pairable', name: 'Omitted Pairable', paired: false }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const pairBtn = document.querySelector('.action-pair[data-receiver-id="rx-omit-pairable"]');
+    assert(pairBtn && pairBtn.disabled, 'UX TEST 6: omitted pairable defaults to disabled (fail-closed)');
+  }
+
+  // 7. Paired + verified_online + qualified renders enabled Use as Output and Forget
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-ready', name: 'Living Room', paired: true, presence: 'verified_online', qualification: 'qualified' }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const outputBtn = document.querySelector('.action-use-output[data-receiver-id="rx-ready"]');
+    const unpairBtn = document.querySelector('.action-unpair[data-receiver-id="rx-ready"]');
+    assert(outputBtn && !outputBtn.disabled, 'UX TEST 7: verified_online + qualified enables Use as Output');
+    assert(unpairBtn && !unpairBtn.disabled, 'UX TEST 7: paired receiver enables Forget');
+  }
+
+  // 8. Paired + provisional_mdns disables Use as Output and enables Forget
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-prov', name: 'Den Stream', paired: true, presence: 'provisional_mdns', qualification: 'qualified' }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const outputBtn = document.querySelector('.action-use-output[data-receiver-id="rx-prov"]');
+    const unpairBtn = document.querySelector('.action-unpair[data-receiver-id="rx-prov"]');
+    assert(outputBtn && outputBtn.disabled, 'UX TEST 8: provisional_mdns disables Use as Output');
+    assert(unpairBtn && !unpairBtn.disabled, 'UX TEST 8: provisional_mdns enables Forget');
+  }
+
+  // 9. Paired + offline disables Use as Output and enables Forget
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-off', name: 'Patio Stream', paired: true, presence: 'offline', qualification: 'qualified' }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const outputBtn = document.querySelector('.action-use-output[data-receiver-id="rx-off"]');
+    const unpairBtn = document.querySelector('.action-unpair[data-receiver-id="rx-off"]');
+    assert(outputBtn && outputBtn.disabled, 'UX TEST 9: offline disables Use as Output');
+    assert(unpairBtn && !unpairBtn.disabled, 'UX TEST 9: offline enables Forget');
+  }
+
+  // 10. Paired + unqualified disables Use as Output
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-unqual', name: 'Kitchen Stream', paired: true, presence: 'verified_online', qualification: 'unqualified' }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const outputBtn = document.querySelector('.action-use-output[data-receiver-id="rx-unqual"]');
+    assert(outputBtn && outputBtn.disabled, 'UX TEST 10: unqualified disables Use as Output even if online');
+  }
+
+  // 11. Device with qualification: 'identity_mismatch' renders Identity Conflict badge
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-conflict', name: 'Suspect Stream', paired: false, qualification: 'identity_mismatch' }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const html = document.querySelector('#discover-result')?.innerHTML || '';
+    assert(html.includes('Identity Conflict'), 'UX TEST 11: identity_mismatch renders Identity Conflict badge');
+  }
+
+  // 12. Device with qualification: 'identity_mismatch' renders warning explanation
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-conflict', name: 'Suspect Stream', paired: false, qualification: 'identity_mismatch' }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const html = document.querySelector('#discover-result')?.innerHTML || '';
+    assert(html.includes('device-card__warning-text') && html.includes('Identity mismatch'), 'UX TEST 12: renders warning explanation message');
+  }
+
+  // 13. Paired device with identity_mismatch disables Use as Output and enables Forget
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-p-conflict', name: 'Tampered Paired', paired: true, presence: 'verified_online', qualification: 'identity_mismatch' }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const outputBtn = document.querySelector('.action-use-output[data-receiver-id="rx-p-conflict"]');
+    const unpairBtn = document.querySelector('.action-unpair[data-receiver-id="rx-p-conflict"]');
+    assert(outputBtn && outputBtn.disabled, 'UX TEST 13: paired identity_mismatch disables Use as Output');
+    assert(unpairBtn && !unpairBtn.disabled, 'UX TEST 13: paired identity_mismatch allows Forget');
+  }
+
+  // 14. Unpaired device with identity_mismatch disables Pair button
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-u-conflict', name: 'Tampered Unpaired', paired: false, pairable: true, qualification: 'identity_mismatch' }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const pairBtn = document.querySelector('.action-pair[data-receiver-id="rx-u-conflict"]');
+    assert(pairBtn && pairBtn.disabled, 'UX TEST 14: unpaired identity_mismatch disables Pair');
+  }
+
+  // 15. discoverDevices updates #devices-last-updated with timestamp
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ receivers: [] }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const tsText = document.querySelector('#devices-last-updated')?.textContent || '';
+    assert(/^Updated at \d\d:\d\d:\d\d$/.test(tsText), `UX TEST 15: timestamp updated (${tsText})`);
+  }
+
+  // 16. discoverDevices polling with identical data preserves card fingerprint without re-mutating innerHTML
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-stable', name: 'Stable Stream', paired: false, pairable: true }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const fp1 = document.querySelector('#discover-result')?.dataset.cardsFingerprint;
+    const cardEl = document.querySelector('#device-card-rx-stable');
+    cardEl.marker = 'custom-property';
+
+    // Poll with same data
+    await window.discoverDevices(true);
+    const fp2 = document.querySelector('#discover-result')?.dataset.cardsFingerprint;
+    const cardElAfter = document.querySelector('#device-card-rx-stable');
+    assert(fp1 === fp2, 'UX TEST 16: Fingerprint unchanged across identical poll');
+    assert(cardElAfter && cardElAfter.marker === 'custom-property', 'UX TEST 16: DOM element preserved across reconciliation');
+  }
+
+  // 17. discoverDevices preserves focus on active action button across reconciliation
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          receivers: [{ receiver_id: 'rx-foc', name: 'Focus Stream', paired: false, pairable: true }]
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const btn = document.querySelector('.action-pair[data-receiver-id="rx-foc"]');
+    document.activeElement = btn;
+
+    // Mutate data slightly to force reconciliation
+    window.MichiAPI.discoverDevices = async () => ({
+      receivers: [{ receiver_id: 'rx-foc', name: 'Focus Stream Updated', paired: false, pairable: true }]
+    });
+
+    await window.discoverDevices(true);
+    const newBtn = document.querySelector('.action-pair[data-receiver-id="rx-foc"]');
+    assert(document.activeElement === newBtn, 'UX TEST 17: Focus preserved on active action button after reconciliation');
+  }
+
+  // 18. openReceiverPairModal reveals modal with Step 1 and hides Step 2 and Step 3
+  {
+    const { sandbox, window, document } = makeSandbox();
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.openReceiverPairModal('rx-modal-test', 'Living Room');
+    const modal = document.querySelector('#receiver-pair-modal');
+    const step1 = document.querySelector('#pair-step-button');
+    const step2 = document.querySelector('#pair-step-pin');
+    const step3 = document.querySelector('#pair-step-success');
+
+    assert(modal && !modal.classList.contains('hidden'), 'UX TEST 18: Modal is visible');
+    assert(step1 && !step1.classList.contains('hidden'), 'UX TEST 18: Step 1 button prompt visible');
+    assert(step2 && step2.classList.contains('hidden'), 'UX TEST 18: Step 2 PIN entry hidden');
+    assert(step3 && step3.classList.contains('hidden'), 'UX TEST 18: Step 3 success hidden');
+  }
+
+  // 19. proceedToPairingPin renders countdown timer in mm:ss format
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/pair/start')) {
+        const exp = new Date(Date.now() + 60000).toISOString();
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          pairing_id: 'pair-sess-1', expires_at: exp
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.openReceiverPairModal('rx-timer-test', 'Test Device');
+    await window.proceedToPairingPin();
+
+    const timerVal = document.querySelector('#pair-timer-val')?.textContent || '';
+    assert(/^\d\d:\d\d$/.test(timerVal), `UX TEST 19: Timer rendered in mm:ss format (${timerVal})`);
+    window.closeReceiverPairModal();
+  }
+
+  // 20. submitReceiverPairPin rejects invalid PIN without calling API
+  {
+    let confirmCalled = false;
+    const fetchImpl = async (url) => {
+      if (url.includes('/pair/confirm')) {
+        confirmCalled = true;
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ status: 'paired' }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.ReceiverPairingState.pairingId = 'pair-test-id';
+    const pinInput = document.querySelector('#pair-pin-input');
+    pinInput.value = '123'; // invalid length
+
+    await window.submitReceiverPairPin();
+    assert(!confirmCalled, 'UX TEST 20: Short PIN rejected without API request');
+    const pinErr = document.querySelector('#pair-pin-error')?.textContent || '';
+    assert(pinErr.includes('6 dígitos'), 'UX TEST 20: Displays validation error for invalid PIN');
+  }
+
+  // 21. submitReceiverPairPin with presence='verified_online' displays "Receiver ready"
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/pair/confirm')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          status: 'paired', presence: 'verified_online'
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.ReceiverPairingState.pairingId = 'pair-verified-id';
+    const pinInput = document.querySelector('#pair-pin-input');
+    pinInput.value = '654321';
+
+    await window.submitReceiverPairPin();
+    const title = document.querySelector('#pair-success-title')?.textContent || '';
+    assert(title.includes('Receiver ready'), `UX TEST 21: Step 3 shows Receiver ready for verified_online (${title})`);
+  }
+
+  // 22. submitReceiverPairPin with presence='provisional_mdns' displays "Pairing completed. Waiting for signed Michi Link presence."
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/pair/confirm')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
+          status: 'paired', presence: 'provisional_mdns'
+        }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    window.ReceiverPairingState.pairingId = 'pair-prov-id';
+    const pinInput = document.querySelector('#pair-pin-input');
+    pinInput.value = '112233';
+
+    await window.submitReceiverPairPin();
+    const msg = document.querySelector('#pair-success-message')?.textContent || '';
+    assert(msg.includes('Waiting for signed Michi Link presence'), `UX TEST 22: Step 3 shows truthful provisional message (${msg})`);
   }
 
   console.log('======================================================================');

@@ -2515,3 +2515,124 @@ async fn test_i18n_locales_parity_and_completeness() {
         }
     }
 }
+
+#[test]
+fn test_webui_static_pairing_modal_structure_and_classes() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let static_dir = manifest_dir.join("static");
+
+    let html =
+        std::fs::read_to_string(static_dir.join("index.html")).expect("index.html must exist");
+    assert!(html.contains("id=\"receiver-pair-modal\""));
+    assert!(html.contains("class=\"modal-overlay"));
+    assert!(html.contains("pairing-modal-panel"));
+    assert!(html.contains("pairing-pin-input"));
+    assert!(html.contains("inputmode=\"numeric\""));
+    assert!(html.contains("autocomplete=\"one-time-code\""));
+    assert!(html.contains("pattern=\"[0-9]*\""));
+    assert!(html.contains("maxlength=\"6\""));
+    assert!(html.contains("id=\"devices-last-updated\""));
+    assert!(html.contains("id=\"pair-success-title\""));
+    assert!(html.contains("id=\"pair-success-message\""));
+
+    let css =
+        std::fs::read_to_string(static_dir.join("styles.css")).expect("styles.css must exist");
+    assert!(css.contains(".modal-overlay"));
+    assert!(css.contains(".pairing-modal-panel"));
+    assert!(css.contains(".pairing-pin-input"));
+    assert!(css.contains(".device-badge--error"));
+    assert!(css.contains(".device-card__warning-text"));
+    assert!(css.contains(".device-card--skeleton"));
+    assert!(css.contains("@keyframes skeleton-pulse"));
+}
+
+#[tokio::test]
+async fn test_pairing_presence_persistence_and_scent_store_truth() {
+    let (_app, pool, state) = make_app().await;
+
+    // Scent store must be injected into receiver manager
+    assert!(
+        state.receiver_manager.scent_store().is_some(),
+        "ReceiverSessionManager must have ScentStore injected"
+    );
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // 1. Persist receiver with ProvisionalMdns presence -> online must be FALSE
+    let prec_provisional = michi_db::PersistedReceiver {
+        id: "rx-test-prov".to_string(),
+        name: "Provisional Stream".to_string(),
+        device_type: "stream".to_string(),
+        base_url: "http://192.168.1.100:9090".to_string(),
+        paired: true,
+        online: false, // Provisional presence maps to online: false
+        audio_capabilities: "{}".to_string(),
+        last_seen: Some(now.clone()),
+        paired_at: Some(now.clone()),
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        michi_id: Some("prov-michi-1".to_string()),
+        capabilities_json: Some("{}".to_string()),
+        capabilities_observed_at: None,
+        authority_supported: true,
+    };
+    let cred_provisional = michi_db::PersistedReceiverCredential {
+        receiver_id: "rx-test-prov".to_string(),
+        ciphertext: vec![1, 2, 3],
+        nonce: vec![4, 5, 6],
+        version: 1,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    michi_db::persist_paired_receiver_transaction(&pool, &prec_provisional, &cred_provisional)
+        .await
+        .unwrap();
+
+    let prov = michi_db::get_receiver_db(&pool, "rx-test-prov")
+        .await
+        .unwrap()
+        .expect("rx-test-prov must exist in database");
+    assert!(
+        !prov.online,
+        "Provisional presence receiver must NOT be persisted as online"
+    );
+
+    // 2. Persist receiver with VerifiedOnline presence -> online must be TRUE
+    let prec_verified = michi_db::PersistedReceiver {
+        id: "rx-test-ver".to_string(),
+        name: "Verified Stream".to_string(),
+        device_type: "stream".to_string(),
+        base_url: "http://192.168.1.101:9090".to_string(),
+        paired: true,
+        online: true, // VerifiedOnline maps to online: true
+        audio_capabilities: "{}".to_string(),
+        last_seen: Some(now.clone()),
+        paired_at: Some(now.clone()),
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        michi_id: Some("ver-michi-1".to_string()),
+        capabilities_json: Some("{}".to_string()),
+        capabilities_observed_at: None,
+        authority_supported: true,
+    };
+    let cred_verified = michi_db::PersistedReceiverCredential {
+        receiver_id: "rx-test-ver".to_string(),
+        ciphertext: vec![7, 8, 9],
+        nonce: vec![10, 11, 12],
+        version: 1,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    michi_db::persist_paired_receiver_transaction(&pool, &prec_verified, &cred_verified)
+        .await
+        .unwrap();
+
+    let ver = michi_db::get_receiver_db(&pool, "rx-test-ver")
+        .await
+        .unwrap()
+        .expect("rx-test-ver must exist in database");
+    assert!(
+        ver.online,
+        "VerifiedOnline presence receiver must be persisted as online"
+    );
+}

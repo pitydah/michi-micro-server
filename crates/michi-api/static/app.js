@@ -3464,7 +3464,9 @@ var ReceiverPairingState = {
   pairingId: null,
   expiresAt: null,
   timerInterval: null,
-  phase: 'idle'
+  phase: 'idle',
+  originatingElement: null,
+  pairedReceiverPresence: null
 };
 
 var devicePollingInterval = null;
@@ -3490,10 +3492,56 @@ function stopDevicePolling() {
 window.startDevicePolling = startDevicePolling;
 window.stopDevicePolling = stopDevicePolling;
 
+function setupPairingModalListeners() {
+  var modal = $('#receiver-pair-modal');
+  if (!modal || modal.dataset.listenersBound) return;
+  modal.dataset.listenersBound = 'true';
+
+  modal.addEventListener('click', function (ev) {
+    if (ev.target === modal) {
+      closeReceiverPairModal();
+    }
+  });
+
+  document.addEventListener('keydown', function (ev) {
+    var m = $('#receiver-pair-modal');
+    if (!m || m.classList.contains('hidden') || m.style.display === 'none') return;
+    if (ev.key === 'Escape' || ev.keyCode === 27) {
+      ev.preventDefault();
+      closeReceiverPairModal();
+      return;
+    }
+    if (ev.key === 'Tab' || ev.keyCode === 9) {
+      var focusables = m.querySelectorAll('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])');
+      var visibleFocusables = Array.prototype.filter.call(focusables, function (el) {
+        return el.offsetParent !== null && !el.closest('.hidden');
+      });
+      if (visibleFocusables.length === 0) return;
+      var first = visibleFocusables[0];
+      var last = visibleFocusables[visibleFocusables.length - 1];
+
+      if (ev.shiftKey) {
+        if (document.activeElement === first || !m.contains(document.activeElement)) {
+          ev.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (document.activeElement === last || !m.contains(document.activeElement)) {
+          ev.preventDefault();
+          first.focus();
+        }
+      }
+    }
+  });
+}
+
 function openReceiverPairModal(receiverId, name) {
+  setupPairingModalListeners();
   ReceiverPairingState.receiverId = receiverId;
   ReceiverPairingState.receiverName = name;
   ReceiverPairingState.phase = 'prompt_button';
+  ReceiverPairingState.originatingElement = document.activeElement;
+  ReceiverPairingState.pairedReceiverPresence = null;
 
   var modal = $('#receiver-pair-modal');
   var title = $('#pair-modal-title');
@@ -3513,6 +3561,8 @@ function openReceiverPairModal(receiverId, name) {
   if (modal) {
     modal.classList.remove('hidden');
     modal.style.display = 'flex';
+    var readyBtn = $('#btn-pair-ready');
+    if (readyBtn) readyBtn.focus();
   }
 }
 window.openReceiverPairModal = openReceiverPairModal;
@@ -3522,9 +3572,11 @@ function closeReceiverPairModal() {
     clearInterval(ReceiverPairingState.timerInterval);
     ReceiverPairingState.timerInterval = null;
   }
+  var origin = ReceiverPairingState.originatingElement;
   ReceiverPairingState.phase = 'idle';
   ReceiverPairingState.receiverId = null;
   ReceiverPairingState.pairingId = null;
+  ReceiverPairingState.originatingElement = null;
 
   var stepSuccess = $('#pair-step-success');
   if (stepSuccess) stepSuccess.classList.add('hidden');
@@ -3534,8 +3586,18 @@ function closeReceiverPairModal() {
     modal.classList.add('hidden');
     modal.style.display = 'none';
   }
+  if (origin && typeof origin.focus === 'function') {
+    try { origin.focus(); } catch (_) {}
+  }
 }
 window.closeReceiverPairModal = closeReceiverPairModal;
+
+function formatPairTimer(sec) {
+  var s = Math.max(0, Math.floor(sec));
+  var mm = Math.floor(s / 60);
+  var ss = s % 60;
+  return (mm < 10 ? '0' : '') + mm + ':' + (ss < 10 ? '0' : '') + ss;
+}
 
 async function proceedToPairingPin() {
   if (!ReceiverPairingState.receiverId) return;
@@ -3581,12 +3643,12 @@ async function proceedToPairingPin() {
     }
 
     var timerEl = $('#pair-timer-val');
-    if (timerEl) timerEl.textContent = expiresSec + 's';
+    if (timerEl) timerEl.textContent = formatPairTimer(expiresSec);
 
     if (ReceiverPairingState.timerInterval) clearInterval(ReceiverPairingState.timerInterval);
     ReceiverPairingState.timerInterval = setInterval(function () {
       expiresSec--;
-      if (timerEl) timerEl.textContent = Math.max(0, expiresSec) + 's';
+      if (timerEl) timerEl.textContent = formatPairTimer(expiresSec);
       if (expiresSec <= 0) {
         clearInterval(ReceiverPairingState.timerInterval);
         ReceiverPairingState.timerInterval = null;
@@ -3631,7 +3693,7 @@ async function submitReceiverPairPin() {
   if (pinErr) pinErr.textContent = '';
 
   try {
-    await MichiAPI.confirmReceiverPair({
+    var confirmResp = await MichiAPI.confirmReceiverPair({
       pairing_id: ReceiverPairingState.pairingId,
       pin: pin
     });
@@ -3645,9 +3707,24 @@ async function submitReceiverPairPin() {
     var stepBtn = $('#pair-step-button');
     var stepPin = $('#pair-step-pin');
     var stepSuccess = $('#pair-step-success');
+    var successTitle = $('#pair-success-title');
+    var successMsg = $('#pair-success-message');
+
     if (stepBtn) stepBtn.classList.add('hidden');
     if (stepPin) stepPin.classList.add('hidden');
     if (stepSuccess) stepSuccess.classList.remove('hidden');
+
+    var pStatus = confirmResp && confirmResp.presence;
+    if (pStatus === 'verified_online') {
+      if (successTitle) successTitle.textContent = 'Receiver ready';
+      if (successMsg) successMsg.textContent = 'The device is verified online and ready to receive audio streams.';
+    } else {
+      if (successTitle) successTitle.textContent = 'Pairing completed';
+      if (successMsg) successMsg.textContent = 'Pairing completed. Waiting for signed Michi Link presence.';
+    }
+
+    var doneBtn = $('#btn-pair-done');
+    if (doneBtn) doneBtn.focus();
 
     showToast('✓ Dispositivo emparejado exitosamente');
     discoverDevices(true);
@@ -3679,7 +3756,11 @@ async function discoverDevices(silent) {
   if (!canPerformProtectedAction()) return;
   var resEl = $('#discover-result');
   if (resEl && !silent && !resEl.querySelector('.device-card')) {
-    resEl.innerHTML = '<span style="color:var(--text-3)">Scanning local network for Michi receivers...</span>';
+    resEl.innerHTML = '<div style="margin-bottom:0.5rem;color:var(--text-3);font-size:0.85rem">Refreshing Michi devices...</div>' +
+      '<div style="display:flex;flex-direction:column;gap:0.75rem">' +
+        '<div class="device-card device-card--skeleton"><div style="flex:1"><div class="skeleton-line" style="width:160px;height:16px;margin-bottom:6px"></div><div class="skeleton-line" style="width:240px;height:12px"></div></div><div class="skeleton-line" style="width:90px;height:28px"></div></div>' +
+        '<div class="device-card device-card--skeleton"><div style="flex:1"><div class="skeleton-line" style="width:140px;height:16px;margin-bottom:6px"></div><div class="skeleton-line" style="width:200px;height:12px"></div></div><div class="skeleton-line" style="width:90px;height:28px"></div></div>' +
+      '</div>';
   }
   try {
     var res = await MichiAPI.discoverDevices();
@@ -3687,28 +3768,39 @@ async function discoverDevices(silent) {
       throw new Error("API contract violation: 'receivers' array field required in discovery response");
     }
     var devs = res.receivers;
+
+    var updatedEl = $('#devices-last-updated');
+    if (updatedEl) {
+      var now = new Date();
+      var hh = String(now.getHours()).padStart(2, '0');
+      var mm = String(now.getMinutes()).padStart(2, '0');
+      var ss = String(now.getSeconds()).padStart(2, '0');
+      updatedEl.textContent = 'Updated at ' + hh + ':' + mm + ':' + ss;
+    }
+
     if (resEl) {
       if (devs.length === 0) {
+        resEl.dataset.cardsFingerprint = '';
         resEl.innerHTML = '<div class="empty-state"><p>No Michi receivers or devices discovered yet.</p></div>';
       } else {
         // Ensure event delegation listener is attached once
         if (!resEl.dataset.delegationBound) {
           resEl.dataset.delegationBound = 'true';
           resEl.addEventListener('click', function (ev) {
-            var pairBtn = ev.target.closest('.action-pair');
+            var pairBtn = ev.target.closest ? ev.target.closest('.action-pair') : null;
             if (pairBtn && !pairBtn.disabled) {
               var id = pairBtn.getAttribute('data-receiver-id');
               var n = pairBtn.getAttribute('data-name');
               openReceiverPairModal(id, n);
               return;
             }
-            var outputBtn = ev.target.closest('.action-use-output');
+            var outputBtn = ev.target.closest ? ev.target.closest('.action-use-output') : null;
             if (outputBtn && !outputBtn.disabled) {
               var id = outputBtn.getAttribute('data-receiver-id');
               selectOutputTarget('receiver', id);
               return;
             }
-            var unpairBtn = ev.target.closest('.action-unpair');
+            var unpairBtn = ev.target.closest ? ev.target.closest('.action-unpair') : null;
             if (unpairBtn && !unpairBtn.disabled) {
               var id = unpairBtn.getAttribute('data-receiver-id');
               unpairReceiver(id);
@@ -3717,21 +3809,25 @@ async function discoverDevices(silent) {
           });
         }
 
-        var cardsHtml = devs.map(function (d) {
+        var builtCards = devs.map(function (d) {
           var name = d.name || d.device_name || 'Michi Music Stream';
           var endpoint = d.base_url || d.host || (d.addresses && d.addresses[0]) || 'Endpoint unavailable';
           var isOnline = d.online === true || d.presence === 'verified_online';
           var isPaired = d.paired === true;
-          var receiverId = d.receiver_id || d.michi_id || '';
-          var stableId = d.michi_id || d.receiver_id || '';
+          var receiverId = d.receiver_id || d.michi_id || d.id || '';
+          var stableId = d.michi_id || d.receiver_id || d.id || '';
           var typeLabel = d.device_type === 'hifi' ? 'Hi-Fi' : 'Standard';
           var presence = d.presence || (isOnline ? 'verified_online' : 'offline');
-          var qualification = d.qualification || (isOnline ? 'qualified' : 'unqualified');
-          var pairable = d.pairable !== false;
+          var qualification = d.qualification || 'unqualified';
+          var isIdentityMismatch = qualification === 'identity_mismatch';
+          var pairable = d.pairable === true;
 
           var presenceBadgeClass = 'device-badge--offline';
           var presenceText = 'Offline';
-          if (presence === 'verified_online') {
+          if (isIdentityMismatch) {
+            presenceBadgeClass = 'device-badge--danger';
+            presenceText = 'Identity Conflict';
+          } else if (presence === 'verified_online') {
             presenceBadgeClass = 'device-badge--verified';
             presenceText = 'Verified Online';
           } else if (presence === 'provisional_mdns') {
@@ -3742,45 +3838,102 @@ async function discoverDevices(silent) {
             presenceText = 'Degraded';
           }
 
+          var conflictMsgHtml = isIdentityMismatch
+            ? '<div class="device-card__warning-text">Identity mismatch: device identity does not match cryptographic pinning.</div>'
+            : '';
+
           var actionsHtml = '';
           if (isPaired) {
-            var canUseOutput = (presence === 'verified_online') && (qualification === 'qualified');
-            actionsHtml = '<div class="device-card__actions">' +
-              '<span class="device-badge device-badge--paired">Paired</span>' +
-              '<button class="btn btn-sm btn-primary action-use-output" data-receiver-id="' + esc(receiverId) + '"' +
-                (canUseOutput ? '' : ' disabled title="Device must be verified online and qualified to use as output"') +
-              '>Use as Output</button>' +
-              '<button class="btn btn-sm btn-ghost action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
-              '</div>';
+            if (isIdentityMismatch) {
+              actionsHtml = '<div class="device-card__actions">' +
+                '<span class="device-badge device-badge--paired">Paired</span>' +
+                '<button class="btn btn-sm btn-primary action-use-output" data-receiver-id="' + esc(receiverId) + '" disabled title="Output blocked due to identity conflict">Use as Output</button>' +
+                '<button class="btn btn-sm btn-ghost action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
+                '</div>';
+            } else {
+              var canUseOutput = (presence === 'verified_online') && (qualification === 'qualified');
+              actionsHtml = '<div class="device-card__actions">' +
+                '<span class="device-badge device-badge--paired">Paired</span>' +
+                '<button class="btn btn-sm btn-primary action-use-output" data-receiver-id="' + esc(receiverId) + '"' +
+                  (canUseOutput ? '' : ' disabled title="Device must be verified online and qualified to use as output"') +
+                '>Use as Output</button>' +
+                '<button class="btn btn-sm btn-ghost action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
+                '</div>';
+            }
           } else {
-            actionsHtml = '<div class="device-card__actions">' +
-              '<span class="device-badge device-badge--offline">Unpaired</span>' +
-              '<button class="btn btn-sm btn-primary action-pair" data-receiver-id="' + esc(receiverId) + '" data-name="' + esc(name) + '"' +
-                (pairable ? '' : ' disabled title="Device is not in pairable state"') +
-              '>Pair</button>' +
-              '</div>';
+            if (isIdentityMismatch) {
+              actionsHtml = '<div class="device-card__actions">' +
+                '<span class="device-badge device-badge--offline">Unpaired</span>' +
+                '<button class="btn btn-sm btn-primary action-pair" data-receiver-id="' + esc(receiverId) + '" data-name="' + esc(name) + '" disabled title="Pairing blocked due to identity conflict">Pair</button>' +
+                '</div>';
+            } else {
+              actionsHtml = '<div class="device-card__actions">' +
+                '<span class="device-badge device-badge--offline">Unpaired</span>' +
+                '<button class="btn btn-sm btn-primary action-pair" data-receiver-id="' + esc(receiverId) + '" data-name="' + esc(name) + '"' +
+                  (pairable ? '' : ' disabled title="Device is not in pairable state"') +
+                '>Pair</button>' +
+                '</div>';
+            }
           }
 
-          return '<div class="device-card chain-item" id="device-card-' + esc(stableId) + '" data-stable-id="' + esc(stableId) + '">' +
+          var fingerprint = [stableId, name, endpoint, presence, qualification, isPaired, pairable].join(';;');
+
+          var html = '<div class="device-card chain-item" id="device-card-' + esc(stableId) + '" data-stable-id="' + esc(stableId) + '" data-fingerprint="' + esc(fingerprint) + '">' +
             '<div>' +
             '<div class="device-card__header">' +
             '<span class="device-card__title">' + esc(name) + '</span> ' +
             '<span class="device-badge ' + presenceBadgeClass + '">' + esc(presenceText) + '</span>' +
             '</div>' +
             '<div class="device-card__meta">' + esc(typeLabel) + ' · ' + esc(endpoint) + '</div>' +
+            conflictMsgHtml +
             '</div>' +
             actionsHtml +
             '</div>';
-        }).join('');
 
-        resEl.innerHTML = '<div style="display:flex;flex-direction:column;gap:0.75rem">' + cardsHtml + '</div>';
+          return {
+            stableId: stableId,
+            fingerprint: fingerprint,
+            html: html
+          };
+        });
+
+        var currentFingerprints = builtCards.map(function (c) { return c.fingerprint; }).join('|||');
+
+        // Only update DOM if card state actually changed, preventing loss of active element / focus
+        if (resEl.dataset.cardsFingerprint !== currentFingerprints || !resEl.querySelector('.device-card')) {
+          resEl.dataset.cardsFingerprint = currentFingerprints;
+
+          var activeEl = document.activeElement;
+          var activeId = activeEl && activeEl.getAttribute ? activeEl.getAttribute('data-receiver-id') : null;
+          var isPairActive = activeEl && activeEl.classList && activeEl.classList.contains('action-pair');
+          var isOutputActive = activeEl && activeEl.classList && activeEl.classList.contains('action-use-output');
+          var isUnpairActive = activeEl && activeEl.classList && activeEl.classList.contains('action-unpair');
+
+          var cardsHtml = builtCards.map(function (c) { return c.html; }).join('');
+          resEl.innerHTML = '<div id="devices-container" style="display:flex;flex-direction:column;gap:0.75rem">' + cardsHtml + '</div>';
+
+          if (activeId) {
+            var selector = isPairActive ? '.action-pair[data-receiver-id="' + activeId + '"]' :
+                           isOutputActive ? '.action-use-output[data-receiver-id="' + activeId + '"]' :
+                           isUnpairActive ? '.action-unpair[data-receiver-id="' + activeId + '"]' : null;
+            if (selector) {
+              var btn = resEl.querySelector ? resEl.querySelector(selector) : null;
+              if (btn && typeof btn.focus === 'function' && !btn.disabled) {
+                try { btn.focus(); } catch (_) {}
+              }
+            }
+          }
+        }
       }
     }
     if (!silent) {
       showToast('Discovery complete');
     }
   } catch (e) {
-    if (resEl) resEl.innerHTML = '<span style="color:var(--error)">✗ Discovery failed: ' + esc(e.message) + '</span>';
+    if (resEl) {
+      resEl.dataset.cardsFingerprint = '';
+      resEl.innerHTML = '<span style="color:var(--error)">✗ Discovery failed: ' + esc(e.message) + '</span>';
+    }
     if (!silent) {
       showToast('Discovery failed: ' + e.message, true);
     }
