@@ -36,13 +36,22 @@ impl ReceiverDiscoveryBridge {
                 michi_id,
                 old: _,
                 new,
+                presence_source,
+                verified,
             } => {
                 let registry_arc = self.receiver_manager.registry().await;
                 let mut reg = registry_arc.write().await;
                 if let Some(entry) = reg.get_mut(&michi_id) {
                     debug!(michi_id = %michi_id, new_endpoint = %new, "ReceiverDiscoveryBridge: updating endpoint");
                     entry.base_url = new.to_string();
-                    entry.presence = ReceiverPresence::VerifiedOnline;
+                    entry.presence = match presence_source {
+                        michi_connect::scent_store::ScentPresenceSource::WhiskerSigned
+                            if verified =>
+                        {
+                            ReceiverPresence::VerifiedOnline
+                        }
+                        _ => ReceiverPresence::ProvisionalMdns,
+                    };
                     entry.last_seen = Some(chrono::Utc::now());
                 }
             }
@@ -66,9 +75,8 @@ impl ReceiverDiscoveryBridge {
         {
             return;
         }
-        let is_stream_service = record.service == "michi-stream-standard"
-            || record.service == "michi-stream-hifi"
-            || record.service.starts_with("michi-stream");
+        let is_stream_service =
+            record.service == "michi-stream-standard" || record.service == "michi-stream-hifi";
         let has_audio_role = record.roles.iter().any(|r| r == "audio_receiver");
         if !is_stream_service || !has_audio_role {
             return;
@@ -84,12 +92,10 @@ impl ReceiverDiscoveryBridge {
         };
 
         let target_presence = match record.presence_source {
-            michi_connect::scent_store::ScentPresenceSource::WhiskerSigned => {
+            michi_connect::scent_store::ScentPresenceSource::WhiskerSigned if record.verified => {
                 ReceiverPresence::VerifiedOnline
             }
-            michi_connect::scent_store::ScentPresenceSource::MdnsProvisional => {
-                ReceiverPresence::ProvisionalMdns
-            }
+            _ => ReceiverPresence::ProvisionalMdns,
         };
 
         let registry_arc = self.receiver_manager.registry().await;
@@ -97,9 +103,7 @@ impl ReceiverDiscoveryBridge {
 
         if let Some(entry) = reg.get_mut(&record.michi_id) {
             entry.base_url = base_url_str;
-            if entry.presence != ReceiverPresence::VerifiedOnline {
-                entry.presence = target_presence;
-            }
+            entry.presence = target_presence;
             entry.last_seen = Some(chrono::Utc::now());
             entry.name = record.name.clone();
             entry.device_type = if record.service.contains("hifi") {
@@ -114,9 +118,7 @@ impl ReceiverDiscoveryBridge {
                 if entry.receiver_id == record.device_id || entry.receiver_id == record.michi_id {
                     entry.michi_id = Some(record.michi_id.clone());
                     entry.base_url = base_url_str.clone();
-                    if entry.presence != ReceiverPresence::VerifiedOnline {
-                        entry.presence = target_presence;
-                    }
+                    entry.presence = target_presence;
                     entry.last_seen = Some(chrono::Utc::now());
                     entry.name = record.name.clone();
                     found_legacy = true;
@@ -391,6 +393,8 @@ mod tests {
                 michi_id: "stream-dhcp".to_string(),
                 old: Some(Url::parse("http://192.168.1.100:8080/").unwrap()),
                 new: new_url.clone(),
+                presence_source: michi_connect::scent_store::ScentPresenceSource::WhiskerSigned,
+                verified: true,
             })
             .await;
 

@@ -243,10 +243,10 @@ pub async fn receivers_handler(
         .list()
         .iter()
         .map(|e| {
-            let online = e.presence == michi_receivers::models::ReceiverPresence::VerifiedOnline
-                || e.last_seen
-                    .map(|ls| (chrono::Utc::now() - ls).num_seconds() < 90)
-                    .unwrap_or(false);
+            let online = e.presence == michi_receivers::models::ReceiverPresence::VerifiedOnline;
+            let verified = e.presence == michi_receivers::models::ReceiverPresence::VerifiedOnline;
+            let reachable = e.presence == michi_receivers::models::ReceiverPresence::VerifiedOnline
+                || e.presence == michi_receivers::models::ReceiverPresence::ProvisionalMdns;
             serde_json::json!({
                 "id": e.receiver_id,
                 "receiver_id": e.receiver_id,
@@ -254,8 +254,11 @@ pub async fn receivers_handler(
                 "name": e.name,
                 "device_type": e.device_type,
                 "host": e.base_url,
+                "base_url": e.base_url,
                 "paired": e.paired,
                 "online": online,
+                "verified": verified,
+                "reachable": reachable,
                 "presence": e.presence,
                 "authority_supported": e.authority_supported,
                 "session_active": e.active_session_id.is_some(),
@@ -778,12 +781,15 @@ pub async fn discover_mdns_handler(
             michi_receivers::ReceiverPresence::Unknown => "unknown",
         };
         let is_online = entry.presence == michi_receivers::ReceiverPresence::VerifiedOnline;
-        let verified = entry.capabilities_verified_at.is_some()
-            || state
-                .scent_store
-                .get(entry.michi_id())
-                .map(|r| r.verified)
-                .unwrap_or(false);
+        let verified = entry.presence == michi_receivers::ReceiverPresence::VerifiedOnline;
+        let reachable =
+            is_online || entry.presence == michi_receivers::ReceiverPresence::ProvisionalMdns;
+        let is_valid_url = Url::parse(&entry.base_url).is_ok();
+        let pairable = !entry.paired
+            && reachable
+            && is_valid_url
+            && entry.qualification
+                != michi_receivers::models::ReceiverQualification::IdentityMismatch;
         let host_or_addr = Url::parse(&entry.base_url)
             .ok()
             .and_then(|u| u.host_str().map(|h| h.to_string()))
@@ -800,11 +806,12 @@ pub async fn discover_mdns_handler(
             "addresses": vec![host_or_addr],
             "verified": verified,
             "online": is_online,
+            "reachable": reachable,
             "paired": entry.paired,
             "presence": presence_str,
             "last_seen": entry.last_seen.map(|d| d.to_rfc3339()),
             "qualification": entry.compute_qualification(),
-            "pairable": !entry.paired,
+            "pairable": pairable,
         }));
     }
 
@@ -838,6 +845,10 @@ pub async fn discover_mdns_handler(
             ),
         };
 
+        let is_valid_url = Url::parse(&base_url_str).is_ok();
+        let reachable = rec.online;
+        let pairable = reachable && is_valid_url;
+
         seen_ids.insert(rec.michi_id.clone());
         receivers.push(serde_json::json!({
             "receiver_id": rec.michi_id.clone(),
@@ -850,11 +861,12 @@ pub async fn discover_mdns_handler(
             "addresses": vec![host_or_addr],
             "verified": is_verified,
             "online": is_online,
+            "reachable": reachable,
             "paired": false,
             "presence": presence_str,
             "last_seen": if is_online { Some(chrono::Utc::now().to_rfc3339()) } else { None },
             "qualification": michi_receivers::models::ReceiverQualification::NeedsCapabilityRefresh,
-            "pairable": true,
+            "pairable": pairable,
         }));
     }
 
@@ -1407,6 +1419,37 @@ pub async fn set_room_mode_handler(
 pub async fn whisker_discovery_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let metrics = &state.whisker_metrics;
     let active_scent = state.scent_store.list_active();
+    let all_scent = state.scent_store.list();
+    let provisional_mdns_count = all_scent
+        .iter()
+        .filter(|r| {
+            r.online
+                && r.presence_source
+                    == michi_connect::scent_store::ScentPresenceSource::MdnsProvisional
+        })
+        .count();
+    let verified_stream_count = all_scent
+        .iter()
+        .filter(|r| {
+            r.online
+                && r.verified
+                && r.presence_source
+                    == michi_connect::scent_store::ScentPresenceSource::WhiskerSigned
+        })
+        .count();
+    let offline_stream_count = all_scent.iter().filter(|r| !r.online).count();
+
+    let joined = metrics.joined_interfaces.read().unwrap().clone();
+    let interface_names: Vec<String> = joined.iter().map(|i| i.name.clone()).collect();
+    let interface_ipv4: Vec<String> = joined.iter().map(|i| i.ip.to_string()).collect();
+
+    let last_verified = metrics
+        .last_verified_announce_at
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let last_packet = metrics
+        .last_packet_at
+        .load(std::sync::atomic::Ordering::Relaxed);
+
     let scent_items: Vec<serde_json::Value> = active_scent
         .into_iter()
         .map(|r| {
@@ -1428,6 +1471,16 @@ pub async fn whisker_discovery_handler(State(state): State<AppState>) -> Json<se
         .collect();
     Json(serde_json::json!({
         "status": "ok",
+        "multicast_group": metrics.multicast_group.read().unwrap().clone(),
+        "multicast_port": metrics.multicast_port.load(std::sync::atomic::Ordering::Relaxed),
+        "interfaces_joined": joined.len(),
+        "interface_names": interface_names,
+        "interface_ipv4": interface_ipv4,
+        "provisional_mdns_count": provisional_mdns_count,
+        "verified_stream_count": verified_stream_count,
+        "offline_stream_count": offline_stream_count,
+        "last_verified_announce_at": if last_verified > 0 { Some(last_verified) } else { None },
+        "last_packet_at": if last_packet > 0 { Some(last_packet) } else { None },
         "packets_received": metrics.packets_received.load(std::sync::atomic::Ordering::Relaxed),
         "announces_verified": metrics.announces_verified.load(std::sync::atomic::Ordering::Relaxed),
         "signature_rejected": metrics.signature_rejected.load(std::sync::atomic::Ordering::Relaxed),

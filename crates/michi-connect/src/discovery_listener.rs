@@ -11,7 +11,7 @@ use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-/// Counters for diagnostic observability.
+/// Counters and state for diagnostic observability.
 #[derive(Debug, Default)]
 pub struct WhiskerMetrics {
     pub packets_received: AtomicU64,
@@ -20,6 +20,11 @@ pub struct WhiskerMetrics {
     pub timestamp_rejected: AtomicU64,
     pub replay_rejected: AtomicU64,
     pub non_stream_filtered: AtomicU64,
+    pub last_verified_announce_at: AtomicU64,
+    pub last_packet_at: AtomicU64,
+    pub multicast_group: Arc<std::sync::RwLock<String>>,
+    pub multicast_port: std::sync::atomic::AtomicU16,
+    pub joined_interfaces: Arc<std::sync::RwLock<Vec<MulticastInterfaceCandidate>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,17 +47,19 @@ pub fn is_virtual_or_docker(name: &str) -> bool {
         || lower.starts_with("br-")
         || lower.starts_with("veth")
         || lower.starts_with("virbr")
+        || lower.starts_with("podman")
         || lower.starts_with("cni")
         || lower.starts_with("flannel")
 }
 
 /// Filter and prioritize network interfaces for multicast listening.
 /// Excludes loopback, link-local (169.254/16), unspecified, and broadcast.
-/// Prioritizes physical RFC1918 interfaces over virtual bridges/docker.
+/// If at least one physical LAN interface is available, excludes virtual/docker/bridge interfaces.
+/// Prioritizes RFC1918 interfaces and deduplicates by IPv4 address.
 pub fn select_multicast_interfaces(
     candidates: &[MulticastInterfaceCandidate],
 ) -> Vec<MulticastInterfaceCandidate> {
-    let mut filtered: Vec<MulticastInterfaceCandidate> = candidates
+    let valid: Vec<MulticastInterfaceCandidate> = candidates
         .iter()
         .filter(|c| {
             let octets = c.ip.octets();
@@ -73,18 +80,24 @@ pub fn select_multicast_interfaces(
         .cloned()
         .collect();
 
-    filtered.sort_by_key(|c| {
-        let is_virt = is_virtual_or_docker(&c.name);
-        let rfc1918 = is_rfc1918(&c.ip);
-        match (is_virt, rfc1918) {
-            (false, true) => 0,  // Physical RFC1918
-            (false, false) => 1, // Physical Other
-            (true, true) => 2,   // Virtual RFC1918 (docker/bridges)
-            (true, false) => 3,  // Virtual Other
-        }
-    });
+    let (mut physical, mut virtuals): (Vec<_>, Vec<_>) = valid
+        .into_iter()
+        .partition(|c| !is_virtual_or_docker(&c.name));
 
-    filtered
+    let dedup_by_ip = |list: &mut Vec<MulticastInterfaceCandidate>| {
+        let mut seen = std::collections::HashSet::new();
+        list.retain(|c| seen.insert(c.ip));
+    };
+
+    if !physical.is_empty() {
+        physical.sort_by_key(|c| if is_rfc1918(&c.ip) { 0 } else { 1 });
+        dedup_by_ip(&mut physical);
+        physical
+    } else {
+        virtuals.sort_by_key(|c| if is_rfc1918(&c.ip) { 0 } else { 1 });
+        dedup_by_ip(&mut virtuals);
+        virtuals
+    }
 }
 
 pub struct WhiskerDiscoveryListener {
@@ -105,6 +118,10 @@ impl WhiskerDiscoveryListener {
         scent: Arc<ScentStore>,
         metrics: Arc<WhiskerMetrics>,
     ) -> Self {
+        *metrics.multicast_group.write().unwrap() = MULTICAST_GROUP.to_string();
+        metrics
+            .multicast_port
+            .store(MULTICAST_PORT, Ordering::Relaxed);
         Self {
             engine,
             scent,
@@ -122,10 +139,13 @@ impl WhiskerDiscoveryListener {
         group: Ipv4Addr,
         port: u16,
     ) -> Self {
+        let metrics = Arc::new(WhiskerMetrics::default());
+        *metrics.multicast_group.write().unwrap() = group.to_string();
+        metrics.multicast_port.store(port, Ordering::Relaxed);
         Self {
             engine,
             scent,
-            metrics: Arc::new(WhiskerMetrics::default()),
+            metrics,
             multicast_group: group,
             multicast_port: port,
         }
@@ -158,8 +178,19 @@ impl WhiskerDiscoveryListener {
         let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, self.multicast_port);
         socket.bind(&bind_addr.into())?;
 
+        self.metrics.joined_interfaces.write().unwrap().clear();
+
         if let Some(iface) = interface_ip {
             socket.join_multicast_v4(&self.multicast_group, &iface)?;
+            self.metrics
+                .joined_interfaces
+                .write()
+                .unwrap()
+                .push(MulticastInterfaceCandidate {
+                    name: "explicit".into(),
+                    ip: iface,
+                    is_loopback: false,
+                });
             info!(
                 group = %self.multicast_group,
                 port = self.multicast_port,
@@ -196,6 +227,7 @@ impl WhiskerDiscoveryListener {
                                 ip = %iface.ip,
                                 "Whisker joined multicast group on interface"
                             );
+                            self.metrics.joined_interfaces.write().unwrap().push(iface);
                             joined_count += 1;
                         }
                         Err(e) => {
@@ -227,6 +259,13 @@ impl WhiskerDiscoveryListener {
         self.metrics
             .packets_received
             .fetch_add(1, Ordering::Relaxed);
+        let now_epoch_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.metrics
+            .last_packet_at
+            .store(now_epoch_ms, Ordering::Relaxed);
 
         let announce: Announce = match serde_json::from_slice(buf) {
             Ok(ann) => ann,
@@ -263,6 +302,9 @@ impl WhiskerDiscoveryListener {
                 self.metrics
                     .announces_verified
                     .fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .last_verified_announce_at
+                    .store(now_epoch_ms, Ordering::Relaxed);
                 let service_str = match announce.service {
                     Service::StreamStandard => "michi-stream-standard",
                     Service::StreamHiFi => "michi-stream-hifi",
@@ -562,14 +604,100 @@ mod tests {
         assert!(!selected.iter().any(|c| c.name == "lo"));
         assert!(!selected.iter().any(|c| c.name == "eth1:linklocal"));
 
-        // Priority order:
-        // 1. eth0 (Physical RFC1918)
-        // 2. wan0 (Physical Other)
-        // 3. docker0 / br-lan (Virtual RFC1918)
+        // Physical LAN exists -> virtual interfaces (docker0, br-lan) are completely excluded!
+        assert_eq!(selected.len(), 2);
         assert_eq!(selected[0].name, "eth0");
         assert_eq!(selected[1].name, "wan0");
-        let virt_names: Vec<String> = selected[2..].iter().map(|c| c.name.clone()).collect();
-        assert!(virt_names.contains(&"docker0".to_string()));
-        assert!(virt_names.contains(&"br-lan".to_string()));
+    }
+
+    #[test]
+    fn test_select_multicast_interfaces_scenarios() {
+        // eth0 + docker0 -> eth0 only
+        let res1 = select_multicast_interfaces(&[
+            MulticastInterfaceCandidate {
+                name: "eth0".into(),
+                ip: "192.168.1.50".parse().unwrap(),
+                is_loopback: false,
+            },
+            MulticastInterfaceCandidate {
+                name: "docker0".into(),
+                ip: "172.17.0.1".parse().unwrap(),
+                is_loopback: false,
+            },
+        ]);
+        assert_eq!(res1.len(), 1);
+        assert_eq!(res1[0].name, "eth0");
+
+        // enp3s0 + br-xxx -> enp3s0 only
+        let res2 = select_multicast_interfaces(&[
+            MulticastInterfaceCandidate {
+                name: "enp3s0".into(),
+                ip: "10.0.1.20".parse().unwrap(),
+                is_loopback: false,
+            },
+            MulticastInterfaceCandidate {
+                name: "br-deadbeef".into(),
+                ip: "172.18.0.1".parse().unwrap(),
+                is_loopback: false,
+            },
+        ]);
+        assert_eq!(res2.len(), 1);
+        assert_eq!(res2[0].name, "enp3s0");
+
+        // wlan0 -> wlan0
+        let res3 = select_multicast_interfaces(&[MulticastInterfaceCandidate {
+            name: "wlan0".into(),
+            ip: "192.168.31.82".parse().unwrap(),
+            is_loopback: false,
+        }]);
+        assert_eq!(res3.len(), 1);
+        assert_eq!(res3[0].name, "wlan0");
+
+        // physical public + docker RFC1918 -> physical usable
+        let res4 = select_multicast_interfaces(&[
+            MulticastInterfaceCandidate {
+                name: "eth0".into(),
+                ip: "198.51.100.1".parse().unwrap(),
+                is_loopback: false,
+            },
+            MulticastInterfaceCandidate {
+                name: "docker0".into(),
+                ip: "172.17.0.1".parse().unwrap(),
+                is_loopback: false,
+            },
+        ]);
+        assert_eq!(res4.len(), 1);
+        assert_eq!(res4[0].name, "eth0");
+
+        // virtual only -> fallback virtual
+        let res5 = select_multicast_interfaces(&[
+            MulticastInterfaceCandidate {
+                name: "docker0".into(),
+                ip: "172.17.0.1".parse().unwrap(),
+                is_loopback: false,
+            },
+            MulticastInterfaceCandidate {
+                name: "veth123".into(),
+                ip: "10.42.0.1".parse().unwrap(),
+                is_loopback: false,
+            },
+        ]);
+        assert_eq!(res5.len(), 2);
+
+        // duplicates -> deduplicated
+        let res6 = select_multicast_interfaces(&[
+            MulticastInterfaceCandidate {
+                name: "eth0".into(),
+                ip: "192.168.1.100".parse().unwrap(),
+                is_loopback: false,
+            },
+            MulticastInterfaceCandidate {
+                name: "eth0:1".into(),
+                ip: "192.168.1.100".parse().unwrap(),
+                is_loopback: false,
+            },
+        ]);
+        assert_eq!(res6.len(), 1);
+        assert_eq!(res6[0].ip, "192.168.1.100".parse::<Ipv4Addr>().unwrap());
     }
 }

@@ -175,6 +175,16 @@ pub struct WhiskerStatus {
     pub replay_rejected: u64,
     pub non_stream_filtered: u64,
     pub scent_entries: usize,
+    pub multicast_group: String,
+    pub multicast_port: u16,
+    pub interfaces_joined: usize,
+    pub interface_names: Vec<String>,
+    pub interface_ipv4: Vec<String>,
+    pub provisional_mdns_count: usize,
+    pub verified_stream_count: usize,
+    pub offline_stream_count: usize,
+    pub last_verified_announce_at: Option<u64>,
+    pub last_packet_at: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -497,6 +507,107 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
         degraded = true;
     }
 
+    let disabled_mods = state.disabled_modules.read().await;
+    let mut homeassistant = michi_homeassistant::get_runtime_status();
+    if disabled_mods.contains("homeassistant") {
+        homeassistant.enabled = false;
+    }
+    drop(disabled_mods);
+
+    let whisker = {
+        let all_scent = state.scent_store.list();
+        let provisional_mdns_count = all_scent
+            .iter()
+            .filter(|r| {
+                r.online
+                    && r.presence_source
+                        == michi_connect::scent_store::ScentPresenceSource::MdnsProvisional
+            })
+            .count();
+        let verified_stream_count = all_scent
+            .iter()
+            .filter(|r| {
+                r.online
+                    && r.verified
+                    && r.presence_source
+                        == michi_connect::scent_store::ScentPresenceSource::WhiskerSigned
+            })
+            .count();
+        let offline_stream_count = all_scent.iter().filter(|r| !r.online).count();
+
+        let joined = state
+            .whisker_metrics
+            .joined_interfaces
+            .read()
+            .unwrap()
+            .clone();
+        let interface_names = joined.iter().map(|i| i.name.clone()).collect();
+        let interface_ipv4 = joined.iter().map(|i| i.ip.to_string()).collect();
+
+        let last_verified = state
+            .whisker_metrics
+            .last_verified_announce_at
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let last_packet = state
+            .whisker_metrics
+            .last_packet_at
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        WhiskerStatus {
+            packets_received: state
+                .whisker_metrics
+                .packets_received
+                .load(std::sync::atomic::Ordering::Relaxed),
+            announces_verified: state
+                .whisker_metrics
+                .announces_verified
+                .load(std::sync::atomic::Ordering::Relaxed),
+            signature_rejected: state
+                .whisker_metrics
+                .signature_rejected
+                .load(std::sync::atomic::Ordering::Relaxed),
+            timestamp_rejected: state
+                .whisker_metrics
+                .timestamp_rejected
+                .load(std::sync::atomic::Ordering::Relaxed),
+            replay_rejected: state
+                .whisker_metrics
+                .replay_rejected
+                .load(std::sync::atomic::Ordering::Relaxed),
+            non_stream_filtered: state
+                .whisker_metrics
+                .non_stream_filtered
+                .load(std::sync::atomic::Ordering::Relaxed),
+            scent_entries: state.scent_store.list_active().len(),
+            multicast_group: state
+                .whisker_metrics
+                .multicast_group
+                .read()
+                .unwrap()
+                .clone(),
+            multicast_port: state
+                .whisker_metrics
+                .multicast_port
+                .load(std::sync::atomic::Ordering::Relaxed),
+            interfaces_joined: joined.len(),
+            interface_names,
+            interface_ipv4,
+            provisional_mdns_count,
+            verified_stream_count,
+            offline_stream_count,
+            last_verified_announce_at: if last_verified > 0 {
+                Some(last_verified)
+            } else {
+                None
+            },
+            last_packet_at: if last_packet > 0 {
+                Some(last_packet)
+            } else {
+                None
+            },
+        }
+    };
+
     Json(DiagnosticsReport {
         healthy,
         degraded,
@@ -549,47 +660,14 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
             client_available: registered_receivers > 0,
             registered_receivers,
         },
-        whisker: WhiskerStatus {
-            packets_received: state
-                .whisker_metrics
-                .packets_received
-                .load(std::sync::atomic::Ordering::Relaxed),
-            announces_verified: state
-                .whisker_metrics
-                .announces_verified
-                .load(std::sync::atomic::Ordering::Relaxed),
-            signature_rejected: state
-                .whisker_metrics
-                .signature_rejected
-                .load(std::sync::atomic::Ordering::Relaxed),
-            timestamp_rejected: state
-                .whisker_metrics
-                .timestamp_rejected
-                .load(std::sync::atomic::Ordering::Relaxed),
-            replay_rejected: state
-                .whisker_metrics
-                .replay_rejected
-                .load(std::sync::atomic::Ordering::Relaxed),
-            non_stream_filtered: state
-                .whisker_metrics
-                .non_stream_filtered
-                .load(std::sync::atomic::Ordering::Relaxed),
-            scent_entries: state.scent_store.list_active().len(),
-        },
+        whisker,
         player_compatibility: PlayerCompatibility::new(
             total_queues > 0,
             playback_restored,
             registered_receivers > 0,
             active_import_sessions > 0,
         ),
-        homeassistant: {
-            let mut ha = michi_homeassistant::get_runtime_status();
-            let disabled_mods = state.disabled_modules.read().await;
-            if disabled_mods.contains("homeassistant") {
-                ha.enabled = false;
-            }
-            ha
-        },
+        homeassistant,
         system: SystemStatus {
             memory_rss_mb,
             memory_vm_mb,
