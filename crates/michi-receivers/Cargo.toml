@@ -29,5 +29,6 @@ michi-connect = { path = "../michi-connect" }
 [dev-dependencies]
 tokio.workspace = true
 uuid.workspace = true
+axum.workspace = true
 michi-playback = { path = "../michi-playback" }
 michi-core = { path = "../michi-core" }

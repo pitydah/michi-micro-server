@@ -2168,6 +2168,7 @@ name = "michi-receivers"
 version = "1.0.0-rc.4"
 dependencies = [
  "async-trait",
+ "axum",
  "base64",
  "blake3",
  "chacha20poly1305",

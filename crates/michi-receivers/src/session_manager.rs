@@ -161,47 +161,63 @@ impl ReceiverSessionManager {
 
         let pairing_id = uuid::Uuid::new_v4().to_string();
 
-        let pinned_michi_id = start_resp
-            .server_michi_id
-            .clone()
-            .or_else(|| info.michi_id.clone());
-        let pinned_public_key = start_resp
-            .server_public_key
-            .clone()
-            .or_else(|| info.public_key.clone());
+        let expected_server_id = info
+            .server_id
+            .as_ref()
+            .or(info.device_id.as_ref())
+            .ok_or_else(|| {
+                "CONTRACT_VIOLATION: server_id is required in receiver info".to_string()
+            })?
+            .clone();
+        let expected_michi_id = info
+            .michi_id
+            .as_ref()
+            .ok_or_else(|| "CONTRACT_VIOLATION: michi_id is required in receiver info".to_string())?
+            .clone();
+        let expected_public_key = info
+            .public_key
+            .as_ref()
+            .ok_or_else(|| {
+                "CONTRACT_VIOLATION: public_key is required in receiver info".to_string()
+            })?
+            .clone();
 
-        if let Some(ref pk_b64) = pinned_public_key {
-            let pk_bytes = michi_identity::decode_base64url_strict(pk_b64).map_err(|e| {
-                format!("INVALID_RECEIVER_IDENTITY: invalid public_key base64url: {e}")
-            })?;
-            if pk_bytes.len() != 32 {
-                return Err("INVALID_RECEIVER_IDENTITY: public_key must be 32 bytes".to_string());
-            }
-            let key_bytes: [u8; 32] = pk_bytes.as_slice().try_into().map_err(|_| {
-                "INVALID_RECEIVER_IDENTITY: failed converting public key bytes".to_string()
-            })?;
-            let verifying_key =
-                ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).map_err(|e| {
-                    format!("INVALID_RECEIVER_IDENTITY: invalid Ed25519 public key: {e}")
-                })?;
-            let derived_id =
-                michi_identity::types::MichiId::from_public_key(&verifying_key).to_base64url();
+        let pk_bytes = michi_identity::decode_base64url_strict(&expected_public_key)
+            .map_err(|e| format!("CONTRACT_VIOLATION: invalid public_key base64url: {e}"))?;
+        if pk_bytes.len() != 32 {
+            return Err("CONTRACT_VIOLATION: public_key must be 32 bytes".to_string());
+        }
+        let key_bytes: [u8; 32] = pk_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| "CONTRACT_VIOLATION: failed converting public key bytes".to_string())?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|e| format!("CONTRACT_VIOLATION: invalid Ed25519 public key: {e}"))?;
+        let derived_id =
+            michi_identity::types::MichiId::from_public_key(&verifying_key).to_base64url();
 
-            if let Some(ref mid) = pinned_michi_id {
-                if mid != &derived_id {
-                    return Err(format!(
-                        "INVALID_RECEIVER_IDENTITY: michi_id '{mid}' does not match derived public_key identity '{derived_id}'"
-                    ));
-                }
-            }
+        if expected_michi_id != derived_id {
+            return Err(format!(
+                "CONTRACT_VIOLATION: michi_id '{expected_michi_id}' does not match derived public_key identity '{derived_id}'"
+            ));
         }
 
-        if let (Some(ref s_id), Some(ref i_id)) = (&start_resp.server_michi_id, &info.michi_id) {
-            if s_id != i_id {
-                return Err(format!(
-                    "INVALID_RECEIVER_IDENTITY: pair_start server_michi_id '{s_id}' does not match server/info michi_id '{i_id}'"
-                ));
-            }
+        let start_michi_id = start_resp.server_michi_id.as_ref().ok_or_else(|| {
+            "CONTRACT_VIOLATION: server_michi_id is required in pair_start response".to_string()
+        })?;
+        let start_public_key = start_resp.server_public_key.as_ref().ok_or_else(|| {
+            "CONTRACT_VIOLATION: server_public_key is required in pair_start response".to_string()
+        })?;
+
+        if start_michi_id != &expected_michi_id {
+            return Err(format!(
+                "CONTRACT_VIOLATION: pair_start server_michi_id '{start_michi_id}' does not match server/info michi_id '{expected_michi_id}'"
+            ));
+        }
+        if start_public_key != &expected_public_key {
+            return Err(format!(
+                "CONTRACT_VIOLATION: pair_start server_public_key '{start_public_key}' does not match server/info public_key '{expected_public_key}'"
+            ));
         }
 
         let pending = PendingReceiverPairing {
@@ -212,8 +228,11 @@ impl ReceiverSessionManager {
             initiator_id: initiator_id.to_string(),
             created_at: now,
             expires_at,
-            server_michi_id: pinned_michi_id,
-            server_public_key: pinned_public_key,
+            server_michi_id: Some(expected_michi_id.clone()),
+            server_public_key: Some(expected_public_key.clone()),
+            expected_server_id,
+            expected_michi_id,
+            expected_public_key,
         };
 
         // Clean expired pairings and save new pending pairing
@@ -245,6 +264,28 @@ impl ReceiverSessionManager {
         } else {
             ReceiverClient::new(&pending.receiver_base_url)
         };
+
+        // Enforce identity pre-verification BEFORE calling pair_confirm
+        let pre_info = client.get_info().await?;
+        let pre_server_id = pre_info.server_id.as_ref().or(pre_info.device_id.as_ref());
+        if pre_server_id != Some(&pending.expected_server_id) {
+            return Err(format!(
+                "IDENTITY_MISMATCH: receiver server_id changed before pair_confirm (expected '{}', got '{:?}')",
+                pending.expected_server_id, pre_server_id
+            ));
+        }
+        if pre_info.michi_id.as_ref() != Some(&pending.expected_michi_id) {
+            return Err(format!(
+                "IDENTITY_MISMATCH: receiver michi_id changed before pair_confirm (expected '{}', got '{:?}')",
+                pending.expected_michi_id, pre_info.michi_id
+            ));
+        }
+        if pre_info.public_key.as_ref() != Some(&pending.expected_public_key) {
+            return Err(format!(
+                "IDENTITY_MISMATCH: receiver public_key changed before pair_confirm (expected '{}', got '{:?}')",
+                pending.expected_public_key, pre_info.public_key
+            ));
+        }
 
         let confirm_resp = client
             .pair_confirm(
@@ -301,26 +342,29 @@ impl ReceiverSessionManager {
             p.remove(pairing_id);
         }
 
-        // Re-fetch fresh info to enforce identity pinning
+        // Re-fetch fresh info to enforce identity pinning post-confirmation
         let fresh_info = client.get_info().await?;
-        if let Some(ref pinned_id) = pending.server_michi_id {
-            let actual_id = fresh_info
-                .michi_id
-                .as_ref()
-                .or(fresh_info.server_id.as_ref());
-            if actual_id != Some(pinned_id) {
-                return Err(format!(
-                    "IDENTITY_MISMATCH: receiver michi_id changed between pair/start and pair/confirm (expected '{pinned_id}', got '{actual_id:?}')"
-                ));
-            }
+        let fresh_server_id = fresh_info
+            .server_id
+            .as_ref()
+            .or(fresh_info.device_id.as_ref());
+        if fresh_server_id != Some(&pending.expected_server_id) {
+            return Err(format!(
+                "IDENTITY_MISMATCH: receiver server_id changed post-confirmation (expected '{}', got '{:?}')",
+                pending.expected_server_id, fresh_server_id
+            ));
         }
-        if let Some(ref pinned_pk) = pending.server_public_key {
-            if fresh_info.public_key.as_ref() != Some(pinned_pk) {
-                return Err(format!(
-                    "IDENTITY_MISMATCH: receiver public_key changed between pair/start and pair/confirm (expected '{pinned_pk}', got '{:?}')",
-                    fresh_info.public_key
-                ));
-            }
+        if fresh_info.michi_id.as_ref() != Some(&pending.expected_michi_id) {
+            return Err(format!(
+                "IDENTITY_MISMATCH: receiver michi_id changed post-confirmation (expected '{}', got '{:?}')",
+                pending.expected_michi_id, fresh_info.michi_id
+            ));
+        }
+        if fresh_info.public_key.as_ref() != Some(&pending.expected_public_key) {
+            return Err(format!(
+                "IDENTITY_MISMATCH: receiver public_key changed post-confirmation (expected '{}', got '{:?}')",
+                pending.expected_public_key, fresh_info.public_key
+            ));
         }
 
         let info = fresh_info;
@@ -329,7 +373,9 @@ impl ReceiverSessionManager {
             .clone()
             .or_else(|| info.server_id.clone())
             .or_else(|| info.device_id.clone())
-            .unwrap_or_else(|| client.base_url.clone());
+            .ok_or_else(|| {
+                "IDENTITY_MISMATCH: missing device identifier post-confirmation".to_string()
+            })?;
         let name = info.name.clone().unwrap_or_else(|| device_id.clone());
         let device_type = info
             .device_type
@@ -1306,6 +1352,408 @@ mod tests {
         assert_eq!(
             reg.get(rec_id).and_then(|e| e.active_session_id.as_ref()),
             None
+        );
+    }
+
+    // =========================================================================
+    // A18 Test Matrix: Pairing Tests 1-10
+    // =========================================================================
+
+    use axum::extract::State as AxumState;
+    use axum::routing::{get, post};
+    use axum::Json as AxumJson;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Clone)]
+    struct MockReceiverState {
+        info_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
+        start_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
+        confirm_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
+        pair_confirm_called: std::sync::Arc<AtomicBool>,
+        info_call_count: std::sync::Arc<AtomicUsize>,
+        mutate_on_confirm: std::sync::Arc<AtomicBool>,
+    }
+
+    async fn mock_server_info(
+        AxumState(st): AxumState<MockReceiverState>,
+    ) -> AxumJson<serde_json::Value> {
+        st.info_call_count.fetch_add(1, Ordering::SeqCst);
+        let val = st.info_json.read().unwrap().clone();
+        AxumJson(val)
+    }
+
+    async fn mock_pair_start(
+        AxumState(st): AxumState<MockReceiverState>,
+    ) -> AxumJson<serde_json::Value> {
+        let val = st.start_json.read().unwrap().clone();
+        AxumJson(val)
+    }
+
+    async fn mock_pair_confirm(
+        AxumState(st): AxumState<MockReceiverState>,
+    ) -> AxumJson<serde_json::Value> {
+        st.pair_confirm_called.store(true, Ordering::SeqCst);
+        if st.mutate_on_confirm.load(Ordering::SeqCst) {
+            let mut info = st.info_json.write().unwrap();
+            let obj = info.as_object_mut().unwrap();
+            obj.insert(
+                "server_id".to_string(),
+                serde_json::Value::String("mutated-after-confirm-uuid".to_string()),
+            );
+            obj.insert(
+                "device_id".to_string(),
+                serde_json::Value::String("mutated-after-confirm-uuid".to_string()),
+            );
+        }
+        let val = st.confirm_json.read().unwrap().clone();
+        AxumJson(val)
+    }
+
+    async fn spawn_mock_receiver(st: MockReceiverState) -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new()
+            .route("/api/v1/server/info", get(mock_server_info))
+            .route("/api/v1/pair/start", post(mock_pair_start))
+            .route("/api/v1/pair/confirm", post(mock_pair_confirm))
+            .with_state(st);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn default_mock_state() -> MockReceiverState {
+        let info = serde_json::json!({
+            "service": "michi-stream-standard",
+            "name": "Test Stream",
+            "device_id": "550e8400-e29b-41d4-a716-446655440000",
+            "server_id": "550e8400-e29b-41d4-a716-446655440000",
+            "michi_id": "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4",
+            "public_key": "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8",
+            "supported_codecs": ["pcm_s16le"],
+            "audio": {
+                "transports": ["rtp_udp"],
+                "codecs": ["pcm_s16le"],
+                "sample_rates": [48000],
+                "bit_depths": [16],
+                "channels": [2],
+            }
+        });
+
+        let start = serde_json::json!({
+            "session_id": "pair-sess-1",
+            "expires_at": chrono::Utc::now().checked_add_signed(chrono::Duration::seconds(60)).unwrap().to_rfc3339(),
+            "server_michi_id": "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4",
+            "server_public_key": "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8",
+        });
+
+        let confirm = serde_json::json!({
+            "status": "paired",
+            "token": "test-device-token-12345",
+            "device_id": "550e8400-e29b-41d4-a716-446655440000",
+            "server_id": "550e8400-e29b-41d4-a716-446655440000",
+        });
+
+        MockReceiverState {
+            info_json: std::sync::Arc::new(std::sync::RwLock::new(info)),
+            start_json: std::sync::Arc::new(std::sync::RwLock::new(start)),
+            confirm_json: std::sync::Arc::new(std::sync::RwLock::new(confirm)),
+            pair_confirm_called: std::sync::Arc::new(AtomicBool::new(false)),
+            info_call_count: std::sync::Arc::new(AtomicUsize::new(0)),
+            mutate_on_confirm: std::sync::Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn make_test_session_manager() -> ReceiverSessionManager {
+        let dir = std::env::temp_dir().join(format!("test-id-sess-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let id = std::sync::Arc::new(
+            michi_identity::IdentityManager::generate(&dir, "Session Test", "").unwrap(),
+        );
+        ReceiverSessionManager::new_with_identity(id)
+    }
+
+    // 1. start_pairing and confirm_pairing succeed with valid receiver info & pair_start response
+    #[tokio::test]
+    async fn test_pairing_1_success_valid_flow() {
+        let st = default_mock_state();
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let pending = mgr
+            .start_pairing(&base_url, "initiator-1")
+            .await
+            .expect("start_pairing should succeed");
+        assert_eq!(
+            pending.expected_server_id,
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+        assert_eq!(
+            pending.expected_michi_id,
+            "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4"
+        );
+        assert_eq!(
+            pending.expected_public_key,
+            "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8"
+        );
+
+        let rec_id = mgr
+            .confirm_pairing(&pending.pairing_id, "123456")
+            .await
+            .expect("confirm_pairing should succeed");
+        assert_eq!(rec_id, "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4");
+        assert!(st.pair_confirm_called.load(Ordering::SeqCst));
+
+        let reg = mgr.registry.read().await;
+        assert!(reg.get(&rec_id).is_some());
+    }
+
+    // 2. start_pairing fails if michi_id missing in info
+    #[tokio::test]
+    async fn test_pairing_2_fails_missing_michi_id() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("michi_id");
+        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("CONTRACT_VIOLATION"),
+            "expected CONTRACT_VIOLATION, got: {err}"
+        );
+        assert!(err.contains("michi_id is required"), "got: {err}");
+    }
+
+    // 3. start_pairing fails if public_key missing in info
+    #[tokio::test]
+    async fn test_pairing_3_fails_missing_public_key() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("public_key");
+        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("CONTRACT_VIOLATION"),
+            "expected CONTRACT_VIOLATION, got: {err}"
+        );
+        assert!(err.contains("public_key is required"), "got: {err}");
+    }
+
+    // 4. start_pairing fails if server_id missing in info
+    #[tokio::test]
+    async fn test_pairing_4_fails_missing_server_id() {
+        let st = default_mock_state();
+        {
+            let mut info = st.info_json.write().unwrap();
+            let obj = info.as_object_mut().unwrap();
+            obj.remove("server_id");
+            obj.remove("device_id");
+        }
+        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("CONTRACT_VIOLATION"),
+            "expected CONTRACT_VIOLATION, got: {err}"
+        );
+        assert!(err.contains("server_id is required"), "got: {err}");
+    }
+
+    // 5. start_pairing fails if public_key does not derive to michi_id
+    #[tokio::test]
+    async fn test_pairing_5_fails_derived_michi_id_mismatch() {
+        let st = default_mock_state();
+        // Give valid HiFi michi_id with standard public_key
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "michi_id".to_string(),
+                serde_json::Value::String(
+                    "lz4CalNVFwbIecx40oFy7Z1HCzkonqkdcBP_eG3FZjo".to_string(),
+                ),
+            );
+        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("CONTRACT_VIOLATION"),
+            "expected CONTRACT_VIOLATION, got: {err}"
+        );
+        assert!(
+            err.contains("does not match derived public_key identity"),
+            "got: {err}"
+        );
+    }
+
+    // 6. start_pairing fails if pair_start response missing server_michi_id
+    #[tokio::test]
+    async fn test_pairing_6_fails_missing_start_server_michi_id() {
+        let st = default_mock_state();
+        st.start_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("server_michi_id");
+        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("CONTRACT_VIOLATION"),
+            "expected CONTRACT_VIOLATION, got: {err}"
+        );
+        assert!(err.contains("server_michi_id is required"), "got: {err}");
+    }
+
+    // 7. start_pairing fails if pair_start response missing server_public_key
+    #[tokio::test]
+    async fn test_pairing_7_fails_missing_start_server_public_key() {
+        let st = default_mock_state();
+        st.start_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("server_public_key");
+        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("CONTRACT_VIOLATION"),
+            "expected CONTRACT_VIOLATION, got: {err}"
+        );
+        assert!(err.contains("server_public_key is required"), "got: {err}");
+    }
+
+    // 8. start_pairing fails if pair_start server_michi_id != info.michi_id
+    #[tokio::test]
+    async fn test_pairing_8_fails_start_michi_id_mismatch() {
+        let st = default_mock_state();
+        st.start_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "server_michi_id".to_string(),
+                serde_json::Value::String(
+                    "lz4CalNVFwbIecx40oFy7Z1HCzkonqkdcBP_eG3FZjo".to_string(),
+                ),
+            );
+        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("CONTRACT_VIOLATION"),
+            "expected CONTRACT_VIOLATION, got: {err}"
+        );
+        assert!(
+            err.contains("does not match server/info michi_id"),
+            "got: {err}"
+        );
+    }
+
+    // 9. confirm_pairing aborts BEFORE pair_confirm if receiver identity changes between start and confirm
+    #[tokio::test]
+    async fn test_pairing_9_confirm_aborts_before_remote_call_on_identity_mismatch() {
+        let st = default_mock_state();
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
+
+        // Mutate receiver identity before confirm
+        {
+            let mut info = st.info_json.write().unwrap();
+            let obj = info.as_object_mut().unwrap();
+            obj.insert(
+                "michi_id".to_string(),
+                serde_json::Value::String(
+                    "lz4CalNVFwbIecx40oFy7Z1HCzkonqkdcBP_eG3FZjo".to_string(),
+                ),
+            );
+            obj.insert(
+                "public_key".to_string(),
+                serde_json::Value::String(
+                    "4CggHpvLXArVU2CJypgueD9MOtNfT9l1dfbCXrNdOts".to_string(),
+                ),
+            );
+        }
+
+        let res = mgr.confirm_pairing(&pending.pairing_id, "123456").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("IDENTITY_MISMATCH"),
+            "expected IDENTITY_MISMATCH, got: {err}"
+        );
+
+        // CRITICAL: pair_confirm on remote receiver MUST NOT have been called!
+        assert!(
+            !st.pair_confirm_called.load(Ordering::SeqCst),
+            "remote pair_confirm must not be called when identity mismatches"
+        );
+    }
+
+    // 10. confirm_pairing post-confirmation fails closed if identity is invalid/mismatched
+    #[tokio::test]
+    async fn test_pairing_10_post_confirmation_fails_closed_on_identity_mismatch() {
+        let st = default_mock_state();
+        st.mutate_on_confirm.store(true, Ordering::SeqCst);
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
+
+        let res = mgr.confirm_pairing(&pending.pairing_id, "123456").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("IDENTITY_MISMATCH"),
+            "expected IDENTITY_MISMATCH, got: {err}"
+        );
+
+        // Receiver must NOT be in registry
+        let reg = mgr.registry.read().await;
+        assert_eq!(
+            reg.list().len(),
+            0,
+            "registry must remain empty on identity mismatch"
         );
     }
 }
