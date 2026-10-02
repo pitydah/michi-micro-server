@@ -106,6 +106,33 @@ pub fn serialize_effective_presence(
     }
 }
 
+pub fn compute_effective_receiver_presence(
+    entry: &michi_receivers::ReceiverRegistryEntry,
+    scent_store: &michi_connect::ScentStore,
+) -> michi_receivers::ReceiverPresence {
+    let opt_record = entry
+        .michi_id
+        .as_deref()
+        .and_then(|mid| scent_store.get(mid))
+        .or_else(|| scent_store.get(&entry.receiver_id));
+
+    if let Some(record) = opt_record {
+        match scent_store.effective_presence_now(&record) {
+            michi_connect::scent_store::EffectivePresence::VerifiedOnline => {
+                michi_receivers::ReceiverPresence::VerifiedOnline
+            }
+            michi_connect::scent_store::EffectivePresence::ProvisionalMdns => {
+                michi_receivers::ReceiverPresence::ProvisionalMdns
+            }
+            michi_connect::scent_store::EffectivePresence::Offline => {
+                michi_receivers::ReceiverPresence::Offline
+            }
+        }
+    } else {
+        entry.presence
+    }
+}
+
 // ── Speaker group management (canonical alias to persistent Room Groups) ──────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -313,7 +340,8 @@ pub async fn receivers_handler(
         .list()
         .iter()
         .map(|e| {
-            let p = serialize_presence_state(e.presence);
+            let eff_presence = compute_effective_receiver_presence(e, &state.scent_store);
+            let p = serialize_presence_state(eff_presence);
             serde_json::json!({
                 "id": e.receiver_id,
                 "receiver_id": e.receiver_id,
@@ -352,7 +380,8 @@ pub async fn get_receiver_handler(
             &format!("receiver not found: {id}"),
         )
     })?;
-    let p = serialize_presence_state(entry.presence);
+    let eff_presence = compute_effective_receiver_presence(entry, &state.scent_store);
+    let p = serialize_presence_state(eff_presence);
     Ok(Json(serde_json::json!({
         "id": entry.receiver_id,
         "receiver_id": entry.receiver_id,
@@ -458,14 +487,41 @@ pub async fn receiver_pair_start_handler(
     } else if let Some(ref rid) = body.receiver_id {
         let reg_arc = state.receiver_manager.registry().await;
         let reg = reg_arc.read().await;
-        let entry = reg.get(rid).ok_or_else(|| {
-            v1_error(
+        if let Some(entry) = reg.get(rid) {
+            if entry.qualification
+                == michi_receivers::models::ReceiverQualification::IdentityMismatch
+            {
+                return Err(v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "IDENTITY_MISMATCH",
+                    "receiver has an unresolved identity mismatch and cannot be paired",
+                ));
+            }
+            if entry.paired {
+                return Err(v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "ALREADY_PAIRED",
+                    "receiver is already paired",
+                ));
+            }
+            entry.base_url.clone()
+        } else if let Some(scent_entry) = state.scent_store.get(rid) {
+            if let Some(ref bu) = scent_entry.base_url {
+                bu.to_string()
+            } else {
+                return Err(v1_error(
+                    StatusCode::NOT_FOUND,
+                    "RECEIVER_NOT_FOUND",
+                    &format!("receiver not found or has no base_url: {rid}"),
+                ));
+            }
+        } else {
+            return Err(v1_error(
                 StatusCode::NOT_FOUND,
                 "RECEIVER_NOT_FOUND",
                 &format!("receiver not found: {rid}"),
-            )
-        })?;
-        entry.base_url.clone()
+            ));
+        }
     } else {
         return Err(v1_error(
             StatusCode::BAD_REQUEST,
@@ -486,7 +542,15 @@ pub async fn receiver_pair_start_handler(
             "receiver_pair_session_id": pending.receiver_pair_session_id,
             "expires_at": pending.expires_at.to_rfc3339(),
         }))),
-        Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "PAIR_START_FAILED", &e)),
+        Err(e) => {
+            if e.contains("IDENTITY_MISMATCH") {
+                Err(v1_error(StatusCode::BAD_REQUEST, "IDENTITY_MISMATCH", &e))
+            } else if e.contains("ALREADY_PAIRED") {
+                Err(v1_error(StatusCode::BAD_REQUEST, "ALREADY_PAIRED", &e))
+            } else {
+                Err(v1_error(StatusCode::BAD_REQUEST, "PAIR_START_FAILED", &e))
+            }
+        }
     }
 }
 
@@ -601,8 +665,10 @@ pub async fn receiver_pair_confirm_handler(
                 let reg = state.receiver_manager.registry().await;
                 let reg_read = reg.read().await;
                 let (p, qualification) = if let Some(entry) = reg_read.get(&device_id) {
+                    let eff_presence =
+                        compute_effective_receiver_presence(entry, &state.scent_store);
                     (
-                        serialize_presence_state(entry.presence),
+                        serialize_presence_state(eff_presence),
                         entry.compute_qualification(),
                     )
                 } else {
@@ -689,8 +755,10 @@ pub async fn discover_receiver_handler(
                 let reg = state.receiver_manager.registry().await;
                 let reg_read = reg.read().await;
                 let (p, qualification) = if let Some(entry) = reg_read.get(&device_id) {
+                    let eff_presence =
+                        compute_effective_receiver_presence(entry, &state.scent_store);
                     (
-                        serialize_presence_state(entry.presence),
+                        serialize_presence_state(eff_presence),
                         entry.compute_qualification(),
                     )
                 } else {
@@ -899,7 +967,8 @@ pub async fn discover_mdns_handler(
         seen_ids.insert(stable_id.to_string());
         seen_ids.insert(entry.receiver_id.clone());
 
-        let p = serialize_presence_state(entry.presence);
+        let eff_presence = compute_effective_receiver_presence(entry, &state.scent_store);
+        let p = serialize_presence_state(eff_presence);
         let is_valid_url = Url::parse(&entry.base_url).is_ok();
         let pairable = !entry.paired
             && p.reachable
@@ -1593,21 +1662,27 @@ pub async fn whisker_discovery_handler(State(state): State<AppState>) -> Json<se
 
     let scent_items: Vec<serde_json::Value> = active_scent
         .into_iter()
-        .map(|r| {
-            serde_json::json!({
+        .filter_map(|r| {
+            let eff = state.scent_store.effective_presence_now(&r);
+            if eff == michi_connect::scent_store::EffectivePresence::Offline {
+                return None;
+            }
+            let p = serialize_effective_presence(eff);
+            Some(serde_json::json!({
                 "michi_id": r.michi_id,
                 "device_id": r.device_id,
                 "name": r.name,
                 "service": r.service,
                 "roles": r.roles,
-                "verified": r.verified,
+                "verified": p.verified,
                 "presence_source": match r.presence_source {
                     michi_connect::scent_store::ScentPresenceSource::WhiskerSigned => "whisker_signed",
                     michi_connect::scent_store::ScentPresenceSource::MdnsProvisional => "mdns_provisional",
                 },
                 "base_url": r.base_url.map(|u| u.to_string()),
-                "online": r.online,
-            })
+                "online": p.online,
+                "presence": p.presence,
+            }))
         })
         .collect();
     Json(serde_json::json!({

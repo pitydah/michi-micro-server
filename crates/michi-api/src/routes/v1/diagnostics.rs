@@ -577,7 +577,7 @@ pub async fn diagnostics_handler(State(state): State<AppState>) -> Json<Diagnost
                 .whisker_metrics
                 .non_stream_filtered
                 .load(std::sync::atomic::Ordering::Relaxed),
-            scent_entries: state.scent_store.list_active().len(),
+            scent_entries: verified_stream_count + provisional_mdns_count,
             multicast_group: state
                 .whisker_metrics
                 .multicast_group

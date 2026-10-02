@@ -8673,12 +8673,25 @@ async fn spawn_test_mock_receiver(
 async fn test_real_pair_confirm_response_contracts_provisional_and_verified() {
     let (app, _pool, state) = make_app_with_state().await;
 
-    // 1. Provisional pairing: no fresh Whisker signed announcement in ScentStore
+    // 1. Provisional pairing: mDNS candidate in ScentStore (no fresh Whisker signed announcement)
     let (base_url_prov, handle1) = spawn_test_mock_receiver(
         "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4",
         "550e8400-e29b-41d4-a716-446655440001",
     )
     .await;
+
+    state.scent_store.observe_mdns_candidate(
+        michi_connect::scent_store::VerifiedServerInfo {
+            michi_id: "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4".to_string(),
+            device_id: "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            name: "Test Stream Prov".to_string(),
+            service: "michi-stream-standard".to_string(),
+            roles: vec!["audio_receiver".to_string()],
+        },
+        base_url_prov.parse().unwrap(),
+        None,
+        std::time::Instant::now(),
+    );
 
     let req = Request::builder()
         .method("POST")
@@ -8709,6 +8722,41 @@ async fn test_real_pair_confirm_response_contracts_provisional_and_verified() {
     assert!(res.get("device_id").is_some());
     assert_eq!(res["receiver_id"], res["device_id"]);
     handle1.abort();
+
+    // 1b. Offline pairing: no Scent record exists in ScentStore (HTTP pairing alone does not prove mDNS presence)
+    let (app1b, _pool1b, _state1b) = make_app_with_state().await;
+    let (base_url_off, handle1b) = spawn_test_mock_receiver(
+        "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4",
+        "550e8400-e29b-41d4-a716-446655440002",
+    )
+    .await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/discover/pair")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "base_url": base_url_off,
+                "pin": "123456"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app1b.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let res: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(res["status"], "paired");
+    assert_eq!(res["paired"], true);
+    assert_eq!(res["presence"], "offline");
+    assert_eq!(res["online"], false);
+    assert_eq!(res["reachable"], false);
+    assert_eq!(res["verified"], false);
+    handle1b.abort();
 
     // 2. Verified pairing: fresh Whisker signed announcement exists in ScentStore
     let (app2, _pool2, state2) = make_app_with_state().await;
@@ -8757,6 +8805,80 @@ async fn test_real_pair_confirm_response_contracts_provisional_and_verified() {
     assert!(res.get("qualification").is_some());
     assert_eq!(res["receiver_id"], res["device_id"]);
     handle2.abort();
+}
+
+#[tokio::test]
+async fn test_receiver_pair_start_gating_identity_mismatch_and_already_paired() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    // 1. Seed registry with IdentityMismatch receiver
+    let reg_arc = state.receiver_manager.registry().await;
+    {
+        let mut reg = reg_arc.write().await;
+        let entry = michi_receivers::ReceiverRegistryEntry {
+            receiver_id: "mismatched-device-id".to_string(),
+            michi_id: Some("mismatched-michi-id".to_string()),
+            name: "Mismatched Receiver".to_string(),
+            device_type: "standard".to_string(),
+            base_url: "http://127.0.0.1:53999".to_string(),
+            qualification: michi_receivers::models::ReceiverQualification::IdentityMismatch,
+            ..Default::default()
+        };
+        reg.add(entry);
+
+        let paired_entry = michi_receivers::ReceiverRegistryEntry {
+            receiver_id: "paired-device-id".to_string(),
+            michi_id: Some("paired-michi-id".to_string()),
+            name: "Paired Receiver".to_string(),
+            device_type: "standard".to_string(),
+            base_url: "http://127.0.0.1:53998".to_string(),
+            paired: true,
+            ..Default::default()
+        };
+        reg.add(paired_entry);
+    }
+
+    // Try pair_start on IdentityMismatch
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/pair/start")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "receiver_id": "mismatched-device-id"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let err: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(err["error"]["code"], "IDENTITY_MISMATCH");
+
+    // Try pair_start on ALREADY_PAIRED
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/pair/start")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "receiver_id": "paired-device-id"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let err: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(err["error"]["code"], "ALREADY_PAIRED");
 }
 
 #[tokio::test]
