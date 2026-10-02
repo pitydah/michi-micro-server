@@ -214,6 +214,7 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "server_id": st.device_id,
                 "michi_id": st.server_michi_id,
                 "public_key": st.server_pubkey_b64,
+                "identity_scheme": "ed25519-blake3-v1",
                 "id": st.device_id,
                 "version": "1.0.0-alpha.1",
                 "api_version": "v1-lite",
