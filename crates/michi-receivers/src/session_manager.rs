@@ -145,7 +145,90 @@ impl ReceiverSessionManager {
     pub async fn get_active_session(&self, receiver_id: &str) -> Option<ReceiverActiveSession> {
         self.active_sessions.read().await.get(receiver_id).cloned()
     }
+}
 
+fn validate_audio_capabilities(info: &ReceiverInfo) -> Result<(), String> {
+    let audio = info.audio.as_ref().ok_or_else(|| {
+        "CONTRACT_VIOLATION: receiver missing canonical 'audio' specification".to_string()
+    })?;
+
+    let transports: Vec<String> = audio
+        .get("transports")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .filter(|v: &Vec<String>| !v.is_empty())
+        .ok_or_else(|| {
+            "CONTRACT_VIOLATION: receiver capabilities missing valid audio.transports".to_string()
+        })?;
+
+    if !transports.iter().any(|t| t == "rtp_udp") {
+        return Err(
+            "CONTRACT_VIOLATION: receiver does not support required 'rtp_udp' audio transport"
+                .to_string(),
+        );
+    }
+
+    let sample_rates: Vec<u32> = audio
+        .get("sample_rates")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_u64().map(|n| n as u32))
+                .collect()
+        })
+        .filter(|v: &Vec<u32>| !v.is_empty())
+        .ok_or_else(|| {
+            "CONTRACT_VIOLATION: receiver capabilities missing valid audio.sample_rates".to_string()
+        })?;
+
+    let bit_depths: Vec<u32> = audio
+        .get("bit_depths")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_u64().map(|n| n as u32))
+                .collect()
+        })
+        .filter(|v: &Vec<u32>| !v.is_empty())
+        .ok_or_else(|| {
+            "CONTRACT_VIOLATION: receiver capabilities missing valid audio.bit_depths".to_string()
+        })?;
+
+    let channels: Vec<u8> = audio
+        .get("channels")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_u64().map(|n| n as u8))
+                .collect()
+        })
+        .filter(|v: &Vec<u8>| !v.is_empty())
+        .ok_or_else(|| {
+            "CONTRACT_VIOLATION: receiver capabilities missing valid audio.channels".to_string()
+        })?;
+
+    let codecs: Vec<String> = audio
+        .get("codecs")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .filter(|v: &Vec<String>| !v.is_empty())
+        .ok_or_else(|| {
+            "CONTRACT_VIOLATION: receiver capabilities missing valid audio.codecs".to_string()
+        })?;
+
+    let _ = (sample_rates, bit_depths, channels, codecs);
+    Ok(())
+}
+
+impl ReceiverSessionManager {
     /// Step 1 of receiver pairing: Initiate pairing with Stream, store pending state, return pairing_id & session info.
     pub async fn start_pairing(
         &self,
@@ -253,6 +336,27 @@ impl ReceiverSessionManager {
             .ok_or_else(|| "CONTRACT_VIOLATION: roles is required in receiver info".to_string())?;
         if !roles.iter().any(|r| r.trim() == "audio_receiver") {
             return Err("CONTRACT_VIOLATION: roles must contain 'audio_receiver'".to_string());
+        }
+
+        // 7. audio capabilities validation
+        validate_audio_capabilities(&info)?;
+
+        // 8. verify receiver is pairable in local registry (not already paired, no identity mismatch)
+        {
+            let reg = self.registry.read().await;
+            if let Some(entry) = reg
+                .get(&expected_michi_id)
+                .or_else(|| reg.get(&expected_server_id))
+            {
+                if entry.qualification == ReceiverQualification::IdentityMismatch {
+                    return Err(
+                        "IDENTITY_MISMATCH: pairing blocked due to identity conflict".to_string(),
+                    );
+                }
+                if entry.paired {
+                    return Err("ALREADY_PAIRED: receiver is already paired".to_string());
+                }
+            }
         }
 
         // ONLY IF FULL CONTRACT IS VALID: initiate remote pair_start
@@ -396,6 +500,9 @@ impl ReceiverSessionManager {
                 pending.expected_public_key, pre_info.public_key
             ));
         }
+
+        // Validate audio capabilities before pair_confirm so remote pairing is never consumed if capabilities are invalid
+        validate_audio_capabilities(&pre_info)?;
 
         let confirm_resp = client
             .pair_confirm(
@@ -596,10 +703,10 @@ impl ReceiverSessionManager {
                     }
                 }
             } else {
-                ReceiverPresence::ProvisionalMdns
+                ReceiverPresence::Offline
             }
         } else {
-            ReceiverPresence::ProvisionalMdns
+            ReceiverPresence::Offline
         };
 
         let entry = ReceiverRegistryEntry {
@@ -1885,6 +1992,128 @@ mod tests {
         );
     }
 
+    // 5f. start_pairing fails if audio spec is missing; pair_start NOT called
+    #[tokio::test]
+    async fn test_pairing_5f_fails_missing_audio_spec() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("audio");
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("CONTRACT_VIOLATION"),
+            "expected CONTRACT_VIOLATION: {err}"
+        );
+        assert!(
+            err.contains("missing canonical 'audio' specification"),
+            "got: {err}"
+        );
+        assert!(
+            !st.pair_start_called.load(Ordering::SeqCst),
+            "remote pair_start must NOT be called when audio spec is missing"
+        );
+    }
+
+    // 5g. start_pairing fails if rtp_udp transport is missing; pair_start NOT called
+    #[tokio::test]
+    async fn test_pairing_5g_fails_missing_rtp_udp_transport() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .get_mut("audio")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("transports".to_string(), serde_json::json!(["http_stream"]));
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("CONTRACT_VIOLATION"),
+            "expected CONTRACT_VIOLATION: {err}"
+        );
+        assert!(
+            err.contains("does not support required 'rtp_udp'"),
+            "got: {err}"
+        );
+        assert!(
+            !st.pair_start_called.load(Ordering::SeqCst),
+            "remote pair_start must NOT be called when rtp_udp transport is missing"
+        );
+    }
+
+    // 5h. start_pairing fails if device has IdentityMismatch in local registry; pair_start NOT called
+    #[tokio::test]
+    async fn test_pairing_5h_fails_blocked_identity_mismatch() {
+        let st = default_mock_state();
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        // Seed registry with conflicting entry
+        let entry = ReceiverRegistryEntry {
+            receiver_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            michi_id: Some("1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4".to_string()),
+            name: "Tampered Device".to_string(),
+            device_type: "standard".to_string(),
+            base_url: base_url.clone(),
+            qualification: ReceiverQualification::IdentityMismatch,
+            ..Default::default()
+        };
+        mgr.registry.write().await.add(entry);
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("IDENTITY_MISMATCH"), "got: {err}");
+        assert!(
+            !st.pair_start_called.load(Ordering::SeqCst),
+            "remote pair_start must NOT be called when receiver has IdentityMismatch"
+        );
+    }
+
+    // 5i. start_pairing fails if device is already paired; pair_start NOT called
+    #[tokio::test]
+    async fn test_pairing_5i_fails_already_paired() {
+        let st = default_mock_state();
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        // Seed registry with already paired entry
+        let entry = ReceiverRegistryEntry {
+            receiver_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            michi_id: Some("1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4".to_string()),
+            name: "Paired Device".to_string(),
+            device_type: "standard".to_string(),
+            base_url: base_url.clone(),
+            paired: true,
+            ..Default::default()
+        };
+        mgr.registry.write().await.add(entry);
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("ALREADY_PAIRED"), "got: {err}");
+        assert!(
+            !st.pair_start_called.load(Ordering::SeqCst),
+            "remote pair_start must NOT be called when receiver is already paired"
+        );
+    }
+
     // 6. start_pairing fails if pair_start response missing server_michi_id
     #[tokio::test]
     async fn test_pairing_6_fails_missing_start_server_michi_id() {
@@ -2031,9 +2260,45 @@ mod tests {
         );
     }
 
-    // 11. confirm_pairing sets ProvisionalMdns when no fresh Whisker signed announcement in ScentStore
+    // 11. confirm_pairing sets ProvisionalMdns when mDNS candidate in ScentStore
     #[tokio::test]
-    async fn test_pairing_11_provisional_presence_when_no_whisker_scent() {
+    async fn test_pairing_11_provisional_presence_when_mdns_candidate_in_scent() {
+        let st = default_mock_state();
+        let (base_url, _handle) = spawn_mock_receiver(st).await;
+        let scent = Arc::new(michi_connect::ScentStore::new());
+        scent.observe_mdns_candidate(
+            michi_connect::scent_store::VerifiedServerInfo {
+                michi_id: "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4".to_string(),
+                device_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                name: "Test Stream".to_string(),
+                service: "michi-stream-standard".to_string(),
+                roles: vec!["audio_receiver".to_string()],
+            },
+            url::Url::parse(&base_url).unwrap(),
+            None,
+            std::time::Instant::now(),
+        );
+        let mgr = make_test_session_manager().with_scent_store(scent);
+
+        let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
+        let dev_id = mgr
+            .confirm_pairing(&pending.pairing_id, "123456")
+            .await
+            .unwrap();
+
+        let reg = mgr.registry.read().await;
+        let entry = reg.get(&dev_id).expect("receiver must exist in registry");
+        assert!(entry.paired, "receiver must be marked paired");
+        assert_eq!(
+            entry.presence,
+            ReceiverPresence::ProvisionalMdns,
+            "presence must be ProvisionalMdns when mDNS candidate exists in ScentStore"
+        );
+    }
+
+    // 11b. confirm_pairing sets Offline when no record exists in ScentStore
+    #[tokio::test]
+    async fn test_pairing_11b_offline_presence_when_no_scent_record() {
         let st = default_mock_state();
         let (base_url, _handle) = spawn_mock_receiver(st).await;
         let scent = Arc::new(michi_connect::ScentStore::new());
@@ -2050,8 +2315,8 @@ mod tests {
         assert!(entry.paired, "receiver must be marked paired");
         assert_eq!(
             entry.presence,
-            ReceiverPresence::ProvisionalMdns,
-            "presence must be ProvisionalMdns when only paired via HTTP without fresh Whisker signed announce"
+            ReceiverPresence::Offline,
+            "presence must be Offline when no Scent record exists (pairing over HTTP does not prove mDNS)"
         );
     }
 
@@ -2095,6 +2360,18 @@ mod tests {
         let st = default_mock_state();
         let (base_url, _handle) = spawn_mock_receiver(st).await;
         let scent = Arc::new(michi_connect::ScentStore::new());
+        scent.observe_mdns_candidate(
+            michi_connect::scent_store::VerifiedServerInfo {
+                michi_id: "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4".to_string(),
+                device_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                name: "Test Stream".to_string(),
+                service: "michi-stream-standard".to_string(),
+                roles: vec!["audio_receiver".to_string()],
+            },
+            url::Url::parse(&base_url).unwrap(),
+            None,
+            std::time::Instant::now(),
+        );
         let mgr = make_test_session_manager().with_scent_store(scent.clone());
         let bridge =
             crate::discovery_bridge::ReceiverDiscoveryBridge::new(scent.clone(), mgr.clone());
