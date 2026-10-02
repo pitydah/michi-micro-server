@@ -8619,6 +8619,7 @@ async fn spawn_test_mock_receiver(
                         "server_id": d,
                         "michi_id": m,
                         "public_key": "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8",
+                        "identity_scheme": "ed25519-blake3-v1",
                         "api_version": "v1-lite",
                         "roles": ["audio_receiver"],
                         "supported_codecs": ["pcm_s16le"],
@@ -9137,4 +9138,207 @@ async fn test_diagnostics_freshness_stale_signed_whisker_reflects_counts() {
         whisker["provisional_mdns_count"], 1,
         "fresh mDNS fallback must be counted as provisional_mdns_count"
     );
+}
+
+#[tokio::test]
+async fn test_delete_receiver_handler_unpairs_and_removes_from_registry_and_db() {
+    let (app, pool, state) = make_app_with_state().await;
+
+    // Seed paired receiver in db and registry
+    let rec_id = "test-delete-receiver-1";
+    let entry = michi_receivers::ReceiverRegistryEntry {
+        receiver_id: rec_id.to_string(),
+        name: "Receiver to Delete".to_string(),
+        base_url: "http://127.0.0.1:9199".to_string(),
+        paired: true,
+        token: Some("secret-token-123".to_string()),
+        presence: michi_receivers::ReceiverPresence::VerifiedOnline,
+        ..Default::default()
+    };
+    state
+        .receiver_manager
+        .registry()
+        .await
+        .write()
+        .await
+        .add(entry);
+
+    let _ = sqlx::query(
+        "INSERT INTO receivers (id, name, device_type, base_url, paired, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(rec_id)
+    .bind("Receiver to Delete")
+    .bind("standard")
+    .bind("http://127.0.0.1:9199")
+    .bind(1)
+    .bind("2026-10-02T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Verify it exists in registry
+    assert!(state
+        .receiver_manager
+        .registry()
+        .await
+        .read()
+        .await
+        .get(rec_id)
+        .is_some());
+
+    // DELETE /api/v1/receivers/:id
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/api/v1/receivers/{rec_id}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let res: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(res["status"], "unpaired");
+    assert_eq!(res["receiver_id"], rec_id);
+
+    // Verify removed from registry
+    assert!(state
+        .receiver_manager
+        .registry()
+        .await
+        .read()
+        .await
+        .get(rec_id)
+        .is_none());
+
+    // Verify removed from database
+    let row = sqlx::query("SELECT COUNT(*) as cnt FROM receivers WHERE id = ?")
+        .bind(rec_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let cnt: i64 = sqlx::Row::get(&row, "cnt");
+    assert_eq!(cnt, 0);
+
+    // Deleting again returns 404
+    let req404 = Request::builder()
+        .method("DELETE")
+        .uri(format!("/api/v1/receivers/{rec_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp404 = app.clone().oneshot(req404).await.unwrap();
+    assert_eq!(resp404.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_pair_start_rejects_stale_offline_scent_entry() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    let stale_id = "550e8400-e29b-41d4-a716-446655440099";
+    let now = std::time::Instant::now();
+    let stale_instant = now - std::time::Duration::from_secs(100);
+
+    // Seed ScentStore with an expired candidate (>90s stale)
+    state.scent_store.observe_signed(
+        "stale_michi_id_99".to_string(),
+        stale_id.to_string(),
+        "Stale Stream".to_string(),
+        "michi-stream-standard".to_string(),
+        vec!["audio_receiver".to_string()],
+        Some("127.0.0.1:53399".parse().unwrap()),
+        stale_instant,
+    );
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/pair/start")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "receiver_id": stale_id
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let res: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(res["error"]["code"], "RECEIVER_OFFLINE");
+}
+
+#[tokio::test]
+async fn test_pair_start_with_re_pair_flag_allows_re_pairing_already_paired_receiver() {
+    let (app, _pool, state) = make_app_with_state().await;
+
+    let rec_id = "550e8400-e29b-41d4-a716-446655440077";
+    let (mock_url, handle) =
+        spawn_test_mock_receiver("1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4", rec_id).await;
+
+    // Seed paired receiver in registry
+    let entry = michi_receivers::ReceiverRegistryEntry {
+        receiver_id: rec_id.to_string(),
+        michi_id: Some("1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4".to_string()),
+        name: "Already Paired Receiver".to_string(),
+        base_url: mock_url.clone(),
+        paired: true,
+        qualification: michi_receivers::models::ReceiverQualification::Qualified,
+        presence: michi_receivers::ReceiverPresence::VerifiedOnline,
+        ..Default::default()
+    };
+    state
+        .receiver_manager
+        .registry()
+        .await
+        .write()
+        .await
+        .add(entry);
+
+    // Attempt without re_pair flag -> fails with ALREADY_PAIRED
+    let req_fail = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/pair/start")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "receiver_id": rec_id
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp_fail = app.clone().oneshot(req_fail).await.unwrap();
+    assert_eq!(resp_fail.status(), StatusCode::BAD_REQUEST);
+    let bytes_fail = axum::body::to_bytes(resp_fail.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let res_fail: serde_json::Value = serde_json::from_slice(&bytes_fail).unwrap();
+    assert_eq!(res_fail["error"]["code"], "ALREADY_PAIRED");
+
+    // Attempt with re_pair: true -> proceeds and starts pairing successfully
+    let req_ok = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/pair/start")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "receiver_id": rec_id,
+                "re_pair": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp_ok = app.clone().oneshot(req_ok).await.unwrap();
+    assert_eq!(resp_ok.status(), StatusCode::OK);
+    let bytes_ok = axum::body::to_bytes(resp_ok.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let res_ok: serde_json::Value = serde_json::from_slice(&bytes_ok).unwrap();
+    assert_eq!(res_ok["status"], "pending_confirmation");
+    assert_eq!(res_ok["receiver_pair_session_id"], "mock-pair-sess-1");
+
+    handle.abort();
 }

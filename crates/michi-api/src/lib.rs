@@ -1893,7 +1893,8 @@ fn v1_link_routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/receivers/:id",
-            get(routes::v1::receivers::get_receiver_handler),
+            get(routes::v1::receivers::get_receiver_handler)
+                .delete(routes::v1::receivers::delete_receiver_handler),
         )
         .route(
             "/api/v1/receivers/:id/session/start",

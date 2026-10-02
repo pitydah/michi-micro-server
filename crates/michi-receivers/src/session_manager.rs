@@ -167,7 +167,7 @@ fn validate_audio_capabilities(info: &ReceiverInfo) -> Result<(), String> {
 
     if !transports.iter().any(|t| t == "rtp_udp") {
         return Err(
-            "CONTRACT_VIOLATION: receiver does not support required 'rtp_udp' audio transport"
+            "CONTRACT_VIOLATION: receiver audio does not support required 'rtp_udp' transport"
                 .to_string(),
         );
     }
@@ -185,6 +185,13 @@ fn validate_audio_capabilities(info: &ReceiverInfo) -> Result<(), String> {
             "CONTRACT_VIOLATION: receiver capabilities missing valid audio.sample_rates".to_string()
         })?;
 
+    if !sample_rates.contains(&48000) {
+        return Err(
+            "CONTRACT_VIOLATION: receiver audio does not support required 48000 Hz sample rate"
+                .to_string(),
+        );
+    }
+
     let bit_depths: Vec<u32> = audio
         .get("bit_depths")
         .and_then(|v| v.as_array())
@@ -197,6 +204,12 @@ fn validate_audio_capabilities(info: &ReceiverInfo) -> Result<(), String> {
         .ok_or_else(|| {
             "CONTRACT_VIOLATION: receiver capabilities missing valid audio.bit_depths".to_string()
         })?;
+
+    if !bit_depths.contains(&16) {
+        return Err(
+            "CONTRACT_VIOLATION: receiver audio does not support required 16-bit depth".to_string(),
+        );
+    }
 
     let channels: Vec<u8> = audio
         .get("channels")
@@ -211,6 +224,13 @@ fn validate_audio_capabilities(info: &ReceiverInfo) -> Result<(), String> {
             "CONTRACT_VIOLATION: receiver capabilities missing valid audio.channels".to_string()
         })?;
 
+    if !channels.contains(&2) {
+        return Err(
+            "CONTRACT_VIOLATION: receiver audio does not support required 2 channels (stereo)"
+                .to_string(),
+        );
+    }
+
     let codecs: Vec<String> = audio
         .get("codecs")
         .and_then(|v| v.as_array())
@@ -224,6 +244,13 @@ fn validate_audio_capabilities(info: &ReceiverInfo) -> Result<(), String> {
             "CONTRACT_VIOLATION: receiver capabilities missing valid audio.codecs".to_string()
         })?;
 
+    if !codecs.iter().any(|c| c == "pcm_s16le") {
+        return Err(
+            "CONTRACT_VIOLATION: receiver audio does not support required 'pcm_s16le' codec"
+                .to_string(),
+        );
+    }
+
     let _ = (sample_rates, bit_depths, channels, codecs);
     Ok(())
 }
@@ -235,6 +262,16 @@ impl ReceiverSessionManager {
         base_url: &str,
         initiator_id: &str,
     ) -> Result<PendingReceiverPairing, String> {
+        self.start_pairing_ext(base_url, initiator_id, false).await
+    }
+
+    /// Step 1 of receiver pairing with optional re-pairing permission for already-paired receivers.
+    pub async fn start_pairing_ext(
+        &self,
+        base_url: &str,
+        initiator_id: &str,
+        allow_re_pair: bool,
+    ) -> Result<PendingReceiverPairing, String> {
         let mut client = if let Some(ref id) = self.identity {
             ReceiverClient::with_identity(base_url, id.clone())
         } else {
@@ -243,7 +280,7 @@ impl ReceiverSessionManager {
         let info = client.get_info().await?;
 
         // Mandatory contract validation BEFORE initiating pair_start remotely:
-        // 1. server_id not empty
+        // 1. server_id not empty and valid canonical UUID
         let expected_server_id = info
             .server_id
             .as_ref()
@@ -254,6 +291,10 @@ impl ReceiverSessionManager {
                     .to_string()
             })?
             .to_string();
+
+        uuid::Uuid::parse_str(&expected_server_id).map_err(|e| {
+            format!("CONTRACT_VIOLATION: server_id must be a valid canonical UUID: {e}")
+        })?;
 
         // 2. michi_id not empty
         let expected_michi_id = info
@@ -299,7 +340,22 @@ impl ReceiverSessionManager {
             ));
         }
 
-        // 4. service EXACTLY "michi-stream-standard" or "michi-stream-hifi"
+        // 4. identity_scheme EXACTLY "ed25519-blake3-v1"
+        let identity_scheme = info
+            .identity_scheme
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "CONTRACT_VIOLATION: identity_scheme is required in receiver info".to_string()
+            })?;
+        if identity_scheme != "ed25519-blake3-v1" {
+            return Err(format!(
+                "CONTRACT_VIOLATION: identity_scheme must be 'ed25519-blake3-v1', got '{identity_scheme}'"
+            ));
+        }
+
+        // 5. service EXACTLY "michi-stream-standard" or "michi-stream-hifi"
         let service = info
             .service
             .as_deref()
@@ -314,7 +370,7 @@ impl ReceiverSessionManager {
             ));
         }
 
-        // 5. api_version EXACTLY "v1-lite"
+        // 6. api_version EXACTLY "v1-lite"
         let api_version = info
             .api_version
             .as_deref()
@@ -329,7 +385,7 @@ impl ReceiverSessionManager {
             ));
         }
 
-        // 6. roles contains "audio_receiver"
+        // 7. roles contains "audio_receiver"
         let roles = info
             .roles
             .as_ref()
@@ -338,10 +394,10 @@ impl ReceiverSessionManager {
             return Err("CONTRACT_VIOLATION: roles must contain 'audio_receiver'".to_string());
         }
 
-        // 7. audio capabilities validation
+        // 8. audio capabilities validation
         validate_audio_capabilities(&info)?;
 
-        // 8. verify receiver is pairable in local registry (not already paired, no identity mismatch)
+        // 9. verify receiver is pairable in local registry (no identity mismatch, not already paired unless allow_re_pair)
         {
             let reg = self.registry.read().await;
             if let Some(entry) = reg
@@ -353,7 +409,7 @@ impl ReceiverSessionManager {
                         "IDENTITY_MISMATCH: pairing blocked due to identity conflict".to_string(),
                     );
                 }
-                if entry.paired {
+                if entry.paired && !allow_re_pair {
                     return Err("ALREADY_PAIRED: receiver is already paired".to_string());
                 }
             }
@@ -482,6 +538,9 @@ impl ReceiverSessionManager {
         let pre_server_id = pre_info.server_id.as_ref().ok_or_else(|| {
             "CONTRACT_VIOLATION: server_id is required in receiver info".to_string()
         })?;
+        uuid::Uuid::parse_str(pre_server_id).map_err(|e| {
+            format!("CONTRACT_VIOLATION: server_id must be a valid canonical UUID: {e}")
+        })?;
         if pre_server_id != &pending.expected_server_id {
             return Err(format!(
                 "IDENTITY_MISMATCH: receiver server_id changed before pair_confirm (expected '{}', got '{}')",
@@ -498,6 +557,20 @@ impl ReceiverSessionManager {
             return Err(format!(
                 "IDENTITY_MISMATCH: receiver public_key changed before pair_confirm (expected '{}', got '{:?}')",
                 pending.expected_public_key, pre_info.public_key
+            ));
+        }
+
+        let pre_scheme = pre_info
+            .identity_scheme
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "CONTRACT_VIOLATION: identity_scheme is required in receiver info".to_string()
+            })?;
+        if pre_scheme != "ed25519-blake3-v1" {
+            return Err(format!(
+                "CONTRACT_VIOLATION: identity_scheme must be 'ed25519-blake3-v1', got '{pre_scheme}'"
             ));
         }
 
@@ -1635,11 +1708,11 @@ mod tests {
             let obj = info.as_object_mut().unwrap();
             obj.insert(
                 "server_id".to_string(),
-                serde_json::Value::String("mutated-after-confirm-uuid".to_string()),
+                serde_json::Value::String("660e8400-e29b-41d4-a716-446655440000".to_string()),
             );
             obj.insert(
                 "device_id".to_string(),
-                serde_json::Value::String("mutated-after-confirm-uuid".to_string()),
+                serde_json::Value::String("660e8400-e29b-41d4-a716-446655440000".to_string()),
             );
         }
         let val = st.confirm_json.read().unwrap().clone();
@@ -1667,6 +1740,7 @@ mod tests {
             "name": "Test Stream",
             "device_id": "550e8400-e29b-41d4-a716-446655440000",
             "server_id": "550e8400-e29b-41d4-a716-446655440000",
+            "identity_scheme": "ed25519-blake3-v1",
             "michi_id": "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4",
             "public_key": "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8",
             "api_version": "v1-lite",
@@ -2112,6 +2186,205 @@ mod tests {
             !st.pair_start_called.load(Ordering::SeqCst),
             "remote pair_start must NOT be called when receiver is already paired"
         );
+    }
+
+    // 5j. start_pairing fails if server_id is not a valid UUID
+    #[tokio::test]
+    async fn test_pairing_5j_fails_server_id_not_uuid() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "server_id".to_string(),
+                serde_json::Value::String("not-a-valid-uuid".to_string()),
+            );
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("CONTRACT_VIOLATION"), "got: {err}");
+        assert!(err.contains("valid canonical UUID"), "got: {err}");
+        assert!(!st.pair_start_called.load(Ordering::SeqCst));
+    }
+
+    // 5k. start_pairing fails if identity_scheme is missing
+    #[tokio::test]
+    async fn test_pairing_5k_fails_missing_identity_scheme() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("identity_scheme");
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("CONTRACT_VIOLATION"), "got: {err}");
+        assert!(err.contains("identity_scheme is required"), "got: {err}");
+        assert!(!st.pair_start_called.load(Ordering::SeqCst));
+    }
+
+    // 5l. start_pairing fails if identity_scheme is unsupported
+    #[tokio::test]
+    async fn test_pairing_5l_fails_invalid_identity_scheme() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "identity_scheme".to_string(),
+                serde_json::Value::String("rsa-sha256".to_string()),
+            );
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("CONTRACT_VIOLATION"), "got: {err}");
+        assert!(
+            err.contains("identity_scheme must be 'ed25519-blake3-v1'"),
+            "got: {err}"
+        );
+        assert!(!st.pair_start_called.load(Ordering::SeqCst));
+    }
+
+    // 5m. start_pairing fails if pcm_s16le codec is missing from audio.codecs
+    #[tokio::test]
+    async fn test_pairing_5m_fails_missing_codec_pcm_s16le() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .get_mut("audio")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("codecs".to_string(), serde_json::json!(["opus"]));
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("CONTRACT_VIOLATION"), "got: {err}");
+        assert!(err.contains("required 'pcm_s16le' codec"), "got: {err}");
+        assert!(!st.pair_start_called.load(Ordering::SeqCst));
+    }
+
+    // 5n. start_pairing fails if 48000 Hz is missing from audio.sample_rates
+    #[tokio::test]
+    async fn test_pairing_5n_fails_missing_sample_rate_48000() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .get_mut("audio")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("sample_rates".to_string(), serde_json::json!([44100]));
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("CONTRACT_VIOLATION"), "got: {err}");
+        assert!(err.contains("required 48000 Hz sample rate"), "got: {err}");
+        assert!(!st.pair_start_called.load(Ordering::SeqCst));
+    }
+
+    // 5o. start_pairing fails if 16-bit depth is missing from audio.bit_depths
+    #[tokio::test]
+    async fn test_pairing_5o_fails_missing_bit_depth_16() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .get_mut("audio")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("bit_depths".to_string(), serde_json::json!([24]));
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("CONTRACT_VIOLATION"), "got: {err}");
+        assert!(err.contains("required 16-bit depth"), "got: {err}");
+        assert!(!st.pair_start_called.load(Ordering::SeqCst));
+    }
+
+    // 5p. start_pairing fails if channel count 2 is missing from audio.channels
+    #[tokio::test]
+    async fn test_pairing_5p_fails_missing_channel_count_2() {
+        let st = default_mock_state();
+        st.info_json
+            .write()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .get_mut("audio")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("channels".to_string(), serde_json::json!([1]));
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let res = mgr.start_pairing(&base_url, "initiator-1").await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("CONTRACT_VIOLATION"), "got: {err}");
+        assert!(err.contains("required 2 channels (stereo)"), "got: {err}");
+        assert!(!st.pair_start_called.load(Ordering::SeqCst));
+    }
+
+    // 5q. start_pairing_ext allows re-pairing an already paired receiver
+    #[tokio::test]
+    async fn test_pairing_5q_start_pairing_ext_allows_re_pair() {
+        let st = default_mock_state();
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager();
+
+        let entry = ReceiverRegistryEntry {
+            receiver_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            michi_id: Some("1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4".to_string()),
+            name: "Paired Device".to_string(),
+            device_type: "standard".to_string(),
+            base_url: base_url.clone(),
+            paired: true,
+            ..Default::default()
+        };
+        mgr.registry.write().await.add(entry);
+
+        let res = mgr.start_pairing_ext(&base_url, "initiator-1", true).await;
+        assert!(
+            res.is_ok(),
+            "start_pairing_ext must succeed when allow_re_pair is true: {:?}",
+            res.err()
+        );
+        assert!(st.pair_start_called.load(Ordering::SeqCst));
     }
 
     // 6. start_pairing fails if pair_start response missing server_michi_id

@@ -407,6 +407,48 @@ pub async fn get_receiver_handler(
     })))
 }
 
+/// DELETE /api/v1/receivers/:id
+pub async fn delete_receiver_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // 1. Stop any active receiver session/supervisor
+    let _ = state.receiver_manager.stop_session(&id).await;
+
+    // 2. Remove from database
+    let db_deleted = michi_db::delete_receiver_db(&state.db, &id)
+        .await
+        .unwrap_or(false);
+    let _ = michi_db::delete_receiver_credential_db(&state.db, &id).await;
+
+    // 3. Unpair in registry and remove entry
+    let reg_arc = state.receiver_manager.registry().await;
+    let reg_deleted = {
+        let mut reg = reg_arc.write().await;
+        let exists = reg.get(&id).is_some();
+        if let Some(entry) = reg.get_mut(&id) {
+            entry.paired = false;
+            entry.token = None;
+            entry.active_session_id = None;
+        }
+        reg.remove(&id);
+        exists
+    };
+
+    if !db_deleted && !reg_deleted {
+        return Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "RECEIVER_NOT_FOUND",
+            &format!("receiver not found: {id}"),
+        ));
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "unpaired",
+        "receiver_id": id,
+    })))
+}
+
 /// POST /api/v1/receivers/:id/takeover
 pub async fn receiver_takeover_handler(
     State(state): State<AppState>,
@@ -465,6 +507,7 @@ pub struct ReceiverPairStartBody {
     pub base_url: Option<String>,
     pub receiver_id: Option<String>,
     pub initiator_id: Option<String>,
+    pub re_pair: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -497,7 +540,7 @@ pub async fn receiver_pair_start_handler(
                     "receiver has an unresolved identity mismatch and cannot be paired",
                 ));
             }
-            if entry.paired {
+            if entry.paired && body.re_pair != Some(true) {
                 return Err(v1_error(
                     StatusCode::BAD_REQUEST,
                     "ALREADY_PAIRED",
@@ -505,7 +548,21 @@ pub async fn receiver_pair_start_handler(
                 ));
             }
             entry.base_url.clone()
-        } else if let Some(scent_entry) = state.scent_store.get(rid) {
+        } else if let Some(scent_entry) = state.scent_store.get(rid).or_else(|| {
+            state
+                .scent_store
+                .list()
+                .into_iter()
+                .find(|s| s.device_id == *rid)
+        }) {
+            let eff = state.scent_store.effective_presence_now(&scent_entry);
+            if eff == michi_connect::scent_store::EffectivePresence::Offline {
+                return Err(v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "RECEIVER_OFFLINE",
+                    &format!("receiver {rid} is offline or stale in scent store"),
+                ));
+            }
             if let Some(ref bu) = scent_entry.base_url {
                 bu.to_string()
             } else {
@@ -530,9 +587,10 @@ pub async fn receiver_pair_start_handler(
         ));
     };
 
+    let allow_re_pair = body.re_pair.unwrap_or(false);
     match state
         .receiver_manager
-        .start_pairing(&target_base_url, &initiator_id)
+        .start_pairing_ext(&target_base_url, &initiator_id, allow_re_pair)
         .await
     {
         Ok(pending) => Ok(Json(serde_json::json!({
@@ -615,13 +673,24 @@ async fn persist_paired_receiver(state: &AppState, device_id: &str) -> Result<()
         authority_supported: entry.authority_supported,
     };
 
-    michi_db::persist_paired_receiver_transaction(&state.db, &prec, &cred)
-        .await
-        .map_err(|e| {
-            format!("failed to persist receiver record and credential for {device_id}: {e}")
-        })?;
+    // Retry database transaction up to 3 times with exponential backoff
+    let mut last_err = None;
+    for attempt in 1..=3 {
+        match michi_db::persist_paired_receiver_transaction(&state.db, &prec, &cred).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    "persist_paired_receiver attempt {attempt}/3 failed for {device_id}: {e}"
+                );
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
+            }
+        }
+    }
 
-    Ok(())
+    Err(format!(
+        "failed to persist receiver record and credential for {device_id} after 3 attempts: {last_err:?}"
+    ))
 }
 
 pub async fn receiver_pair_confirm_handler(
