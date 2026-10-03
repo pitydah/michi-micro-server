@@ -622,6 +622,7 @@ impl ReceiverSessionManager {
             Err(e) => {
                 let recovered = if e.code == "NETWORK_ERROR"
                     || e.code == "PAIRING_ALREADY_CONSUMED"
+                    || e.code == "CONFLICT"
                     || e.http_status == 409
                 {
                     match client.pair_status(&pending.receiver_pair_session_id).await {
@@ -649,6 +650,7 @@ impl ReceiverSessionManager {
                         "PAIRING_EXPIRED"
                         | "PAIRING_NOT_FOUND"
                         | "PAIRING_ALREADY_CONSUMED"
+                        | "CONFLICT"
                         | "PAIRING_ATTEMPTS_EXCEEDED" => {
                             let mut p = self.pending_pairings.write().await;
                             p.remove(pairing_id);
@@ -666,7 +668,7 @@ impl ReceiverSessionManager {
         };
 
         if let Some(ref err) = confirm_resp.error {
-            let recovered = if err.code == "PAIRING_ALREADY_CONSUMED" {
+            let recovered = if err.code == "PAIRING_ALREADY_CONSUMED" || err.code == "CONFLICT" {
                 match client.pair_status(&pending.receiver_pair_session_id).await {
                     Ok(status_resp) if status_resp.status == "confirmed" => {
                         client.pair_recover_auto().await.ok()
@@ -681,6 +683,7 @@ impl ReceiverSessionManager {
                 if err.code == "PAIRING_EXPIRED"
                     || err.code == "PAIRING_NOT_FOUND"
                     || err.code == "PAIRING_ALREADY_CONSUMED"
+                    || err.code == "CONFLICT"
                     || err.code == "PAIRING_ATTEMPTS_EXCEEDED"
                 {
                     let mut p = self.pending_pairings.write().await;
@@ -696,7 +699,9 @@ impl ReceiverSessionManager {
         // IMMEDIATELY PRESERVE TOKEN IN LOCAL JOURNAL
         if let (Some(ref pool), Some(ref tok)) = (&self.db_pool, &client.token) {
             if let Err(e) = michi_db::record_pairing_journal_token_db(pool, pairing_id, tok).await {
-                tracing::error!("CRITICAL: failed to persist token to pairing journal for {pairing_id}: {e}");
+                tracing::error!(
+                    "CRITICAL: failed to persist token to pairing journal for {pairing_id}: {e}"
+                );
             }
         }
 
@@ -895,12 +900,9 @@ impl ReceiverSessionManager {
             }
             Err(e) => {
                 if let Some(ref pool) = self.db_pool {
-                    let _ = michi_db::record_pairing_journal_recovery_required_db(
-                        pool,
-                        pairing_id,
-                        &e,
-                    )
-                    .await;
+                    let _ =
+                        michi_db::record_pairing_journal_recovery_required_db(pool, pairing_id, &e)
+                            .await;
                 }
                 Err(e)
             }
@@ -2936,7 +2938,10 @@ mod tests {
         let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
 
         let res = mgr.confirm_pairing(&pending.pairing_id, "482391").await;
-        assert!(res.is_err(), "confirm must fail on post-confirm identity mismatch");
+        assert!(
+            res.is_err(),
+            "confirm must fail on post-confirm identity mismatch"
+        );
 
         let journal = michi_db::get_pairing_journal_entry_db(&pool, &pending.pairing_id)
             .await
@@ -2949,7 +2954,10 @@ mod tests {
             "token must be preserved in journal despite post-confirm error"
         );
         assert!(
-            journal.error_reason.unwrap_or_default().contains("IDENTITY_MISMATCH"),
+            journal
+                .error_reason
+                .unwrap_or_default()
+                .contains("IDENTITY_MISMATCH"),
             "error_reason must record the failure cause"
         );
     }

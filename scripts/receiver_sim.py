@@ -502,9 +502,20 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            existing_ch = st.recovery_challenges.get((michi_id, public_key))
+            now = time.time()
+            if existing_ch and now < existing_ch["expires_at"]:
+                exp_iso = datetime.datetime.fromtimestamp(existing_ch["expires_at"], datetime.timezone.utc).isoformat()
+                self.send_json(200, {
+                    "challenge_nonce": existing_ch["challenge_nonce"],
+                    "expires_at": exp_iso,
+                    "server_michi_id": st.server_michi_id,
+                    "server_public_key": st.server_pubkey_b64,
+                })
+                return
+
             raw_nonce = secrets.token_bytes(32)
             challenge_nonce = base64.urlsafe_b64encode(raw_nonce).decode("ascii").rstrip("=")
-            now = time.time()
             exp_iso = datetime.datetime.fromtimestamp(now + 60.0, datetime.timezone.utc).isoformat()
             st.recovery_challenges[(michi_id, public_key)] = {
                 "challenge_nonce": challenge_nonce,
@@ -546,9 +557,6 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 })
                 return
 
-            # Invalidate challenge immediately (single-use replay resistance)
-            st.recovery_challenges.pop((michi_id, public_key), None)
-
             existing = next(
                 (c for c in st.controllers.values() if c.get("michi_id") == michi_id and c.get("public_key") == public_key),
                 None,
@@ -558,6 +566,9 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                     "error": {"code": "NOT_FOUND", "message": "controller identity is not registered on this receiver"},
                 })
                 return
+
+            # Single-use challenge consumed only upon successful recovery (anti-DoS)
+            st.recovery_challenges.pop((michi_id, public_key), None)
 
             device_id = existing["device_id"]
             raw_token = secrets.token_bytes(32)

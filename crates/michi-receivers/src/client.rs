@@ -324,12 +324,13 @@ impl ReceiverClient {
             });
         }
 
-        let result: PairRecoverStartResponse = resp.json().await.map_err(|e| ReceiverProtocolError {
-            http_status: 500,
-            code: "DECODE_ERROR".into(),
-            message: format!("pair_recover_start parse failed: {e}"),
-            details: serde_json::Value::Null,
-        })?;
+        let result: PairRecoverStartResponse =
+            resp.json().await.map_err(|e| ReceiverProtocolError {
+                http_status: 500,
+                code: "DECODE_ERROR".into(),
+                message: format!("pair_recover_start parse failed: {e}"),
+                details: serde_json::Value::Null,
+            })?;
         Ok(result)
     }
 
@@ -339,20 +340,17 @@ impl ReceiverClient {
         challenge_nonce: &str,
     ) -> Result<PairConfirmResponse, ReceiverProtocolError> {
         let (michi_id, public_key, signature) = if let Some(ref id) = self.identity {
-            let nonce_bytes = URL_SAFE_NO_PAD
-                .decode(challenge_nonce)
-                .map_err(|e| ReceiverProtocolError {
-                    http_status: 400,
-                    code: "INVALID_CHALLENGE".into(),
-                    message: format!("invalid base64url challenge nonce: {e}"),
-                    details: serde_json::Value::Null,
-                })?;
+            let nonce_bytes =
+                URL_SAFE_NO_PAD
+                    .decode(challenge_nonce)
+                    .map_err(|e| ReceiverProtocolError {
+                        http_status: 400,
+                        code: "INVALID_CHALLENGE".into(),
+                        message: format!("invalid base64url challenge nonce: {e}"),
+                        details: serde_json::Value::Null,
+                    })?;
             let (sig, pk) = id.sign_base64url(&nonce_bytes);
-            (
-                id.michi_id().to_base64url(),
-                pk,
-                sig,
-            )
+            (id.michi_id().to_base64url(), pk, sig)
         } else {
             return Err(ReceiverProtocolError {
                 http_status: 500,

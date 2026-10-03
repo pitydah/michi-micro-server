@@ -806,7 +806,9 @@ pub async fn reconcile_unrecovered_pairings(state: &AppState) -> Result<usize, S
                 .ok()
                 .flatten();
             if existing_db.is_some() {
-                let _ = michi_db::record_pairing_journal_completed_db(&state.db, &journal.pairing_id).await;
+                let _ =
+                    michi_db::record_pairing_journal_completed_db(&state.db, &journal.pairing_id)
+                        .await;
                 continue;
             }
 
@@ -815,12 +817,19 @@ pub async fn reconcile_unrecovered_pairings(state: &AppState) -> Result<usize, S
             if reg.get(receiver_id).is_some() {
                 drop(reg);
                 if persist_paired_receiver(state, receiver_id).await.is_ok() {
-                    let _ = michi_db::record_pairing_journal_completed_db(&state.db, &journal.pairing_id).await;
+                    let _ = michi_db::record_pairing_journal_completed_db(
+                        &state.db,
+                        &journal.pairing_id,
+                    )
+                    .await;
                     recovered_count += 1;
                 }
             } else {
                 drop(reg);
-                let mut client = michi_receivers::ReceiverClient::with_identity(&journal.base_url, state.identity.clone());
+                let mut client = michi_receivers::ReceiverClient::with_identity(
+                    &journal.base_url,
+                    state.identity.clone(),
+                );
                 client.token = Some(token.clone());
                 if let Ok(info) = client.get_info().await {
                     let device_id = info
