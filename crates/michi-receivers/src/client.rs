@@ -192,6 +192,251 @@ impl ReceiverClient {
         Ok(result)
     }
 
+    /// GET /api/v1/pair/status?session_id=<uuid>
+    pub async fn pair_status(
+        &self,
+        session_id: &str,
+    ) -> Result<PairStatusResponse, ReceiverProtocolError> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/v1/pair/status?session_id={}",
+                self.base_url, session_id
+            ))
+            .send()
+            .await
+            .map_err(|e| ReceiverProtocolError {
+                http_status: 503,
+                code: "NETWORK_ERROR".into(),
+                message: format!("pair_status request failed: {e}"),
+                details: serde_json::Value::Null,
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            if let Ok(err_val) = resp.json::<serde_json::Value>().await {
+                if let Some(err_obj) = err_val.get("error") {
+                    let code = err_obj
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("PAIR_STATUS_FAILED")
+                        .to_string();
+                    let message = err_obj
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("pair status check failed")
+                        .to_string();
+                    let details = err_obj
+                        .get("details")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    return Err(ReceiverProtocolError {
+                        http_status: status_code,
+                        code,
+                        message,
+                        details,
+                    });
+                }
+            }
+            return Err(ReceiverProtocolError {
+                http_status: status_code,
+                code: "PAIR_STATUS_FAILED".into(),
+                message: format!("pair_status failed with status {status}"),
+                details: serde_json::Value::Null,
+            });
+        }
+
+        let result: PairStatusResponse = resp.json().await.map_err(|e| ReceiverProtocolError {
+            http_status: 500,
+            code: "DECODE_ERROR".into(),
+            message: format!("pair_status parse failed: {e}"),
+            details: serde_json::Value::Null,
+        })?;
+        Ok(result)
+    }
+
+    /// POST /api/v1/pair/recover/start to get a fresh receiver-issued single-use challenge nonce
+    pub async fn pair_recover_start(
+        &self,
+    ) -> Result<PairRecoverStartResponse, ReceiverProtocolError> {
+        let (michi_id, public_key) = if let Some(ref id) = self.identity {
+            (id.michi_id().to_base64url(), id.public_key_base64url())
+        } else {
+            return Err(ReceiverProtocolError {
+                http_status: 500,
+                code: "INTERNAL_ERROR".into(),
+                message: "IdentityManager not configured on ReceiverClient".into(),
+                details: serde_json::Value::Null,
+            });
+        };
+
+        let payload = serde_json::json!({
+            "michi_id": michi_id,
+            "public_key": public_key,
+        });
+
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/pair/recover/start", self.base_url))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| ReceiverProtocolError {
+                http_status: 503,
+                code: "NETWORK_ERROR".into(),
+                message: format!("pair_recover_start request failed: {e}"),
+                details: serde_json::Value::Null,
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            if let Ok(err_val) = resp.json::<serde_json::Value>().await {
+                if let Some(err_obj) = err_val.get("error") {
+                    let code = err_obj
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("PAIR_RECOVER_START_FAILED")
+                        .to_string();
+                    let message = err_obj
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("pair recover start failed")
+                        .to_string();
+                    let details = err_obj
+                        .get("details")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    return Err(ReceiverProtocolError {
+                        http_status: status_code,
+                        code,
+                        message,
+                        details,
+                    });
+                }
+            }
+            return Err(ReceiverProtocolError {
+                http_status: status_code,
+                code: "PAIR_RECOVER_START_FAILED".into(),
+                message: format!("pair_recover_start failed with status {status}"),
+                details: serde_json::Value::Null,
+            });
+        }
+
+        let result: PairRecoverStartResponse =
+            resp.json().await.map_err(|e| ReceiverProtocolError {
+                http_status: 500,
+                code: "DECODE_ERROR".into(),
+                message: format!("pair_recover_start parse failed: {e}"),
+                details: serde_json::Value::Null,
+            })?;
+        Ok(result)
+    }
+
+    /// POST /api/v1/pair/recover with Ed25519 signature
+    pub async fn pair_recover(
+        &mut self,
+        challenge_nonce: &str,
+    ) -> Result<PairConfirmResponse, ReceiverProtocolError> {
+        let (michi_id, public_key, signature) = if let Some(ref id) = self.identity {
+            let nonce_bytes =
+                URL_SAFE_NO_PAD
+                    .decode(challenge_nonce)
+                    .map_err(|e| ReceiverProtocolError {
+                        http_status: 400,
+                        code: "INVALID_CHALLENGE".into(),
+                        message: format!("invalid base64url challenge nonce: {e}"),
+                        details: serde_json::Value::Null,
+                    })?;
+            let (sig, pk) = id.sign_base64url(&nonce_bytes);
+            (id.michi_id().to_base64url(), pk, sig)
+        } else {
+            return Err(ReceiverProtocolError {
+                http_status: 500,
+                code: "INTERNAL_ERROR".into(),
+                message: "IdentityManager not configured on ReceiverClient".into(),
+                details: serde_json::Value::Null,
+            });
+        };
+
+        let payload = serde_json::json!({
+            "michi_id": michi_id,
+            "public_key": public_key,
+            "challenge_nonce": challenge_nonce,
+            "challenge_signature": signature,
+        });
+
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/pair/recover", self.base_url))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| ReceiverProtocolError {
+                http_status: 503,
+                code: "NETWORK_ERROR".into(),
+                message: format!("pair_recover request failed: {e}"),
+                details: serde_json::Value::Null,
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            if let Ok(err_val) = resp.json::<serde_json::Value>().await {
+                if let Some(err_obj) = err_val.get("error") {
+                    let code = err_obj
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("PAIRING_FAILED")
+                        .to_string();
+                    let message = err_obj
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("pair recover rejected")
+                        .to_string();
+                    let details = err_obj
+                        .get("details")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    return Err(ReceiverProtocolError {
+                        http_status: status_code,
+                        code,
+                        message,
+                        details,
+                    });
+                }
+            }
+            return Err(ReceiverProtocolError {
+                http_status: status_code,
+                code: "PAIR_RECOVER_FAILED".into(),
+                message: format!("pair_recover failed with status {status}"),
+                details: serde_json::Value::Null,
+            });
+        }
+
+        let result: PairConfirmResponse = resp.json().await.map_err(|e| ReceiverProtocolError {
+            http_status: 500,
+            code: "DECODE_ERROR".into(),
+            message: format!("pair_recover parse failed: {e}"),
+            details: serde_json::Value::Null,
+        })?;
+        if let Some(ref t) = result.token {
+            self.token = Some(t.clone());
+        }
+        Ok(result)
+    }
+
+    /// Performs 2-step replay-resistant recovery:
+    /// 1. POST /api/v1/pair/recover/start -> obtains receiver challenge_nonce
+    /// 2. POST /api/v1/pair/recover -> signs receiver challenge_nonce and recovers token
+    pub async fn pair_recover_auto(
+        &mut self,
+    ) -> Result<PairConfirmResponse, ReceiverProtocolError> {
+        let start_resp = self.pair_recover_start().await?;
+        self.pair_recover(&start_resp.challenge_nonce).await
+    }
+
     fn apply_session_headers(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if let Some(ref stok) = self.active_session_token {
             req = req.header("X-Michi-Session", stok);

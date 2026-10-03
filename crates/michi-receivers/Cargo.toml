@@ -24,6 +24,8 @@ tokio-util.workspace = true
 url = "2"
 michi-sync = { path = "../michi-sync" }
 michi-connect = { path = "../michi-connect" }
+michi-db = { path = "../michi-db" }
+sqlx.workspace = true
 
 
 [dev-dependencies]

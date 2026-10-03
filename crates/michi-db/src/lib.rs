@@ -326,8 +326,16 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
             migration_050
         );
     }
+    if current < 51 {
+        run_migration_step!(
+            conn,
+            51,
+            "receiver_pairing_journal table for atomic pairing recovery",
+            migration_051
+        );
+    }
 
-    info!("database schema at version 50");
+    info!("database schema at version 51");
     Ok(())
 }
 
@@ -1369,6 +1377,38 @@ async fn migration_050(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
     Ok(())
 }
 
+async fn migration_051(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS receiver_pairing_journal (
+            pairing_id TEXT PRIMARY KEY,
+            receiver_id TEXT NOT NULL,
+            base_url TEXT NOT NULL,
+            michi_id TEXT NOT NULL,
+            token TEXT,
+            state TEXT NOT NULL DEFAULT 'started',
+            error_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_pairing_journal_state ON receiver_pairing_journal(state)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_pairing_journal_receiver_id ON receiver_pairing_journal(receiver_id)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedReceiver {
     pub id: String,
@@ -1690,6 +1730,162 @@ pub async fn delete_receiver_credential_db(
         .execute(pool)
         .await?;
     Ok(res.rows_affected() > 0)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PairingJournalEntry {
+    pub pairing_id: String,
+    pub receiver_id: String,
+    pub base_url: String,
+    pub michi_id: String,
+    pub token: Option<String>,
+    pub state: String,
+    pub error_reason: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub async fn record_pairing_journal_start_db(
+    pool: &SqlitePool,
+    pairing_id: &str,
+    receiver_id: &str,
+    base_url: &str,
+    michi_id: &str,
+) -> Result<(), DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO receiver_pairing_journal (pairing_id, receiver_id, base_url, michi_id, state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'started', ?, ?)
+         ON CONFLICT(pairing_id) DO UPDATE SET
+            receiver_id = excluded.receiver_id,
+            base_url = excluded.base_url,
+            michi_id = excluded.michi_id,
+            updated_at = excluded.updated_at",
+    )
+    .bind(pairing_id)
+    .bind(receiver_id)
+    .bind(base_url)
+    .bind(michi_id)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn record_pairing_journal_token_db(
+    pool: &SqlitePool,
+    pairing_id: &str,
+    token: &str,
+) -> Result<(), DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE receiver_pairing_journal
+         SET token = ?, state = 'token_acquired', updated_at = ?
+         WHERE pairing_id = ?",
+    )
+    .bind(token)
+    .bind(&now)
+    .bind(pairing_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn record_pairing_journal_completed_db(
+    pool: &SqlitePool,
+    pairing_id: &str,
+) -> Result<(), DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE receiver_pairing_journal
+         SET state = 'persisted', updated_at = ?
+         WHERE pairing_id = ?",
+    )
+    .bind(&now)
+    .bind(pairing_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn record_pairing_journal_recovery_required_db(
+    pool: &SqlitePool,
+    pairing_id: &str,
+    error_reason: &str,
+) -> Result<(), DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE receiver_pairing_journal
+         SET state = 'recovery_required', error_reason = ?, updated_at = ?
+         WHERE pairing_id = ?",
+    )
+    .bind(error_reason)
+    .bind(&now)
+    .bind(pairing_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_pairing_journal_entry_db(
+    pool: &SqlitePool,
+    pairing_id: &str,
+) -> Result<Option<PairingJournalEntry>, DbError> {
+    use sqlx::Row;
+    let row_opt = sqlx::query(
+        "SELECT pairing_id, receiver_id, base_url, michi_id, token, state, error_reason, created_at, updated_at
+         FROM receiver_pairing_journal WHERE pairing_id = ?",
+    )
+    .bind(pairing_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(row) = row_opt {
+        Ok(Some(PairingJournalEntry {
+            pairing_id: row.get("pairing_id"),
+            receiver_id: row.get("receiver_id"),
+            base_url: row.get("base_url"),
+            michi_id: row.get("michi_id"),
+            token: row.get("token"),
+            state: row.get("state"),
+            error_reason: row.get("error_reason"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn list_unrecovered_pairing_journals_db(
+    pool: &SqlitePool,
+) -> Result<Vec<PairingJournalEntry>, DbError> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT pairing_id, receiver_id, base_url, michi_id, token, state, error_reason, created_at, updated_at
+         FROM receiver_pairing_journal
+         WHERE state IN ('token_acquired', 'recovery_required')
+         ORDER BY created_at ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(PairingJournalEntry {
+            pairing_id: row.get("pairing_id"),
+            receiver_id: row.get("receiver_id"),
+            base_url: row.get("base_url"),
+            michi_id: row.get("michi_id"),
+            token: row.get("token"),
+            state: row.get("state"),
+            error_reason: row.get("error_reason"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        });
+    }
+    Ok(out)
 }
 
 pub async fn save_room_group_db(

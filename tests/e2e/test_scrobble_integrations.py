@@ -96,6 +96,8 @@ def _post_expecting_error(opener, path, body, timeout=5):
             return e.code, json.loads(body_bytes)
         except Exception:
             return e.code, {}
+    except (urllib.error.URLError, TimeoutError) as e:
+        return 502, {"error": str(e)}
 
 
 # ── Scrobbling status contract ─────────────────────────────────────────────────

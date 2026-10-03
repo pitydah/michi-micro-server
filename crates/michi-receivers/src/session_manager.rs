@@ -23,6 +23,7 @@ pub struct ReceiverSessionManager {
     registry: Arc<RwLock<ReceiverRegistry>>,
     identity: Option<Arc<michi_identity::IdentityManager>>,
     scent_store: Option<Arc<michi_connect::ScentStore>>,
+    db_pool: Option<sqlx::SqlitePool>,
     pending_pairings: Arc<RwLock<HashMap<String, PendingReceiverPairing>>>,
     active_sessions: Arc<RwLock<HashMap<String, ReceiverActiveSession>>>,
     active_transports: Arc<RwLock<HashMap<String, SharedAudioTransport>>>,
@@ -35,6 +36,7 @@ impl std::fmt::Debug for ReceiverSessionManager {
         f.debug_struct("ReceiverSessionManager")
             .field("identity", &self.identity.is_some())
             .field("scent_store", &self.scent_store.is_some())
+            .field("db_pool", &self.db_pool.is_some())
             .finish()
     }
 }
@@ -51,6 +53,7 @@ impl ReceiverSessionManager {
             registry: Arc::new(RwLock::new(ReceiverRegistry::new())),
             identity: None,
             scent_store: None,
+            db_pool: None,
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
@@ -70,6 +73,7 @@ impl ReceiverSessionManager {
             registry: Arc::new(RwLock::new(ReceiverRegistry::new())),
             identity: Some(identity),
             scent_store: None,
+            db_pool: None,
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
@@ -98,6 +102,7 @@ impl ReceiverSessionManager {
             registry,
             identity: None,
             scent_store: None,
+            db_pool: None,
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
@@ -112,6 +117,19 @@ impl ReceiverSessionManager {
 
     pub fn set_scent_store(&mut self, scent_store: Arc<michi_connect::ScentStore>) {
         self.scent_store = Some(scent_store);
+    }
+
+    pub fn set_db_pool(&mut self, db_pool: sqlx::SqlitePool) {
+        self.db_pool = Some(db_pool);
+    }
+
+    pub fn with_db_pool(mut self, db_pool: sqlx::SqlitePool) -> Self {
+        self.db_pool = Some(db_pool);
+        self
+    }
+
+    pub fn db_pool(&self) -> Option<sqlx::SqlitePool> {
+        self.db_pool.clone()
     }
 
     pub fn with_scent_store(mut self, scent_store: Arc<michi_connect::ScentStore>) -> Self {
@@ -507,7 +525,21 @@ impl ReceiverSessionManager {
         {
             let mut p = self.pending_pairings.write().await;
             p.retain(|_, v| v.expires_at > now);
-            p.insert(pairing_id, pending.clone());
+            p.insert(pairing_id.clone(), pending.clone());
+        }
+
+        if let Some(ref pool) = self.db_pool {
+            if let Err(e) = michi_db::record_pairing_journal_start_db(
+                pool,
+                &pairing_id,
+                &pending.expected_server_id,
+                &pending.receiver_base_url,
+                &pending.expected_michi_id,
+            )
+            .await
+            {
+                tracing::warn!("failed to record pairing journal start for {pairing_id}: {e}");
+            }
         }
 
         Ok(pending)
@@ -588,230 +620,293 @@ impl ReceiverSessionManager {
         let confirm_resp = match confirm_resp {
             Ok(resp) => resp,
             Err(e) => {
-                // Strict typed handling of receiver error codes
-                match e.code.as_str() {
-                    "PAIRING_PIN_MISMATCH" => {
-                        // Keep pending for user retry
+                let recovered = if e.code == "NETWORK_ERROR"
+                    || e.code == "PAIRING_ALREADY_CONSUMED"
+                    || e.code == "CONFLICT"
+                    || e.http_status == 409
+                {
+                    match client.pair_status(&pending.receiver_pair_session_id).await {
+                        Ok(status_resp) if status_resp.status == "confirmed" => {
+                            tracing::info!(
+                                "pairing session {} confirmed remotely; executing authenticated recovery",
+                                pending.receiver_pair_session_id
+                            );
+                            client.pair_recover_auto().await.ok()
+                        }
+                        _ => None,
                     }
-                    "PAIRING_EXPIRED"
-                    | "PAIRING_NOT_FOUND"
-                    | "PAIRING_ALREADY_CONSUMED"
-                    | "PAIRING_ATTEMPTS_EXCEEDED" => {
-                        let mut p = self.pending_pairings.write().await;
-                        p.remove(pairing_id);
-                    }
-                    _ => {
-                        if e.http_status == 408 || e.http_status == 410 {
+                } else {
+                    None
+                };
+
+                if let Some(rec_resp) = recovered {
+                    rec_resp
+                } else {
+                    // Strict typed handling of receiver error codes
+                    match e.code.as_str() {
+                        "PAIRING_PIN_MISMATCH" => {
+                            // Keep pending for user retry
+                        }
+                        "PAIRING_EXPIRED"
+                        | "PAIRING_NOT_FOUND"
+                        | "PAIRING_ALREADY_CONSUMED"
+                        | "CONFLICT"
+                        | "PAIRING_ATTEMPTS_EXCEEDED" => {
                             let mut p = self.pending_pairings.write().await;
                             p.remove(pairing_id);
                         }
+                        _ => {
+                            if e.http_status == 408 || e.http_status == 410 {
+                                let mut p = self.pending_pairings.write().await;
+                                p.remove(pairing_id);
+                            }
+                        }
                     }
+                    return Err(format!("pair_confirm failed: {}: {}", e.code, e.message));
                 }
-                return Err(format!("pair_confirm failed: {}: {}", e.code, e.message));
             }
         };
 
         if let Some(ref err) = confirm_resp.error {
-            if err.code == "PAIRING_EXPIRED"
-                || err.code == "PAIRING_NOT_FOUND"
-                || err.code == "PAIRING_ALREADY_CONSUMED"
-                || err.code == "PAIRING_ATTEMPTS_EXCEEDED"
-            {
-                let mut p = self.pending_pairings.write().await;
-                p.remove(pairing_id);
+            let recovered = if err.code == "PAIRING_ALREADY_CONSUMED" || err.code == "CONFLICT" {
+                match client.pair_status(&pending.receiver_pair_session_id).await {
+                    Ok(status_resp) if status_resp.status == "confirmed" => {
+                        client.pair_recover_auto().await.ok()
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            if recovered.is_none() {
+                if err.code == "PAIRING_EXPIRED"
+                    || err.code == "PAIRING_NOT_FOUND"
+                    || err.code == "PAIRING_ALREADY_CONSUMED"
+                    || err.code == "CONFLICT"
+                    || err.code == "PAIRING_ATTEMPTS_EXCEEDED"
+                {
+                    let mut p = self.pending_pairings.write().await;
+                    p.remove(pairing_id);
+                }
+                return Err(format!(
+                    "pair_confirm failed: {}: {}",
+                    err.code, err.message
+                ));
             }
-            return Err(format!(
-                "pair_confirm failed: {}: {}",
-                err.code, err.message
-            ));
         }
 
-        // On successful confirmation, clean up pending pairing
-        {
-            let mut p = self.pending_pairings.write().await;
-            p.remove(pairing_id);
+        // IMMEDIATELY PRESERVE TOKEN IN LOCAL JOURNAL
+        if let (Some(ref pool), Some(ref tok)) = (&self.db_pool, &client.token) {
+            if let Err(e) = michi_db::record_pairing_journal_token_db(pool, pairing_id, tok).await {
+                tracing::error!(
+                    "CRITICAL: failed to persist token to pairing journal for {pairing_id}: {e}"
+                );
+            }
         }
 
-        // Re-fetch fresh info to enforce identity pinning post-confirmation
-        let fresh_info = client.get_info().await?;
-        let fresh_server_id = fresh_info.server_id.as_ref().ok_or_else(|| {
-            "CONTRACT_VIOLATION: server_id is required in receiver info".to_string()
-        })?;
-        if fresh_server_id != &pending.expected_server_id {
-            return Err(format!(
-                "IDENTITY_MISMATCH: receiver server_id changed post-confirmation (expected '{}', got '{}')",
-                pending.expected_server_id, fresh_server_id
-            ));
-        }
-        if fresh_info.michi_id.as_ref() != Some(&pending.expected_michi_id) {
-            return Err(format!(
-                "IDENTITY_MISMATCH: receiver michi_id changed post-confirmation (expected '{}', got '{:?}')",
-                pending.expected_michi_id, fresh_info.michi_id
-            ));
-        }
-        if fresh_info.public_key.as_ref() != Some(&pending.expected_public_key) {
-            return Err(format!(
-                "IDENTITY_MISMATCH: receiver public_key changed post-confirmation (expected '{}', got '{:?}')",
-                pending.expected_public_key, fresh_info.public_key
-            ));
-        }
-
-        let info = fresh_info;
-        let device_id = info
-            .michi_id
-            .clone()
-            .or_else(|| info.server_id.clone())
-            .ok_or_else(|| {
-                "IDENTITY_MISMATCH: missing device identifier post-confirmation".to_string()
+        let build_and_add_result: Result<String, String> = async {
+            // Re-fetch fresh info to enforce identity pinning post-confirmation
+            let fresh_info = client.get_info().await?;
+            let fresh_server_id = fresh_info.server_id.as_ref().ok_or_else(|| {
+                "CONTRACT_VIOLATION: server_id is required in receiver info".to_string()
             })?;
-        let name = info.name.clone().unwrap_or_else(|| device_id.clone());
-        let device_type = info
-            .device_type
-            .clone()
-            .or_else(|| info.service.clone())
-            .unwrap_or_else(|| "unknown".into());
-
-        // Extract discrete capabilities without fake defaults - require canonical info.audio
-        let audio = info.audio.as_ref().ok_or_else(|| {
-            "receiver failed capability negotiation: missing canonical 'audio' specification"
-                .to_string()
-        })?;
-
-        let transports: Vec<String> = audio
-            .get("transports")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .filter(|v: &Vec<String>| !v.is_empty())
-            .ok_or_else(|| "receiver capabilities missing valid audio.transports".to_string())?;
-
-        if !transports.iter().any(|t| t == "rtp_udp") {
-            return Err("receiver does not support required 'rtp_udp' audio transport".to_string());
-        }
-
-        let sample_rates: Vec<u32> = audio
-            .get("sample_rates")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_u64().map(|n| n as u32))
-                    .collect()
-            })
-            .filter(|v: &Vec<u32>| !v.is_empty())
-            .ok_or_else(|| "receiver capabilities missing valid audio.sample_rates".to_string())?;
-
-        let bit_depths: Vec<u32> = audio
-            .get("bit_depths")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_u64().map(|n| n as u32))
-                    .collect()
-            })
-            .filter(|v: &Vec<u32>| !v.is_empty())
-            .ok_or_else(|| "receiver capabilities missing valid audio.bit_depths".to_string())?;
-
-        let channels: Vec<u8> = audio
-            .get("channels")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_u64().map(|n| n as u8))
-                    .collect()
-            })
-            .filter(|v: &Vec<u8>| !v.is_empty())
-            .ok_or_else(|| "receiver capabilities missing valid audio.channels".to_string())?;
-
-        let codecs: Vec<String> = audio
-            .get("codecs")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .filter(|v: &Vec<String>| !v.is_empty())
-            .ok_or_else(|| "receiver capabilities missing valid audio.codecs".to_string())?;
-
-        let max_sr = *sample_rates.iter().max().unwrap_or(&48000);
-        let max_bd = *bit_depths.iter().max().unwrap_or(&16);
-
-        let mut caps = vec![
-            "stream".to_string(),
-            "volume".to_string(),
-            "heartbeat".to_string(),
-        ];
-        if let Some(feats) = &info.features {
-            if feats
-                .get("ota_update")
-                .and_then(|v| v.as_bool())
-                .or_else(|| feats.get("ota").and_then(|v| v.as_bool()))
-                .unwrap_or(false)
-            {
-                caps.push("ota_update".to_string());
+            if fresh_server_id != &pending.expected_server_id {
+                return Err(format!(
+                    "IDENTITY_MISMATCH: receiver server_id changed post-confirmation (expected '{}', got '{}')",
+                    pending.expected_server_id, fresh_server_id
+                ));
             }
-        }
+            if fresh_info.michi_id.as_ref() != Some(&pending.expected_michi_id) {
+                return Err(format!(
+                    "IDENTITY_MISMATCH: receiver michi_id changed post-confirmation (expected '{}', got '{:?}')",
+                    pending.expected_michi_id, fresh_info.michi_id
+                ));
+            }
+            if fresh_info.public_key.as_ref() != Some(&pending.expected_public_key) {
+                return Err(format!(
+                    "IDENTITY_MISMATCH: receiver public_key changed post-confirmation (expected '{}', got '{:?}')",
+                    pending.expected_public_key, fresh_info.public_key
+                ));
+            }
 
-        let authority_supported = info
-            .features
-            .as_ref()
-            .and_then(|f| f.get("authority_v1").or_else(|| f.get("perch_v1")))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            let info = fresh_info;
+            let device_id = info
+                .michi_id
+                .clone()
+                .or_else(|| info.server_id.clone())
+                .ok_or_else(|| {
+                    "IDENTITY_MISMATCH: missing device identifier post-confirmation".to_string()
+                })?;
+            let name = info.name.clone().unwrap_or_else(|| device_id.clone());
+            let device_type = info
+                .device_type
+                .clone()
+                .or_else(|| info.service.clone())
+                .unwrap_or_else(|| "unknown".into());
 
-        let target_presence = if let Some(ref scent) = self.scent_store {
-            if let Some(record) = scent.get(&pending.expected_michi_id) {
-                match record.effective_presence(std::time::Instant::now()) {
-                    michi_connect::scent_store::EffectivePresence::VerifiedOnline => {
-                        ReceiverPresence::VerifiedOnline
+            // Extract discrete capabilities without fake defaults - require canonical info.audio
+            let audio = info.audio.as_ref().ok_or_else(|| {
+                "receiver failed capability negotiation: missing canonical 'audio' specification"
+                    .to_string()
+            })?;
+
+            let transports: Vec<String> = audio
+                .get("transports")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .filter(|v: &Vec<String>| !v.is_empty())
+                .ok_or_else(|| "receiver capabilities missing valid audio.transports".to_string())?;
+
+            if !transports.iter().any(|t| t == "rtp_udp") {
+                return Err("receiver does not support required 'rtp_udp' audio transport".to_string());
+            }
+
+            let sample_rates: Vec<u32> = audio
+                .get("sample_rates")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_u64().map(|n| n as u32))
+                        .collect()
+                })
+                .filter(|v: &Vec<u32>| !v.is_empty())
+                .ok_or_else(|| "receiver capabilities missing valid audio.sample_rates".to_string())?;
+
+            let bit_depths: Vec<u32> = audio
+                .get("bit_depths")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_u64().map(|n| n as u32))
+                        .collect()
+                })
+                .filter(|v: &Vec<u32>| !v.is_empty())
+                .ok_or_else(|| "receiver capabilities missing valid audio.bit_depths".to_string())?;
+
+            let channels: Vec<u8> = audio
+                .get("channels")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_u64().map(|n| n as u8))
+                        .collect()
+                })
+                .filter(|v: &Vec<u8>| !v.is_empty())
+                .ok_or_else(|| "receiver capabilities missing valid audio.channels".to_string())?;
+
+            let codecs: Vec<String> = audio
+                .get("codecs")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .filter(|v: &Vec<String>| !v.is_empty())
+                .ok_or_else(|| "receiver capabilities missing valid audio.codecs".to_string())?;
+
+            let max_sr = *sample_rates.iter().max().unwrap_or(&48000);
+            let max_bd = *bit_depths.iter().max().unwrap_or(&16);
+
+            let mut caps = vec![
+                "stream".to_string(),
+                "volume".to_string(),
+                "heartbeat".to_string(),
+            ];
+            if let Some(feats) = &info.features {
+                if feats
+                    .get("ota_update")
+                    .and_then(|v| v.as_bool())
+                    .or_else(|| feats.get("ota").and_then(|v| v.as_bool()))
+                    .unwrap_or(false)
+                {
+                    caps.push("ota_update".to_string());
+                }
+            }
+
+            let authority_supported = info
+                .features
+                .as_ref()
+                .and_then(|f| f.get("authority_v1").or_else(|| f.get("perch_v1")))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let target_presence = if let Some(ref scent) = self.scent_store {
+                if let Some(record) = scent.get(&pending.expected_michi_id) {
+                    match record.effective_presence(std::time::Instant::now()) {
+                        michi_connect::scent_store::EffectivePresence::VerifiedOnline => {
+                            ReceiverPresence::VerifiedOnline
+                        }
+                        michi_connect::scent_store::EffectivePresence::ProvisionalMdns => {
+                            ReceiverPresence::ProvisionalMdns
+                        }
+                        michi_connect::scent_store::EffectivePresence::Offline => {
+                            ReceiverPresence::Offline
+                        }
                     }
-                    michi_connect::scent_store::EffectivePresence::ProvisionalMdns => {
-                        ReceiverPresence::ProvisionalMdns
-                    }
-                    michi_connect::scent_store::EffectivePresence::Offline => {
-                        ReceiverPresence::Offline
-                    }
+                } else {
+                    ReceiverPresence::Offline
                 }
             } else {
                 ReceiverPresence::Offline
+            };
+
+            let entry = ReceiverRegistryEntry {
+                receiver_id: device_id.clone(),
+                michi_id: info.michi_id.clone(),
+                name,
+                device_type,
+                base_url: pending.receiver_base_url,
+                paired: true,
+                token: client.token.clone(),
+                presence: target_presence,
+                last_seen: Some(chrono::Utc::now()),
+                capabilities: caps,
+                capabilities_verified_at: Some(chrono::Utc::now()),
+                capabilities_stale: false,
+                authority_supported,
+                owner_michi_id: None,
+                owner_name: None,
+                active_session_id: None,
+                max_sample_rate: max_sr,
+                max_bit_depth: max_bd,
+                supported_transports: transports,
+                supported_codecs: codecs,
+                supported_sample_rates: sample_rates,
+                supported_bit_depths: bit_depths,
+                supported_channels: channels,
+                maximum_safe_volume: Some(100),
+                qualification: ReceiverQualification::Qualified,
+            };
+
+            self.registry.write().await.add(entry);
+            Ok(device_id)
+        }
+        .await;
+
+        match build_and_add_result {
+            Ok(device_id) => {
+                if let Some(ref pool) = self.db_pool {
+                    let _ = michi_db::record_pairing_journal_completed_db(pool, pairing_id).await;
+                }
+                let mut p = self.pending_pairings.write().await;
+                p.remove(pairing_id);
+                Ok(device_id)
             }
-        } else {
-            ReceiverPresence::Offline
-        };
-
-        let entry = ReceiverRegistryEntry {
-            receiver_id: device_id.clone(),
-            michi_id: info.michi_id.clone(),
-            name,
-            device_type,
-            base_url: pending.receiver_base_url,
-            paired: true,
-            token: client.token.clone(),
-            presence: target_presence,
-            last_seen: Some(chrono::Utc::now()),
-            capabilities: caps,
-            capabilities_verified_at: Some(chrono::Utc::now()),
-            capabilities_stale: false,
-            authority_supported,
-            owner_michi_id: None,
-            owner_name: None,
-            active_session_id: None,
-            max_sample_rate: max_sr,
-            max_bit_depth: max_bd,
-            supported_transports: transports,
-            supported_codecs: codecs,
-            supported_sample_rates: sample_rates,
-            supported_bit_depths: bit_depths,
-            supported_channels: channels,
-            maximum_safe_volume: Some(100),
-            qualification: ReceiverQualification::Qualified,
-        };
-
-        self.registry.write().await.add(entry);
-        Ok(device_id)
+            Err(e) => {
+                if let Some(ref pool) = self.db_pool {
+                    let _ =
+                        michi_db::record_pairing_journal_recovery_required_db(pool, pairing_id, &e)
+                            .await;
+                }
+                Err(e)
+            }
+        }
     }
 
     /// High-level 2-in-1 convenience for tests and internal workflows with known PIN.
@@ -1677,8 +1772,15 @@ mod tests {
         info_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
         start_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
         confirm_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
+        status_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
+        recover_start_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
+        recover_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
         pair_start_called: std::sync::Arc<AtomicBool>,
         pair_confirm_called: std::sync::Arc<AtomicBool>,
+        pair_status_called: std::sync::Arc<AtomicBool>,
+        pair_recover_start_called: std::sync::Arc<AtomicBool>,
+        pair_recover_called: std::sync::Arc<AtomicBool>,
+        confirm_status_override: std::sync::Arc<std::sync::RwLock<Option<axum::http::StatusCode>>>,
         info_call_count: std::sync::Arc<AtomicUsize>,
         mutate_on_confirm: std::sync::Arc<AtomicBool>,
     }
@@ -1699,10 +1801,44 @@ mod tests {
         AxumJson(val)
     }
 
-    async fn mock_pair_confirm(
+    async fn mock_pair_status(
         AxumState(st): AxumState<MockReceiverState>,
     ) -> AxumJson<serde_json::Value> {
+        st.pair_status_called.store(true, Ordering::SeqCst);
+        let val = st.status_json.read().unwrap().clone();
+        AxumJson(val)
+    }
+
+    async fn mock_pair_recover_start(
+        AxumState(st): AxumState<MockReceiverState>,
+    ) -> AxumJson<serde_json::Value> {
+        st.pair_recover_start_called.store(true, Ordering::SeqCst);
+        let val = st.recover_start_json.read().unwrap().clone();
+        AxumJson(val)
+    }
+
+    async fn mock_pair_recover(
+        AxumState(st): AxumState<MockReceiverState>,
+    ) -> AxumJson<serde_json::Value> {
+        st.pair_recover_called.store(true, Ordering::SeqCst);
+        let val = st.recover_json.read().unwrap().clone();
+        AxumJson(val)
+    }
+
+    async fn mock_pair_confirm(
+        AxumState(st): AxumState<MockReceiverState>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
         st.pair_confirm_called.store(true, Ordering::SeqCst);
+        if let Some(status) = *st.confirm_status_override.read().unwrap() {
+            let err = serde_json::json!({
+                "error": {
+                    "code": if status == axum::http::StatusCode::CONFLICT { "PAIRING_ALREADY_CONSUMED" } else { "INTERNAL_ERROR" },
+                    "message": "pairing confirm failed in mock"
+                }
+            });
+            return (status, AxumJson(err)).into_response();
+        }
         if st.mutate_on_confirm.load(Ordering::SeqCst) {
             let mut info = st.info_json.write().unwrap();
             let obj = info.as_object_mut().unwrap();
@@ -1716,14 +1852,17 @@ mod tests {
             );
         }
         let val = st.confirm_json.read().unwrap().clone();
-        AxumJson(val)
+        (axum::http::StatusCode::OK, AxumJson(val)).into_response()
     }
 
     async fn spawn_mock_receiver(st: MockReceiverState) -> (String, tokio::task::JoinHandle<()>) {
         let app = axum::Router::new()
             .route("/api/v1/server/info", get(mock_server_info))
             .route("/api/v1/pair/start", post(mock_pair_start))
+            .route("/api/v1/pair/status", get(mock_pair_status))
             .route("/api/v1/pair/confirm", post(mock_pair_confirm))
+            .route("/api/v1/pair/recover/start", post(mock_pair_recover_start))
+            .route("/api/v1/pair/recover", post(mock_pair_recover))
             .with_state(st);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1769,12 +1908,41 @@ mod tests {
             "server_id": "550e8400-e29b-41d4-a716-446655440000",
         });
 
+        let status = serde_json::json!({
+            "session_id": "pair-sess-1",
+            "status": "pending",
+            "expires_at": chrono::Utc::now().checked_add_signed(chrono::Duration::seconds(60)).unwrap().to_rfc3339(),
+            "attempts_remaining": 5
+        });
+
+        let recover_start = serde_json::json!({
+            "challenge_nonce": "CxIZICcuNTxDSlFYX2ZtdA",
+            "expires_at": chrono::Utc::now().checked_add_signed(chrono::Duration::seconds(60)).unwrap().to_rfc3339(),
+            "server_michi_id": "f2UwxQaeA6vA8LO7Cr1nGRr5MStned_Gbmc_ua48qUc",
+            "server_public_key": "RpHnJr9oP1DXBkPuIMuk0hJ2hAQVCMGREE"
+        });
+
+        let recover = serde_json::json!({
+            "status": "paired",
+            "token": "test-recovered-token-99999",
+            "expires_in": 0,
+            "device_id": "550e8400-e29b-41d4-a716-446655440000",
+            "server_id": "550e8400-e29b-41d4-a716-446655440000"
+        });
+
         MockReceiverState {
             info_json: std::sync::Arc::new(std::sync::RwLock::new(info)),
             start_json: std::sync::Arc::new(std::sync::RwLock::new(start)),
             confirm_json: std::sync::Arc::new(std::sync::RwLock::new(confirm)),
+            status_json: std::sync::Arc::new(std::sync::RwLock::new(status)),
+            recover_start_json: std::sync::Arc::new(std::sync::RwLock::new(recover_start)),
+            recover_json: std::sync::Arc::new(std::sync::RwLock::new(recover)),
             pair_start_called: std::sync::Arc::new(AtomicBool::new(false)),
             pair_confirm_called: std::sync::Arc::new(AtomicBool::new(false)),
+            pair_status_called: std::sync::Arc::new(AtomicBool::new(false)),
+            pair_recover_start_called: std::sync::Arc::new(AtomicBool::new(false)),
+            pair_recover_called: std::sync::Arc::new(AtomicBool::new(false)),
+            confirm_status_override: std::sync::Arc::new(std::sync::RwLock::new(None)),
             info_call_count: std::sync::Arc::new(AtomicUsize::new(0)),
             mutate_on_confirm: std::sync::Arc::new(AtomicBool::new(false)),
         }
@@ -2724,5 +2892,122 @@ mod tests {
             assert!(entry.paired);
             assert_eq!(entry.presence, ReceiverPresence::Offline);
         }
+    }
+
+    #[tokio::test]
+    async fn test_pairing_journal_lifecycle_persisted() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let st = default_mock_state();
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager().with_db_pool(pool.clone());
+
+        let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
+        let journal = michi_db::get_pairing_journal_entry_db(&pool, &pending.pairing_id)
+            .await
+            .unwrap()
+            .expect("journal entry must exist after start_pairing");
+        assert_eq!(journal.state, "started");
+        assert_eq!(journal.token, None);
+
+        let dev_id = mgr
+            .confirm_pairing(&pending.pairing_id, "482391")
+            .await
+            .unwrap();
+        assert!(!dev_id.is_empty());
+
+        let journal_after = michi_db::get_pairing_journal_entry_db(&pool, &pending.pairing_id)
+            .await
+            .unwrap()
+            .expect("journal entry must exist after confirm_pairing");
+        assert_eq!(journal_after.state, "persisted");
+        assert_eq!(
+            journal_after.token.as_deref(),
+            Some("test-device-token-12345")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pairing_journal_recovery_required_on_post_confirm_failure() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let st = default_mock_state();
+        // Mutate identity on confirm to induce post-confirmation invariant violation
+        st.mutate_on_confirm.store(true, Ordering::SeqCst);
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager().with_db_pool(pool.clone());
+
+        let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
+
+        let res = mgr.confirm_pairing(&pending.pairing_id, "482391").await;
+        assert!(
+            res.is_err(),
+            "confirm must fail on post-confirm identity mismatch"
+        );
+
+        let journal = michi_db::get_pairing_journal_entry_db(&pool, &pending.pairing_id)
+            .await
+            .unwrap()
+            .expect("journal entry must exist");
+        assert_eq!(journal.state, "recovery_required");
+        assert_eq!(
+            journal.token.as_deref(),
+            Some("test-device-token-12345"),
+            "token must be preserved in journal despite post-confirm error"
+        );
+        assert!(
+            journal
+                .error_reason
+                .unwrap_or_default()
+                .contains("IDENTITY_MISMATCH"),
+            "error_reason must record the failure cause"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pairing_confirm_response_lost_authenticated_recovery() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let st = default_mock_state();
+        // Simulate confirm returning 409 conflict (as if previous attempt was consumed)
+        *st.confirm_status_override.write().unwrap() = Some(axum::http::StatusCode::CONFLICT);
+        // Status reports confirmed
+        *st.status_json.write().unwrap() = serde_json::json!({
+            "session_id": "pair-sess-1",
+            "status": "confirmed",
+            "expires_at": chrono::Utc::now().to_rfc3339(),
+            "attempts_remaining": 5
+        });
+
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager().with_db_pool(pool.clone());
+
+        let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
+
+        let dev_id = mgr
+            .confirm_pairing(&pending.pairing_id, "482391")
+            .await
+            .expect("confirm must transparently recover via pair_status and pair_recover");
+        assert!(!dev_id.is_empty());
+        assert!(
+            st.pair_status_called.load(Ordering::SeqCst),
+            "pair_status must be called"
+        );
+        assert!(
+            st.pair_recover_start_called.load(Ordering::SeqCst),
+            "pair_recover_start must be called"
+        );
+        assert!(
+            st.pair_recover_called.load(Ordering::SeqCst),
+            "pair_recover must be called"
+        );
+
+        let journal = michi_db::get_pairing_journal_entry_db(&pool, &pending.pairing_id)
+            .await
+            .unwrap()
+            .expect("journal entry must exist");
+        assert_eq!(journal.state, "persisted");
+        assert_eq!(
+            journal.token.as_deref(),
+            Some("test-recovered-token-99999"),
+            "recovered token must be preserved"
+        );
     }
 }

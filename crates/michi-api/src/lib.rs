@@ -373,6 +373,23 @@ impl AppState {
             }
         }
 
+        // Reconcile unrecovered pairing journals (crash recovery / forward recovery)
+        match crate::routes::v1::receivers::reconcile_unrecovered_pairings(self).await {
+            Ok(count) if count > 0 => {
+                tracing::info!(
+                    "pairing journal recovery: restored {} unrecovered pairings",
+                    count
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "pairing journal recovery encountered error during bootstrap: {}",
+                    e
+                );
+            }
+        }
+
         tracing::info!("spawning sync upload startup crash recovery scan in background");
         let sync_mgr = self.sync_manager.clone();
         let shutdown_tok = self.shutdown_token.clone();
@@ -479,10 +496,12 @@ impl AppState {
         michi_link::spawn_token_cleanup(token_store.clone());
 
         let scent_store = Arc::new(michi_connect::ScentStore::new());
-        let receiver_manager = michi_receivers::ReceiverSessionManager::new_with_identity_and_scent(
-            identity.clone(),
-            scent_store.clone(),
-        );
+        let receiver_manager =
+            michi_receivers::ReceiverSessionManager::new_with_identity_and_scent(
+                identity.clone(),
+                scent_store.clone(),
+            )
+            .with_db_pool(db.clone());
         let pairing_registry = Arc::new(michi_identity::PairingRegistry::new());
         let pairing_display = Arc::new(RwLock::new(None));
         let pairing_sessions_display = Arc::new(RwLock::new(HashMap::new()));

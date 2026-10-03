@@ -168,6 +168,26 @@ pub struct PairConfirmResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairStatusResponse {
+    pub session_id: String,
+    pub status: String,
+    pub expires_at: Option<String>,
+    pub attempts_remaining: Option<u32>,
+    #[serde(default)]
+    pub error: Option<ErrorBody>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairRecoverStartResponse {
+    pub challenge_nonce: String,
+    pub expires_at: String,
+    pub server_michi_id: String,
+    pub server_public_key: String,
+    #[serde(default)]
+    pub error: Option<ErrorBody>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EffectiveSessionWire {
     pub transport: String,
