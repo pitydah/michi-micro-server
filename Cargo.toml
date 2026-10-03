@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/michi-link/crates/michi-identity"]
 members = [
     "apps/michi-server",
     "crates/michi-core",
