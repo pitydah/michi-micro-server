@@ -201,9 +201,41 @@ class ReceiverHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         st = self.state
-        path = self.path.split("?")[0]
+        url_parts = self.path.split("?")
+        path = url_parts[0]
+        query = {}
+        if len(url_parts) > 1:
+            for pair in url_parts[1].split("&"):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    query[k] = v
 
         if self.check_faults(path):
+            return
+
+        if path == "/api/v1/pair/status":
+            session_id = query.get("session_id")
+            if not session_id:
+                self.send_json(400, {
+                    "error": {"code": "INVALID_REQUEST", "message": "missing session_id query parameter"}
+                })
+                return
+            sess = st.pairing_sessions.get(session_id)
+            if sess is None:
+                self.send_json(404, {
+                    "error": {"code": "NOT_FOUND", "message": "the pairing session was not found"}
+                })
+                return
+            if sess.get("status") == "pending" and time.time() >= sess["expires_at"]:
+                status = "expired"
+            else:
+                status = sess.get("status", "pending")
+            self.send_json(200, {
+                "session_id": session_id,
+                "status": status,
+                "expires_at": sess.get("expires_at_iso", ""),
+                "attempts_remaining": max(1, sess.get("attempts_remaining", 5)),
+            })
             return
 
         if path == "/api/v1/server/info":
@@ -349,16 +381,24 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             now = time.time()
             expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=120)
 
+            expires_iso = expires_at.isoformat().replace("+00:00", "Z")
             st.pairing_sessions[session_id] = {
                 "nonce": nonce,
                 "pin": pin,
                 "expires_at": now + 120,
+                "expires_at_iso": expires_iso,
                 "consumed": False,
+                "status": "pending",
+                "attempts_remaining": 5,
+                "controller": {
+                    "michi_id": body.get("michi_id"),
+                    "public_key": body.get("public_key"),
+                }
             }
 
             self.send_json(200, {
                 "session_id": session_id,
-                "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+                "expires_at": expires_iso,
                 "attempts_remaining": 5,
                 "server_michi_id": st.server_michi_id,
                 "server_public_key": st.server_pubkey_b64,
@@ -374,13 +414,18 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 })
                 return
             sess = st.pairing_sessions[sess_key]
-            if sess.get("consumed", False):
+            if sess.get("status") == "confirmed" or sess.get("consumed", False):
                 self.send_json(409, {
                     "error": {"code": "PAIRING_ALREADY_CONSUMED", "message": "pairing session already consumed"},
                 })
                 return
+            if sess.get("status") == "locked":
+                self.send_json(429, {
+                    "error": {"code": "RATE_LIMITED", "message": "PIN attempts exceeded for this pairing session"},
+                })
+                return
             if time.time() > sess["expires_at"]:
-                del st.pairing_sessions[sess_key]
+                sess["status"] = "expired"
                 self.send_json(400, {
                     "error": {"code": "PAIRING_EXPIRED", "message": "pairing session expired"},
                 })
@@ -388,16 +433,33 @@ class ReceiverHandler(BaseHTTPRequestHandler):
 
             pin = body.get("pin")
             if pin != sess["pin"]:
+                sess["attempts_remaining"] = sess.get("attempts_remaining", 5) - 1
+                if sess["attempts_remaining"] <= 0:
+                    sess["status"] = "locked"
+                    sess["consumed"] = True
+                    self.send_json(429, {
+                        "error": {"code": "RATE_LIMITED", "message": "PIN attempts exceeded; pairing session is locked"},
+                    })
+                    return
                 self.send_json(401, {
                     "error": {"code": "PAIRING_PIN_MISMATCH", "message": f"PIN '{pin}' incorrect"},
                 })
                 return
 
+            sess["status"] = "confirmed"
             sess["consumed"] = True
             # Receiver issues long-lived Bearer pairing token
             bearer_token = f"tok_michi_{secrets.token_hex(16)}"
             st.tokens.add(bearer_token)
             controller_id = body.get("michi_id") or body.get("initiator_id") or "controller-1"
+            if not hasattr(st, "controllers"):
+                st.controllers = {}
+            st.controllers[controller_id] = {
+                "michi_id": body.get("michi_id"),
+                "public_key": body.get("public_key"),
+                "token": bearer_token,
+                "device_id": controller_id,
+            }
 
             self.send_json(200, {
                 "status": "paired",
@@ -406,6 +468,41 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "device_id": controller_id,
                 "server_id": st.device_id,
                 "controller_id": controller_id,
+            })
+            return
+
+        # Pairing Recover (POST /api/v1/pair/recover)
+        if path == "/api/v1/pair/recover":
+            michi_id = body.get("michi_id")
+            public_key = body.get("public_key")
+            challenge_nonce = body.get("challenge_nonce")
+            challenge_sig = body.get("challenge_signature")
+
+            if not michi_id or not public_key or not challenge_nonce or not challenge_sig:
+                self.send_json(400, {
+                    "error": {"code": "INVALID_REQUEST", "message": "missing required recovery fields"},
+                })
+                return
+
+            # Rotate and issue new token
+            bearer_token = f"tok_michi_{secrets.token_hex(16)}"
+            st.tokens.add(bearer_token)
+            controller_id = michi_id
+            if not hasattr(st, "controllers"):
+                st.controllers = {}
+            st.controllers[controller_id] = {
+                "michi_id": michi_id,
+                "public_key": public_key,
+                "token": bearer_token,
+                "device_id": controller_id,
+            }
+
+            self.send_json(200, {
+                "status": "paired",
+                "token": bearer_token,
+                "expires_in": 0,
+                "device_id": controller_id,
+                "server_id": st.device_id,
             })
             return
 

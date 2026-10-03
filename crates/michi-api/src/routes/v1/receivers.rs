@@ -593,13 +593,23 @@ pub async fn receiver_pair_start_handler(
         .start_pairing_ext(&target_base_url, &initiator_id, allow_re_pair)
         .await
     {
-        Ok(pending) => Ok(Json(serde_json::json!({
-            "status": "pending_confirmation",
-            "pairing_id": pending.pairing_id,
-            "receiver_base_url": pending.receiver_base_url,
-            "receiver_pair_session_id": pending.receiver_pair_session_id,
-            "expires_at": pending.expires_at.to_rfc3339(),
-        }))),
+        Ok(pending) => {
+            let _ = michi_db::record_pairing_journal_start_db(
+                &state.db,
+                &pending.pairing_id,
+                &pending.expected_server_id,
+                &pending.receiver_base_url,
+                &pending.expected_michi_id,
+            )
+            .await;
+            Ok(Json(serde_json::json!({
+                "status": "pending_confirmation",
+                "pairing_id": pending.pairing_id,
+                "receiver_base_url": pending.receiver_base_url,
+                "receiver_pair_session_id": pending.receiver_pair_session_id,
+                "expires_at": pending.expires_at.to_rfc3339(),
+            })))
+        }
         Err(e) => {
             if e.contains("IDENTITY_MISMATCH") {
                 Err(v1_error(StatusCode::BAD_REQUEST, "IDENTITY_MISMATCH", &e))
@@ -609,15 +619,6 @@ pub async fn receiver_pair_start_handler(
                 Err(v1_error(StatusCode::BAD_REQUEST, "PAIR_START_FAILED", &e))
             }
         }
-    }
-}
-
-async fn rollback_pairing(state: &AppState, device_id: &str) {
-    let reg_arc = state.receiver_manager.registry().await;
-    let mut reg = reg_arc.write().await;
-    if let Some(entry) = reg.get_mut(device_id) {
-        entry.paired = false;
-        entry.token = None;
     }
 }
 
@@ -742,18 +743,23 @@ pub async fn receiver_pair_confirm_handler(
                     )
                 } else {
                     tracing::error!(
-                        "PAIRING_REGISTRY_INVARIANT_VIOLATION: receiver {} missing from registry after confirmation and persistence; remote pairing may have completed but local registry convergence failed",
+                        "PAIRING_REGISTRY_INVARIANT_VIOLATION: receiver {} missing from registry after confirmation and persistence; marking journal recovery required",
                         device_id
                     );
                     drop(reg_read);
-                    rollback_pairing(&state, &device_id).await;
-                    let _ = michi_db::delete_receiver_db(&state.db, &device_id).await;
+                    let _ = michi_db::record_pairing_journal_recovery_required_db(
+                        &state.db,
+                        &pairing_id,
+                        "Receiver entry missing from registry after confirmation and persistence",
+                    )
+                    .await;
                     return Err(v1_error(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "PAIRING_REGISTRY_INVARIANT_VIOLATION",
                         "Receiver registry invariant violation: entry unexpectedly absent after pairing confirmation. Remote pairing may have completed but local registry convergence failed.",
                     ));
                 };
+                let _ = michi_db::record_pairing_journal_completed_db(&state.db, &pairing_id).await;
                 Ok(Json(serde_json::json!({
                     "status": "paired",
                     "device_id": device_id,
@@ -767,8 +773,13 @@ pub async fn receiver_pair_confirm_handler(
                 })))
             }
             Err(e) => {
-                tracing::error!("pairing confirmed but persistence failed: {}", e);
-                rollback_pairing(&state, &device_id).await;
+                tracing::error!("pairing confirmed but persistence failed: {}; marking journal recovery required", e);
+                let _ = michi_db::record_pairing_journal_recovery_required_db(
+                    &state.db,
+                    &pairing_id,
+                    &format!("persistence failed: {e}"),
+                )
+                .await;
                 Err(v1_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "PERSISTENCE_FAILED",
@@ -778,6 +789,105 @@ pub async fn receiver_pair_confirm_handler(
         },
         Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "PAIR_CONFIRM_FAILED", &e)),
     }
+}
+
+/// Reconciles unrecovered pairing journal entries (forward recovery after crash/restart)
+pub async fn reconcile_unrecovered_pairings(state: &AppState) -> Result<usize, String> {
+    let unrecovered = michi_db::list_unrecovered_pairing_journals_db(&state.db)
+        .await
+        .map_err(|e| format!("failed to list unrecovered pairing journals: {e}"))?;
+
+    let mut recovered_count = 0;
+    for journal in unrecovered {
+        if let Some(ref token) = journal.token {
+            let receiver_id = &journal.receiver_id;
+            let existing_db = michi_db::get_receiver_db(&state.db, receiver_id)
+                .await
+                .ok()
+                .flatten();
+            if existing_db.is_some() {
+                let _ = michi_db::record_pairing_journal_completed_db(&state.db, &journal.pairing_id).await;
+                continue;
+            }
+
+            let reg_arc = state.receiver_manager.registry().await;
+            let reg = reg_arc.read().await;
+            if reg.get(receiver_id).is_some() {
+                drop(reg);
+                if persist_paired_receiver(state, receiver_id).await.is_ok() {
+                    let _ = michi_db::record_pairing_journal_completed_db(&state.db, &journal.pairing_id).await;
+                    recovered_count += 1;
+                }
+            } else {
+                drop(reg);
+                let mut client = michi_receivers::ReceiverClient::with_identity(&journal.base_url, state.identity.clone());
+                client.token = Some(token.clone());
+                if let Ok(info) = client.get_info().await {
+                    let device_id = info
+                        .michi_id
+                        .clone()
+                        .or_else(|| info.server_id.clone())
+                        .unwrap_or_else(|| receiver_id.clone());
+                    let name = info.name.clone().unwrap_or_else(|| device_id.clone());
+                    let device_type = info
+                        .device_type
+                        .clone()
+                        .or_else(|| info.service.clone())
+                        .unwrap_or_else(|| "unknown".into());
+                    let audio = info.audio.as_ref();
+                    let caps_json = audio
+                        .map(|a| serde_json::to_string(a).unwrap_or_else(|_| "{}".into()))
+                        .unwrap_or_else(|| "{}".into());
+
+                    let store = match state.receiver_credential_store.as_ref().as_ref() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    if let Ok((ciphertext, nonce)) = store.encrypt_token(&device_id, token) {
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let cred = michi_db::PersistedReceiverCredential {
+                            receiver_id: device_id.clone(),
+                            ciphertext,
+                            nonce,
+                            version: 1,
+                            created_at: now.clone(),
+                            updated_at: now.clone(),
+                        };
+                        let prec = michi_db::PersistedReceiver {
+                            id: device_id.clone(),
+                            name: name.clone(),
+                            device_type: device_type.clone(),
+                            base_url: journal.base_url.clone(),
+                            paired: true,
+                            online: false,
+                            audio_capabilities: caps_json,
+                            last_seen: Some(now.clone()),
+                            paired_at: Some(now.clone()),
+                            created_at: now.clone(),
+                            updated_at: now,
+                            michi_id: info.michi_id.clone(),
+                            capabilities_json: None,
+                            capabilities_observed_at: None,
+                            authority_supported: false,
+                        };
+                        if michi_db::persist_paired_receiver_transaction(&state.db, &prec, &cred)
+                            .await
+                            .is_ok()
+                        {
+                            let _ = michi_db::record_pairing_journal_completed_db(
+                                &state.db,
+                                &journal.pairing_id,
+                            )
+                            .await;
+                            recovered_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(recovered_count)
 }
 
 #[derive(Debug, Deserialize)]
@@ -832,12 +942,10 @@ pub async fn discover_receiver_handler(
                     )
                 } else {
                     tracing::error!(
-                        "PAIRING_REGISTRY_INVARIANT_VIOLATION: receiver {} missing from registry after discovery pairing and persistence; remote pairing may have completed but local registry convergence failed",
+                        "PAIRING_REGISTRY_INVARIANT_VIOLATION: receiver {} missing from registry after discovery pairing and persistence; local registry convergence failed",
                         device_id
                     );
                     drop(reg_read);
-                    rollback_pairing(&state, &device_id).await;
-                    let _ = michi_db::delete_receiver_db(&state.db, &device_id).await;
                     return Err(v1_error(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "PAIRING_REGISTRY_INVARIANT_VIOLATION",
@@ -858,7 +966,6 @@ pub async fn discover_receiver_handler(
             }
             Err(e) => {
                 tracing::error!("discovery pairing confirmed but persistence failed: {}", e);
-                rollback_pairing(&state, &device_id).await;
                 Err(v1_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "PERSISTENCE_FAILED",
