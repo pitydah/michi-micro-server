@@ -1771,10 +1771,12 @@ mod tests {
         start_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
         confirm_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
         status_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
+        recover_start_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
         recover_json: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
         pair_start_called: std::sync::Arc<AtomicBool>,
         pair_confirm_called: std::sync::Arc<AtomicBool>,
         pair_status_called: std::sync::Arc<AtomicBool>,
+        pair_recover_start_called: std::sync::Arc<AtomicBool>,
         pair_recover_called: std::sync::Arc<AtomicBool>,
         confirm_status_override: std::sync::Arc<std::sync::RwLock<Option<axum::http::StatusCode>>>,
         info_call_count: std::sync::Arc<AtomicUsize>,
@@ -1802,6 +1804,14 @@ mod tests {
     ) -> AxumJson<serde_json::Value> {
         st.pair_status_called.store(true, Ordering::SeqCst);
         let val = st.status_json.read().unwrap().clone();
+        AxumJson(val)
+    }
+
+    async fn mock_pair_recover_start(
+        AxumState(st): AxumState<MockReceiverState>,
+    ) -> AxumJson<serde_json::Value> {
+        st.pair_recover_start_called.store(true, Ordering::SeqCst);
+        let val = st.recover_start_json.read().unwrap().clone();
         AxumJson(val)
     }
 
@@ -1849,6 +1859,7 @@ mod tests {
             .route("/api/v1/pair/start", post(mock_pair_start))
             .route("/api/v1/pair/status", get(mock_pair_status))
             .route("/api/v1/pair/confirm", post(mock_pair_confirm))
+            .route("/api/v1/pair/recover/start", post(mock_pair_recover_start))
             .route("/api/v1/pair/recover", post(mock_pair_recover))
             .with_state(st);
 
@@ -1902,6 +1913,13 @@ mod tests {
             "attempts_remaining": 5
         });
 
+        let recover_start = serde_json::json!({
+            "challenge_nonce": "CxIZICcuNTxDSlFYX2ZtdA",
+            "expires_at": chrono::Utc::now().checked_add_signed(chrono::Duration::seconds(60)).unwrap().to_rfc3339(),
+            "server_michi_id": "f2UwxQaeA6vA8LO7Cr1nGRr5MStned_Gbmc_ua48qUc",
+            "server_public_key": "RpHnJr9oP1DXBkPuIMuk0hJ2hAQVCMGREE"
+        });
+
         let recover = serde_json::json!({
             "status": "paired",
             "token": "test-recovered-token-99999",
@@ -1915,10 +1933,12 @@ mod tests {
             start_json: std::sync::Arc::new(std::sync::RwLock::new(start)),
             confirm_json: std::sync::Arc::new(std::sync::RwLock::new(confirm)),
             status_json: std::sync::Arc::new(std::sync::RwLock::new(status)),
+            recover_start_json: std::sync::Arc::new(std::sync::RwLock::new(recover_start)),
             recover_json: std::sync::Arc::new(std::sync::RwLock::new(recover)),
             pair_start_called: std::sync::Arc::new(AtomicBool::new(false)),
             pair_confirm_called: std::sync::Arc::new(AtomicBool::new(false)),
             pair_status_called: std::sync::Arc::new(AtomicBool::new(false)),
+            pair_recover_start_called: std::sync::Arc::new(AtomicBool::new(false)),
             pair_recover_called: std::sync::Arc::new(AtomicBool::new(false)),
             confirm_status_override: std::sync::Arc::new(std::sync::RwLock::new(None)),
             info_call_count: std::sync::Arc::new(AtomicUsize::new(0)),
@@ -2961,6 +2981,10 @@ mod tests {
         assert!(
             st.pair_status_called.load(Ordering::SeqCst),
             "pair_status must be called"
+        );
+        assert!(
+            st.pair_recover_start_called.load(Ordering::SeqCst),
+            "pair_recover_start must be called"
         );
         assert!(
             st.pair_recover_called.load(Ordering::SeqCst),

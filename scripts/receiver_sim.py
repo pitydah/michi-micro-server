@@ -16,6 +16,7 @@ Strictly implements and validates:
 import argparse
 import base64
 import datetime
+import hashlib
 import json
 import os
 import secrets
@@ -45,6 +46,8 @@ class ReceiverState:
         # Pairing & Session State
         self.pairing_sessions = {} # session_id -> {nonce, pin, expires_at, consumed}
         self.tokens = set() # valid bearer tokens issued by this receiver
+        self.controllers = {} # controller_id -> controller dict
+        self.recovery_challenges = {} # (michi_id, public_key) -> challenge dict
         self.active_session_id = None
         self.active_session_token = None
         self.lease_expires_at = 0.0
@@ -416,7 +419,7 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             sess = st.pairing_sessions[sess_key]
             if sess.get("status") == "confirmed" or sess.get("consumed", False):
                 self.send_json(409, {
-                    "error": {"code": "PAIRING_ALREADY_CONSUMED", "message": "pairing session already consumed"},
+                    "error": {"code": "CONFLICT", "message": "pairing session already consumed"},
                 })
                 return
             if sess.get("status") == "locked":
@@ -442,22 +445,30 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                     })
                     return
                 self.send_json(401, {
-                    "error": {"code": "PAIRING_PIN_MISMATCH", "message": f"PIN '{pin}' incorrect"},
+                    "error": {"code": "UNAUTHORIZED", "message": f"PIN '{pin}' incorrect"},
                 })
                 return
 
             sess["status"] = "confirmed"
             sess["consumed"] = True
             # Receiver issues long-lived Bearer pairing token
-            bearer_token = f"tok_michi_{secrets.token_hex(16)}"
+            raw_token = secrets.token_bytes(32)
+            bearer_token = base64.urlsafe_b64encode(raw_token).decode("ascii").rstrip("=")
             st.tokens.add(bearer_token)
-            controller_id = body.get("michi_id") or body.get("initiator_id") or "controller-1"
-            if not hasattr(st, "controllers"):
-                st.controllers = {}
+            token_sha256 = hashlib.sha256(raw_token).hexdigest()
+
+            michi_id = body.get("michi_id")
+            public_key = body.get("public_key")
+            existing = next(
+                (c for c in st.controllers.values() if michi_id and c.get("michi_id") == michi_id and c.get("public_key") == public_key),
+                None,
+            )
+            controller_id = existing["device_id"] if existing else (michi_id or body.get("initiator_id") or "controller-1")
             st.controllers[controller_id] = {
-                "michi_id": body.get("michi_id"),
-                "public_key": body.get("public_key"),
+                "michi_id": michi_id,
+                "public_key": public_key,
                 "token": bearer_token,
+                "token_sha256": token_sha256,
                 "device_id": controller_id,
             }
 
@@ -468,6 +479,43 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "device_id": controller_id,
                 "server_id": st.device_id,
                 "controller_id": controller_id,
+            })
+            return
+
+        # Pairing Recover Start (POST /api/v1/pair/recover/start)
+        if path == "/api/v1/pair/recover/start":
+            michi_id = body.get("michi_id")
+            public_key = body.get("public_key")
+            if not michi_id or not public_key:
+                self.send_json(400, {
+                    "error": {"code": "INVALID_REQUEST", "message": "missing michi_id or public_key"},
+                })
+                return
+
+            existing = next(
+                (c for c in st.controllers.values() if c.get("michi_id") == michi_id and c.get("public_key") == public_key),
+                None,
+            )
+            if existing is None:
+                self.send_json(404, {
+                    "error": {"code": "NOT_FOUND", "message": "controller identity is not registered on this receiver"},
+                })
+                return
+
+            raw_nonce = secrets.token_bytes(32)
+            challenge_nonce = base64.urlsafe_b64encode(raw_nonce).decode("ascii").rstrip("=")
+            now = time.time()
+            exp_iso = datetime.datetime.fromtimestamp(now + 60.0, datetime.timezone.utc).isoformat()
+            st.recovery_challenges[(michi_id, public_key)] = {
+                "challenge_nonce": challenge_nonce,
+                "expires_at": now + 60.0,
+            }
+
+            self.send_json(200, {
+                "challenge_nonce": challenge_nonce,
+                "expires_at": exp_iso,
+                "server_michi_id": st.server_michi_id,
+                "server_public_key": st.server_pubkey_b64,
             })
             return
 
@@ -484,24 +532,46 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 })
                 return
 
-            # Rotate and issue new token
-            bearer_token = f"tok_michi_{secrets.token_hex(16)}"
+            ch = st.recovery_challenges.get((michi_id, public_key))
+            if ch is None or ch["challenge_nonce"] != challenge_nonce:
+                self.send_json(400, {
+                    "error": {"code": "INVALID_REQUEST", "message": "no active recovery challenge matching nonce"},
+                })
+                return
+
+            if time.time() >= ch["expires_at"]:
+                st.recovery_challenges.pop((michi_id, public_key), None)
+                self.send_json(400, {
+                    "error": {"code": "INVALID_REQUEST", "message": "recovery challenge expired"},
+                })
+                return
+
+            # Invalidate challenge immediately (single-use replay resistance)
+            st.recovery_challenges.pop((michi_id, public_key), None)
+
+            existing = next(
+                (c for c in st.controllers.values() if c.get("michi_id") == michi_id and c.get("public_key") == public_key),
+                None,
+            )
+            if existing is None:
+                self.send_json(404, {
+                    "error": {"code": "NOT_FOUND", "message": "controller identity is not registered on this receiver"},
+                })
+                return
+
+            device_id = existing["device_id"]
+            raw_token = secrets.token_bytes(32)
+            bearer_token = base64.urlsafe_b64encode(raw_token).decode("ascii").rstrip("=")
             st.tokens.add(bearer_token)
-            controller_id = michi_id
-            if not hasattr(st, "controllers"):
-                st.controllers = {}
-            st.controllers[controller_id] = {
-                "michi_id": michi_id,
-                "public_key": public_key,
-                "token": bearer_token,
-                "device_id": controller_id,
-            }
+            token_sha256 = hashlib.sha256(raw_token).hexdigest()
+            existing["token"] = bearer_token
+            existing["token_sha256"] = token_sha256
 
             self.send_json(200, {
                 "status": "paired",
                 "token": bearer_token,
                 "expires_in": 0,
-                "device_id": controller_id,
+                "device_id": device_id,
                 "server_id": st.device_id,
             })
             return

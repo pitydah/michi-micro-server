@@ -256,6 +256,83 @@ impl ReceiverClient {
         Ok(result)
     }
 
+    /// POST /api/v1/pair/recover/start to get a fresh receiver-issued single-use challenge nonce
+    pub async fn pair_recover_start(
+        &self,
+    ) -> Result<PairRecoverStartResponse, ReceiverProtocolError> {
+        let (michi_id, public_key) = if let Some(ref id) = self.identity {
+            (id.michi_id().to_base64url(), id.public_key_base64url())
+        } else {
+            return Err(ReceiverProtocolError {
+                http_status: 500,
+                code: "INTERNAL_ERROR".into(),
+                message: "IdentityManager not configured on ReceiverClient".into(),
+                details: serde_json::Value::Null,
+            });
+        };
+
+        let payload = serde_json::json!({
+            "michi_id": michi_id,
+            "public_key": public_key,
+        });
+
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/pair/recover/start", self.base_url))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| ReceiverProtocolError {
+                http_status: 503,
+                code: "NETWORK_ERROR".into(),
+                message: format!("pair_recover_start request failed: {e}"),
+                details: serde_json::Value::Null,
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            if let Ok(err_val) = resp.json::<serde_json::Value>().await {
+                if let Some(err_obj) = err_val.get("error") {
+                    let code = err_obj
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("PAIR_RECOVER_START_FAILED")
+                        .to_string();
+                    let message = err_obj
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("pair recover start failed")
+                        .to_string();
+                    let details = err_obj
+                        .get("details")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    return Err(ReceiverProtocolError {
+                        http_status: status_code,
+                        code,
+                        message,
+                        details,
+                    });
+                }
+            }
+            return Err(ReceiverProtocolError {
+                http_status: status_code,
+                code: "PAIR_RECOVER_START_FAILED".into(),
+                message: format!("pair_recover_start failed with status {status}"),
+                details: serde_json::Value::Null,
+            });
+        }
+
+        let result: PairRecoverStartResponse = resp.json().await.map_err(|e| ReceiverProtocolError {
+            http_status: 500,
+            code: "DECODE_ERROR".into(),
+            message: format!("pair_recover_start parse failed: {e}"),
+            details: serde_json::Value::Null,
+        })?;
+        Ok(result)
+    }
+
     /// POST /api/v1/pair/recover with Ed25519 signature
     pub async fn pair_recover(
         &mut self,
@@ -352,14 +429,14 @@ impl ReceiverClient {
         Ok(result)
     }
 
-    /// POST /api/v1/pair/recover with an automatically generated 32-byte CSPRNG challenge nonce
+    /// Performs 2-step replay-resistant recovery:
+    /// 1. POST /api/v1/pair/recover/start -> obtains receiver challenge_nonce
+    /// 2. POST /api/v1/pair/recover -> signs receiver challenge_nonce and recovers token
     pub async fn pair_recover_auto(
         &mut self,
     ) -> Result<PairConfirmResponse, ReceiverProtocolError> {
-        let mut nonce = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
-        let challenge_nonce = URL_SAFE_NO_PAD.encode(&nonce);
-        self.pair_recover(&challenge_nonce).await
+        let start_resp = self.pair_recover_start().await?;
+        self.pair_recover(&start_resp.challenge_nonce).await
     }
 
     fn apply_session_headers(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
