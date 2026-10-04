@@ -45,6 +45,10 @@ impl ReceiverClient {
         self.identity = Some(identity);
     }
 
+    pub fn set_token(&mut self, token: impl Into<String>) {
+        self.token = Some(token.into());
+    }
+
     /// GET /api/v1/server/info (canonical v1-lite)
     pub async fn get_info(&self) -> Result<ReceiverInfo, String> {
         let resp = self

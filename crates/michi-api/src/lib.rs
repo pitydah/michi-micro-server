@@ -496,7 +496,7 @@ impl AppState {
         michi_link::spawn_token_cleanup(token_store.clone());
 
         let scent_store = Arc::new(michi_connect::ScentStore::new());
-        let receiver_manager =
+        let mut receiver_manager =
             michi_receivers::ReceiverSessionManager::new_with_identity_and_scent(
                 identity.clone(),
                 scent_store.clone(),
@@ -519,6 +519,10 @@ impl AppState {
                 })
                 .ok(),
         );
+
+        if let Some(ref store) = *receiver_credential_store {
+            receiver_manager.set_credential_store(Arc::new(store.clone()));
+        }
 
         let resolver = Arc::new(michi_playback::SqliteTrackResolver::new(
             db.clone(),

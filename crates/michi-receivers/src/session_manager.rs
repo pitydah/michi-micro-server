@@ -24,6 +24,7 @@ pub struct ReceiverSessionManager {
     identity: Option<Arc<michi_identity::IdentityManager>>,
     scent_store: Option<Arc<michi_connect::ScentStore>>,
     db_pool: Option<sqlx::SqlitePool>,
+    credential_store: Option<Arc<crate::credentials::ReceiverCredentialStore>>,
     pending_pairings: Arc<RwLock<HashMap<String, PendingReceiverPairing>>>,
     active_sessions: Arc<RwLock<HashMap<String, ReceiverActiveSession>>>,
     active_transports: Arc<RwLock<HashMap<String, SharedAudioTransport>>>,
@@ -37,6 +38,7 @@ impl std::fmt::Debug for ReceiverSessionManager {
             .field("identity", &self.identity.is_some())
             .field("scent_store", &self.scent_store.is_some())
             .field("db_pool", &self.db_pool.is_some())
+            .field("credential_store", &self.credential_store.is_some())
             .finish()
     }
 }
@@ -54,6 +56,7 @@ impl ReceiverSessionManager {
             identity: None,
             scent_store: None,
             db_pool: None,
+            credential_store: None,
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
@@ -74,6 +77,7 @@ impl ReceiverSessionManager {
             identity: Some(identity),
             scent_store: None,
             db_pool: None,
+            credential_store: None,
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
@@ -103,6 +107,7 @@ impl ReceiverSessionManager {
             identity: None,
             scent_store: None,
             db_pool: None,
+            credential_store: None,
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             active_transports: Arc::new(RwLock::new(HashMap::new())),
@@ -130,6 +135,25 @@ impl ReceiverSessionManager {
 
     pub fn db_pool(&self) -> Option<sqlx::SqlitePool> {
         self.db_pool.clone()
+    }
+
+    pub fn set_credential_store(
+        &mut self,
+        credential_store: Arc<crate::credentials::ReceiverCredentialStore>,
+    ) {
+        self.credential_store = Some(credential_store);
+    }
+
+    pub fn with_credential_store(
+        mut self,
+        credential_store: Arc<crate::credentials::ReceiverCredentialStore>,
+    ) -> Self {
+        self.credential_store = Some(credential_store);
+        self
+    }
+
+    pub fn credential_store(&self) -> Option<Arc<crate::credentials::ReceiverCredentialStore>> {
+        self.credential_store.clone()
     }
 
     pub fn with_scent_store(mut self, scent_store: Arc<michi_connect::ScentStore>) -> Self {
@@ -529,10 +553,15 @@ impl ReceiverSessionManager {
         }
 
         if let Some(ref pool) = self.db_pool {
+            let effective_device_id = if !pending.expected_michi_id.is_empty() {
+                &pending.expected_michi_id
+            } else {
+                &pending.expected_server_id
+            };
             if let Err(e) = michi_db::record_pairing_journal_start_db(
                 pool,
                 &pairing_id,
-                &pending.expected_server_id,
+                effective_device_id,
                 &pending.receiver_base_url,
                 &pending.expected_michi_id,
                 Some(&pending.receiver_pair_session_id),
@@ -724,6 +753,23 @@ impl ReceiverSessionManager {
                     "pair_confirm failed: {}: {}",
                     err.code, err.message
                 ));
+            }
+        }
+
+        // Record TOKEN_RECEIVED in journal with encrypted token immediately after confirm succeeds
+        let effective_device_id = if !pending.expected_michi_id.is_empty() {
+            &pending.expected_michi_id
+        } else {
+            &pending.expected_server_id
+        };
+        if let Some(ref tok) = client.token {
+            if let (Some(ref pool), Some(ref store)) = (&self.db_pool, &self.credential_store) {
+                if let Ok((ct, nonce)) = store.encrypt_token(effective_device_id, tok) {
+                    let _ = michi_db::record_pairing_journal_token_received_db(
+                        pool, pairing_id, &ct, &nonce,
+                    )
+                    .await;
+                }
             }
         }
 
@@ -3055,5 +3101,175 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err2.code, "IDENTITY_MISMATCH");
+    }
+
+    #[tokio::test]
+    async fn test_pairing_crash_frontier_1_started_remains_started() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let st = default_mock_state();
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager().with_db_pool(pool.clone());
+
+        let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
+
+        // Frontier 1: Process crashes right after start_pairing
+        let journal = michi_db::get_pairing_journal_entry_db(&pool, &pending.pairing_id)
+            .await
+            .unwrap()
+            .expect("journal entry must exist");
+        assert_eq!(journal.state, "started");
+        assert_eq!(journal.remote_session_id.as_deref(), Some("pair-sess-1"));
+        assert!(journal.token_ciphertext.is_none());
+
+        // Unrecovered pairings only looks for confirm_sent, remote_outcome_unknown, token_received, recovery_required
+        let unrecovered = michi_db::list_unrecovered_pairing_journals_db(&pool)
+            .await
+            .unwrap();
+        assert!(
+            unrecovered.is_empty(),
+            "started pairings must not trigger premature recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pairing_crash_frontier_2_durable_confirm_sent_recorded() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let st = default_mock_state();
+        // Override confirm to delay so we can inspect state or simulate crash before network completes
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager().with_db_pool(pool.clone());
+
+        let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
+
+        // Directly record confirm_sent to simulate crash right after confirm_sent write
+        michi_db::record_pairing_journal_confirm_sent_db(&pool, &pending.pairing_id)
+            .await
+            .unwrap();
+
+        let unrecovered = michi_db::list_unrecovered_pairing_journals_db(&pool)
+            .await
+            .unwrap();
+        assert_eq!(unrecovered.len(), 1);
+        assert_eq!(unrecovered[0].state, "confirm_sent");
+        assert_eq!(
+            unrecovered[0].remote_session_id.as_deref(),
+            Some("pair-sess-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pairing_crash_frontier_3_remote_outcome_unknown_on_network_failure() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let st = default_mock_state();
+        // Override confirm to 503 Service Unavailable (network error / gateway timeout)
+        *st.confirm_status_override.write().unwrap() =
+            Some(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        // Status returns error so recovery fails and records outcome unknown
+        *st.status_json.write().unwrap() = serde_json::json!({
+            "error": {
+                "code": "NETWORK_ERROR",
+                "message": "upstream unreachable"
+            }
+        });
+
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager().with_db_pool(pool.clone());
+
+        let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
+
+        let _ = mgr.confirm_pairing(&pending.pairing_id, "482391").await;
+
+        let journal = michi_db::get_pairing_journal_entry_db(&pool, &pending.pairing_id)
+            .await
+            .unwrap()
+            .expect("journal entry must exist");
+        assert_eq!(journal.state, "remote_outcome_unknown");
+        assert!(
+            journal.error_reason.is_some(),
+            "error_reason must be populated on remote_outcome_unknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pairing_crash_frontier_4_token_received_encrypted_in_journal() {
+        let pool = michi_db::init_pool("sqlite::memory:").await.unwrap();
+        let cred_store = Arc::new(crate::credentials::ReceiverCredentialStore::new([99u8; 32]));
+        let st = default_mock_state();
+        let (base_url, _handle) = spawn_mock_receiver(st.clone()).await;
+        let mgr = make_test_session_manager()
+            .with_db_pool(pool.clone())
+            .with_credential_store(cred_store.clone());
+
+        let pending = mgr.start_pairing(&base_url, "initiator-1").await.unwrap();
+
+        let dev_id = mgr
+            .confirm_pairing(&pending.pairing_id, "482391")
+            .await
+            .expect("pairing confirm must succeed");
+
+        // Journal must have completed in persisted state, but token was encrypted without plaintext leak
+        let journal = michi_db::get_pairing_journal_entry_db(&pool, &pending.pairing_id)
+            .await
+            .unwrap()
+            .expect("journal entry must exist");
+        assert_eq!(journal.state, "persisted");
+        assert!(
+            journal.token_ciphertext.is_some(),
+            "token_ciphertext must be populated in journal"
+        );
+        assert!(
+            journal.token_nonce.is_some(),
+            "token_nonce must be populated in journal"
+        );
+
+        // Verify encrypted token can be decrypted and matches mock receiver token
+        let ct = journal.token_ciphertext.unwrap();
+        let nonce = journal.token_nonce.unwrap();
+        let decrypted = cred_store.decrypt_token(&dev_id, &ct, &nonce).unwrap();
+        assert_eq!(decrypted, "test-device-token-12345");
+    }
+
+    #[tokio::test]
+    async fn test_pairing_strict_recover_response_validation() {
+        use crate::models::PairConfirmResponse;
+
+        // Missing token
+        let invalid_resp1 = PairConfirmResponse {
+            status: Some("paired".into()),
+            token: None,
+            refresh_token: None,
+            expires_in: Some(3600),
+            device_id: Some("dev-1".into()),
+            server_id: Some("srv-1".into()),
+            controller_id: None,
+            error: None,
+        };
+        assert!(invalid_resp1.token.is_none());
+
+        // Empty token
+        let invalid_resp2 = PairConfirmResponse {
+            status: Some("paired".into()),
+            token: Some("   ".into()),
+            refresh_token: None,
+            expires_in: Some(3600),
+            device_id: Some("dev-1".into()),
+            server_id: Some("srv-1".into()),
+            controller_id: None,
+            error: None,
+        };
+        assert!(invalid_resp2.token.as_ref().unwrap().trim().is_empty());
+
+        // Missing expires_in
+        let invalid_resp3 = PairConfirmResponse {
+            status: Some("paired".into()),
+            token: Some("valid_token".into()),
+            refresh_token: None,
+            expires_in: None,
+            device_id: Some("dev-1".into()),
+            server_id: Some("srv-1".into()),
+            controller_id: None,
+            error: None,
+        };
+        assert!(invalid_resp3.expires_in.is_none());
     }
 }

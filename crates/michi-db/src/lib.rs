@@ -334,8 +334,16 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
             migration_051
         );
     }
+    if current < 52 {
+        run_migration_step!(
+            conn,
+            52,
+            "receiver_pairing_journal encrypted tokens, remote_session_id and drop plaintext token",
+            migration_052
+        );
+    }
 
-    info!("database schema at version 51");
+    info!("database schema at version 52");
     Ok(())
 }
 
@@ -1384,7 +1392,7 @@ async fn migration_051(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
             receiver_id TEXT NOT NULL,
             base_url TEXT NOT NULL,
             michi_id TEXT NOT NULL,
-            remote_session_id TEXT,
+            token TEXT,
             state TEXT NOT NULL DEFAULT 'started',
             error_reason TEXT,
             created_at TEXT NOT NULL,
@@ -1402,6 +1410,47 @@ async fn migration_051(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_pairing_journal_receiver_id ON receiver_pairing_journal(receiver_id)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn migration_052(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    let rows: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as("PRAGMA table_info(receiver_pairing_journal)")
+            .fetch_all(&mut **tx)
+            .await?;
+
+    let existing_cols: std::collections::HashSet<String> = rows.into_iter().map(|r| r.1).collect();
+
+    if existing_cols.contains("token") {
+        sqlx::query("ALTER TABLE receiver_pairing_journal DROP COLUMN token")
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    if !existing_cols.contains("token_ciphertext") {
+        sqlx::query("ALTER TABLE receiver_pairing_journal ADD COLUMN token_ciphertext BLOB")
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    if !existing_cols.contains("token_nonce") {
+        sqlx::query("ALTER TABLE receiver_pairing_journal ADD COLUMN token_nonce BLOB")
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    if !existing_cols.contains("remote_session_id") {
+        sqlx::query("ALTER TABLE receiver_pairing_journal ADD COLUMN remote_session_id TEXT")
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_pairing_journal_remote_session_id ON receiver_pairing_journal(remote_session_id)",
     )
     .execute(&mut **tx)
     .await?;
@@ -1739,6 +1788,8 @@ pub struct PairingJournalEntry {
     pub base_url: String,
     pub michi_id: String,
     pub remote_session_id: Option<String>,
+    pub token_ciphertext: Option<Vec<u8>>,
+    pub token_nonce: Option<Vec<u8>>,
     pub state: String,
     pub error_reason: Option<String>,
     pub created_at: String,
@@ -1812,6 +1863,27 @@ pub async fn record_pairing_journal_outcome_unknown_db(
     Ok(())
 }
 
+pub async fn record_pairing_journal_token_received_db(
+    pool: &SqlitePool,
+    pairing_id: &str,
+    ciphertext: &[u8],
+    nonce: &[u8],
+) -> Result<(), DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE receiver_pairing_journal
+         SET state = 'token_received', token_ciphertext = ?, token_nonce = ?, updated_at = ?
+         WHERE pairing_id = ?",
+    )
+    .bind(ciphertext)
+    .bind(nonce)
+    .bind(&now)
+    .bind(pairing_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn record_pairing_journal_completed_db(
     pool: &SqlitePool,
     pairing_id: &str,
@@ -1822,6 +1894,25 @@ pub async fn record_pairing_journal_completed_db(
          SET state = 'persisted', updated_at = ?
          WHERE pairing_id = ?",
     )
+    .bind(&now)
+    .bind(pairing_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn record_pairing_journal_failed_db(
+    pool: &SqlitePool,
+    pairing_id: &str,
+    error_reason: &str,
+) -> Result<(), DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE receiver_pairing_journal
+         SET state = 'failed', error_reason = ?, updated_at = ?
+         WHERE pairing_id = ?",
+    )
+    .bind(error_reason)
     .bind(&now)
     .bind(pairing_id)
     .execute(pool)
@@ -1854,7 +1945,7 @@ pub async fn get_pairing_journal_entry_db(
 ) -> Result<Option<PairingJournalEntry>, DbError> {
     use sqlx::Row;
     let row_opt = sqlx::query(
-        "SELECT pairing_id, receiver_id, base_url, michi_id, remote_session_id, state, error_reason, created_at, updated_at
+        "SELECT pairing_id, receiver_id, base_url, michi_id, remote_session_id, token_ciphertext, token_nonce, state, error_reason, created_at, updated_at
          FROM receiver_pairing_journal WHERE pairing_id = ?",
     )
     .bind(pairing_id)
@@ -1868,6 +1959,8 @@ pub async fn get_pairing_journal_entry_db(
             base_url: row.get("base_url"),
             michi_id: row.get("michi_id"),
             remote_session_id: row.get("remote_session_id"),
+            token_ciphertext: row.get("token_ciphertext"),
+            token_nonce: row.get("token_nonce"),
             state: row.get("state"),
             error_reason: row.get("error_reason"),
             created_at: row.get("created_at"),
@@ -1883,9 +1976,9 @@ pub async fn list_unrecovered_pairing_journals_db(
 ) -> Result<Vec<PairingJournalEntry>, DbError> {
     use sqlx::Row;
     let rows = sqlx::query(
-        "SELECT pairing_id, receiver_id, base_url, michi_id, remote_session_id, state, error_reason, created_at, updated_at
+        "SELECT pairing_id, receiver_id, base_url, michi_id, remote_session_id, token_ciphertext, token_nonce, state, error_reason, created_at, updated_at
          FROM receiver_pairing_journal
-         WHERE state IN ('confirm_sent', 'remote_outcome_unknown', 'recovery_required')
+         WHERE state IN ('confirm_sent', 'remote_outcome_unknown', 'token_received', 'recovery_required')
          ORDER BY created_at ASC",
     )
     .fetch_all(pool)
@@ -1899,6 +1992,8 @@ pub async fn list_unrecovered_pairing_journals_db(
             base_url: row.get("base_url"),
             michi_id: row.get("michi_id"),
             remote_session_id: row.get("remote_session_id"),
+            token_ciphertext: row.get("token_ciphertext"),
+            token_nonce: row.get("token_nonce"),
             state: row.get("state"),
             error_reason: row.get("error_reason"),
             created_at: row.get("created_at"),
