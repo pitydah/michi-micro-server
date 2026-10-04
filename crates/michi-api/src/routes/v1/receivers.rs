@@ -807,8 +807,7 @@ pub async fn reconcile_unrecovered_pairings(state: &AppState) -> Result<usize, S
             .flatten();
         if existing_db.is_some() {
             let _ =
-                michi_db::record_pairing_journal_completed_db(&state.db, &journal.pairing_id)
-                    .await;
+                michi_db::record_pairing_journal_completed_db(&state.db, &journal.pairing_id).await;
             continue;
         }
 
@@ -817,11 +816,9 @@ pub async fn reconcile_unrecovered_pairings(state: &AppState) -> Result<usize, S
         if reg.get(receiver_id).is_some() {
             drop(reg);
             if persist_paired_receiver(state, receiver_id).await.is_ok() {
-                let _ = michi_db::record_pairing_journal_completed_db(
-                    &state.db,
-                    &journal.pairing_id,
-                )
-                .await;
+                let _ =
+                    michi_db::record_pairing_journal_completed_db(&state.db, &journal.pairing_id)
+                        .await;
                 recovered_count += 1;
             }
             continue;
@@ -949,7 +946,9 @@ pub async fn reconcile_unrecovered_pairings(state: &AppState) -> Result<usize, S
             let store = match state.receiver_credential_store.as_ref().as_ref() {
                 Some(s) => s,
                 None => {
-                    tracing::error!("receiver_credential_store not configured; cannot persist token");
+                    tracing::error!(
+                        "receiver_credential_store not configured; cannot persist token"
+                    );
                     continue;
                 }
             };
@@ -1038,10 +1037,16 @@ pub async fn reconcile_unrecovered_pairings(state: &AppState) -> Result<usize, S
                 maximum_safe_volume: Some(100),
                 qualification: michi_receivers::models::ReceiverQualification::Qualified,
             };
-            state.receiver_manager.registry().await.write().await.add(entry);
+            state
+                .receiver_manager
+                .registry()
+                .await
+                .write()
+                .await
+                .add(entry);
 
-            let _ = michi_db::record_pairing_journal_completed_db(&state.db, &journal.pairing_id)
-                .await;
+            let _ =
+                michi_db::record_pairing_journal_completed_db(&state.db, &journal.pairing_id).await;
             recovered_count += 1;
         } else if status_resp.status == "expired"
             || status_resp.status == "not_found"

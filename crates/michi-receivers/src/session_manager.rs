@@ -627,9 +627,17 @@ impl ReceiverSessionManager {
             Ok(resp) => resp,
             Err(e) => {
                 // If network failure or remote status unknown, record REMOTE_OUTCOME_UNKNOWN in journal
-                if e.code == "NETWORK_ERROR" || e.http_status == 502 || e.http_status == 503 || e.http_status == 504 || e.http_status == 408 {
+                if e.code == "NETWORK_ERROR"
+                    || e.http_status == 502
+                    || e.http_status == 503
+                    || e.http_status == 504
+                    || e.http_status == 408
+                {
                     if let Some(ref pool) = self.db_pool {
-                        let _ = michi_db::record_pairing_journal_outcome_unknown_db(pool, pairing_id, &e.message).await;
+                        let _ = michi_db::record_pairing_journal_outcome_unknown_db(
+                            pool, pairing_id, &e.message,
+                        )
+                        .await;
                     }
                 }
 
@@ -689,15 +697,13 @@ impl ReceiverSessionManager {
         if let Some(ref err) = confirm_resp.error {
             let recovered = if err.code == "PAIRING_ALREADY_CONSUMED" || err.code == "CONFLICT" {
                 match client.pair_status(&pending.receiver_pair_session_id).await {
-                    Ok(status_resp) if status_resp.status == "confirmed" => {
-                        client
-                            .pair_recover_auto(
-                                Some(&pending.expected_michi_id),
-                                Some(&pending.expected_public_key),
-                            )
-                            .await
-                            .ok()
-                    }
+                    Ok(status_resp) if status_resp.status == "confirmed" => client
+                        .pair_recover_auto(
+                            Some(&pending.expected_michi_id),
+                            Some(&pending.expected_public_key),
+                        )
+                        .await
+                        .ok(),
                     _ => None,
                 }
             } else {

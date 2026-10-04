@@ -353,22 +353,24 @@ impl ReceiverClient {
                 message: format!("invalid base64url server_public_key: {e}"),
                 details: serde_json::Value::Null,
             })?;
-        let key_bytes: [u8; 32] = pk_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| ReceiverProtocolError {
-                http_status: 400,
-                code: "INVALID_SERVER_PUBLIC_KEY".into(),
-                message: "server_public_key must be exactly 32 bytes".into(),
-                details: serde_json::Value::Null,
-            })?;
-        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
-            .map_err(|e| ReceiverProtocolError {
+        let key_bytes: [u8; 32] =
+            pk_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| ReceiverProtocolError {
+                    http_status: 400,
+                    code: "INVALID_SERVER_PUBLIC_KEY".into(),
+                    message: "server_public_key must be exactly 32 bytes".into(),
+                    details: serde_json::Value::Null,
+                })?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).map_err(|e| {
+            ReceiverProtocolError {
                 http_status: 400,
                 code: "INVALID_SERVER_PUBLIC_KEY".into(),
                 message: format!("invalid Ed25519 server_public_key: {e}"),
                 details: serde_json::Value::Null,
-            })?;
+            }
+        })?;
         let derived_michi_id =
             michi_identity::types::MichiId::from_public_key(&verifying_key).to_base64url();
 
