@@ -535,6 +535,7 @@ impl ReceiverSessionManager {
                 &pending.expected_server_id,
                 &pending.receiver_base_url,
                 &pending.expected_michi_id,
+                Some(&pending.receiver_pair_session_id),
             )
             .await
             {
@@ -609,6 +610,11 @@ impl ReceiverSessionManager {
         // Validate audio capabilities before pair_confirm so remote pairing is never consumed if capabilities are invalid
         validate_audio_capabilities(&pre_info)?;
 
+        // Record CONFIRM_SENT in journal before sending network request
+        if let Some(ref pool) = self.db_pool {
+            let _ = michi_db::record_pairing_journal_confirm_sent_db(pool, pairing_id).await;
+        }
+
         let confirm_resp = client
             .pair_confirm(
                 &pending.receiver_pair_session_id,
@@ -620,6 +626,13 @@ impl ReceiverSessionManager {
         let confirm_resp = match confirm_resp {
             Ok(resp) => resp,
             Err(e) => {
+                // If network failure or remote status unknown, record REMOTE_OUTCOME_UNKNOWN in journal
+                if e.code == "NETWORK_ERROR" || e.http_status == 502 || e.http_status == 503 || e.http_status == 504 || e.http_status == 408 {
+                    if let Some(ref pool) = self.db_pool {
+                        let _ = michi_db::record_pairing_journal_outcome_unknown_db(pool, pairing_id, &e.message).await;
+                    }
+                }
+
                 let recovered = if e.code == "NETWORK_ERROR"
                     || e.code == "PAIRING_ALREADY_CONSUMED"
                     || e.code == "CONFLICT"
@@ -631,7 +644,13 @@ impl ReceiverSessionManager {
                                 "pairing session {} confirmed remotely; executing authenticated recovery",
                                 pending.receiver_pair_session_id
                             );
-                            client.pair_recover_auto().await.ok()
+                            client
+                                .pair_recover_auto(
+                                    Some(&pending.expected_michi_id),
+                                    Some(&pending.expected_public_key),
+                                )
+                                .await
+                                .ok()
                         }
                         _ => None,
                     }
@@ -671,7 +690,13 @@ impl ReceiverSessionManager {
             let recovered = if err.code == "PAIRING_ALREADY_CONSUMED" || err.code == "CONFLICT" {
                 match client.pair_status(&pending.receiver_pair_session_id).await {
                     Ok(status_resp) if status_resp.status == "confirmed" => {
-                        client.pair_recover_auto().await.ok()
+                        client
+                            .pair_recover_auto(
+                                Some(&pending.expected_michi_id),
+                                Some(&pending.expected_public_key),
+                            )
+                            .await
+                            .ok()
                     }
                     _ => None,
                 }
@@ -693,15 +718,6 @@ impl ReceiverSessionManager {
                     "pair_confirm failed: {}: {}",
                     err.code, err.message
                 ));
-            }
-        }
-
-        // IMMEDIATELY PRESERVE TOKEN IN LOCAL JOURNAL
-        if let (Some(ref pool), Some(ref tok)) = (&self.db_pool, &client.token) {
-            if let Err(e) = michi_db::record_pairing_journal_token_db(pool, pairing_id, tok).await {
-                tracing::error!(
-                    "CRITICAL: failed to persist token to pairing journal for {pairing_id}: {e}"
-                );
             }
         }
 
@@ -1916,10 +1932,10 @@ mod tests {
         });
 
         let recover_start = serde_json::json!({
-            "challenge_nonce": "CxIZICcuNTxDSlFYX2ZtdA",
+            "challenge_nonce": "CxIZICcuNTxDSlFYX2ZtdEN4SVpJQ2N1TlR4RFNsRllYZg",
             "expires_at": chrono::Utc::now().checked_add_signed(chrono::Duration::seconds(60)).unwrap().to_rfc3339(),
-            "server_michi_id": "f2UwxQaeA6vA8LO7Cr1nGRr5MStned_Gbmc_ua48qUc",
-            "server_public_key": "RpHnJr9oP1DXBkPuIMuk0hJ2hAQVCMGREE"
+            "server_michi_id": "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4",
+            "server_public_key": "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8"
         });
 
         let recover = serde_json::json!({
@@ -2907,7 +2923,7 @@ mod tests {
             .unwrap()
             .expect("journal entry must exist after start_pairing");
         assert_eq!(journal.state, "started");
-        assert_eq!(journal.token, None);
+        assert_eq!(journal.remote_session_id.as_deref(), Some("pair-sess-1"));
 
         let dev_id = mgr
             .confirm_pairing(&pending.pairing_id, "482391")
@@ -2920,10 +2936,6 @@ mod tests {
             .unwrap()
             .expect("journal entry must exist after confirm_pairing");
         assert_eq!(journal_after.state, "persisted");
-        assert_eq!(
-            journal_after.token.as_deref(),
-            Some("test-device-token-12345")
-        );
     }
 
     #[tokio::test]
@@ -2948,11 +2960,6 @@ mod tests {
             .unwrap()
             .expect("journal entry must exist");
         assert_eq!(journal.state, "recovery_required");
-        assert_eq!(
-            journal.token.as_deref(),
-            Some("test-device-token-12345"),
-            "token must be preserved in journal despite post-confirm error"
-        );
         assert!(
             journal
                 .error_reason
@@ -3004,10 +3011,43 @@ mod tests {
             .unwrap()
             .expect("journal entry must exist");
         assert_eq!(journal.state, "persisted");
-        assert_eq!(
-            journal.token.as_deref(),
-            Some("test-recovered-token-99999"),
-            "recovered token must be preserved"
-        );
+    }
+
+    #[tokio::test]
+    async fn test_pairing_recovery_identity_validation_rejects_imposter() {
+        use crate::models::PairRecoverStartResponse;
+
+        // Imposter has mismatch between public key and server_michi_id
+        let imposter_start = PairRecoverStartResponse {
+            challenge_nonce: "CxIZICcuNTxDSlFYX2ZtdEN4SVpJQ2N1TlR4RFNsRllYZg".into(),
+            expires_at: "2026-10-04T00:00:00Z".into(),
+            server_michi_id: "fake_michi_id_does_not_derive_from_key".into(),
+            server_public_key: "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8".into(),
+            error: None,
+        };
+
+        let err = crate::client::ReceiverClient::validate_recover_start_identity(
+            &imposter_start,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "IDENTITY_MISMATCH");
+
+        // Identity mismatch with expected_michi_id
+        let valid_start = PairRecoverStartResponse {
+            challenge_nonce: "CxIZICcuNTxDSlFYX2ZtdEN4SVpJQ2N1TlR4RFNsRllYZg".into(),
+            expires_at: "2026-10-04T00:00:00Z".into(),
+            server_michi_id: "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4".into(),
+            server_public_key: "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8".into(),
+            error: None,
+        };
+        let err2 = crate::client::ReceiverClient::validate_recover_start_identity(
+            &valid_start,
+            Some("different_expected_michi_id"),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err2.code, "IDENTITY_MISMATCH");
     }
 }

@@ -600,6 +600,7 @@ pub async fn receiver_pair_start_handler(
                 &pending.expected_server_id,
                 &pending.receiver_base_url,
                 &pending.expected_michi_id,
+                Some(&pending.receiver_pair_session_id),
             )
             .await;
             Ok(Json(serde_json::json!({
@@ -799,100 +800,265 @@ pub async fn reconcile_unrecovered_pairings(state: &AppState) -> Result<usize, S
 
     let mut recovered_count = 0;
     for journal in unrecovered {
-        if let Some(ref token) = journal.token {
-            let receiver_id = &journal.receiver_id;
-            let existing_db = michi_db::get_receiver_db(&state.db, receiver_id)
+        let receiver_id = &journal.receiver_id;
+        let existing_db = michi_db::get_receiver_db(&state.db, receiver_id)
+            .await
+            .ok()
+            .flatten();
+        if existing_db.is_some() {
+            let _ =
+                michi_db::record_pairing_journal_completed_db(&state.db, &journal.pairing_id)
+                    .await;
+            continue;
+        }
+
+        let reg_arc = state.receiver_manager.registry().await;
+        let reg = reg_arc.read().await;
+        if reg.get(receiver_id).is_some() {
+            drop(reg);
+            if persist_paired_receiver(state, receiver_id).await.is_ok() {
+                let _ = michi_db::record_pairing_journal_completed_db(
+                    &state.db,
+                    &journal.pairing_id,
+                )
+                .await;
+                recovered_count += 1;
+            }
+            continue;
+        }
+        drop(reg);
+
+        // Process unrecovered transactions (confirm_sent, remote_outcome_unknown, recovery_required)
+        let Some(ref remote_session_id) = journal.remote_session_id else {
+            tracing::warn!(
+                "pairing journal {} has no remote_session_id; cannot query pair_status",
+                journal.pairing_id
+            );
+            continue;
+        };
+
+        let mut client = michi_receivers::ReceiverClient::with_identity(
+            &journal.base_url,
+            state.identity.clone(),
+        );
+
+        // Check remote status of the pairing session
+        let status_resp = match client.pair_status(remote_session_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    "failed to query pair_status for pairing {} (session {}): {}",
+                    journal.pairing_id,
+                    remote_session_id,
+                    e
+                );
+                continue;
+            }
+        };
+
+        if status_resp.status == "confirmed" {
+            tracing::info!(
+                "pairing journal {} (receiver {}) outcome is confirmed; initiating 2-step authenticated recovery",
+                journal.pairing_id,
+                receiver_id
+            );
+
+            // Execute authenticated recovery:
+            // 1. POST /api/v1/pair/recover/start
+            // 2. Validate server_michi_id and server_public_key (and BLAKE3 link) before signing challenge
+            // 3. POST /api/v1/pair/recover with Ed25519 signature
+            // 4. Strictly validate recover response
+            let recover_resp = match client
+                .pair_recover_auto(Some(&journal.michi_id), None)
                 .await
-                .ok()
-                .flatten();
-            if existing_db.is_some() {
-                let _ =
-                    michi_db::record_pairing_journal_completed_db(&state.db, &journal.pairing_id)
-                        .await;
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(
+                        "pairing recovery failed for {} (session {}): {}",
+                        journal.pairing_id,
+                        remote_session_id,
+                        e
+                    );
+                    let _ = michi_db::record_pairing_journal_recovery_required_db(
+                        &state.db,
+                        &journal.pairing_id,
+                        &format!("recovery failed: {e}"),
+                    )
+                    .await;
+                    continue;
+                }
+            };
+
+            // Verify the recovered token against an authenticated endpoint (GET /api/v1/receiver-lite/session)
+            // Never consider a token valid just because /server/info works
+            match client.verify_token().await {
+                Ok(true) => {
+                    tracing::info!(
+                        "recovered token successfully authenticated against receiver {}",
+                        receiver_id
+                    );
+                }
+                Ok(false) => {
+                    tracing::error!(
+                        "recovered token was rejected by receiver {} on authenticated endpoint",
+                        receiver_id
+                    );
+                    let _ = michi_db::record_pairing_journal_recovery_required_db(
+                        &state.db,
+                        &journal.pairing_id,
+                        "recovered token rejected on authenticated endpoint",
+                    )
+                    .await;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "network error verifying token for receiver {}: {}",
+                        receiver_id,
+                        e
+                    );
+                    continue;
+                }
+            }
+
+            let info = match client.get_info().await {
+                Ok(i) => i,
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to fetch receiver info after recovery for {}: {}",
+                        receiver_id,
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            let device_id = recover_resp
+                .device_id
+                .clone()
+                .or_else(|| info.michi_id.clone())
+                .or_else(|| info.server_id.clone())
+                .unwrap_or_else(|| receiver_id.clone());
+
+            let token = match recover_resp.token.as_ref() {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let store = match state.receiver_credential_store.as_ref().as_ref() {
+                Some(s) => s,
+                None => {
+                    tracing::error!("receiver_credential_store not configured; cannot persist token");
+                    continue;
+                }
+            };
+
+            let (ciphertext, nonce) = match store.encrypt_token(&device_id, token) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    tracing::error!("failed to encrypt recovered token for {device_id}: {e}");
+                    continue;
+                }
+            };
+
+            let now = chrono::Utc::now().to_rfc3339();
+            let cred = michi_db::PersistedReceiverCredential {
+                receiver_id: device_id.clone(),
+                ciphertext,
+                nonce,
+                version: 1,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            };
+
+            let name = info.name.clone().unwrap_or_else(|| device_id.clone());
+            let device_type = info
+                .device_type
+                .clone()
+                .or_else(|| info.service.clone())
+                .unwrap_or_else(|| "michi-stream-standard".into());
+            let audio = info.audio.as_ref();
+            let caps_json = audio
+                .map(|a| serde_json::to_string(a).unwrap_or_else(|_| "{}".into()))
+                .unwrap_or_else(|| "{}".into());
+
+            let prec = michi_db::PersistedReceiver {
+                id: device_id.clone(),
+                name: name.clone(),
+                device_type: device_type.clone(),
+                base_url: journal.base_url.clone(),
+                paired: true,
+                online: false,
+                audio_capabilities: caps_json,
+                last_seen: Some(now.clone()),
+                paired_at: Some(now.clone()),
+                created_at: now.clone(),
+                updated_at: now,
+                michi_id: info.michi_id.clone(),
+                capabilities_json: None,
+                capabilities_observed_at: None,
+                authority_supported: false,
+            };
+
+            if let Err(e) =
+                michi_db::persist_paired_receiver_transaction(&state.db, &prec, &cred).await
+            {
+                tracing::error!(
+                    "failed to persist recovered receiver transaction for {device_id}: {e}"
+                );
                 continue;
             }
 
-            let reg_arc = state.receiver_manager.registry().await;
-            let reg = reg_arc.read().await;
-            if reg.get(receiver_id).is_some() {
-                drop(reg);
-                if persist_paired_receiver(state, receiver_id).await.is_ok() {
-                    let _ = michi_db::record_pairing_journal_completed_db(
-                        &state.db,
-                        &journal.pairing_id,
-                    )
-                    .await;
-                    recovered_count += 1;
-                }
-            } else {
-                drop(reg);
-                let mut client = michi_receivers::ReceiverClient::with_identity(
-                    &journal.base_url,
-                    state.identity.clone(),
-                );
-                client.token = Some(token.clone());
-                if let Ok(info) = client.get_info().await {
-                    let device_id = info
-                        .michi_id
-                        .clone()
-                        .or_else(|| info.server_id.clone())
-                        .unwrap_or_else(|| receiver_id.clone());
-                    let name = info.name.clone().unwrap_or_else(|| device_id.clone());
-                    let device_type = info
-                        .device_type
-                        .clone()
-                        .or_else(|| info.service.clone())
-                        .unwrap_or_else(|| "unknown".into());
-                    let audio = info.audio.as_ref();
-                    let caps_json = audio
-                        .map(|a| serde_json::to_string(a).unwrap_or_else(|_| "{}".into()))
-                        .unwrap_or_else(|| "{}".into());
+            // Insert into active registry
+            let entry = michi_receivers::ReceiverRegistryEntry {
+                receiver_id: device_id.clone(),
+                michi_id: info.michi_id.clone(),
+                name,
+                device_type,
+                base_url: journal.base_url.clone(),
+                paired: true,
+                token: Some(token.clone()),
+                presence: michi_receivers::ReceiverPresence::Offline,
+                last_seen: Some(chrono::Utc::now()),
+                capabilities: vec!["pcm".to_string(), "rtp".to_string()],
+                capabilities_verified_at: Some(chrono::Utc::now()),
+                capabilities_stale: false,
+                authority_supported: false,
+                owner_michi_id: None,
+                owner_name: None,
+                active_session_id: None,
+                max_sample_rate: 48000,
+                max_bit_depth: 16,
+                supported_transports: vec!["rtp_udp".into()],
+                supported_codecs: vec!["pcm_s16le".into()],
+                supported_sample_rates: vec![48000],
+                supported_bit_depths: vec![16],
+                supported_channels: vec![2],
+                maximum_safe_volume: Some(100),
+                qualification: michi_receivers::models::ReceiverQualification::Qualified,
+            };
+            state.receiver_manager.registry().await.write().await.add(entry);
 
-                    let store = match state.receiver_credential_store.as_ref().as_ref() {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    if let Ok((ciphertext, nonce)) = store.encrypt_token(&device_id, token) {
-                        let now = chrono::Utc::now().to_rfc3339();
-                        let cred = michi_db::PersistedReceiverCredential {
-                            receiver_id: device_id.clone(),
-                            ciphertext,
-                            nonce,
-                            version: 1,
-                            created_at: now.clone(),
-                            updated_at: now.clone(),
-                        };
-                        let prec = michi_db::PersistedReceiver {
-                            id: device_id.clone(),
-                            name: name.clone(),
-                            device_type: device_type.clone(),
-                            base_url: journal.base_url.clone(),
-                            paired: true,
-                            online: false,
-                            audio_capabilities: caps_json,
-                            last_seen: Some(now.clone()),
-                            paired_at: Some(now.clone()),
-                            created_at: now.clone(),
-                            updated_at: now,
-                            michi_id: info.michi_id.clone(),
-                            capabilities_json: None,
-                            capabilities_observed_at: None,
-                            authority_supported: false,
-                        };
-                        if michi_db::persist_paired_receiver_transaction(&state.db, &prec, &cred)
-                            .await
-                            .is_ok()
-                        {
-                            let _ = michi_db::record_pairing_journal_completed_db(
-                                &state.db,
-                                &journal.pairing_id,
-                            )
-                            .await;
-                            recovered_count += 1;
-                        }
-                    }
-                }
-            }
+            let _ = michi_db::record_pairing_journal_completed_db(&state.db, &journal.pairing_id)
+                .await;
+            recovered_count += 1;
+        } else if status_resp.status == "expired"
+            || status_resp.status == "not_found"
+            || status_resp.status == "locked"
+        {
+            tracing::info!(
+                "pairing journal {} (session {}) status is permanently {}; marking journal recovery required",
+                journal.pairing_id,
+                remote_session_id,
+                status_resp.status
+            );
+            let _ = michi_db::record_pairing_journal_recovery_required_db(
+                &state.db,
+                &journal.pairing_id,
+                &format!("terminal remote session status: {}", status_resp.status),
+            )
+            .await;
         }
     }
 

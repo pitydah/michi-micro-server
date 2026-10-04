@@ -1384,7 +1384,7 @@ async fn migration_051(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
             receiver_id TEXT NOT NULL,
             base_url TEXT NOT NULL,
             michi_id TEXT NOT NULL,
-            token TEXT,
+            remote_session_id TEXT,
             state TEXT NOT NULL DEFAULT 'started',
             error_reason TEXT,
             created_at TEXT NOT NULL,
@@ -1738,7 +1738,7 @@ pub struct PairingJournalEntry {
     pub receiver_id: String,
     pub base_url: String,
     pub michi_id: String,
-    pub token: Option<String>,
+    pub remote_session_id: Option<String>,
     pub state: String,
     pub error_reason: Option<String>,
     pub created_at: String,
@@ -1751,21 +1751,24 @@ pub async fn record_pairing_journal_start_db(
     receiver_id: &str,
     base_url: &str,
     michi_id: &str,
+    remote_session_id: Option<&str>,
 ) -> Result<(), DbError> {
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query(
-        "INSERT INTO receiver_pairing_journal (pairing_id, receiver_id, base_url, michi_id, state, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'started', ?, ?)
+        "INSERT INTO receiver_pairing_journal (pairing_id, receiver_id, base_url, michi_id, remote_session_id, state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'started', ?, ?)
          ON CONFLICT(pairing_id) DO UPDATE SET
             receiver_id = excluded.receiver_id,
             base_url = excluded.base_url,
             michi_id = excluded.michi_id,
+            remote_session_id = excluded.remote_session_id,
             updated_at = excluded.updated_at",
     )
     .bind(pairing_id)
     .bind(receiver_id)
     .bind(base_url)
     .bind(michi_id)
+    .bind(remote_session_id)
     .bind(&now)
     .bind(&now)
     .execute(pool)
@@ -1773,18 +1776,35 @@ pub async fn record_pairing_journal_start_db(
     Ok(())
 }
 
-pub async fn record_pairing_journal_token_db(
+pub async fn record_pairing_journal_confirm_sent_db(
     pool: &SqlitePool,
     pairing_id: &str,
-    token: &str,
 ) -> Result<(), DbError> {
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query(
         "UPDATE receiver_pairing_journal
-         SET token = ?, state = 'token_acquired', updated_at = ?
+         SET state = 'confirm_sent', updated_at = ?
          WHERE pairing_id = ?",
     )
-    .bind(token)
+    .bind(&now)
+    .bind(pairing_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn record_pairing_journal_outcome_unknown_db(
+    pool: &SqlitePool,
+    pairing_id: &str,
+    error_reason: &str,
+) -> Result<(), DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE receiver_pairing_journal
+         SET state = 'remote_outcome_unknown', error_reason = ?, updated_at = ?
+         WHERE pairing_id = ?",
+    )
+    .bind(error_reason)
     .bind(&now)
     .bind(pairing_id)
     .execute(pool)
@@ -1834,7 +1854,7 @@ pub async fn get_pairing_journal_entry_db(
 ) -> Result<Option<PairingJournalEntry>, DbError> {
     use sqlx::Row;
     let row_opt = sqlx::query(
-        "SELECT pairing_id, receiver_id, base_url, michi_id, token, state, error_reason, created_at, updated_at
+        "SELECT pairing_id, receiver_id, base_url, michi_id, remote_session_id, state, error_reason, created_at, updated_at
          FROM receiver_pairing_journal WHERE pairing_id = ?",
     )
     .bind(pairing_id)
@@ -1847,7 +1867,7 @@ pub async fn get_pairing_journal_entry_db(
             receiver_id: row.get("receiver_id"),
             base_url: row.get("base_url"),
             michi_id: row.get("michi_id"),
-            token: row.get("token"),
+            remote_session_id: row.get("remote_session_id"),
             state: row.get("state"),
             error_reason: row.get("error_reason"),
             created_at: row.get("created_at"),
@@ -1863,9 +1883,9 @@ pub async fn list_unrecovered_pairing_journals_db(
 ) -> Result<Vec<PairingJournalEntry>, DbError> {
     use sqlx::Row;
     let rows = sqlx::query(
-        "SELECT pairing_id, receiver_id, base_url, michi_id, token, state, error_reason, created_at, updated_at
+        "SELECT pairing_id, receiver_id, base_url, michi_id, remote_session_id, state, error_reason, created_at, updated_at
          FROM receiver_pairing_journal
-         WHERE state IN ('token_acquired', 'recovery_required')
+         WHERE state IN ('confirm_sent', 'remote_outcome_unknown', 'recovery_required')
          ORDER BY created_at ASC",
     )
     .fetch_all(pool)
@@ -1878,7 +1898,7 @@ pub async fn list_unrecovered_pairing_journals_db(
             receiver_id: row.get("receiver_id"),
             base_url: row.get("base_url"),
             michi_id: row.get("michi_id"),
-            token: row.get("token"),
+            remote_session_id: row.get("remote_session_id"),
             state: row.get("state"),
             error_reason: row.get("error_reason"),
             created_at: row.get("created_at"),

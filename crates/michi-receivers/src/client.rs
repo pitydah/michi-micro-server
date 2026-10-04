@@ -334,6 +334,104 @@ impl ReceiverClient {
         Ok(result)
     }
 
+    /// Validates receiver server_michi_id and server_public_key before signing any recovery challenge.
+    /// Ensures that:
+    /// 1. server_public_key is a valid 32-byte Ed25519 public key.
+    /// 2. server_michi_id matches the BLAKE3 derivation of server_public_key (ed25519-blake3-v1).
+    /// 3. If expected_michi_id / expected_public_key are provided, server identity matches expected values.
+    /// 4. challenge_nonce is valid base64url and at least 16 bytes.
+    pub fn validate_recover_start_identity(
+        start_resp: &PairRecoverStartResponse,
+        expected_michi_id: Option<&str>,
+        expected_public_key: Option<&str>,
+    ) -> Result<(), ReceiverProtocolError> {
+        let pk_bytes = URL_SAFE_NO_PAD
+            .decode(&start_resp.server_public_key)
+            .map_err(|e| ReceiverProtocolError {
+                http_status: 400,
+                code: "INVALID_SERVER_PUBLIC_KEY".into(),
+                message: format!("invalid base64url server_public_key: {e}"),
+                details: serde_json::Value::Null,
+            })?;
+        let key_bytes: [u8; 32] = pk_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| ReceiverProtocolError {
+                http_status: 400,
+                code: "INVALID_SERVER_PUBLIC_KEY".into(),
+                message: "server_public_key must be exactly 32 bytes".into(),
+                details: serde_json::Value::Null,
+            })?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|e| ReceiverProtocolError {
+                http_status: 400,
+                code: "INVALID_SERVER_PUBLIC_KEY".into(),
+                message: format!("invalid Ed25519 server_public_key: {e}"),
+                details: serde_json::Value::Null,
+            })?;
+        let derived_michi_id =
+            michi_identity::types::MichiId::from_public_key(&verifying_key).to_base64url();
+
+        if start_resp.server_michi_id != derived_michi_id {
+            return Err(ReceiverProtocolError {
+                http_status: 400,
+                code: "IDENTITY_MISMATCH".into(),
+                message: format!(
+                    "server_michi_id '{}' does not match derived identity '{}'",
+                    start_resp.server_michi_id, derived_michi_id
+                ),
+                details: serde_json::Value::Null,
+            });
+        }
+
+        if let Some(exp_id) = expected_michi_id {
+            if start_resp.server_michi_id != exp_id {
+                return Err(ReceiverProtocolError {
+                    http_status: 400,
+                    code: "IDENTITY_MISMATCH".into(),
+                    message: format!(
+                        "server_michi_id '{}' does not match expected '{}'",
+                        start_resp.server_michi_id, exp_id
+                    ),
+                    details: serde_json::Value::Null,
+                });
+            }
+        }
+
+        if let Some(exp_pk) = expected_public_key {
+            if start_resp.server_public_key != exp_pk {
+                return Err(ReceiverProtocolError {
+                    http_status: 400,
+                    code: "IDENTITY_MISMATCH".into(),
+                    message: format!(
+                        "server_public_key '{}' does not match expected '{}'",
+                        start_resp.server_public_key, exp_pk
+                    ),
+                    details: serde_json::Value::Null,
+                });
+            }
+        }
+
+        let nonce_bytes = URL_SAFE_NO_PAD
+            .decode(&start_resp.challenge_nonce)
+            .map_err(|e| ReceiverProtocolError {
+                http_status: 400,
+                code: "INVALID_CHALLENGE".into(),
+                message: format!("invalid base64url challenge nonce: {e}"),
+                details: serde_json::Value::Null,
+            })?;
+        if nonce_bytes.len() < 16 {
+            return Err(ReceiverProtocolError {
+                http_status: 400,
+                code: "INVALID_CHALLENGE".into(),
+                message: "challenge_nonce must be at least 16 bytes".into(),
+                details: serde_json::Value::Null,
+            });
+        }
+
+        Ok(())
+    }
+
     /// POST /api/v1/pair/recover with Ed25519 signature
     pub async fn pair_recover(
         &mut self,
@@ -421,19 +519,64 @@ impl ReceiverClient {
             message: format!("pair_recover parse failed: {e}"),
             details: serde_json::Value::Null,
         })?;
-        if let Some(ref t) = result.token {
-            self.token = Some(t.clone());
+
+        // Strict validation per pair-recover-response.schema.json:
+        // required: ["token", "expires_in", "device_id", "server_id"]
+        let token = result
+            .token
+            .as_ref()
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| ReceiverProtocolError {
+                http_status: 500,
+                code: "CONTRACT_VIOLATION".into(),
+                message: "recover response missing or empty token".into(),
+                details: serde_json::Value::Null,
+            })?;
+        if result.expires_in.is_none() {
+            return Err(ReceiverProtocolError {
+                http_status: 500,
+                code: "CONTRACT_VIOLATION".into(),
+                message: "recover response missing expires_in".into(),
+                details: serde_json::Value::Null,
+            });
         }
+        let _device_id = result
+            .device_id
+            .as_ref()
+            .filter(|d| !d.trim().is_empty())
+            .ok_or_else(|| ReceiverProtocolError {
+                http_status: 500,
+                code: "CONTRACT_VIOLATION".into(),
+                message: "recover response missing or empty device_id".into(),
+                details: serde_json::Value::Null,
+            })?;
+        let _server_id = result
+            .server_id
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| ReceiverProtocolError {
+                http_status: 500,
+                code: "CONTRACT_VIOLATION".into(),
+                message: "recover response missing or empty server_id".into(),
+                details: serde_json::Value::Null,
+            })?;
+
+        self.token = Some(token.clone());
         Ok(result)
     }
 
     /// Performs 2-step replay-resistant recovery:
     /// 1. POST /api/v1/pair/recover/start -> obtains receiver challenge_nonce
-    /// 2. POST /api/v1/pair/recover -> signs receiver challenge_nonce and recovers token
+    /// 2. Validates server_michi_id and server_public_key before signing
+    /// 3. POST /api/v1/pair/recover -> signs receiver challenge_nonce and recovers token
+    /// 4. Strictly validates recover response
     pub async fn pair_recover_auto(
         &mut self,
+        expected_michi_id: Option<&str>,
+        expected_public_key: Option<&str>,
     ) -> Result<PairConfirmResponse, ReceiverProtocolError> {
         let start_resp = self.pair_recover_start().await?;
+        Self::validate_recover_start_identity(&start_resp, expected_michi_id, expected_public_key)?;
         self.pair_recover(&start_resp.challenge_nonce).await
     }
 
@@ -692,11 +835,47 @@ impl ReceiverClient {
         })
     }
 
+    /// Verifies whether the currently configured token is accepted by the receiver using
+    /// an authenticated endpoint (GET /api/v1/receiver-lite/session).
+    ///
+    /// Unlike /api/v1/server/info which is public/unauthenticated, GET /receiver-lite/session
+    /// requires BearerAuth:
+    /// - Returns Ok(true) if status is 200 (active session) or 404 (no active session, but authenticated).
+    /// - Returns Ok(false) if status is 401 or 403 (unauthorized/invalid token).
+    pub async fn verify_token(&self) -> Result<bool, ReceiverProtocolError> {
+        let req = self
+            .client
+            .get(format!("{}/api/v1/receiver-lite/session", self.base_url));
+        let req = self.apply_session_headers(req);
+        let resp = req.send().await.map_err(|e| ReceiverProtocolError {
+            http_status: 503,
+            code: "NETWORK_ERROR".into(),
+            message: format!("token verification request failed: {e}"),
+            details: serde_json::Value::Null,
+        })?;
+
+        let status = resp.status().as_u16();
+        if status == 401 || status == 403 {
+            Ok(false)
+        } else if status == 200 || status == 404 {
+            Ok(true)
+        } else {
+            Err(ReceiverProtocolError {
+                http_status: status,
+                code: "TOKEN_VERIFICATION_FAILED".into(),
+                message: format!("unexpected status {status} during token verification"),
+                details: serde_json::Value::Null,
+            })
+        }
+    }
+
     /// GET /api/v1/receiver-lite/session (canonical)
     pub async fn get_playback_state(&self) -> Result<ReceiverPlaybackState, String> {
-        let resp = self
+        let req = self
             .client
-            .get(format!("{}/api/v1/receiver-lite/session", self.base_url))
+            .get(format!("{}/api/v1/receiver-lite/session", self.base_url));
+        let req = self.apply_session_headers(req);
+        let resp = req
             .send()
             .await
             .map_err(|e| format!("get_playback_state failed: {e}"))?;
