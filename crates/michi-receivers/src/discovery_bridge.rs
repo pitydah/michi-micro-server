@@ -158,14 +158,28 @@ impl ReceiverDiscoveryBridge {
                     supported_channels: Vec::new(),
                     maximum_safe_volume: None,
                     qualification: ReceiverQualification::NeedsCapabilityRefresh,
+                    michi_home_id: None,
+                    server_membership: None,
+                    authenticated: false,
+                    revoked: false,
                 };
                 info!(
                     michi_id = %record.michi_id,
                     name = %record.name,
                     presence = ?target_presence,
-                    "ReceiverDiscoveryBridge: projected new unpaired receiver"
+                    "ReceiverDiscoveryBridge: projected new receiver"
                 );
                 reg.add(entry);
+
+                let mgr = self.receiver_manager.clone();
+                let mid = record.michi_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = mgr.authenticate_receiver(&mid).await {
+                        debug!("Auto-auth for receiver {} deferred: {}", mid, e);
+                    } else {
+                        info!("Auto-auth completed successfully for receiver {}", mid);
+                    }
+                });
             }
         }
     }

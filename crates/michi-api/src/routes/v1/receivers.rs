@@ -361,6 +361,9 @@ pub async fn receivers_handler(
                 "qualification": e.compute_qualification(),
                 "active_session_id": e.active_session_id,
                 "last_seen": e.last_seen,
+                "authenticated": e.authenticated,
+                "michi_home_id": e.michi_home_id,
+                "revoked": e.revoked,
             })
         })
         .collect();
@@ -404,6 +407,9 @@ pub async fn get_receiver_handler(
         "supported_codecs": entry.supported_codecs,
         "active_session_id": entry.active_session_id,
         "last_seen": entry.last_seen,
+        "authenticated": entry.authenticated,
+        "michi_home_id": entry.michi_home_id,
+        "revoked": entry.revoked,
     })))
 }
 
@@ -586,6 +592,32 @@ pub async fn receiver_pair_start_handler(
             "either base_url or receiver_id must be provided",
         ));
     };
+
+    if state.receiver_manager.home_id().await.is_some() {
+        if let Ok(info) = state.receiver_manager.authenticate_url(&target_base_url).await {
+            let rid = {
+                let reg = state.receiver_manager.registry().await;
+                let reg_r = reg.read().await;
+                reg_r
+                    .receivers
+                    .values()
+                    .find(|e| e.base_url == target_base_url)
+                    .map(|e| e.receiver_id.clone())
+                    .or_else(|| info.device_id.clone())
+                    .or_else(|| info.michi_id.clone())
+                    .or_else(|| info.server_id.clone())
+                    .unwrap_or_else(|| target_base_url.clone())
+            };
+            return Ok(Json(serde_json::json!({
+                "status": "authenticated",
+                "authenticated": true,
+                "receiver_id": rid,
+                "michi_id": info.michi_id,
+                "name": info.name,
+                "base_url": target_base_url,
+            })));
+        }
+    }
 
     let allow_re_pair = body.re_pair.unwrap_or(false);
     match state
@@ -911,6 +943,7 @@ pub async fn reconcile_unrecovered_pairings(state: &AppState) -> Result<usize, S
                                         supported_channels: vec![2],
                                         maximum_safe_volume: Some(100),
                                         qualification: michi_receivers::models::ReceiverQualification::Qualified,
+                                        ..Default::default()
                                     };
                                     state
                                         .receiver_manager
@@ -1145,6 +1178,7 @@ pub async fn reconcile_unrecovered_pairings(state: &AppState) -> Result<usize, S
                 supported_channels: vec![2],
                 maximum_safe_volume: Some(100),
                 qualification: michi_receivers::models::ReceiverQualification::Qualified,
+                ..Default::default()
             };
             state
                 .receiver_manager
@@ -2172,3 +2206,109 @@ pub async fn whisker_discovery_handler(State(state): State<AppState>) -> Json<se
         "active_scent": scent_items,
     }))
 }
+
+// ── Trust Architecture V2 (Home & Roster Management) ──────────────────────
+
+pub async fn home_info_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let home_id = state
+        .receiver_manager
+        .home_id()
+        .await
+        .unwrap_or_else(|| state.home_root_authority.home_id());
+    let root_pk = state
+        .receiver_manager
+        .home_root_public_key()
+        .await
+        .unwrap_or_else(|| state.home_root_authority.public_key_base64url());
+    let server_michi_id = state.identity.michi_id().to_base64url();
+
+    Ok(Json(serde_json::json!({
+        "home_id": home_id,
+        "root_authority_public_key": root_pk,
+        "server_michi_id": server_michi_id,
+        "server_membership": state.server_membership,
+    })))
+}
+
+pub async fn home_roster_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let roster = state.receiver_manager.get_home_roster().await;
+    Ok(Json(serde_json::json!({
+        "devices": roster,
+        "total": roster.len(),
+    })))
+}
+
+pub async fn home_revocations_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let revocations = state.receiver_manager.get_revocations().await;
+    Ok(Json(serde_json::json!({
+        "revocations": revocations,
+        "total": revocations.len(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeDeviceBody {
+    pub device_michi_id: String,
+    pub reason: Option<String>,
+}
+
+pub async fn home_revoke_handler(
+    State(state): State<AppState>,
+    Json(body): Json<RevokeDeviceBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let reason = body
+        .reason
+        .as_deref()
+        .unwrap_or("Manual revocation by home administrator");
+    match state
+        .receiver_manager
+        .revoke_device(&body.device_michi_id, reason)
+        .await
+    {
+        Ok(revocation) => Ok(Json(serde_json::json!({
+            "status": "revoked",
+            "revocation": revocation,
+        }))),
+        Err(e) => Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "REVOCATION_FAILED",
+            &e,
+        )),
+    }
+}
+
+pub async fn receiver_auth_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match state.receiver_manager.authenticate_receiver(&id).await {
+        Ok(info) => {
+            let reg_arc = state.receiver_manager.registry().await;
+            let reg = reg_arc.read().await;
+            let entry = reg.get(&id);
+            Ok(Json(serde_json::json!({
+                "status": "authenticated",
+                "receiver": {
+                    "id": id,
+                    "michi_id": info.michi_id,
+                    "name": info.name,
+                    "authenticated": entry.map(|e| e.authenticated).unwrap_or(true),
+                    "michi_home_id": entry.and_then(|e| e.michi_home_id.clone()),
+                    "revoked": entry.map(|e| e.revoked).unwrap_or(false),
+                }
+            })))
+        }
+        Err(e) => Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "AUTH_FAILED",
+            &e.to_string(),
+        )),
+    }
+}
+

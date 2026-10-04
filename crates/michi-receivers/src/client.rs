@@ -5,6 +5,15 @@ use base64::Engine;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+/// Context for Trust Architecture V2 mutual authentication and transparent re-authentication.
+#[derive(Debug, Clone)]
+pub struct ReceiverHomeAuthContext {
+    pub home_root_public_key: String,
+    pub expected_home_id: String,
+    pub client_membership: michi_identity::types::DeviceMembershipDto,
+    pub revocations: Vec<michi_identity::types::HomeDeviceRevocationDto>,
+}
+
 /// HTTP client for interacting with a Michi Music Stream receiver (canonical Michi Link v1-lite).
 pub struct ReceiverClient {
     pub base_url: String,
@@ -14,6 +23,7 @@ pub struct ReceiverClient {
     pub active_session_token: Option<String>,
     pub heartbeat_sequence: Arc<AtomicU64>,
     pub identity: Option<Arc<michi_identity::IdentityManager>>,
+    pub home_auth_context: Option<ReceiverHomeAuthContext>,
 }
 
 impl ReceiverClient {
@@ -26,6 +36,7 @@ impl ReceiverClient {
             active_session_token: None,
             heartbeat_sequence: Arc::new(AtomicU64::new(0)),
             identity: None,
+            home_auth_context: None,
         }
     }
 
@@ -38,11 +49,16 @@ impl ReceiverClient {
             active_session_token: None,
             heartbeat_sequence: Arc::new(AtomicU64::new(0)),
             identity: Some(identity),
+            home_auth_context: None,
         }
     }
 
     pub fn set_identity(&mut self, identity: Arc<michi_identity::IdentityManager>) {
         self.identity = Some(identity);
+    }
+
+    pub fn set_home_auth_context(&mut self, ctx: ReceiverHomeAuthContext) {
+        self.home_auth_context = Some(ctx);
     }
 
     pub fn set_token(&mut self, token: impl Into<String>) {
@@ -65,6 +81,233 @@ impl ReceiverClient {
         resp.json()
             .await
             .map_err(|e| format!("info parse failed: {e}"))
+    }
+
+    /// POST /api/v1/auth/challenge (Trust V2 canonical mutual authentication)
+    pub async fn auth_challenge(
+        &self,
+        client_michi_id: &str,
+        client_public_key: &str,
+        home_id: &str,
+    ) -> Result<michi_identity::types::DeviceAuthChallengeResponse, ReceiverProtocolError> {
+        let payload = michi_identity::types::DeviceAuthChallengeRequest {
+            client_michi_id: client_michi_id.to_string(),
+            client_public_key: client_public_key.to_string(),
+            home_id: home_id.to_string(),
+        };
+
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/auth/challenge", self.base_url))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| ReceiverProtocolError {
+                http_status: 503,
+                code: "NETWORK_ERROR".into(),
+                message: format!("auth_challenge request failed: {e}"),
+                details: serde_json::Value::Null,
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            if let Ok(err_val) = resp.json::<serde_json::Value>().await {
+                if let Some(err_obj) = err_val.get("error") {
+                    let code = err_obj
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("AUTH_CHALLENGE_FAILED")
+                        .to_string();
+                    let message = err_obj
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("auth challenge rejected")
+                        .to_string();
+                    let details = err_obj
+                        .get("details")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    return Err(ReceiverProtocolError {
+                        http_status: status_code,
+                        code,
+                        message,
+                        details,
+                    });
+                }
+            }
+            return Err(ReceiverProtocolError {
+                http_status: status_code,
+                code: "AUTH_CHALLENGE_FAILED".into(),
+                message: format!("auth_challenge failed with status {status}"),
+                details: serde_json::Value::Null,
+            });
+        }
+
+        let result: michi_identity::types::DeviceAuthChallengeResponse = resp
+            .json()
+            .await
+            .map_err(|e| ReceiverProtocolError {
+                http_status: 500,
+                code: "DECODE_ERROR".into(),
+                message: format!("auth_challenge parse failed: {e}"),
+                details: serde_json::Value::Null,
+            })?;
+        Ok(result)
+    }
+
+    /// POST /api/v1/auth/session (Trust V2 mutual session creation)
+    pub async fn auth_session(
+        &mut self,
+        challenge_id: uuid::Uuid,
+        client_michi_id: &str,
+        membership: michi_identity::types::DeviceMembershipDto,
+        client_signature: &str,
+    ) -> Result<michi_identity::types::DeviceAuthSessionResponse, ReceiverProtocolError> {
+        let payload = michi_identity::types::DeviceAuthSessionRequest {
+            challenge_id,
+            client_michi_id: client_michi_id.to_string(),
+            membership,
+            client_signature: client_signature.to_string(),
+        };
+
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/auth/session", self.base_url))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| ReceiverProtocolError {
+                http_status: 503,
+                code: "NETWORK_ERROR".into(),
+                message: format!("auth_session request failed: {e}"),
+                details: serde_json::Value::Null,
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            if let Ok(err_val) = resp.json::<serde_json::Value>().await {
+                if let Some(err_obj) = err_val.get("error") {
+                    let code = err_obj
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("AUTH_SESSION_FAILED")
+                        .to_string();
+                    let message = err_obj
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("auth session rejected")
+                        .to_string();
+                    let details = err_obj
+                        .get("details")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    return Err(ReceiverProtocolError {
+                        http_status: status_code,
+                        code,
+                        message,
+                        details,
+                    });
+                }
+            }
+            return Err(ReceiverProtocolError {
+                http_status: status_code,
+                code: "AUTH_SESSION_FAILED".into(),
+                message: format!("auth_session failed with status {status}"),
+                details: serde_json::Value::Null,
+            });
+        }
+
+        let result: michi_identity::types::DeviceAuthSessionResponse = resp
+            .json()
+            .await
+            .map_err(|e| ReceiverProtocolError {
+                http_status: 500,
+                code: "DECODE_ERROR".into(),
+                message: format!("auth_session parse failed: {e}"),
+                details: serde_json::Value::Null,
+            })?;
+        self.token = Some(result.session_token.clone());
+        Ok(result)
+    }
+
+    /// High-level mutual authentication with Trust Architecture V2.
+    pub async fn authenticate(
+        &mut self,
+        home_root_public_key: &str,
+        expected_home_id: &str,
+        client_membership: &michi_identity::types::DeviceMembershipDto,
+        revocations: &[michi_identity::types::HomeDeviceRevocationDto],
+    ) -> Result<michi_identity::types::DeviceAuthSessionResponse, ReceiverClientError> {
+        let id = self.identity.as_ref().ok_or_else(|| {
+            ReceiverClientError::Protocol("IdentityManager not configured on client".into())
+        })?;
+
+        let client_michi_id = id.michi_id().to_base64url();
+        let client_public_key = id.public_key_base64url();
+
+        let chal_resp = self
+            .auth_challenge(&client_michi_id, &client_public_key, expected_home_id)
+            .await
+            .map_err(|e| ReceiverClientError::Protocol(format!("auth_challenge failed: {e}")))?;
+
+        let challenge_id_str = chal_resp.challenge_id.to_string();
+
+        // Compute client signature over canonical domain separation
+        let payload = michi_identity::home::device_auth_challenge_payload(
+            expected_home_id,
+            &chal_resp.server_michi_id,
+            &client_michi_id,
+            &challenge_id_str,
+            &chal_resp.challenge_nonce,
+        );
+        let (client_sig, _) = id.sign_base64url(&payload);
+
+        let sess_resp = self
+            .auth_session(
+                chal_resp.challenge_id,
+                &client_michi_id,
+                client_membership.clone(),
+                &client_sig,
+            )
+            .await
+            .map_err(|e| ReceiverClientError::Protocol(format!("auth_session failed: {e}")))?;
+
+        // Verify mutual server response
+        michi_identity::home::verify_server_auth_session(
+            &sess_resp,
+            home_root_public_key,
+            expected_home_id,
+            &client_michi_id,
+            &challenge_id_str,
+            revocations,
+        )
+        .map_err(|e| {
+            ReceiverClientError::Protocol(format!(
+                "server mutual authentication verification failed: {e}"
+            ))
+        })?;
+
+        self.token = Some(sess_resp.session_token.clone());
+        Ok(sess_resp)
+    }
+
+    /// Re-authenticates using the stored home_auth_context if available.
+    pub async fn reauthenticate(&mut self) -> Result<(), ReceiverClientError> {
+        let ctx = self.home_auth_context.clone().ok_or_else(|| {
+            ReceiverClientError::Protocol("No home auth context configured on client".into())
+        })?;
+
+        self.authenticate(
+            &ctx.home_root_public_key,
+            &ctx.expected_home_id,
+            &ctx.client_membership,
+            &ctx.revocations,
+        )
+        .await?;
+
+        Ok(())
     }
 
     /// POST /api/v1/pair/start (canonical) with Ed25519 challenge signature over RAW nonce bytes
