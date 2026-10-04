@@ -4021,7 +4021,9 @@ async function discoverDevices(silent) {
             } else {
               actionsHtml = '<div class="device-card__actions">' +
                 '<span class="device-badge device-badge--offline">Unauthenticated</span>' +
-                '<button class="btn btn-sm btn-primary action-auth-device action-pair" data-receiver-id="' + esc(receiverId) + '" data-name="' + esc(name) + '">Authenticate</button>' +
+                '<button class="btn btn-sm btn-primary action-auth-device action-pair" data-receiver-id="' + esc(receiverId) + '" data-name="' + esc(name) + '"' +
+                  (pairable ? '' : ' disabled title="Device is not ready for pairing"') +
+                '>Authenticate</button>' +
                 '</div>';
             }
           }

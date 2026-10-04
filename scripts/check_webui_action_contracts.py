@@ -59,6 +59,7 @@ ALLOWED_UI_HELPERS = {
     "closeReceiverPairModal",
     "proceedToPairingPin",
     "submitReceiverPairPin",
+    "refreshHomeRoster",
 }
 
 
