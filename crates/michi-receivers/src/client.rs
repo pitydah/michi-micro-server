@@ -144,10 +144,8 @@ impl ReceiverClient {
             });
         }
 
-        let result: michi_identity::types::DeviceAuthChallengeResponse = resp
-            .json()
-            .await
-            .map_err(|e| ReceiverProtocolError {
+        let result: michi_identity::types::DeviceAuthChallengeResponse =
+            resp.json().await.map_err(|e| ReceiverProtocolError {
                 http_status: 500,
                 code: "DECODE_ERROR".into(),
                 message: format!("auth_challenge parse failed: {e}"),
@@ -219,10 +217,8 @@ impl ReceiverClient {
             });
         }
 
-        let result: michi_identity::types::DeviceAuthSessionResponse = resp
-            .json()
-            .await
-            .map_err(|e| ReceiverProtocolError {
+        let result: michi_identity::types::DeviceAuthSessionResponse =
+            resp.json().await.map_err(|e| ReceiverProtocolError {
                 http_status: 500,
                 code: "DECODE_ERROR".into(),
                 message: format!("auth_session parse failed: {e}"),

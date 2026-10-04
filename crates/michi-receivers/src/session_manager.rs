@@ -212,7 +212,11 @@ impl ReceiverSessionManager {
     }
 
     pub async fn home_id(&self) -> Option<String> {
-        self.home_authority.read().await.as_ref().map(|a| a.home_id())
+        self.home_authority
+            .read()
+            .await
+            .as_ref()
+            .map(|a| a.home_id())
     }
 
     pub async fn home_root_public_key(&self) -> Option<String> {
@@ -415,8 +419,7 @@ impl ReceiverSessionManager {
                             .map(|d| d.to_rfc3339()),
                         authority_supported: entry.authority_supported,
                     };
-                    let _ =
-                        michi_db::persist_paired_receiver_transaction(pool, &prec, &cred).await;
+                    let _ = michi_db::persist_paired_receiver_transaction(pool, &prec, &cred).await;
                 }
             }
         }
@@ -436,7 +439,7 @@ impl ReceiverSessionManager {
         let info = client
             .get_info()
             .await
-            .map_err(|e| ReceiverClientError::Protocol(e))?;
+            .map_err(ReceiverClientError::Protocol)?;
         let existing_id = {
             let reg = self.registry.read().await;
             reg.receivers
@@ -456,15 +459,17 @@ impl ReceiverSessionManager {
         {
             let mut reg = self.registry.write().await;
             if reg.get(&receiver_id).is_none() {
-                let mut entry = ReceiverRegistryEntry::default();
-                entry.receiver_id = receiver_id.clone();
-                entry.michi_id = info.michi_id.clone();
-                entry.name = info.name.clone().unwrap_or_else(|| "Michi Receiver".into());
-                entry.base_url = base_url.to_string();
-                entry.device_type = info
-                    .device_type
-                    .clone()
-                    .unwrap_or_else(|| "standard".into());
+                let mut entry = ReceiverRegistryEntry {
+                    receiver_id: receiver_id.clone(),
+                    michi_id: info.michi_id.clone(),
+                    name: info.name.clone().unwrap_or_else(|| "Michi Receiver".into()),
+                    base_url: base_url.to_string(),
+                    device_type: info
+                        .device_type
+                        .clone()
+                        .unwrap_or_else(|| "standard".into()),
+                    ..Default::default()
+                };
                 update_entry_capabilities(&mut entry, &info);
                 reg.add(entry);
             }

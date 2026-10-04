@@ -72,16 +72,11 @@ async fn make_app() -> (axum::Router, SqlitePool, michi_api::AppState, String) {
         .unwrap(),
     );
     let admin_id = Uuid::new_v4();
-    michi_db::create_user(
-        &pool,
-        &admin_id,
-        "admin-trust-v2",
-        "password",
-        true,
-    )
-    .await
-    .unwrap();
-    let state = michi_api::AppState::new_with_identity(config, pool.clone(), Some(admin_id), identity);
+    michi_db::create_user(&pool, &admin_id, "admin-trust-v2", "password", true)
+        .await
+        .unwrap();
+    let state =
+        michi_api::AppState::new_with_identity(config, pool.clone(), Some(admin_id), identity);
     let token = state.auth_sessions.create_session(admin_id).await.unwrap();
     let app = create_router(state.clone());
     (app, pool, state, token)
@@ -164,8 +159,13 @@ async fn test_home_trust_v2_info_roster_and_revocation() {
     let roster: Value = serde_json::from_slice(&bytes).unwrap();
     let devices = roster["devices"].as_array().expect("devices array");
     assert_eq!(devices.len(), 2);
-    assert!(devices.iter().any(|d| d["device_type"] == "server" && d["device_michi_id"] == server_michi_id));
-    let rec = devices.iter().find(|d| d["device_michi_id"] == device_michi_id).unwrap();
+    assert!(devices
+        .iter()
+        .any(|d| d["device_type"] == "server" && d["device_michi_id"] == server_michi_id));
+    let rec = devices
+        .iter()
+        .find(|d| d["device_michi_id"] == device_michi_id)
+        .unwrap();
     assert_eq!(rec["authenticated"], true);
     assert_eq!(rec["revoked"], false);
 

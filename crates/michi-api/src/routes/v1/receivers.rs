@@ -594,7 +594,11 @@ pub async fn receiver_pair_start_handler(
     };
 
     if state.receiver_manager.home_id().await.is_some() {
-        if let Ok(info) = state.receiver_manager.authenticate_url(&target_base_url).await {
+        if let Ok(info) = state
+            .receiver_manager
+            .authenticate_url(&target_base_url)
+            .await
+        {
             let rid = {
                 let reg = state.receiver_manager.registry().await;
                 let reg_r = reg.read().await;
@@ -2275,11 +2279,7 @@ pub async fn home_revoke_handler(
             "status": "revoked",
             "revocation": revocation,
         }))),
-        Err(e) => Err(v1_error(
-            StatusCode::BAD_REQUEST,
-            "REVOCATION_FAILED",
-            &e,
-        )),
+        Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "REVOCATION_FAILED", &e)),
     }
 }
 
@@ -2311,4 +2311,3 @@ pub async fn receiver_auth_handler(
         )),
     }
 }
-

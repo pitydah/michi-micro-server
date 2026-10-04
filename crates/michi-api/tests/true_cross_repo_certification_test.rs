@@ -43,8 +43,7 @@ async fn spawn_stream_simulator() -> SimulatorGuard {
 
     assert!(
         sim_script.exists(),
-        "simulator script must exist at {:?}",
-        sim_script
+        "simulator script must exist at {sim_script:?}"
     );
 
     let child = Command::new("python3")
@@ -105,7 +104,8 @@ async fn test_true_cross_repo_certification_e2e() {
     // Persist root key so AppState loads it
     let home_key_path = tmp.join("config").join("home_root_authority.key");
     let _ = std::fs::create_dir_all(tmp.join("config"));
-    let seed_bytes = hex::decode("c66a870d78788b4028cf21153c6a2b38efb5b0c92bcc4cfae58cc87e1f1f0377").unwrap();
+    let seed_bytes =
+        hex::decode("c66a870d78788b4028cf21153c6a2b38efb5b0c92bcc4cfae58cc87e1f1f0377").unwrap();
     std::fs::write(&home_key_path, &seed_bytes).unwrap();
 
     let db_path = tmp.join("cert_test.db");
@@ -150,15 +150,20 @@ async fn test_true_cross_repo_certification_e2e() {
     };
 
     let identity = Arc::new(
-        michi_identity::IdentityManager::generate(&config.config_path, "Certification Server", "pwd")
-            .unwrap(),
+        michi_identity::IdentityManager::generate(
+            &config.config_path,
+            "Certification Server",
+            "pwd",
+        )
+        .unwrap(),
     );
 
     let admin_id = Uuid::new_v4();
     michi_db::create_user(&pool, &admin_id, "admin-cert", "pass", true)
         .await
         .unwrap();
-    let state = michi_api::AppState::new_with_identity(config, pool.clone(), Some(admin_id), identity);
+    let state =
+        michi_api::AppState::new_with_identity(config, pool.clone(), Some(admin_id), identity);
     let token = state.auth_sessions.create_session(admin_id).await.unwrap();
     let auth_header = format!("Bearer {token}");
     let app = create_router(state.clone());
@@ -183,7 +188,9 @@ async fn test_true_cross_repo_certification_e2e() {
 
     let resp = app.clone().oneshot(pair_req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let auth_res: Value = serde_json::from_slice(&bytes).unwrap();
 
     assert_eq!(auth_res["status"], "authenticated");
@@ -200,7 +207,9 @@ async fn test_true_cross_repo_certification_e2e() {
         .unwrap();
     let resp = app.clone().oneshot(get_rec_req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let rec_data: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(rec_data["authenticated"], true);
     assert_eq!(rec_data["michi_home_id"], home_id);
@@ -267,7 +276,10 @@ async fn test_true_cross_repo_certification_e2e() {
             }
         }
     }
-    assert!(verified_packets, "Simulator must have received 10 valid RTP packets");
+    assert!(
+        verified_packets,
+        "Simulator must have received 10 valid RTP packets"
+    );
 
     // 9. Stop receiver session cleanly
     state
@@ -293,7 +305,9 @@ async fn test_true_cross_repo_certification_e2e() {
 
     let resp = app.clone().oneshot(revoke_req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let rev_res: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(rev_res["status"], "revoked");
 
