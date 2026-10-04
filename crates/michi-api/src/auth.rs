@@ -359,6 +359,7 @@ fn is_admin_route(path: &str) -> bool {
         "/api/v1/health/mounts",
         "/api/v1/health/storage",
         "/api/v1/health/verify",
+        "/api/v1/home",
         "/api/v1/import",
         "/api/v1/jobs",
         "/api/v1/library/scan",

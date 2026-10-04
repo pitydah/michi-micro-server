@@ -323,6 +323,16 @@ const MichiAPI = {
   discoverDevices() { return this.request('/api/v1/devices/discover', { method: 'POST', timeout: 10000 }); },
   startReceiverPair(body) { return this.request('/api/v1/receivers/pair/start', { method: 'POST', body }); },
   confirmReceiverPair(body) { return this.request('/api/v1/receivers/pair/confirm', { method: 'POST', body }); },
+  authReceiver(id) { return this.request('/api/v1/receivers/' + encodeURIComponent(id) + '/auth', { method: 'POST' }); },
+  homeInfo() { return this.request('/api/v1/home/info'); },
+  homeRoster() { return this.request('/api/v1/home/roster'); },
+  homeRevocations() { return this.request('/api/v1/home/revocations'); },
+  homeRevoke(device_michi_id, reason) {
+    return this.request('/api/v1/home/revoke', {
+      method: 'POST',
+      body: { device_michi_id, reason }
+    });
+  },
 
   // Rooms & Chains
   roomGroups() { return this.request('/api/v1/rooms/groups'); },
@@ -3692,6 +3702,17 @@ async function proceedToPairingPin() {
       initiator_id: 'michi-web'
     });
 
+    if (res.status === 'authenticated' || res.authenticated) {
+      if (title) title.textContent = 'Michi Music Stream Authenticated';
+      if (stepBtn) stepBtn.classList.add('hidden');
+      if (stepPin) stepPin.classList.add('hidden');
+      if (stepSuccess) stepSuccess.classList.remove('hidden');
+      showToast('Device authenticated into Michi Home', false);
+      discoverDevices();
+      refreshHomeRoster();
+      return;
+    }
+
     var pairingId = res.pairing_id || res.session_id;
     if (!pairingId) {
       throw new Error(res.error?.message || 'STREAM_NOT_IN_PAIRING_MODE: The Stream receiver did not return a pairing ID.');
@@ -3861,6 +3882,9 @@ async function discoverDevices(silent) {
       updatedEl.textContent = 'Updated at ' + hh + ':' + mm + ':' + ss;
     }
 
+    loadHomeTrustInfo();
+    refreshHomeRoster();
+
     if (resEl) {
       if (devs.length === 0) {
         resEl.dataset.cardsFingerprint = '';
@@ -3879,6 +3903,18 @@ async function discoverDevices(silent) {
         if (!resEl.dataset.delegationBound) {
           resEl.dataset.delegationBound = 'true';
           resEl.addEventListener('click', function (ev) {
+            var authBtn = ev.target.closest ? ev.target.closest('.action-auth-device') : null;
+            if (authBtn && !authBtn.disabled) {
+              var id = authBtn.getAttribute('data-receiver-id');
+              authenticateReceiver(id);
+              return;
+            }
+            var revokeBtn = ev.target.closest ? ev.target.closest('.action-revoke-device') : null;
+            if (revokeBtn && !revokeBtn.disabled) {
+              var mid = revokeBtn.getAttribute('data-michi-id');
+              revokeDevicePrompt(mid);
+              return;
+            }
             var pairBtn = ev.target.closest ? ev.target.closest('.action-pair') : null;
             if (pairBtn && !pairBtn.disabled) {
               var id = pairBtn.getAttribute('data-receiver-id');
@@ -3946,8 +3982,18 @@ async function discoverDevices(silent) {
 
           var relativeSeenHtml = relativeSeen ? ' · ' + esc(relativeSeen) : '';
 
+          var isRevoked = d.revoked === true;
+          var isAuthenticated = d.authenticated === true || isPaired;
           var actionsHtml = '';
-          if (isPaired) {
+
+          if (isRevoked) {
+            presenceBadgeClass = 'device-badge--danger';
+            presenceText = 'Revoked in Home';
+            actionsHtml = '<div class="device-card__actions">' +
+              '<span class="device-badge device-badge--danger">Revoked</span>' +
+              '<button class="btn btn-sm btn-ghost action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
+              '</div>';
+          } else if (isAuthenticated) {
             if (isIdentityMismatch) {
               actionsHtml = '<div class="device-card__actions">' +
                 '<span class="device-badge device-badge--paired">Paired</span>' +
@@ -3956,31 +4002,33 @@ async function discoverDevices(silent) {
                 '</div>';
             } else {
               var canUseOutput = (presence === 'verified_online') && (qualification === 'qualified');
+              var badgeLabel = d.authenticated ? 'Home Member' : 'Paired';
               actionsHtml = '<div class="device-card__actions">' +
-                '<span class="device-badge device-badge--paired">Paired</span>' +
+                '<span class="device-badge device-badge--paired">' + badgeLabel + '</span>' +
                 '<button class="btn btn-sm btn-primary action-use-output" data-receiver-id="' + esc(receiverId) + '"' +
                   (canUseOutput ? '' : ' disabled title="Device must be verified online and qualified to use as output"') +
                 '>Use as Output</button>' +
+                (d.michi_id ? '<button class="btn btn-sm btn-ghost action-revoke-device" data-michi-id="' + esc(d.michi_id) + '">Revoke</button>' : '') +
                 '<button class="btn btn-sm btn-ghost action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
                 '</div>';
             }
           } else {
             if (isIdentityMismatch) {
               actionsHtml = '<div class="device-card__actions">' +
-                '<span class="device-badge device-badge--offline">Unpaired</span>' +
-                '<button class="btn btn-sm btn-primary action-pair" data-receiver-id="' + esc(receiverId) + '" data-name="' + esc(name) + '" disabled title="Pairing blocked due to identity conflict">Pair</button>' +
+                '<span class="device-badge device-badge--offline">Unauthenticated</span>' +
+                '<button class="btn btn-sm btn-primary action-auth-device action-pair" data-receiver-id="' + esc(receiverId) + '" disabled title="Authentication blocked due to identity conflict">Authenticate</button>' +
                 '</div>';
             } else {
               actionsHtml = '<div class="device-card__actions">' +
-                '<span class="device-badge device-badge--offline">Unpaired</span>' +
-                '<button class="btn btn-sm btn-primary action-pair" data-receiver-id="' + esc(receiverId) + '" data-name="' + esc(name) + '"' +
-                  (pairable ? '' : ' disabled title="Device is not in pairable state"') +
-                '>Pair</button>' +
+                '<span class="device-badge device-badge--offline">Unauthenticated</span>' +
+                '<button class="btn btn-sm btn-primary action-auth-device action-pair" data-receiver-id="' + esc(receiverId) + '" data-name="' + esc(name) + '"' +
+                  (pairable ? '' : ' disabled title="Device is not ready for pairing"') +
+                '>Authenticate</button>' +
                 '</div>';
             }
           }
 
-          var fingerprint = [stableId, name, endpoint, presence, qualification, isPaired, pairable, relativeSeen].join(';;');
+          var fingerprint = [stableId, name, endpoint, presence, qualification, isPaired, d.authenticated, d.revoked, pairable, relativeSeen].join(';;');
 
           var html = '<div class="device-card chain-item" id="device-card-' + esc(stableId) + '" data-stable-id="' + esc(stableId) + '" data-fingerprint="' + esc(fingerprint) + '">' +
             '<div>' +
@@ -4077,6 +4125,93 @@ async function selectOutputTarget(type, id) {
   }
 }
 window.selectOutputTarget = selectOutputTarget;
+
+async function authenticateReceiver(id) {
+  try {
+    showToast('Authenticating with Home Root Authority...', false);
+    var res = await MichiAPI.authReceiver(id);
+    showToast('Device successfully authenticated into Home!', false);
+    await discoverDevices(true);
+    await refreshHomeRoster();
+  } catch (err) {
+    showToast('Authentication failed: ' + (err.message || err), true);
+  }
+}
+window.authenticateReceiver = authenticateReceiver;
+
+async function revokeDevicePrompt(michiId) {
+  if (!confirm('Are you sure you want to revoke device ' + michiId + ' from this Home? Active sessions will be terminated.')) {
+    return;
+  }
+  try {
+    await MichiAPI.homeRevoke(michiId, 'Revoked by user via Web UI');
+    showToast('Device revoked from Home', false);
+    await discoverDevices(true);
+    await refreshHomeRoster();
+  } catch (err) {
+    showToast('Revocation failed: ' + (err.message || err), true);
+  }
+}
+window.revokeDevicePrompt = revokeDevicePrompt;
+
+async function loadHomeTrustInfo() {
+  try {
+    var info = await MichiAPI.homeInfo();
+    var hidEl = $('#home-id-val');
+    var hpkEl = $('#home-root-pk-val');
+    var hroleEl = $('#home-server-role-val');
+    if (hidEl) hidEl.textContent = info.home_id || '--';
+    if (hpkEl) hpkEl.textContent = info.root_authority_public_key || '--';
+    if (hroleEl) {
+      var roles = (info.server_membership && info.server_membership.roles) ? info.server_membership.roles.join(', ') : 'Server';
+      hroleEl.textContent = roles;
+    }
+  } catch (err) {
+    console.warn('Failed to load Home Trust info:', err);
+  }
+}
+window.loadHomeTrustInfo = loadHomeTrustInfo;
+
+async function refreshHomeRoster() {
+  var listEl = $('#home-roster-list');
+  if (!listEl) return;
+  try {
+    var rosterRes = await MichiAPI.homeRoster();
+    var revocationsRes = await MichiAPI.homeRevocations();
+    var devices = rosterRes.devices || [];
+    var revocations = revocationsRes.revocations || [];
+    var revokedIds = new Set(revocations.map(function(r) { return r.revoked_device_michi_id; }));
+
+    if (devices.length === 0) {
+      listEl.innerHTML = '<div style="color:var(--text-3);font-size:0.85rem">No devices currently registered in this home roster.</div>';
+      return;
+    }
+
+    var html = '<table class="table" style="width:100%;font-size:0.85rem">' +
+      '<thead><tr><th>Device</th><th>Michi ID</th><th>Status</th><th>Action</th></tr></thead><tbody>';
+    devices.forEach(function(d) {
+      var isRev = d.revoked || revokedIds.has(d.michi_id);
+      var statusBadge = isRev
+        ? '<span class="device-badge device-badge--danger">Revoked</span>'
+        : (d.authenticated ? '<span class="device-badge device-badge--verified">Authenticated</span>' : '<span class="device-badge device-badge--warning">Pending</span>');
+      var actionBtn = isRev
+        ? '<span style="color:var(--text-3)">Revoked</span>'
+        : '<button class="btn btn-sm btn-ghost action-revoke-device" data-michi-id="' + esc(d.michi_id) + '">Revoke</button>';
+
+      html += '<tr>' +
+        '<td><strong>' + esc(d.name || d.receiver_id || 'Unknown') + '</strong></td>' +
+        '<td class="panel-mono text-sm">' + esc(d.michi_id || d.receiver_id) + '</td>' +
+        '<td>' + statusBadge + '</td>' +
+        '<td>' + actionBtn + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table>';
+    listEl.innerHTML = html;
+  } catch (err) {
+    listEl.innerHTML = '<div style="color:var(--danger);font-size:0.85rem">Error loading roster: ' + esc(err.message || err) + '</div>';
+  }
+}
+window.refreshHomeRoster = refreshHomeRoster;
 
 async function startReceiverPair(deviceIdOrBaseUrl, initiatorId) {
   if (!canPerformProtectedAction()) return;

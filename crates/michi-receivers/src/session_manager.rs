@@ -30,6 +30,9 @@ pub struct ReceiverSessionManager {
     active_transports: Arc<RwLock<HashMap<String, SharedAudioTransport>>>,
     heartbeat_handles: Arc<RwLock<HashMap<String, ReceiverSupervisorHandle>>>,
     authority_gate: Arc<crate::authority_gate::AuthorityGate>,
+    home_authority: Arc<RwLock<Option<Arc<michi_identity::home::HomeRootAuthority>>>>,
+    server_membership: Arc<RwLock<Option<michi_identity::types::DeviceMembershipDto>>>,
+    revocations: Arc<RwLock<Vec<michi_identity::types::HomeDeviceRevocationDto>>>,
 }
 
 impl std::fmt::Debug for ReceiverSessionManager {
@@ -62,6 +65,9 @@ impl ReceiverSessionManager {
             active_transports: Arc::new(RwLock::new(HashMap::new())),
             heartbeat_handles: Arc::new(RwLock::new(HashMap::new())),
             authority_gate,
+            home_authority: Arc::new(RwLock::new(None)),
+            server_membership: Arc::new(RwLock::new(None)),
+            revocations: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -83,6 +89,9 @@ impl ReceiverSessionManager {
             active_transports: Arc::new(RwLock::new(HashMap::new())),
             heartbeat_handles: Arc::new(RwLock::new(HashMap::new())),
             authority_gate,
+            home_authority: Arc::new(RwLock::new(None)),
+            server_membership: Arc::new(RwLock::new(None)),
+            revocations: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -113,6 +122,9 @@ impl ReceiverSessionManager {
             active_transports: Arc::new(RwLock::new(HashMap::new())),
             heartbeat_handles: Arc::new(RwLock::new(HashMap::new())),
             authority_gate,
+            home_authority: Arc::new(RwLock::new(None)),
+            server_membership: Arc::new(RwLock::new(None)),
+            revocations: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -163,6 +175,399 @@ impl ReceiverSessionManager {
 
     pub fn scent_store(&self) -> Option<Arc<michi_connect::ScentStore>> {
         self.scent_store.clone()
+    }
+
+    pub fn with_home_authority(
+        mut self,
+        authority: Arc<michi_identity::home::HomeRootAuthority>,
+        membership: michi_identity::types::DeviceMembershipDto,
+    ) -> Self {
+        self.home_authority = Arc::new(RwLock::new(Some(authority)));
+        self.server_membership = Arc::new(RwLock::new(Some(membership)));
+        self
+    }
+
+    pub async fn set_home_authority(
+        &self,
+        authority: Arc<michi_identity::home::HomeRootAuthority>,
+        membership: michi_identity::types::DeviceMembershipDto,
+    ) {
+        *self.home_authority.write().await = Some(authority);
+        *self.server_membership.write().await = Some(membership);
+    }
+
+    pub async fn home_context(&self) -> Option<crate::client::ReceiverHomeAuthContext> {
+        let auth_guard = self.home_authority.read().await;
+        let mem_guard = self.server_membership.read().await;
+        let revs_guard = self.revocations.read().await;
+        match (auth_guard.as_ref(), mem_guard.as_ref()) {
+            (Some(a), Some(m)) => Some(crate::client::ReceiverHomeAuthContext {
+                home_root_public_key: a.public_key_base64url(),
+                expected_home_id: a.home_id(),
+                client_membership: m.clone(),
+                revocations: revs_guard.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    pub async fn home_id(&self) -> Option<String> {
+        self.home_authority
+            .read()
+            .await
+            .as_ref()
+            .map(|a| a.home_id())
+    }
+
+    pub async fn home_root_public_key(&self) -> Option<String> {
+        self.home_authority
+            .read()
+            .await
+            .as_ref()
+            .map(|a| a.public_key_base64url())
+    }
+
+    pub async fn server_membership(&self) -> Option<michi_identity::types::DeviceMembershipDto> {
+        self.server_membership.read().await.clone()
+    }
+}
+
+fn update_entry_capabilities(entry: &mut ReceiverRegistryEntry, info: &ReceiverInfo) {
+    if let Some(audio) = &info.audio {
+        if let Some(transports) = audio.get("transports").and_then(|v| v.as_array()) {
+            entry.supported_transports = transports
+                .iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(srs) = audio.get("sample_rates").and_then(|v| v.as_array()) {
+            let sample_rates: Vec<u32> = srs
+                .iter()
+                .filter_map(|x| x.as_u64().map(|n| n as u32))
+                .collect();
+            if !sample_rates.is_empty() {
+                entry.max_sample_rate = *sample_rates.iter().max().unwrap_or(&48000);
+                entry.supported_sample_rates = sample_rates;
+            }
+        }
+        if let Some(bds) = audio.get("bit_depths").and_then(|v| v.as_array()) {
+            let bit_depths: Vec<u32> = bds
+                .iter()
+                .filter_map(|x| x.as_u64().map(|n| n as u32))
+                .collect();
+            if !bit_depths.is_empty() {
+                entry.max_bit_depth = *bit_depths.iter().max().unwrap_or(&16);
+                entry.supported_bit_depths = bit_depths;
+            }
+        }
+        if let Some(chs) = audio.get("channels").and_then(|v| v.as_array()) {
+            entry.supported_channels = chs
+                .iter()
+                .filter_map(|x| x.as_u64().map(|n| n as u8))
+                .collect();
+        }
+        if let Some(cds) = audio.get("codecs").and_then(|v| v.as_array()) {
+            entry.supported_codecs = cds
+                .iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+    } else if let Some(codecs) = &info.supported_codecs {
+        entry.supported_codecs = codecs.clone();
+    }
+    if entry.max_sample_rate == 0 {
+        entry.max_sample_rate = 48000;
+        entry.supported_sample_rates = vec![44100, 48000];
+    }
+    if entry.max_bit_depth == 0 {
+        entry.max_bit_depth = 16;
+        entry.supported_bit_depths = vec![16];
+    }
+    if entry.supported_channels.is_empty() {
+        entry.supported_channels = vec![2];
+    }
+    if entry.supported_codecs.is_empty() {
+        entry.supported_codecs = vec!["pcm_s16le".to_string()];
+    }
+    if entry.supported_transports.is_empty() {
+        entry.supported_transports = vec!["rtp_udp".to_string()];
+    }
+
+    if let Some(feats) = &info.features {
+        entry.authority_supported = feats
+            .get("authority_v1")
+            .or_else(|| feats.get("perch_v1"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    }
+}
+
+impl ReceiverSessionManager {
+    /// Trust Architecture V2: Authenticate a receiver using Home Membership.
+    pub async fn authenticate_receiver(
+        &self,
+        receiver_id: &str,
+    ) -> Result<ReceiverInfo, ReceiverClientError> {
+        let (base_url, client_id) = {
+            let reg = self.registry.read().await;
+            let entry = reg.get(receiver_id).ok_or_else(|| {
+                ReceiverClientError::Offline(format!("receiver not found: {receiver_id}"))
+            })?;
+            if entry.revoked {
+                return Err(ReceiverClientError::Protocol(format!(
+                    "receiver {receiver_id} is revoked in this home"
+                )));
+            }
+            (entry.base_url.clone(), entry.michi_id.clone())
+        };
+
+        let home_ctx = self.home_context().await.ok_or_else(|| {
+            ReceiverClientError::Protocol("HomeRootAuthority context not configured".into())
+        })?;
+
+        let target_mid = client_id.as_deref().unwrap_or(receiver_id);
+        if home_ctx
+            .revocations
+            .iter()
+            .any(|r| r.revoked_device_michi_id == target_mid)
+        {
+            let mut reg = self.registry.write().await;
+            if let Some(entry) = reg.get_mut(receiver_id) {
+                entry.revoked = true;
+                entry.paired = false;
+                entry.authenticated = false;
+                entry.token = None;
+            }
+            return Err(ReceiverClientError::Protocol(format!(
+                "device {target_mid} is revoked"
+            )));
+        }
+
+        let mut client = if let Some(ref id) = self.identity {
+            ReceiverClient::with_identity(&base_url, id.clone())
+        } else {
+            ReceiverClient::new(&base_url)
+        };
+        client.set_home_auth_context(home_ctx.clone());
+
+        let sess_resp = client
+            .authenticate(
+                &home_ctx.home_root_public_key,
+                &home_ctx.expected_home_id,
+                &home_ctx.client_membership,
+                &home_ctx.revocations,
+            )
+            .await?;
+
+        let info = client.get_info().await.map_err(|e| {
+            ReceiverClientError::Protocol(format!("failed to get receiver info: {e}"))
+        })?;
+
+        {
+            let mut reg = self.registry.write().await;
+            if let Some(entry) = reg.get_mut(receiver_id) {
+                entry.token = Some(sess_resp.session_token.clone());
+                entry.paired = true;
+                entry.authenticated = true;
+                entry.michi_home_id = Some(home_ctx.expected_home_id.clone());
+                entry.server_membership = Some(sess_resp.server_membership.clone());
+                entry.last_seen = Some(chrono::Utc::now());
+                entry.presence = ReceiverPresence::VerifiedOnline;
+                if let Some(ref mid) = info.michi_id {
+                    entry.michi_id = Some(mid.clone());
+                }
+                if let Some(ref n) = info.name {
+                    entry.name = n.clone();
+                }
+                update_entry_capabilities(entry, &info);
+                entry.qualification = entry.compute_qualification();
+            }
+        }
+
+        if let (Some(ref cs), Some(ref pool)) = (&self.credential_store, &self.db_pool) {
+            if let Ok((ct, nonce)) = cs.encrypt_token(receiver_id, &sess_resp.session_token) {
+                let now = chrono::Utc::now().to_rfc3339();
+                let cred = michi_db::PersistedReceiverCredential {
+                    receiver_id: receiver_id.to_string(),
+                    ciphertext: ct,
+                    nonce,
+                    version: 1,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                };
+                let reg_read = self.registry.read().await;
+                if let Some(entry) = reg_read.get(receiver_id) {
+                    let prec = michi_db::PersistedReceiver {
+                        id: entry.receiver_id.clone(),
+                        name: entry.name.clone(),
+                        device_type: entry.device_type.clone(),
+                        base_url: entry.base_url.clone(),
+                        paired: true,
+                        online: entry.is_online(),
+                        audio_capabilities: serde_json::to_string(&entry.capabilities)
+                            .unwrap_or_default(),
+                        last_seen: entry.last_seen.map(|d| d.to_rfc3339()),
+                        paired_at: Some(now.clone()),
+                        created_at: now.clone(),
+                        updated_at: now,
+                        michi_id: entry.michi_id.clone(),
+                        capabilities_json: Some(
+                            serde_json::to_string(&entry.capabilities).unwrap_or_default(),
+                        ),
+                        capabilities_observed_at: entry
+                            .capabilities_verified_at
+                            .map(|d| d.to_rfc3339()),
+                        authority_supported: entry.authority_supported,
+                    };
+                    let _ = michi_db::persist_paired_receiver_transaction(pool, &prec, &cred).await;
+                }
+            }
+        }
+
+        Ok(info)
+    }
+
+    pub async fn authenticate_url(
+        &self,
+        base_url: &str,
+    ) -> Result<ReceiverInfo, ReceiverClientError> {
+        let client = if let Some(ref id) = self.identity {
+            ReceiverClient::with_identity(base_url, id.clone())
+        } else {
+            ReceiverClient::new(base_url)
+        };
+        let info = client
+            .get_info()
+            .await
+            .map_err(ReceiverClientError::Protocol)?;
+        let existing_id = {
+            let reg = self.registry.read().await;
+            reg.receivers
+                .values()
+                .find(|e| e.base_url == base_url)
+                .map(|e| e.receiver_id.clone())
+        };
+        let receiver_id = existing_id.unwrap_or_else(|| {
+            info.device_id
+                .as_deref()
+                .or(info.server_id.as_deref())
+                .or(info.michi_id.as_deref())
+                .unwrap_or(base_url)
+                .to_string()
+        });
+
+        {
+            let mut reg = self.registry.write().await;
+            if reg.get(&receiver_id).is_none() {
+                let mut entry = ReceiverRegistryEntry {
+                    receiver_id: receiver_id.clone(),
+                    michi_id: info.michi_id.clone(),
+                    name: info.name.clone().unwrap_or_else(|| "Michi Receiver".into()),
+                    base_url: base_url.to_string(),
+                    device_type: info
+                        .device_type
+                        .clone()
+                        .unwrap_or_else(|| "standard".into()),
+                    ..Default::default()
+                };
+                update_entry_capabilities(&mut entry, &info);
+                reg.add(entry);
+            }
+        }
+
+        self.authenticate_receiver(&receiver_id).await
+    }
+
+    pub async fn revoke_device(
+        &self,
+        device_michi_id: &str,
+        reason: &str,
+    ) -> Result<michi_identity::types::HomeDeviceRevocationDto, String> {
+        let auth_guard = self.home_authority.read().await;
+        let auth = auth_guard
+            .as_ref()
+            .ok_or_else(|| "HomeRootAuthority not configured".to_string())?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let revocation = auth.issue_revocation(&auth.home_id(), device_michi_id, &now, reason);
+
+        {
+            let mut revs = self.revocations.write().await;
+            revs.retain(|r| r.revoked_device_michi_id != device_michi_id);
+            revs.push(revocation.clone());
+        }
+
+        let receiver_ids_to_stop: Vec<String> = {
+            let mut reg = self.registry.write().await;
+            let mut to_stop = Vec::new();
+            for (id, entry) in reg.receivers.iter_mut() {
+                if entry.receiver_id == device_michi_id
+                    || entry.michi_id.as_deref() == Some(device_michi_id)
+                {
+                    entry.revoked = true;
+                    entry.paired = false;
+                    entry.authenticated = false;
+                    entry.token = None;
+                    entry.presence = ReceiverPresence::Offline;
+                    to_stop.push(id.clone());
+                }
+            }
+            to_stop
+        };
+
+        for rid in receiver_ids_to_stop {
+            let _ = self.stop_session(&rid).await;
+        }
+
+        Ok(revocation)
+    }
+
+    pub async fn get_revocations(&self) -> Vec<michi_identity::types::HomeDeviceRevocationDto> {
+        self.revocations.read().await.clone()
+    }
+
+    pub async fn get_home_roster(&self) -> Vec<HomeRosterDevice> {
+        let mut devices = Vec::new();
+
+        if let Some(ref mem) = *self.server_membership.read().await {
+            devices.push(HomeRosterDevice {
+                device_michi_id: mem.device_michi_id.clone(),
+                name: "Michi Micro Server".to_string(),
+                device_type: "server".to_string(),
+                base_url: None,
+                roles: mem.roles.iter().map(|r| r.as_str().to_string()).collect(),
+                authenticated: true,
+                revoked: false,
+                online: true,
+                last_seen: Some(chrono::Utc::now()),
+            });
+        }
+
+        let reg = self.registry.read().await;
+        for entry in reg.receivers.values() {
+            let roles = entry
+                .server_membership
+                .as_ref()
+                .map(|m| m.roles.iter().map(|r| r.as_str().to_string()).collect())
+                .unwrap_or_else(|| vec!["audio_receiver".to_string()]);
+
+            devices.push(HomeRosterDevice {
+                device_michi_id: entry
+                    .michi_id
+                    .clone()
+                    .unwrap_or_else(|| entry.receiver_id.clone()),
+                name: entry.name.clone(),
+                device_type: entry.device_type.clone(),
+                base_url: Some(entry.base_url.clone()),
+                roles,
+                authenticated: entry.authenticated || entry.paired,
+                revoked: entry.revoked,
+                online: entry.is_online(),
+                last_seen: entry.last_seen,
+            });
+        }
+
+        devices
     }
 
     pub async fn registry(&self) -> Arc<RwLock<ReceiverRegistry>> {
@@ -950,6 +1355,10 @@ impl ReceiverSessionManager {
                 supported_channels: channels,
                 maximum_safe_volume: Some(100),
                 qualification: ReceiverQualification::Qualified,
+                michi_home_id: None,
+                server_membership: None,
+                authenticated: true,
+                revoked: false,
             };
 
             self.registry.write().await.add(entry);
@@ -1040,6 +1449,10 @@ impl ReceiverSessionManager {
         }
         .ok_or_else(|| format!("receiver not found: {receiver_id}"))?;
 
+        if entry.revoked {
+            return Err(format!("receiver {receiver_id} is revoked"));
+        }
+
         // ── Discrete Capability Negotiation (SERVER_CAPS ∩ RECEIVER_CAPS) ──
         if !entry.supported_sample_rates.is_empty()
             && !entry.supported_sample_rates.contains(&sample_rate)
@@ -1115,7 +1528,7 @@ impl ReceiverSessionManager {
         };
         let effective_grant = authority.or(claimed_grant.as_ref());
 
-        let negotiated = client
+        let negotiated = match client
             .session_start_with_authority(
                 session_id,
                 codec,
@@ -1127,7 +1540,35 @@ impl ReceiverSessionManager {
                 volume,
                 effective_grant,
             )
-            .await?;
+            .await
+        {
+            Ok(neg) => neg,
+            Err(e) if e.contains("401") || e.to_lowercase().contains("unauthorized") => {
+                if self.authenticate_receiver(receiver_id).await.is_ok() {
+                    let new_token = {
+                        let reg = self.registry.read().await;
+                        reg.get(receiver_id).and_then(|e| e.token.clone())
+                    };
+                    client.token = new_token;
+                    client
+                        .session_start_with_authority(
+                            session_id,
+                            codec,
+                            sample_rate,
+                            bit_depth,
+                            channels,
+                            stream_port,
+                            buffer_ms,
+                            volume,
+                            effective_grant,
+                        )
+                        .await?
+                } else {
+                    return Err(e);
+                }
+            }
+            Err(e) => return Err(e),
+        };
 
         let receiver_session_id = negotiated.session_id.clone();
         let session_token = Some(negotiated.session_token.clone());
@@ -1514,9 +1955,22 @@ impl ReceiverSessionManager {
             std::sync::atomic::Ordering::SeqCst,
         );
 
-        let resp = client.heartbeat().await?;
-
-        // Update sequence and last_heartbeat in active session
+        let resp = match client.heartbeat().await {
+            Ok(r) => r,
+            Err(ReceiverClientError::Unauthorized) => {
+                if self.authenticate_receiver(receiver_id).await.is_ok() {
+                    let new_token = {
+                        let reg = self.registry.read().await;
+                        reg.get(receiver_id).and_then(|e| e.token.clone())
+                    };
+                    client.token = new_token;
+                    client.heartbeat().await?
+                } else {
+                    return Err(ReceiverClientError::Unauthorized);
+                }
+            }
+            Err(e) => return Err(e),
+        };
         {
             let mut sessions = self.active_sessions.write().await;
             if let Some(sess) = sessions.get_mut(receiver_id) {
@@ -3271,5 +3725,67 @@ mod tests {
             error: None,
         };
         assert!(invalid_resp3.expires_in.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_trust_v2_home_roster_and_revocation() {
+        let mgr = ReceiverSessionManager::new();
+        let root = Arc::new(michi_identity::home::HomeRootAuthority::generate());
+        let server_id = "test-server-michi-id-123456789012345678901";
+        let server_pk = "test-server-public-key-1234567890123456789";
+        let membership = root.issue_membership(
+            &root.home_id(),
+            server_id,
+            server_pk,
+            "server",
+            vec![michi_identity::types::Role::MusicServer],
+            "2026-10-04T00:00:00Z",
+            1,
+        );
+
+        mgr.set_home_authority(root.clone(), membership).await;
+
+        assert_eq!(mgr.home_id().await, Some(root.home_id()));
+        assert_eq!(
+            mgr.home_root_public_key().await,
+            Some(root.public_key_base64url())
+        );
+
+        let entry = ReceiverRegistryEntry {
+            receiver_id: "stream-living-room".to_string(),
+            name: "Living Room Speaker".to_string(),
+            base_url: "http://192.168.1.100:80".to_string(),
+            michi_id: Some("stream-dev-id-12345".to_string()),
+            paired: true,
+            authenticated: true,
+            ..Default::default()
+        };
+        mgr.registry.write().await.add(entry);
+
+        let roster = mgr.get_home_roster().await;
+        assert_eq!(roster.len(), 2);
+        assert!(roster.iter().any(|d| d.device_type == "server"));
+        assert!(roster
+            .iter()
+            .any(|d| d.device_michi_id == "stream-dev-id-12345"));
+
+        // Revoke the receiver
+        let rev = mgr
+            .revoke_device("stream-dev-id-12345", "stolen device")
+            .await
+            .unwrap();
+        assert_eq!(rev.revoked_device_michi_id, "stream-dev-id-12345");
+
+        let revs = mgr.get_revocations().await;
+        assert_eq!(revs.len(), 1);
+        assert_eq!(revs[0].reason, "stolen device");
+
+        // Verify registry was updated
+        let reg = mgr.registry.read().await;
+        let r = reg.get("stream-living-room").unwrap();
+        assert!(r.revoked);
+        assert!(!r.authenticated);
+        assert!(!r.paired);
+        assert!(r.token.is_none());
     }
 }

@@ -56,6 +56,20 @@ pub struct DiscreteAudioCapabilities {
     pub transports: Vec<String>,
 }
 
+/// A device in the Michi Home roster.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HomeRosterDevice {
+    pub device_michi_id: String,
+    pub name: String,
+    pub device_type: String,
+    pub base_url: Option<String>,
+    pub roles: Vec<String>,
+    pub authenticated: bool,
+    pub revoked: bool,
+    pub online: bool,
+    pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Pending pairing state held in memory between `/pair/start` and `/pair/confirm`.
 #[derive(Debug, Clone)]
 pub struct PendingReceiverPairing {
@@ -397,6 +411,10 @@ pub struct ReceiverRegistryEntry {
     pub supported_channels: Vec<u8>,
     pub maximum_safe_volume: Option<u32>,
     pub qualification: ReceiverQualification,
+    pub michi_home_id: Option<String>,
+    pub server_membership: Option<michi_identity::types::DeviceMembershipDto>,
+    pub authenticated: bool,
+    pub revoked: bool,
 }
 
 impl ReceiverRegistryEntry {
@@ -507,6 +525,10 @@ impl Default for ReceiverRegistryEntry {
             supported_channels: Vec::new(),
             maximum_safe_volume: None,
             qualification: ReceiverQualification::Unknown,
+            michi_home_id: None,
+            server_membership: None,
+            authenticated: false,
+            revoked: false,
         }
     }
 }
@@ -666,6 +688,10 @@ mod tests {
             supported_channels: vec![2],
             maximum_safe_volume: Some(100),
             qualification: ReceiverQualification::Qualified,
+            michi_home_id: None,
+            server_membership: None,
+            authenticated: true,
+            revoked: false,
         }
     }
 

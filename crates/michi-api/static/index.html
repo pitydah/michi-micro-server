@@ -613,6 +613,35 @@
                             </div>
                         </div>
 
+                        <!-- Trust Architecture V2: Michi Home Trust & Roster -->
+                        <div class="panel" id="home-trust-panel">
+                            <div class="panel-header devices-panel-header">
+                                <span>Michi Home Trust (V2)</span>
+                                <span id="home-trust-badge" class="badge badge-success">Root Authority Active</span>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Home ID</span>
+                                <span id="home-id-val" class="panel-mono text-sm">--</span>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Root Authority Key</span>
+                                <span id="home-root-pk-val" class="panel-mono text-sm">--</span>
+                            </div>
+                            <div class="panel-row">
+                                <span class="panel-label">Server Membership</span>
+                                <span id="home-server-role-val" class="badge">--</span>
+                            </div>
+                        </div>
+
+                        <!-- Home Device Roster & Security -->
+                        <div class="panel" id="home-roster-panel">
+                            <div class="panel-header devices-panel-header">
+                                <span>Home Device Roster & Revocations</span>
+                                <button class="btn btn-ghost btn-sm" id="btn-refresh-roster" onclick="refreshHomeRoster()">Refresh Roster</button>
+                            </div>
+                            <div id="home-roster-list" class="panel-result"></div>
+                        </div>
+
                         <div class="panel">
                             <div class="panel-header devices-panel-header">
                                 <span>Discovered Receivers & Devices</span>

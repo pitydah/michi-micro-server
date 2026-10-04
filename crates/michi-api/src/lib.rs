@@ -56,6 +56,25 @@ use openapi::ApiDoc;
 
 pub use status::StatusResponse;
 
+#[derive(Clone)]
+pub struct AppHomeAuthority(pub Arc<michi_identity::HomeRootAuthority>);
+
+impl std::fmt::Debug for AppHomeAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HomeRootAuthority")
+            .field("home_id", &self.0.home_id())
+            .field("public_key", &self.0.public_key_base64url())
+            .finish()
+    }
+}
+
+impl std::ops::Deref for AppHomeAuthority {
+    type Target = michi_identity::HomeRootAuthority;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub config: Config,
@@ -108,6 +127,10 @@ pub struct AppState {
         Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// Authoritative module runtime observability tracking generation, health, actual state, and last error.
     pub module_runtime_info: Arc<RwLock<HashMap<String, ModuleRuntimeInfo>>>,
+    /// Root Authority for Home trust domain and device credentials.
+    pub home_root_authority: AppHomeAuthority,
+    /// Server's signed membership certificate within this home.
+    pub server_membership: michi_identity::DeviceMembershipDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -358,6 +381,8 @@ impl AppState {
                         maximum_safe_volume: Some(100),
                         qualification:
                             michi_receivers::models::ReceiverQualification::NeedsCapabilityRefresh,
+                        authenticated: is_paired,
+                        ..Default::default()
                     };
 
                     registry.add(entry);
@@ -524,6 +549,45 @@ impl AppState {
             receiver_manager.set_credential_store(Arc::new(store.clone()));
         }
 
+        let home_key_path = config.config_path.join("home_root_authority.key");
+        let home_root_authority = AppHomeAuthority(Arc::new(if home_key_path.exists() {
+            match std::fs::read(&home_key_path) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut key_bytes = [0u8; 32];
+                    key_bytes.copy_from_slice(&bytes);
+                    let sk = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+                    michi_identity::HomeRootAuthority::from_signing_key(sk)
+                }
+                _ => {
+                    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+                    let _ = std::fs::write(&home_key_path, sk.to_bytes());
+                    michi_identity::HomeRootAuthority::from_signing_key(sk)
+                }
+            }
+        } else {
+            let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+            let _ = std::fs::write(&home_key_path, sk.to_bytes());
+            michi_identity::HomeRootAuthority::from_signing_key(sk)
+        }));
+
+        let server_michi_id = identity.michi_id().to_base64url();
+        let server_public_key = identity.public_key_base64url();
+        let server_membership = home_root_authority.issue_membership(
+            &home_root_authority.home_id(),
+            &server_michi_id,
+            &server_public_key,
+            "server",
+            vec![
+                michi_identity::Role::MusicServer,
+                michi_identity::Role::PlaybackHost,
+            ],
+            &chrono::Utc::now().to_rfc3339(),
+            1,
+        );
+
+        receiver_manager = receiver_manager
+            .with_home_authority(home_root_authority.0.clone(), server_membership.clone());
+
         let resolver = Arc::new(michi_playback::SqliteTrackResolver::new(
             db.clone(),
             config.music_paths.clone(),
@@ -615,6 +679,8 @@ impl AppState {
             whisker_metrics: Arc::new(michi_connect::WhiskerMetrics::default()),
             module_transition_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             module_runtime_info,
+            home_root_authority,
+            server_membership,
         };
 
         state.spawn_background_tasks();
@@ -1901,6 +1967,26 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/receivers",
             get(routes::v1::receivers::receivers_handler),
+        )
+        .route(
+            "/api/v1/home/info",
+            get(routes::v1::receivers::home_info_handler),
+        )
+        .route(
+            "/api/v1/home/roster",
+            get(routes::v1::receivers::home_roster_handler),
+        )
+        .route(
+            "/api/v1/home/revocations",
+            get(routes::v1::receivers::home_revocations_handler),
+        )
+        .route(
+            "/api/v1/home/revoke",
+            post(routes::v1::receivers::home_revoke_handler),
+        )
+        .route(
+            "/api/v1/receivers/:id/auth",
+            post(routes::v1::receivers::receiver_auth_handler),
         )
         .route(
             "/api/v1/receivers/pair/start",
