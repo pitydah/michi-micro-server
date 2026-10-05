@@ -39,18 +39,22 @@ class ReceiverState:
         self.home_id = "FU1FL-wFLfsfew3qpbR7XjDkmStWZY4g84MyW-zXPOs"
         self.active_challenges = {}
 
+        root_seed = bytes.fromhex("c66a870d78788b4028cf21153c6a2b38efb5b0c92bcc4cfae58cc87e1f1f0377")
+        if device_type == "standard":
+            server_seed = bytes.fromhex("3188fd73c843983cf5751b0ce5f639d41f44613a77395e45b5b4a9e9499e43a1")
+            self.server_michi_id = "f2UwxQaeA6vA8LO7Cr1nGRr5MStned_Gbmc_ua48qUc"
+        else:
+            server_seed = bytes.fromhex("e11972bb6837e27476a8986472a9e621a24475fbf99194ef41925844ffee72d3")
+            self.server_michi_id = "FySPx3wCSC4rOV-wiEUTb0gp87XncaLT3-k44eoDe4s"
+
         try:
-            import blake3
             from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-            root_seed = blake3.blake3(b"michi-link contract vectors v1" + b"home-root").digest()
             self.home_root_private_key = Ed25519PrivateKey.from_private_bytes(root_seed)
             self.home_root_public_key = self.home_root_private_key.public_key()
 
-            server_seed = blake3.blake3(b"michi-link contract vectors v1" + (b"receiver" if device_type == "standard" else b"receiver-hifi")).digest()
             self.server_private_key = Ed25519PrivateKey.from_private_bytes(server_seed)
             pk_bytes = self.server_private_key.public_key().public_bytes_raw()
             self.server_pubkey_b64 = base64.urlsafe_b64encode(pk_bytes).decode("ascii").rstrip("=")
-            self.server_michi_id = base64.urlsafe_b64encode(blake3.blake3(pk_bytes).digest()).decode("ascii").rstrip("=")
 
             canon_bytes = (
                 b"michi-link-membership-v1"
