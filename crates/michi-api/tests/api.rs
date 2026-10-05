@@ -9075,7 +9075,6 @@ async fn test_receiver_music_stream_profile_requires_trust_v2_zero_fallback() {
     assert_eq!(err["error"]["code"], "STREAM_AUTH_FAILED");
 }
 
-
 #[tokio::test]
 async fn test_receivers_api_presence_consistency_and_anti_elevation() {
     let (app, _pool, state) = make_app_with_state().await;
