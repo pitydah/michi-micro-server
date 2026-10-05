@@ -138,15 +138,7 @@ impl ScentStore {
         now: Instant,
     ) {
         self.observe_signed_with_home(
-            michi_id,
-            device_id,
-            name,
-            service,
-            roles,
-            source,
-            now,
-            None,
-            None,
+            michi_id, device_id, name, service, roles, source, now, None, None,
         );
     }
 
