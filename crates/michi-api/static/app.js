@@ -3468,17 +3468,6 @@ async function transferHandoff() {
   }
 }
 
-var ReceiverPairingState = {
-  receiverId: null,
-  receiverName: null,
-  pairingId: null,
-  expiresAt: null,
-  timerInterval: null,
-  phase: 'idle',
-  originatingElement: null,
-  pairedReceiverPresence: null
-};
-
 var devicePollingInterval = null;
 
 function startDevicePolling() {
@@ -3502,73 +3491,6 @@ function stopDevicePolling() {
 window.startDevicePolling = startDevicePolling;
 window.stopDevicePolling = stopDevicePolling;
 
-function setupPairingModalListeners() {
-  var modal = $('#receiver-pair-modal');
-  if (!modal || modal.dataset.listenersBound) return;
-  modal.dataset.listenersBound = 'true';
-
-  modal.addEventListener('click', function (ev) {
-    if (ev.target === modal) {
-      closeReceiverPairModal();
-    }
-  });
-
-  var btnReady = $('#btn-pair-ready');
-  if (btnReady) btnReady.addEventListener('click', proceedToPairingPin);
-
-  var btnConfirm = $('#btn-pair-confirm');
-  if (btnConfirm) btnConfirm.addEventListener('click', submitReceiverPairPin);
-
-  var btnDone = $('#btn-pair-done');
-  if (btnDone) btnDone.addEventListener('click', closeReceiverPairModal);
-
-  var btnCancel1 = $('#btn-pair-cancel-1');
-  if (btnCancel1) btnCancel1.addEventListener('click', closeReceiverPairModal);
-
-  var btnCancel2 = $('#btn-pair-cancel-2');
-  if (btnCancel2) btnCancel2.addEventListener('click', closeReceiverPairModal);
-
-  var pinInput = $('#pair-pin-input');
-  if (pinInput) {
-    pinInput.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        submitReceiverPairPin();
-      }
-    });
-  }
-
-  document.addEventListener('keydown', function (ev) {
-    var m = $('#receiver-pair-modal');
-    if (!m || m.classList.contains('hidden') || m.style.display === 'none') return;
-    if (ev.key === 'Escape' || ev.keyCode === 27) {
-      ev.preventDefault();
-      closeReceiverPairModal();
-      return;
-    }
-    if (ev.key === 'Tab' || ev.keyCode === 9) {
-      var focusables = m.querySelectorAll('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])');
-      var visibleFocusables = Array.prototype.filter.call(focusables, function (el) {
-        return el.offsetParent !== null && !el.closest('.hidden');
-      });
-      if (visibleFocusables.length === 0) return;
-      var first = visibleFocusables[0];
-      var last = visibleFocusables[visibleFocusables.length - 1];
-
-      if (ev.shiftKey) {
-        if (document.activeElement === first || !m.contains(document.activeElement)) {
-          ev.preventDefault();
-          last.focus();
-        }
-      } else {
-        if (document.activeElement === last || !m.contains(document.activeElement)) {
-          ev.preventDefault();
-          first.focus();
-        }
-      }
-    }
-  });
-}
 
 function formatRelativeTime(isoString) {
   if (!isoString) return '';
@@ -3588,253 +3510,6 @@ function formatRelativeTime(isoString) {
 }
 window.formatRelativeTime = formatRelativeTime;
 
-function openReceiverPairModal(receiverId, name) {
-  setupPairingModalListeners();
-  ReceiverPairingState.receiverId = receiverId;
-  ReceiverPairingState.receiverName = name;
-  ReceiverPairingState.phase = 'prompt_button';
-  ReceiverPairingState.originatingElement = document.activeElement;
-  ReceiverPairingState.pairedReceiverPresence = null;
-
-  var modal = $('#receiver-pair-modal');
-  var title = $('#pair-modal-title');
-  var stepBtn = $('#pair-step-button');
-  var stepPin = $('#pair-step-pin');
-  var stepSuccess = $('#pair-step-success');
-  var pinErr = $('#pair-pin-error');
-  var pinInput = $('#pair-pin-input');
-
-  if (title) title.textContent = 'Prepare ' + (name || 'Michi Music Stream');
-  if (stepBtn) stepBtn.classList.remove('hidden');
-  if (stepPin) stepPin.classList.add('hidden');
-  if (stepSuccess) stepSuccess.classList.add('hidden');
-  if (pinErr) pinErr.textContent = '';
-  if (pinInput) pinInput.value = '';
-
-  if (modal) {
-    modal.classList.remove('hidden');
-    modal.style.display = 'flex';
-    var readyBtn = $('#btn-pair-ready');
-    if (readyBtn) readyBtn.focus();
-  }
-}
-window.openReceiverPairModal = openReceiverPairModal;
-
-function closeReceiverPairModal() {
-  if (ReceiverPairingState.timerInterval) {
-    clearInterval(ReceiverPairingState.timerInterval);
-    ReceiverPairingState.timerInterval = null;
-  }
-  var origin = ReceiverPairingState.originatingElement;
-  ReceiverPairingState.phase = 'idle';
-  ReceiverPairingState.receiverId = null;
-  ReceiverPairingState.pairingId = null;
-  ReceiverPairingState.originatingElement = null;
-
-  var stepSuccess = $('#pair-step-success');
-  if (stepSuccess) stepSuccess.classList.add('hidden');
-
-  var modal = $('#receiver-pair-modal');
-  if (modal) {
-    modal.classList.add('hidden');
-    modal.style.display = 'none';
-  }
-  if (origin && typeof origin.focus === 'function') {
-    try { origin.focus(); } catch (_) {}
-  }
-}
-window.closeReceiverPairModal = closeReceiverPairModal;
-
-function formatPairTimer(sec) {
-  var s = Math.max(0, Math.floor(sec));
-  var mm = Math.floor(s / 60);
-  var ss = s % 60;
-  return (mm < 10 ? '0' : '') + mm + ':' + (ss < 10 ? '0' : '') + ss;
-}
-
-function formatPairingError(raw) {
-  var rawStr = String(raw || 'PAIRING_ERROR');
-  var friendlyTitle = 'Michi Music Stream unavailable';
-  var friendlyDesc = 'Could not communicate with the receiver.';
-
-  if (rawStr.includes('PAIRING_PIN_MISMATCH') || rawStr.includes('401')) {
-    friendlyTitle = 'Incorrect code';
-    friendlyDesc = 'Check the six-digit code shown on Michi Music Stream.';
-  } else if (rawStr.includes('PAIRING_EXPIRED') || rawStr.includes('expired')) {
-    friendlyTitle = 'Pairing session expired';
-    friendlyDesc = 'Hold the Stream button again to open pairing mode.';
-  } else if (rawStr.includes('PAIRING_ATTEMPTS_EXCEEDED')) {
-    friendlyTitle = 'Too many attempts';
-    friendlyDesc = 'Open pairing mode on Michi Music Stream again.';
-  } else if (rawStr.includes('IDENTITY_MISMATCH')) {
-    friendlyTitle = 'Device identity changed';
-    friendlyDesc = 'Pairing was stopped for security.';
-  } else if (rawStr.includes('STREAM_NOT_IN_PAIRING_MODE') || rawStr.includes('WINDOW_CLOSED')) {
-    friendlyTitle = 'Pairing mode is not active';
-    friendlyDesc = 'Hold the Stream button for 5 seconds and try again.';
-  }
-
-  return {
-    title: friendlyTitle,
-    desc: friendlyDesc,
-    raw: rawStr,
-    html: '<div class="pairing-error-friendly"><strong>' + esc(friendlyTitle) + '</strong><p>' + esc(friendlyDesc) + '</p></div>' +
-          '<details class="pairing-error-details"><summary>Technical details</summary><code>' + esc(rawStr) + '</code></details>'
-  };
-}
-
-async function proceedToPairingPin() {
-  if (!ReceiverPairingState.receiverId) return;
-  var title = $('#pair-modal-title');
-  var stepBtn = $('#pair-step-button');
-  var stepPin = $('#pair-step-pin');
-  var stepSuccess = $('#pair-step-success');
-  var pinErr = $('#pair-pin-error');
-  var readyBtn = $('#btn-pair-ready');
-
-  if (readyBtn) readyBtn.disabled = true;
-  if (pinErr) pinErr.textContent = '';
-  if (stepSuccess) stepSuccess.classList.add('hidden');
-
-  try {
-    var res = await MichiAPI.startReceiverPair({
-      receiver_id: ReceiverPairingState.receiverId,
-      initiator_id: 'michi-web'
-    });
-
-    if (res.status === 'authenticated' || res.authenticated) {
-      if (title) title.textContent = 'Michi Music Stream Authenticated';
-      if (stepBtn) stepBtn.classList.add('hidden');
-      if (stepPin) stepPin.classList.add('hidden');
-      if (stepSuccess) stepSuccess.classList.remove('hidden');
-      showToast('Device authenticated into Michi Home', false);
-      discoverDevices();
-      refreshHomeRoster();
-      return;
-    }
-
-    var pairingId = res.pairing_id || res.session_id;
-    if (!pairingId) {
-      throw new Error(res.error?.message || 'STREAM_NOT_IN_PAIRING_MODE: The Stream receiver did not return a pairing ID.');
-    }
-
-    ReceiverPairingState.pairingId = pairingId;
-    ReceiverPairingState.phase = 'pin_entry';
-
-    if (title) title.textContent = 'Enter pairing code';
-    if (stepBtn) stepBtn.classList.add('hidden');
-    if (stepPin) stepPin.classList.remove('hidden');
-
-    var pinInput = $('#pair-pin-input');
-    if (pinInput) {
-      pinInput.value = '';
-      pinInput.focus();
-    }
-
-    var expiresSec = 60;
-    if (res.expires_at) {
-      var expDate = new Date(res.expires_at);
-      if (!isNaN(expDate.getTime())) {
-        expiresSec = Math.max(5, Math.floor((expDate.getTime() - Date.now()) / 1000));
-      }
-    }
-
-    var timerEl = $('#pair-timer-val');
-    var countdownEl = $('#pair-pin-countdown');
-    if (timerEl) timerEl.textContent = formatPairTimer(expiresSec);
-    if (countdownEl) countdownEl.innerHTML = 'Expires in <span id="pair-timer-val">' + formatPairTimer(expiresSec) + '</span>';
-
-    if (ReceiverPairingState.timerInterval) clearInterval(ReceiverPairingState.timerInterval);
-    ReceiverPairingState.timerInterval = setInterval(function () {
-      expiresSec--;
-      var tEl = $('#pair-timer-val');
-      if (tEl) tEl.textContent = formatPairTimer(expiresSec);
-      if (expiresSec <= 0) {
-        clearInterval(ReceiverPairingState.timerInterval);
-        ReceiverPairingState.timerInterval = null;
-        var errInfo = formatPairingError('PAIRING_EXPIRED: Pairing session expired');
-        if (pinErr) pinErr.innerHTML = errInfo.html;
-        var confirmBtn = $('#btn-pair-confirm');
-        if (confirmBtn) confirmBtn.disabled = true;
-      }
-    }, 1000);
-
-    var confirmBtn = $('#btn-pair-confirm');
-    if (confirmBtn) confirmBtn.disabled = false;
-  } catch (e) {
-    var errInfo = formatPairingError(e.message || 'STREAM_NOT_IN_PAIRING_MODE');
-    if (pinErr) pinErr.innerHTML = errInfo.html;
-    showToast(errInfo.title + ': ' + errInfo.desc, true);
-  } finally {
-    if (readyBtn) readyBtn.disabled = false;
-  }
-}
-window.proceedToPairingPin = proceedToPairingPin;
-
-async function submitReceiverPairPin() {
-  var pinInput = $('#pair-pin-input');
-  var pin = pinInput ? pinInput.value.trim() : '';
-  var pinErr = $('#pair-pin-error');
-  var confirmBtn = $('#btn-pair-confirm');
-
-  if (!pin || !/^\d{6}$/.test(pin)) {
-    if (pinErr) {
-      pinErr.textContent = 'Enter the six-digit code shown on Michi Music Stream.';
-      pinErr.innerHTML = '<div class="pairing-error-friendly"><strong>Invalid code</strong><p>Enter the six-digit code shown on Michi Music Stream.</p></div>';
-    }
-    return;
-  }
-
-  if (confirmBtn) confirmBtn.disabled = true;
-  if (pinErr) pinErr.textContent = '';
-
-  try {
-    var confirmResp = await MichiAPI.confirmReceiverPair({
-      pairing_id: ReceiverPairingState.pairingId,
-      pin: pin
-    });
-
-    if (ReceiverPairingState.timerInterval) {
-      clearInterval(ReceiverPairingState.timerInterval);
-      ReceiverPairingState.timerInterval = null;
-    }
-    ReceiverPairingState.phase = 'paired';
-
-    var stepBtn = $('#pair-step-button');
-    var stepPin = $('#pair-step-pin');
-    var stepSuccess = $('#pair-step-success');
-    var successTitle = $('#pair-success-title');
-    var successMsg = $('#pair-success-message');
-
-    if (stepBtn) stepBtn.classList.add('hidden');
-    if (stepPin) stepPin.classList.add('hidden');
-    if (stepSuccess) stepSuccess.classList.remove('hidden');
-
-    var pStatus = confirmResp && confirmResp.presence;
-    if (successTitle) successTitle.textContent = 'Michi Music Stream paired';
-
-    if (pStatus === 'verified_online') {
-      if (successMsg) successMsg.textContent = 'Identity verified. The receiver is ready for playback.';
-    } else if (pStatus === 'provisional_mdns') {
-      if (successMsg) successMsg.textContent = 'Pairing completed. Waiting for signed Michi Link presence.';
-    } else {
-      if (successMsg) successMsg.textContent = 'Pairing completed, but the receiver is no longer reachable on the network.';
-    }
-
-    var doneBtn = $('#btn-pair-done');
-    if (doneBtn) doneBtn.focus();
-
-    showToast('✓ Michi Music Stream paired');
-    discoverDevices(true);
-  } catch (e) {
-    var errInfo = formatPairingError(e.message || 'PAIRING_ERROR');
-    if (pinErr) pinErr.innerHTML = errInfo.html;
-    showToast(errInfo.title + ': ' + errInfo.desc, true);
-  } finally {
-    if (confirmBtn) confirmBtn.disabled = false;
-  }
-}
-window.submitReceiverPairPin = submitReceiverPairPin;
 
 async function discoverDevices(silent) {
   if (!canPerformProtectedAction()) return;
@@ -3915,13 +3590,6 @@ async function discoverDevices(silent) {
               revokeDevicePrompt(mid);
               return;
             }
-            var pairBtn = ev.target.closest ? ev.target.closest('.action-pair') : null;
-            if (pairBtn && !pairBtn.disabled) {
-              var id = pairBtn.getAttribute('data-receiver-id');
-              var n = pairBtn.getAttribute('data-name');
-              openReceiverPairModal(id, n);
-              return;
-            }
             var outputBtn = ev.target.closest ? ev.target.closest('.action-use-output') : null;
             if (outputBtn && !outputBtn.disabled) {
               var id = outputBtn.getAttribute('data-receiver-id');
@@ -3950,7 +3618,6 @@ async function discoverDevices(silent) {
           var typeLabel = d.device_type === 'hifi' ? 'Hi-Fi' : 'Standard';
           var qualification = d.qualification || 'unqualified';
           var isIdentityMismatch = qualification === 'identity_mismatch';
-          var pairable = d.pairable === true;
 
           var presenceBadgeClass = 'device-badge--offline';
           var presenceText = 'Offline';
@@ -3960,7 +3627,7 @@ async function discoverDevices(silent) {
           if (isIdentityMismatch) {
             presenceBadgeClass = 'device-badge--danger';
             presenceText = 'Identity Conflict';
-            statusDetailHtml = '<div class="device-card__warning-text">Device identity could not be verified. Pairing and playback are disabled.</div>';
+            statusDetailHtml = '<div class="device-card__warning-text">Device identity could not be verified. Authentication and playback are disabled.</div>';
           } else if (presence === 'verified_online') {
             presenceBadgeClass = 'device-badge--verified';
             presenceText = 'Verified Online';
@@ -3996,15 +3663,15 @@ async function discoverDevices(silent) {
           } else if (isAuthenticated) {
             if (isIdentityMismatch) {
               actionsHtml = '<div class="device-card__actions">' +
-                '<span class="device-badge device-badge--paired">Paired</span>' +
+                '<span class="device-badge device-badge--danger">Identity Conflict</span>' +
                 '<button class="btn btn-sm btn-primary action-use-output" data-receiver-id="' + esc(receiverId) + '" disabled title="Output blocked due to identity conflict">Use as Output</button>' +
                 '<button class="btn btn-sm btn-ghost action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
                 '</div>';
             } else {
               var canUseOutput = (presence === 'verified_online') && (qualification === 'qualified');
-              var badgeLabel = d.authenticated ? 'Home Member' : 'Paired';
+              var badgeLabel = d.authenticated ? 'Home Member' : 'Authenticated';
               actionsHtml = '<div class="device-card__actions">' +
-                '<span class="device-badge device-badge--paired">' + badgeLabel + '</span>' +
+                '<span class="device-badge device-badge--verified">' + badgeLabel + '</span>' +
                 '<button class="btn btn-sm btn-primary action-use-output" data-receiver-id="' + esc(receiverId) + '"' +
                   (canUseOutput ? '' : ' disabled title="Device must be verified online and qualified to use as output"') +
                 '>Use as Output</button>' +
@@ -4016,19 +3683,19 @@ async function discoverDevices(silent) {
             if (isIdentityMismatch) {
               actionsHtml = '<div class="device-card__actions">' +
                 '<span class="device-badge device-badge--offline">Unauthenticated</span>' +
-                '<button class="btn btn-sm btn-primary action-auth-device action-pair" data-receiver-id="' + esc(receiverId) + '" disabled title="Authentication blocked due to identity conflict">Authenticate</button>' +
+                '<button class="btn btn-sm btn-primary action-auth-device" data-receiver-id="' + esc(receiverId) + '" disabled title="Authentication blocked due to identity conflict">Authenticate</button>' +
                 '</div>';
             } else {
               actionsHtml = '<div class="device-card__actions">' +
                 '<span class="device-badge device-badge--offline">Unauthenticated</span>' +
-                '<button class="btn btn-sm btn-primary action-auth-device action-pair" data-receiver-id="' + esc(receiverId) + '" data-name="' + esc(name) + '"' +
-                  (pairable ? '' : ' disabled title="Device is not ready for pairing"') +
+                '<button class="btn btn-sm btn-primary action-auth-device" data-receiver-id="' + esc(receiverId) + '" data-name="' + esc(name) + '"' +
+                  (isOnline ? '' : ' disabled title="Device must be online to authenticate"') +
                 '>Authenticate</button>' +
                 '</div>';
             }
           }
 
-          var fingerprint = [stableId, name, endpoint, presence, qualification, isPaired, d.authenticated, d.revoked, pairable, relativeSeen].join(';;');
+          var fingerprint = [stableId, name, endpoint, presence, qualification, isAuthenticated, d.authenticated, d.revoked, relativeSeen].join(';;');
 
           var html = '<div class="device-card chain-item" id="device-card-' + esc(stableId) + '" data-stable-id="' + esc(stableId) + '" data-fingerprint="' + esc(fingerprint) + '">' +
             '<div>' +
@@ -4058,7 +3725,7 @@ async function discoverDevices(silent) {
 
           var activeEl = document.activeElement;
           var activeId = activeEl && activeEl.getAttribute ? activeEl.getAttribute('data-receiver-id') : null;
-          var isPairActive = activeEl && activeEl.classList && activeEl.classList.contains('action-pair');
+          var isAuthActive = activeEl && activeEl.classList && activeEl.classList.contains('action-auth-device');
           var isOutputActive = activeEl && activeEl.classList && activeEl.classList.contains('action-use-output');
           var isUnpairActive = activeEl && activeEl.classList && activeEl.classList.contains('action-unpair');
 
@@ -4066,7 +3733,7 @@ async function discoverDevices(silent) {
           resEl.innerHTML = '<div id="devices-container" style="display:flex;flex-direction:column;gap:0.75rem">' + cardsHtml + '</div>';
 
           if (activeId) {
-            var selector = isPairActive ? '.action-pair[data-receiver-id="' + activeId + '"]' :
+            var selector = isAuthActive ? '.action-auth-device[data-receiver-id="' + activeId + '"]' :
                            isOutputActive ? '.action-use-output[data-receiver-id="' + activeId + '"]' :
                            isUnpairActive ? '.action-unpair[data-receiver-id="' + activeId + '"]' : null;
             if (selector) {
@@ -4128,6 +3795,7 @@ async function selectOutputTarget(type, id) {
 window.selectOutputTarget = selectOutputTarget;
 
 async function authenticateReceiver(id) {
+  if (!canPerformProtectedAction()) return;
   try {
     showToast('Authenticating with Home Root Authority...', false);
     var res = await MichiAPI.authReceiver(id);
@@ -4141,6 +3809,7 @@ async function authenticateReceiver(id) {
 window.authenticateReceiver = authenticateReceiver;
 
 async function revokeDevicePrompt(michiId) {
+  if (!canPerformProtectedAction()) return;
   if (!confirm('Are you sure you want to revoke device ' + michiId + ' from this Home? Active sessions will be terminated.')) {
     return;
   }
@@ -4244,48 +3913,6 @@ async function refreshHomeRoster() {
 }
 window.refreshHomeRoster = refreshHomeRoster;
 
-async function startReceiverPair(deviceIdOrBaseUrl, initiatorId) {
-  if (!canPerformProtectedAction()) return;
-  try {
-    var payload;
-    if (typeof deviceIdOrBaseUrl === 'object' && deviceIdOrBaseUrl !== null) {
-      payload = deviceIdOrBaseUrl;
-    } else if (typeof deviceIdOrBaseUrl === 'string' && (deviceIdOrBaseUrl.startsWith('http://') || deviceIdOrBaseUrl.startsWith('https://'))) {
-      payload = { base_url: deviceIdOrBaseUrl, initiator_id: initiatorId || 'michi-web' };
-    } else {
-      payload = { receiver_id: deviceIdOrBaseUrl, initiator_id: initiatorId || 'michi-web' };
-    }
-    var res = await MichiAPI.startReceiverPair(payload);
-    showToast('Receiver pairing initiated');
-    return res;
-  } catch (e) {
-    showToast('Pairing start failed: ' + e.message, true);
-  }
-}
-window.startReceiverPair = startReceiverPair;
-
-async function confirmReceiverPair(pairingIdOrDeviceId, pin) {
-  if (!canPerformProtectedAction()) return;
-  var pinVal = typeof pairingIdOrDeviceId === 'object' && pairingIdOrDeviceId !== null ? pairingIdOrDeviceId.pin : pin;
-  if (!pinVal || !/^\d{6}$/.test(String(pinVal).trim())) {
-    showToast('PIN must be exactly 6 numeric digits', true);
-    return;
-  }
-  try {
-    var payload;
-    if (typeof pairingIdOrDeviceId === 'object' && pairingIdOrDeviceId !== null) {
-      payload = pairingIdOrDeviceId;
-    } else {
-      payload = { pairing_id: pairingIdOrDeviceId, pin: pin };
-    }
-    var res = await MichiAPI.confirmReceiverPair(payload);
-    showToast('Receiver paired successfully');
-    return res;
-  } catch (e) {
-    showToast('Pairing confirmation failed: ' + e.message, true);
-  }
-}
-window.confirmReceiverPair = confirmReceiverPair;
 
 // ── Settings ─────────────────────────────────────────────────────
 const SETTINGS_TAB_ALIASES = {

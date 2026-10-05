@@ -48,6 +48,8 @@ pub struct ScentRecord {
     pub last_mdns_seen: Option<Instant>,
     pub server_info_verified_at: Option<Instant>,
     pub online: bool,
+    pub michi_home_id: Option<String>,
+    pub membership_fingerprint: Option<String>,
 }
 
 /// Authoritative presence level derived strictly from current freshness.
@@ -135,6 +137,33 @@ impl ScentStore {
         source: Option<SocketAddr>,
         now: Instant,
     ) {
+        self.observe_signed_with_home(
+            michi_id,
+            device_id,
+            name,
+            service,
+            roles,
+            source,
+            now,
+            None,
+            None,
+        );
+    }
+
+    /// Record a verified signed announce from discovery including Home metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_signed_with_home(
+        &self,
+        michi_id: String,
+        device_id: String,
+        name: String,
+        service: String,
+        roles: Vec<String>,
+        source: Option<SocketAddr>,
+        now: Instant,
+        michi_home_id: Option<String>,
+        membership_fingerprint: Option<String>,
+    ) {
         let mut to_send = Vec::new();
 
         {
@@ -153,6 +182,8 @@ impl ScentStore {
                     record.name = name;
                     record.service = service;
                     record.roles = roles;
+                    record.michi_home_id = michi_home_id;
+                    record.membership_fingerprint = membership_fingerprint;
 
                     if let Some(src) = source {
                         if !record.endpoints.contains(&src) {
@@ -187,6 +218,8 @@ impl ScentStore {
                         last_mdns_seen: None,
                         server_info_verified_at: None,
                         online: true,
+                        michi_home_id,
+                        membership_fingerprint,
                     };
                     info!(michi_id = %michi_id, "Scent: discovered new signed peer");
                     vac.insert(record.clone());
@@ -287,6 +320,8 @@ impl ScentStore {
                         last_mdns_seen: Some(now),
                         server_info_verified_at: Some(now),
                         online: true,
+                        michi_home_id: None,
+                        membership_fingerprint: None,
                     };
                     info!(michi_id = %info.michi_id, "Scent: discovered new provisional mDNS peer");
                     vac.insert(record.clone());

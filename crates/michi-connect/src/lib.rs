@@ -205,6 +205,8 @@ impl MichiConnect {
             host: host.to_string(),
             port,
             features,
+            michi_home_id: None,
+            membership_fingerprint: None,
         };
         engine.build_signed_announce(&profile)
     }

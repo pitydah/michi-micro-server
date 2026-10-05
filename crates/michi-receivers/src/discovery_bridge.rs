@@ -121,6 +121,9 @@ impl ReceiverDiscoveryBridge {
                     entry.presence = target_presence;
                     entry.last_seen = Some(chrono::Utc::now());
                     entry.name = record.name.clone();
+                    if record.michi_home_id.is_some() {
+                        entry.michi_home_id = record.michi_home_id.clone();
+                    }
                     found_legacy = true;
                     break;
                 }
@@ -158,7 +161,7 @@ impl ReceiverDiscoveryBridge {
                     supported_channels: Vec::new(),
                     maximum_safe_volume: None,
                     qualification: ReceiverQualification::NeedsCapabilityRefresh,
-                    michi_home_id: None,
+                    michi_home_id: record.michi_home_id.clone(),
                     server_membership: None,
                     authenticated: false,
                     revoked: false,
@@ -259,6 +262,8 @@ mod tests {
             last_mdns_seen: None,
             server_info_verified_at: Some(Instant::now()),
             online: true,
+            michi_home_id: None,
+            membership_fingerprint: None,
         };
 
         bridge
@@ -295,6 +300,8 @@ mod tests {
             last_mdns_seen: Some(Instant::now()),
             server_info_verified_at: Some(Instant::now()),
             online: true,
+            michi_home_id: None,
+            membership_fingerprint: None,
         };
 
         bridge
@@ -340,6 +347,8 @@ mod tests {
             last_mdns_seen: None,
             server_info_verified_at: None,
             online: true,
+            michi_home_id: None,
+            membership_fingerprint: None,
         };
 
         bridge.handle_event(ScentEvent::Discovered(record)).await;
@@ -368,6 +377,8 @@ mod tests {
             last_mdns_seen: None,
             server_info_verified_at: None,
             online: true,
+            michi_home_id: None,
+            membership_fingerprint: None,
         };
 
         bridge.handle_event(ScentEvent::Discovered(record)).await;
@@ -396,6 +407,8 @@ mod tests {
             last_mdns_seen: None,
             server_info_verified_at: Some(Instant::now()),
             online: true,
+            michi_home_id: None,
+            membership_fingerprint: None,
         };
 
         bridge.handle_event(ScentEvent::Discovered(record)).await;

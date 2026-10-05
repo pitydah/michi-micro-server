@@ -579,39 +579,6 @@
 
                     <!-- 5. Devices & Multiroom -->
                     <div class="stab-content hidden" id="stab-devices">
-                        <!-- Receiver Pairing Modal -->
-                        <div id="receiver-pair-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="pair-modal-title">
-                            <div class="panel pairing-modal-panel">
-                                <div class="panel-header" id="pair-modal-title">Prepare Michi Music Stream</div>
-                                <div id="pair-step-button" class="pairing-step">
-                                    <p id="pair-step-button-desc" class="pairing-step-desc">Hold the button on Michi Music Stream for 5 seconds. When the display indicates that it is ready to pair, continue.</p>
-                                    <div class="pairing-actions-right">
-                                        <button class="btn btn-ghost btn-sm" id="btn-pair-cancel-1">Cancel</button>
-                                        <button class="btn btn-primary btn-sm" id="btn-pair-ready">Continue</button>
-                                    </div>
-                                </div>
-                                <div id="pair-step-pin" class="hidden pairing-step">
-                                    <p id="pair-step-pin-desc" class="pairing-step-desc--short">Enter the six-digit code shown on Michi Music Stream.</p>
-                                    <div class="pairing-input-container">
-                                        <input type="text" id="pair-pin-input" class="panel-input pairing-pin-input" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" placeholder="000123">
-                                    </div>
-                                    <div id="pair-pin-countdown" class="pairing-countdown">Expires in <span id="pair-timer-val">01:00</span></div>
-                                    <div id="pair-pin-error" class="pairing-pin-error"></div>
-                                    <div class="pairing-actions-right">
-                                        <button class="btn btn-ghost btn-sm" id="btn-pair-cancel-2">Cancel</button>
-                                        <button class="btn btn-primary btn-sm" id="btn-pair-confirm">Pair</button>
-                                    </div>
-                                </div>
-                                <div id="pair-step-success" class="hidden pairing-step-success">
-                                    <div class="pairing-success-icon">✓</div>
-                                    <p id="pair-success-title" class="pairing-success-title">Michi Music Stream paired</p>
-                                    <p id="pair-success-message" class="pairing-success-msg">Identity verified. The receiver is ready for playback.</p>
-                                    <div class="pairing-actions-center">
-                                        <button class="btn btn-primary btn-sm" id="btn-pair-done">Done</button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
 
                         <!-- Trust Architecture V2: Michi Home Trust & Roster -->
                         <div class="panel" id="home-trust-panel">

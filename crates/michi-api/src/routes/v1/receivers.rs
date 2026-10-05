@@ -594,32 +594,41 @@ pub async fn receiver_pair_start_handler(
     };
 
     if state.receiver_manager.home_id().await.is_some() {
-        if let Ok(info) = state
+        match state
             .receiver_manager
             .authenticate_url(&target_base_url)
             .await
         {
-            let rid = {
-                let reg = state.receiver_manager.registry().await;
-                let reg_r = reg.read().await;
-                reg_r
-                    .receivers
-                    .values()
-                    .find(|e| e.base_url == target_base_url)
-                    .map(|e| e.receiver_id.clone())
-                    .or_else(|| info.device_id.clone())
-                    .or_else(|| info.michi_id.clone())
-                    .or_else(|| info.server_id.clone())
-                    .unwrap_or_else(|| target_base_url.clone())
-            };
-            return Ok(Json(serde_json::json!({
-                "status": "authenticated",
-                "authenticated": true,
-                "receiver_id": rid,
-                "michi_id": info.michi_id,
-                "name": info.name,
-                "base_url": target_base_url,
-            })));
+            Ok(info) => {
+                let rid = {
+                    let reg = state.receiver_manager.registry().await;
+                    let reg_r = reg.read().await;
+                    reg_r
+                        .receivers
+                        .values()
+                        .find(|e| e.base_url == target_base_url)
+                        .map(|e| e.receiver_id.clone())
+                        .or_else(|| info.device_id.clone())
+                        .or_else(|| info.michi_id.clone())
+                        .or_else(|| info.server_id.clone())
+                        .unwrap_or_else(|| target_base_url.clone())
+                };
+                return Ok(Json(serde_json::json!({
+                    "status": "authenticated",
+                    "authenticated": true,
+                    "receiver_id": rid,
+                    "michi_id": info.michi_id,
+                    "name": info.name,
+                    "base_url": target_base_url,
+                })));
+            }
+            Err(e) => {
+                return Err(v1_error(
+                    StatusCode::UNAUTHORIZED,
+                    "STREAM_AUTH_FAILED",
+                    &format!("Music Stream authentication failed under Michi Trust Architecture V2: {e}"),
+                ));
+            }
         }
     }
 
@@ -2258,6 +2267,7 @@ pub async fn home_revocations_handler(
 
 #[derive(Debug, Deserialize)]
 pub struct RevokeDeviceBody {
+    #[serde(alias = "michi_id")]
     pub device_michi_id: String,
     pub reason: Option<String>,
 }

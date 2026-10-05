@@ -410,30 +410,30 @@
       "auth": "protected"
     },
     {
-      "id": "receivers.pair_start",
+      "id": "receivers.auth",
       "surface": "settings.receivers",
-      "element": "button[onclick*='startPairing']",
-      "frontend_handler": "startReceiverPair",
+      "element": "button.action-auth-device",
+      "frontend_handler": "authenticateReceiver",
       "authority": "server",
       "endpoint": {
         "method": "POST",
-        "path": "/api/v1/receivers/pair/start"
+        "path": "/api/v1/receivers/:id/auth"
       },
-      "effect": "Starts pairing exchange with selected receiver and prompts for PIN confirmation",
+      "effect": "Authenticates receiver with Michi Home Root Authority and marks receiver as Home Member",
       "test": "WEBUI-ACT-RX-002",
       "auth": "protected"
     },
     {
-      "id": "receivers.pair_confirm",
+      "id": "home.revoke",
       "surface": "settings.receivers",
-      "element": "button[onclick*='confirmPairing']",
-      "frontend_handler": "confirmReceiverPair",
+      "element": "button.action-revoke-device",
+      "frontend_handler": "revokeDevicePrompt",
       "authority": "server",
       "endpoint": {
         "method": "POST",
-        "path": "/api/v1/receivers/pair/confirm"
+        "path": "/api/v1/home/revoke"
       },
-      "effect": "Validates PIN, establishes secure shared credentials, and registers receiver",
+      "effect": "Revokes receiver membership in Michi Home and invalidates active sessions",
       "test": "WEBUI-ACT-RX-003",
       "auth": "protected"
     },
