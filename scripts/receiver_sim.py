@@ -36,12 +36,52 @@ class ReceiverState:
         self.type_name = "michi_stream_standard" if device_type == "standard" else "michi_stream_hifi"
         self.output_connector = "jack_3_5" if device_type == "standard" else "rca_stereo"
         self.supported_codecs = ["pcm_s16le"]
-        if device_type == "standard":
-            self.server_pubkey_b64 = "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8"
-            self.server_michi_id = "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4"
-        else:
-            self.server_pubkey_b64 = "4CggHpvLXArVU2CJypgueD9MOtNfT9l1dfbCXrNdOts"
-            self.server_michi_id = "lz4CalNVFwbIecx40oFy7Z1HCzkonqkdcBP_eG3FZjo"
+        self.home_id = "FU1FL-wFLfsfew3qpbR7XjDkmStWZY4g84MyW-zXPOs"
+        self.active_challenges = {}
+
+        try:
+            import blake3
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+            root_seed = blake3.blake3(b"michi-link contract vectors v1" + b"home-root").digest()
+            self.home_root_private_key = Ed25519PrivateKey.from_private_bytes(root_seed)
+            self.home_root_public_key = self.home_root_private_key.public_key()
+
+            server_seed = blake3.blake3(b"michi-link contract vectors v1" + (b"receiver" if device_type == "standard" else b"receiver-hifi")).digest()
+            self.server_private_key = Ed25519PrivateKey.from_private_bytes(server_seed)
+            pk_bytes = self.server_private_key.public_key().public_bytes_raw()
+            self.server_pubkey_b64 = base64.urlsafe_b64encode(pk_bytes).decode("ascii").rstrip("=")
+            self.server_michi_id = base64.urlsafe_b64encode(blake3.blake3(pk_bytes).digest()).decode("ascii").rstrip("=")
+
+            canon_bytes = (
+                b"michi-link-membership-v1"
+                + self.home_id.encode("ascii")
+                + self.server_michi_id.encode("ascii")
+                + self.server_pubkey_b64.encode("ascii")
+                + b"stream"
+                + b":audio_receiver"
+                + b":2026-10-04T12:00:00Z:1"
+            )
+            server_mem_sig = base64.urlsafe_b64encode(self.home_root_private_key.sign(canon_bytes)).decode("ascii").rstrip("=")
+            self.server_membership = {
+                "version": 1,
+                "home_id": self.home_id,
+                "device_michi_id": self.server_michi_id,
+                "device_public_key": self.server_pubkey_b64,
+                "device_type": "stream",
+                "roles": ["audio_receiver"],
+                "issued_at": "2026-10-04T12:00:00Z",
+                "serial": 1,
+                "signature": server_mem_sig,
+            }
+        except Exception as e:
+            self.server_private_key = None
+            self.server_membership = None
+            if device_type == "standard":
+                self.server_pubkey_b64 = "CGzuzD0UgfvAs1PJdcBBA1XqgVC28pgABFMzR6VNnq8"
+                self.server_michi_id = "1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4"
+            else:
+                self.server_pubkey_b64 = "4CggHpvLXArVU2CJypgueD9MOtNfT9l1dfbCXrNdOts"
+                self.server_michi_id = "lz4CalNVFwbIecx40oFy7Z1HCzkonqkdcBP_eG3FZjo"
 
         # Pairing & Session State
         self.pairing_sessions = {} # session_id -> {nonce, pin, expires_at, consumed}
@@ -256,6 +296,8 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "type": st.type_name,
                 "roles": ["audio_receiver"],
                 "supported_codecs": st.supported_codecs,
+                "michi_home_id": st.home_id,
+                "auth": {"required": True, "strategy": "HOME_MEMBERSHIP", "token_refresh": False},
                 "audio": {
                     "transports": ["rtp_udp"],
                     "codecs": st.supported_codecs,
@@ -373,7 +415,60 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             self.send_json(200, {"status": "metrics_reset"})
             return
 
-        if self.check_faults(path):
+        # Trust Architecture V2: Challenge Endpoint (POST /api/v1/auth/challenge)
+        if path == "/api/v1/auth/challenge":
+            challenge_id = str(uuid.uuid4())
+            nonce_bytes = secrets.token_bytes(16)
+            challenge_nonce = base64.urlsafe_b64encode(nonce_bytes).decode("ascii").rstrip("=")
+            st.active_challenges[challenge_id] = {
+                "challenge_id": challenge_id,
+                "challenge_nonce": challenge_nonce,
+                "client_michi_id": body.get("client_michi_id"),
+                "client_public_key": body.get("client_public_key"),
+                "home_id": body.get("home_id"),
+                "expires_at": time.time() + 60,
+            }
+            self.send_json(200, {
+                "challenge_id": challenge_id,
+                "challenge_nonce": challenge_nonce,
+                "server_michi_id": st.server_michi_id,
+                "server_public_key": st.server_pubkey_b64,
+                "expires_in": 60,
+            })
+            return
+
+        # Trust Architecture V2: Session Endpoint (POST /api/v1/auth/session)
+        if path == "/api/v1/auth/session":
+            challenge_id = body.get("challenge_id")
+            challenge = st.active_challenges.get(challenge_id)
+            if not challenge or time.time() > challenge["expires_at"]:
+                self.send_json(401, {"error": {"code": "UNAUTHORIZED", "message": "challenge expired or invalid"}})
+                return
+
+            client_michi_id = body.get("client_michi_id")
+            raw_token = secrets.token_bytes(32)
+            session_token = base64.urlsafe_b64encode(raw_token).decode("ascii").rstrip("=")
+            st.tokens.add(session_token)
+
+            server_auth_payload = (
+                b"michi-link-server-auth-v1"
+                + st.home_id.encode("ascii")
+                + st.server_michi_id.encode("ascii")
+                + client_michi_id.encode("ascii")
+                + challenge_id.encode("ascii")
+                + session_token.encode("ascii")
+            )
+            server_sig_bytes = st.server_private_key.sign(server_auth_payload)
+            server_signature = base64.urlsafe_b64encode(server_sig_bytes).decode("ascii").rstrip("=")
+
+            self.send_json(200, {
+                "session_token": session_token,
+                "token_type": "Bearer",
+                "expires_in": 86400,
+                "server_michi_id": st.server_michi_id,
+                "server_membership": st.server_membership,
+                "server_signature": server_signature,
+            })
             return
 
         # 1. Pairing Start (POST /api/v1/pair/start)
