@@ -603,7 +603,7 @@ pub async fn receiver_pair_start_handler(
             Ok(info) => {
                 info.service
                     .as_deref()
-                    .map_or(false, |s| s.starts_with("michi-stream"))
+                    .is_some_and(|s| s.starts_with("michi-stream"))
                     || info
                         .auth
                         .as_ref()
@@ -1031,7 +1031,7 @@ pub async fn reconcile_unrecovered_pairings(state: &AppState) -> Result<usize, S
             Ok(ref info) => {
                 info.service
                     .as_deref()
-                    .map_or(false, |s| s.starts_with("michi-stream"))
+                    .is_some_and(|s| s.starts_with("michi-stream"))
                     || info
                         .auth
                         .as_ref()
