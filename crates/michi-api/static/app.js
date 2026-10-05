@@ -4220,17 +4220,18 @@ async function refreshHomeRoster() {
     var html = '<table class="table" style="width:100%;font-size:0.85rem">' +
       '<thead><tr><th>Device</th><th>Michi ID</th><th>Status</th><th>Action</th></tr></thead><tbody>';
     devices.forEach(function(d) {
-      var isRev = d.revoked || revokedIds.has(d.michi_id);
+      var mid = d.device_michi_id || d.michi_id || d.receiver_id || '';
+      var isRev = d.revoked || (mid && revokedIds.has(mid));
       var statusBadge = isRev
         ? '<span class="device-badge device-badge--danger">Revoked</span>'
         : (d.authenticated ? '<span class="device-badge device-badge--verified">Authenticated</span>' : '<span class="device-badge device-badge--warning">Pending</span>');
       var actionBtn = isRev
         ? '<span style="color:var(--text-3)">Revoked</span>'
-        : '<button class="btn btn-sm btn-ghost action-revoke-device" data-michi-id="' + esc(d.michi_id) + '">Revoke</button>';
+        : '<button class="btn btn-sm btn-ghost action-revoke-device" data-michi-id="' + esc(mid) + '">Revoke</button>';
 
       html += '<tr>' +
         '<td><strong>' + esc(d.name || d.receiver_id || 'Unknown') + '</strong></td>' +
-        '<td class="panel-mono text-sm">' + esc(d.michi_id || d.receiver_id) + '</td>' +
+        '<td class="panel-mono text-sm">' + esc(mid) + '</td>' +
         '<td>' + statusBadge + '</td>' +
         '<td>' + actionBtn + '</td>' +
         '</tr>';
