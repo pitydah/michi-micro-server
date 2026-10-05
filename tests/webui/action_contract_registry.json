@@ -259,21 +259,21 @@
       "auth_condition": null,
       "frontend_handler": "discoverDevices"
     },
-    "receivers.pair_start": {
+    "receivers.auth": {
       "test_id": "WEBUI-ACT-RX-002",
       "test_file": "tests/e2e/test_webui_action_effects.py",
       "test_function": "test_link_and_receivers_actions_contract",
       "auth": "protected",
       "auth_condition": null,
-      "frontend_handler": "startReceiverPair"
+      "frontend_handler": "authenticateReceiver"
     },
-    "receivers.pair_confirm": {
+    "home.revoke": {
       "test_id": "WEBUI-ACT-RX-003",
       "test_file": "tests/e2e/test_webui_action_effects.py",
       "test_function": "test_link_and_receivers_actions_contract",
       "auth": "protected",
       "auth_condition": null,
-      "frontend_handler": "confirmReceiverPair"
+      "frontend_handler": "revokeDevicePrompt"
     },
     "rooms.create": {
       "test_id": "WEBUI-ACT-RM-001",

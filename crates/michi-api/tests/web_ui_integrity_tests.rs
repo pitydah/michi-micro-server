@@ -2523,25 +2523,20 @@ fn test_webui_static_pairing_modal_structure_and_classes() {
 
     let html =
         std::fs::read_to_string(static_dir.join("index.html")).expect("index.html must exist");
-    assert!(html.contains("id=\"receiver-pair-modal\""));
-    assert!(html.contains("class=\"modal-overlay"));
-    assert!(html.contains("pairing-modal-panel"));
-    assert!(html.contains("pairing-pin-input"));
-    assert!(html.contains("inputmode=\"numeric\""));
-    assert!(html.contains("autocomplete=\"one-time-code\""));
-    assert!(html.contains("pattern=\"[0-9]*\""));
-    assert!(html.contains("maxlength=\"6\""));
+    assert!(
+        !html.contains("id=\"receiver-pair-modal\""),
+        "Legacy button/PIN modal must be eliminated"
+    );
+    assert!(html.contains("id=\"home-trust-panel\""));
+    assert!(html.contains("id=\"home-trust-badge\""));
+    assert!(html.contains("id=\"home-id-val\""));
+    assert!(html.contains("id=\"home-root-pk-val\""));
+    assert!(html.contains("id=\"home-roster-list\""));
     assert!(html.contains("id=\"devices-last-updated\""));
-    assert!(html.contains("id=\"pair-success-title\""));
-    assert!(html.contains("id=\"pair-success-message\""));
 
     let css =
         std::fs::read_to_string(static_dir.join("styles.css")).expect("styles.css must exist");
     assert!(css.contains(".modal-overlay"));
-    assert!(css.contains(".pairing-modal-panel"));
-    assert!(css.contains(".pairing-pin-input"));
-    assert!(css.contains(".device-badge--error"));
-    assert!(css.contains(".device-card__warning-text"));
     assert!(css.contains(".device-card--skeleton"));
     assert!(css.contains("@keyframes skeleton-pulse"));
 }

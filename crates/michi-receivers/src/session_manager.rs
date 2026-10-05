@@ -3368,6 +3368,8 @@ mod tests {
             last_mdns_seen: None,
             server_info_verified_at: Some(std::time::Instant::now()),
             online: true,
+            michi_home_id: None,
+            membership_fingerprint: None,
         };
         bridge
             .handle_event(michi_connect::ScentEvent::Discovered(signed_rec.clone()))

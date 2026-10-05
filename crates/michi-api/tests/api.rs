@@ -8670,6 +8670,131 @@ async fn spawn_test_mock_receiver(
     (format!("http://{addr}"), handle)
 }
 
+async fn spawn_test_mock_receiver_v2(
+    state: &michi_api::AppState,
+    server_id: &str,
+) -> (String, String, tokio::task::JoinHandle<()>) {
+    use axum::routing::{get, post};
+    use ed25519_dalek::Signer;
+    use std::sync::Arc;
+
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key();
+    let pub_key_b64 = michi_identity::encode_base64url(pk.as_bytes());
+    let michi_id = michi_identity::IdentityManager::derive_michi_id(&pub_key_b64)
+        .unwrap()
+        .to_base64url();
+
+    let dev_id = server_id.to_string();
+    let home_id = state.home_root_authority.home_id();
+    let now = chrono::Utc::now().to_rfc3339();
+    let server_membership = state.home_root_authority.issue_membership(
+        &home_id,
+        &michi_id,
+        &pub_key_b64,
+        "standard",
+        vec![michi_identity::Role::AudioReceiver],
+        &now,
+        1,
+    );
+
+    let dev_id_clone = dev_id.clone();
+    let michi_id_clone = michi_id.clone();
+    let pub_key_clone = pub_key_b64.clone();
+
+    let chal_michi_id = michi_id.clone();
+    let chal_pub_key = pub_key_b64.clone();
+
+    let sess_sk = Arc::new(sk);
+    let sess_michi_id = michi_id.clone();
+    let sess_home_id = home_id.clone();
+    let sess_membership = Arc::new(server_membership);
+
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/server/info",
+            get(move || {
+                let d = dev_id_clone.clone();
+                let m = michi_id_clone.clone();
+                let pk = pub_key_clone.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "service": "michi-stream-standard",
+                        "name": "Test Stream",
+                        "device_id": d,
+                        "server_id": d,
+                        "michi_id": m,
+                        "public_key": pk,
+                        "identity_scheme": "ed25519-blake3-v1",
+                        "api_version": "v1-lite",
+                        "roles": ["audio_receiver"],
+                        "supported_codecs": ["pcm_s16le"],
+                        "audio": {
+                            "transports": ["rtp_udp"],
+                            "codecs": ["pcm_s16le"],
+                            "sample_rates": [48000],
+                            "bit_depths": [16],
+                            "channels": [2],
+                        }
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/api/v1/auth/challenge",
+            post(move |axum::Json(_req): axum::Json<michi_identity::types::DeviceAuthChallengeRequest>| {
+                let m = chal_michi_id.clone();
+                let pk = chal_pub_key.clone();
+                async move {
+                    axum::Json(michi_identity::types::DeviceAuthChallengeResponse {
+                        challenge_id: uuid::Uuid::new_v4(),
+                        challenge_nonce: "mock-nonce-12345678901234567890".to_string(),
+                        server_michi_id: m,
+                        server_public_key: pk,
+                        expires_in: 60,
+                    })
+                }
+            }),
+        )
+        .route(
+            "/api/v1/auth/session",
+            post(move |axum::Json(req): axum::Json<michi_identity::types::DeviceAuthSessionRequest>| {
+                let sk = sess_sk.clone();
+                let m = sess_michi_id.clone();
+                let hid = sess_home_id.clone();
+                let memb = (*sess_membership).clone();
+                async move {
+                    let session_token = "mock-token-xyz-12345".to_string();
+                    let payload = michi_identity::home::server_auth_confirm_payload(
+                        &hid,
+                        &m,
+                        &req.client_michi_id,
+                        &req.challenge_id.to_string(),
+                        &session_token,
+                    );
+                    let sig = sk.sign(&payload);
+                    let server_signature = michi_identity::encode_base64url(&sig.to_bytes());
+
+                    axum::Json(michi_identity::types::DeviceAuthSessionResponse {
+                        session_token,
+                        token_type: "Bearer".to_string(),
+                        expires_in: 86400,
+                        server_michi_id: m,
+                        server_membership: memb,
+                        server_signature,
+                    })
+                }
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), michi_id, handle)
+}
+
 #[tokio::test]
 async fn test_real_pair_confirm_response_contracts_provisional_and_verified() {
     let (app, _pool, state) = make_app_with_state().await;
@@ -9276,13 +9401,13 @@ async fn test_pair_start_with_re_pair_flag_allows_re_pairing_already_paired_rece
     let (app, _pool, state) = make_app_with_state().await;
 
     let rec_id = "550e8400-e29b-41d4-a716-446655440077";
-    let (mock_url, handle) =
-        spawn_test_mock_receiver("1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4", rec_id).await;
+    let (mock_url, mock_michi_id, handle) =
+        spawn_test_mock_receiver_v2(&state, rec_id).await;
 
     // Seed paired receiver in registry
     let entry = michi_receivers::ReceiverRegistryEntry {
         receiver_id: rec_id.to_string(),
-        michi_id: Some("1_fKPrJgtUmrEczOhMdMV_k4s-VaDE1Hfg_65xhp8F4".to_string()),
+        michi_id: Some(mock_michi_id.clone()),
         name: "Already Paired Receiver".to_string(),
         base_url: mock_url.clone(),
         paired: true,
@@ -9318,7 +9443,7 @@ async fn test_pair_start_with_re_pair_flag_allows_re_pairing_already_paired_rece
     let res_fail: serde_json::Value = serde_json::from_slice(&bytes_fail).unwrap();
     assert_eq!(res_fail["error"]["code"], "ALREADY_PAIRED");
 
-    // Attempt with re_pair: true -> proceeds and starts pairing successfully
+    // Attempt with re_pair: true -> proceeds and authenticates successfully via Trust Architecture V2
     let req_ok = Request::builder()
         .method("POST")
         .uri("/api/v1/receivers/pair/start")
@@ -9337,8 +9462,9 @@ async fn test_pair_start_with_re_pair_flag_allows_re_pairing_already_paired_rece
         .await
         .unwrap();
     let res_ok: serde_json::Value = serde_json::from_slice(&bytes_ok).unwrap();
-    assert_eq!(res_ok["status"], "pending_confirmation");
-    assert_eq!(res_ok["receiver_pair_session_id"], "mock-pair-sess-1");
+    assert_eq!(res_ok["status"], "authenticated");
+    assert_eq!(res_ok["authenticated"], true);
+    assert_eq!(res_ok["receiver_id"], rec_id);
 
     handle.abort();
 }

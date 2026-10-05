@@ -717,8 +717,8 @@ class TestWebUIActionContractsComprehensive:
         WEBUI-ACT-ML-002: michilink.self_test (GET /api/v1/link/self-test)
         WEBUI-ACT-ML-003: michilink.device_revoke (POST /api/v1/devices/revoke)
         WEBUI-ACT-RX-001: receivers.discover (POST /api/v1/devices/discover)
-        WEBUI-ACT-RX-002: receivers.pair_start (POST /api/v1/receivers/pair/start)
-        WEBUI-ACT-RX-003: receivers.pair_confirm (POST /api/v1/receivers/pair/confirm)
+        WEBUI-ACT-RX-002: receivers.auth (POST /api/v1/receivers/:id/auth)
+        WEBUI-ACT-RX-003: home.revoke (POST /api/v1/home/revoke)
         """
         opener, _ = _authenticated_opener()
         # QR
@@ -743,14 +743,14 @@ class TestWebUIActionContractsComprehensive:
         status, _ = _post(opener, "/api/v1/devices/discover", {})
         assert status == 200
 
-        # Pair start / confirm
+        # Receiver auth / Home revoke
         try:
-            _post(opener, "/api/v1/receivers/pair/start", {"base_url": "http://127.0.0.1:9999"})
+            _post(opener, f"/api/v1/receivers/{fake_id}/auth", {})
         except urllib.error.HTTPError as e:
             assert e.code in (400, 404, 422)
 
         try:
-            _post(opener, "/api/v1/receivers/pair/confirm", {"pairing_id": fake_id, "pin": "000000"})
+            _post(opener, "/api/v1/home/revoke", {"michi_id": fake_id, "reason": "contract_test"})
         except urllib.error.HTTPError as e:
             assert e.code in (400, 404, 422)
 

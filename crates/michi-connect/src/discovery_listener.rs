@@ -319,7 +319,7 @@ impl WhiskerDiscoveryListener {
                     })
                     .collect();
 
-                self.scent.observe_signed(
+                self.scent.observe_signed_with_home(
                     michi_id,
                     announce.device_id,
                     announce.name,
@@ -327,6 +327,8 @@ impl WhiskerDiscoveryListener {
                     roles_str,
                     Some(source),
                     now,
+                    announce.michi_home_id,
+                    announce.membership_fingerprint,
                 );
                 true
             }
@@ -434,6 +436,8 @@ mod tests {
             host: "192.168.1.50".into(),
             port: 8080,
             features: make_test_features("pcm_s16le"),
+            michi_home_id: None,
+            membership_fingerprint: None,
         };
 
         let announce = engine
@@ -469,6 +473,8 @@ mod tests {
             host: "192.168.1.51".into(),
             port: 8080,
             features: make_test_features("pcm_s16le"),
+            michi_home_id: None,
+            membership_fingerprint: None,
         };
 
         let mut announce = engine
@@ -507,6 +513,8 @@ mod tests {
             host: "192.168.1.52".into(),
             port: 8080,
             features: make_test_features("pcm_s16le"),
+            michi_home_id: None,
+            membership_fingerprint: None,
         };
 
         let announce = engine
@@ -542,6 +550,8 @@ mod tests {
             host: "192.168.1.10".into(),
             port: 9090,
             features: make_test_features("flac"),
+            michi_home_id: None,
+            membership_fingerprint: None,
         };
 
         let announce = engine

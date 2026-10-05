@@ -51,12 +51,10 @@ window.computeBytesSha256 = computeBytesSha256;
 window.toggleShuffle    = toggleShuffle;
 window.toggleRepeat     = toggleRepeat;
 window.discoverDevices  = discoverDevices;
-window.ReceiverPairingState  = ReceiverPairingState;
-window.openReceiverPairModal = openReceiverPairModal;
-window.closeReceiverPairModal = closeReceiverPairModal;
-window.proceedToPairingPin   = proceedToPairingPin;
-window.submitReceiverPairPin = submitReceiverPairPin;
-window.formatPairTimer       = formatPairTimer;
+window.authenticateReceiver  = authenticateReceiver;
+window.revokeDevicePrompt    = revokeDevicePrompt;
+window.loadHomeTrustInfo     = loadHomeTrustInfo;
+window.refreshHomeRoster     = refreshHomeRoster;
 window.handleSearch     = handleSearch;
 window.toggleStar       = toggleStar;
 window.reevaluateCurrentSectionAccess = reevaluateCurrentSectionAccess;
@@ -429,44 +427,18 @@ function createDOM() {
   stabDevices.innerHTML = '<span id="discovery-status-badge" class="discovery-status-badge discovery-status-badge--unavailable"><span class="discovery-status-dot"></span><span id="discovery-status-text">Discovery unavailable</span></span>';
   doc.body.appendChild(stabDevices);
 
-  const pairModal = el('div', 'receiver-pair-modal');
-  pairModal.classList.add('hidden');
-  const pairModalTitle = el('div', 'pair-modal-title');
-  const stepButton = el('div', 'pair-step-button');
-  const stepButtonDesc = el('p', 'pair-step-button-desc');
-  stepButtonDesc.textContent = 'Press and hold the button on your Michi Music Stream for 5 seconds until the status indicator starts flashing.';
-  const btnPairReady = el('button', 'btn-pair-ready');
-  btnPairReady.textContent = 'Continue';
-  stepButton.appendChild(stepButtonDesc);
-  stepButton.appendChild(btnPairReady);
-
-  const stepPin = el('div', 'pair-step-pin');
-  stepPin.classList.add('hidden');
-  const pinInput = el('input', 'pair-pin-input');
-  const pinTimerVal = el('span', 'pair-timer-val');
-  const pinError = el('div', 'pair-pin-error');
-  const btnPairConfirm = el('button', 'btn-pair-confirm');
-  stepPin.appendChild(pinInput);
-  stepPin.appendChild(pinTimerVal);
-  stepPin.appendChild(pinError);
-  stepPin.appendChild(btnPairConfirm);
-
-  const stepSuccess = el('div', 'pair-step-success');
-  stepSuccess.classList.add('hidden');
-  const successTitle = el('p', 'pair-success-title');
-  const successMsg = el('p', 'pair-success-message');
-  const btnPairDone = el('button', 'btn-pair-done');
-  btnPairDone.textContent = 'Done';
-  stepSuccess.appendChild(successTitle);
-  stepSuccess.appendChild(successMsg);
-  stepSuccess.appendChild(btnPairDone);
-
-  pairModal.appendChild(pairModalTitle);
-  pairModal.appendChild(stepButton);
-  pairModal.appendChild(stepPin);
-  pairModal.appendChild(stepSuccess);
-
-  doc.body.appendChild(pairModal);
+  const homePanel = el('div', 'home-trust-panel');
+  const homeBadge = el('span', 'home-trust-badge');
+  const homeIdVal = el('span', 'home-id-val');
+  const homeRootPkVal = el('span', 'home-root-pk-val');
+  const homeRoleVal = el('span', 'home-server-role-val');
+  const homeRosterList = el('div', 'home-roster-list');
+  homePanel.appendChild(homeBadge);
+  homePanel.appendChild(homeIdVal);
+  homePanel.appendChild(homeRootPkVal);
+  homePanel.appendChild(homeRoleVal);
+  homePanel.appendChild(homeRosterList);
+  doc.body.appendChild(homePanel);
   doc.body.appendChild(el('span', 'devices-last-updated'));
 
   doc.body.appendChild(pageSettings);
@@ -552,9 +524,13 @@ function makeSandbox({ window, document, fetchImpl = null, showToastImpl = null 
     Promise:            globalThis.Promise,
     JSON:               globalThis.JSON,
     Error:              globalThis.Error,
-    showToast: showToastImpl || (() => {}),
+    confirm:            (msg) => true,
+    lastToast:          null,
+    showToast: showToastImpl || ((msg, isError) => { sandbox.lastToast = { msg, isError }; }),
     fetch:     effectiveFetch,
   };
+  window.confirm = sandbox.confirm;
+  window.showToast = sandbox.showToast;
   return { sandbox, window, document };
 }
 
@@ -1385,12 +1361,12 @@ async function runE2E() {
     assert(html.includes('Refresh Devices') && html.includes('device-empty-icon'), 'UX TEST 3: Empty state contains stream icon and refresh button');
   }
 
-  // 4. Unpaired device with pairable: true renders enabled Pair button
+  // 4. Unauthenticated device with presence: verified_online renders enabled Authenticate button
   {
     const fetchImpl = async (url) => {
       if (url.includes('/api/v1/devices/discover')) {
         return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
-          receivers: [{ receiver_id: 'rx-pairable', name: 'Pairable Stream', paired: false, pairable: true }]
+          receivers: [{ receiver_id: 'rx-pairable', name: 'Verified Stream', presence: 'verified_online', authenticated: false }]
         }) };
       }
       return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
@@ -1401,16 +1377,16 @@ async function runE2E() {
     window.AuthSession.state = 'authenticated';
 
     await window.discoverDevices();
-    const pairBtn = document.querySelector('.action-pair[data-receiver-id="rx-pairable"]');
-    assert(pairBtn && !pairBtn.disabled, 'UX TEST 4: pairable=true renders enabled Pair button');
+    const authBtn = document.querySelector('.action-auth-device[data-receiver-id="rx-pairable"]');
+    assert(authBtn && !authBtn.disabled, 'UX TEST 4: presence=verified_online renders enabled Authenticate button');
   }
 
-  // 5. Unpaired device with pairable: false renders disabled Pair button
+  // 5. Unauthenticated device with presence: offline renders disabled Authenticate button
   {
     const fetchImpl = async (url) => {
       if (url.includes('/api/v1/devices/discover')) {
         return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
-          receivers: [{ receiver_id: 'rx-unpairable', name: 'Unpairable Stream', paired: false, pairable: false }]
+          receivers: [{ receiver_id: 'rx-unpairable', name: 'Offline Stream', presence: 'offline', authenticated: false }]
         }) };
       }
       return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
@@ -1421,16 +1397,16 @@ async function runE2E() {
     window.AuthSession.state = 'authenticated';
 
     await window.discoverDevices();
-    const pairBtn = document.querySelector('.action-pair[data-receiver-id="rx-unpairable"]');
-    assert(pairBtn && pairBtn.disabled, 'UX TEST 5: pairable=false renders disabled Pair button');
+    const authBtn = document.querySelector('.action-auth-device[data-receiver-id="rx-unpairable"]');
+    assert(authBtn && authBtn.disabled, 'UX TEST 5: presence=offline renders disabled Authenticate button');
   }
 
-  // 6. Unpaired device with pairable omitted defaults to disabled (strict fail-closed)
+  // 6. Unauthenticated device with presence: provisional_mdns renders disabled Authenticate button
   {
     const fetchImpl = async (url) => {
       if (url.includes('/api/v1/devices/discover')) {
         return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
-          receivers: [{ receiver_id: 'rx-omit-pairable', name: 'Omitted Pairable', paired: false }]
+          receivers: [{ receiver_id: 'rx-omit-pairable', name: 'Provisional Stream', presence: 'provisional_mdns', authenticated: false }]
         }) };
       }
       return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
@@ -1441,8 +1417,8 @@ async function runE2E() {
     window.AuthSession.state = 'authenticated';
 
     await window.discoverDevices();
-    const pairBtn = document.querySelector('.action-pair[data-receiver-id="rx-omit-pairable"]');
-    assert(pairBtn && pairBtn.disabled, 'UX TEST 6: omitted pairable defaults to disabled (fail-closed)');
+    const authBtn = document.querySelector('.action-auth-device[data-receiver-id="rx-omit-pairable"]');
+    assert(authBtn && authBtn.disabled, 'UX TEST 6: provisional_mdns disables Authenticate button');
   }
 
   // 7. Paired + verified_online + qualified renders enabled Use as Output and Forget
@@ -1568,7 +1544,7 @@ async function runE2E() {
 
     await window.discoverDevices();
     const html = document.querySelector('#discover-result')?.innerHTML || '';
-    assert(html.includes('device-card__warning-text') && html.includes('Device identity could not be verified. Pairing and playback are disabled.'), 'UX TEST 12: renders warning explanation message');
+    assert(html.includes('device-card__warning-text') && html.includes('Device identity could not be verified. Authentication and playback are disabled.'), 'UX TEST 12: renders warning explanation message');
   }
 
   // 13. Paired device with identity_mismatch disables Use as Output and enables Forget
@@ -1593,12 +1569,12 @@ async function runE2E() {
     assert(unpairBtn && !unpairBtn.disabled, 'UX TEST 13: paired identity_mismatch allows Forget');
   }
 
-  // 14. Unpaired device with identity_mismatch disables Pair button
+  // 14. Unauthenticated device with identity_mismatch disables Authenticate button
   {
     const fetchImpl = async (url) => {
       if (url.includes('/api/v1/devices/discover')) {
         return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
-          receivers: [{ receiver_id: 'rx-u-conflict', name: 'Tampered Unpaired', paired: false, pairable: true, qualification: 'identity_mismatch' }]
+          receivers: [{ receiver_id: 'rx-u-conflict', name: 'Tampered Unpaired', authenticated: false, qualification: 'identity_mismatch' }]
         }) };
       }
       return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
@@ -1609,8 +1585,8 @@ async function runE2E() {
     window.AuthSession.state = 'authenticated';
 
     await window.discoverDevices();
-    const pairBtn = document.querySelector('.action-pair[data-receiver-id="rx-u-conflict"]');
-    assert(pairBtn && pairBtn.disabled, 'UX TEST 14: unpaired identity_mismatch disables Pair');
+    const authBtn = document.querySelector('.action-auth-device[data-receiver-id="rx-u-conflict"]');
+    assert(authBtn && authBtn.disabled, 'UX TEST 14: unauthenticated identity_mismatch disables Authenticate');
   }
 
   // 15. discoverDevices updates #devices-last-updated with timestamp
@@ -1664,7 +1640,7 @@ async function runE2E() {
     const fetchImpl = async (url) => {
       if (url.includes('/api/v1/devices/discover')) {
         return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
-          receivers: [{ receiver_id: 'rx-foc', name: 'Focus Stream', paired: false, pairable: true }]
+          receivers: [{ receiver_id: 'rx-foc', name: 'Focus Stream', presence: 'verified_online', authenticated: false }]
         }) };
       }
       return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
@@ -1675,44 +1651,101 @@ async function runE2E() {
     window.AuthSession.state = 'authenticated';
 
     await window.discoverDevices();
-    const btn = document.querySelector('.action-pair[data-receiver-id="rx-foc"]');
+    const btn = document.querySelector('.action-auth-device[data-receiver-id="rx-foc"]');
     document.activeElement = btn;
 
     // Mutate data slightly to force reconciliation
     window.MichiAPI.discoverDevices = async () => ({
-      receivers: [{ receiver_id: 'rx-foc', name: 'Focus Stream Updated', paired: false, pairable: true }]
+      receivers: [{ receiver_id: 'rx-foc', name: 'Focus Stream Updated', presence: 'verified_online', authenticated: false }]
     });
 
     await window.discoverDevices(true);
-    const newBtn = document.querySelector('.action-pair[data-receiver-id="rx-foc"]');
+    const newBtn = document.querySelector('.action-auth-device[data-receiver-id="rx-foc"]');
     assert(document.activeElement === newBtn, 'UX TEST 17: Focus preserved on active action button after reconciliation');
   }
 
-  // 18. openReceiverPairModal reveals modal with Step 1 and hides Step 2 and Step 3
+  // 18. authenticateReceiver calls POST /api/v1/receivers/:id/auth and refreshes devices and roster
   {
-    const { sandbox, window, document } = makeSandbox();
+    let authEndpointCalled = null;
+    let discoverCalled = false;
+    let rosterCalled = false;
+    const fetchImpl = async (url) => {
+      if (url.includes('/auth')) {
+        authEndpointCalled = url;
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ status: 'authenticated' }) };
+      }
+      if (url.includes('/devices/discover')) {
+        discoverCalled = true;
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ receivers: [] }) };
+      }
+      if (url.includes('/home/roster')) {
+        rosterCalled = true;
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ members: [] }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window } = makeSandbox({ fetchImpl });
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
 
-    window.openReceiverPairModal('rx-modal-test', 'Living Room');
-    const modal = document.querySelector('#receiver-pair-modal');
-    const step1 = document.querySelector('#pair-step-button');
-    const step2 = document.querySelector('#pair-step-pin');
-    const step3 = document.querySelector('#pair-step-success');
-
-    assert(modal && !modal.classList.contains('hidden'), 'UX TEST 18: Modal is visible');
-    assert(step1 && !step1.classList.contains('hidden'), 'UX TEST 18: Step 1 button prompt visible');
-    assert(step2 && step2.classList.contains('hidden'), 'UX TEST 18: Step 2 PIN entry hidden');
-    assert(step3 && step3.classList.contains('hidden'), 'UX TEST 18: Step 3 success hidden');
+    await window.authenticateReceiver('rx-auth-test');
+    assert(authEndpointCalled && authEndpointCalled.includes('/api/v1/receivers/rx-auth-test/auth'), 'UX TEST 18: authenticateReceiver calls auth endpoint with id');
+    assert(discoverCalled, 'UX TEST 18: authenticateReceiver refreshes devices');
+    assert(rosterCalled, 'UX TEST 18: authenticateReceiver refreshes home roster');
   }
 
-  // 19. proceedToPairingPin renders countdown timer in mm:ss format
+  // 19. authenticateReceiver displays toast on failure
   {
     const fetchImpl = async (url) => {
-      if (url.includes('/pair/start')) {
-        const exp = new Date(Date.now() + 60000).toISOString();
+      if (url.includes('/auth')) {
+        return { ok: false, status: 400, headers: { get: () => 'application/json' }, json: async () => ({ error: { message: 'Trust verification failed' } }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.authenticateReceiver('rx-err-test');
+    const toastEl = document.getElementById('toast');
+    assert(toastEl && toastEl.classList.contains('toast-error') && toastEl.textContent.includes('Authentication failed'), 'UX TEST 19: authenticateReceiver shows error toast on failure');
+  }
+
+  // 20. revokeDevicePrompt calls POST /api/v1/home/revoke on confirmation
+  {
+    let revokeCalledWith = null;
+    const fetchImpl = async (url, opts) => {
+      if (url.includes('/home/revoke')) {
+        revokeCalledWith = JSON.parse(opts.body);
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ status: 'revoked' }) };
+      }
+      if (url.includes('/devices/discover')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ receivers: [] }) };
+      }
+      if (url.includes('/home/roster')) {
+        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ members: [] }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window } = makeSandbox({ fetchImpl });
+    sandbox.confirm = () => true;
+    window.confirm = () => true;
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.revokeDevicePrompt('michi-id-test');
+    assert(revokeCalledWith && (revokeCalledWith.device_michi_id === 'michi-id-test' || revokeCalledWith.michi_id === 'michi-id-test'), 'UX TEST 20: revokeDevicePrompt calls homeRevoke API');
+  }
+
+  // 21. Authenticated device with verified_online renders Home Member badge and Use as Output
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
         return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
-          pairing_id: 'pair-sess-1', expires_at: exp
+          receivers: [{ receiver_id: 'rx-auth-badge', name: 'Member Stream', presence: 'verified_online', authenticated: true, qualification: 'qualified', michi_id: 'mid-1' }]
         }) };
       }
       return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
@@ -1720,45 +1753,21 @@ async function runE2E() {
     const { sandbox, window, document } = makeSandbox({ fetchImpl });
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
 
-    window.openReceiverPairModal('rx-timer-test', 'Test Device');
-    await window.proceedToPairingPin();
-
-    const timerVal = document.querySelector('#pair-timer-val')?.textContent || '';
-    assert(/^\d\d:\d\d$/.test(timerVal), `UX TEST 19: Timer rendered in mm:ss format (${timerVal})`);
-    window.closeReceiverPairModal();
+    await window.discoverDevices();
+    const html = document.querySelector('#discover-result')?.innerHTML || '';
+    assert(html.includes('Home Member'), 'UX TEST 21: Authenticated device displays Home Member badge');
+    assert(html.includes('action-use-output'), 'UX TEST 21: Authenticated device displays Use as Output button');
+    assert(html.includes('action-revoke-device'), 'UX TEST 21: Authenticated device displays Revoke button');
   }
 
-  // 20. submitReceiverPairPin rejects invalid PIN without calling API
-  {
-    let confirmCalled = false;
-    const fetchImpl = async (url) => {
-      if (url.includes('/pair/confirm')) {
-        confirmCalled = true;
-        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ status: 'paired' }) };
-      }
-      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
-    };
-    const { sandbox, window, document } = makeSandbox({ fetchImpl });
-    vm.createContext(sandbox);
-    vm.runInContext(jsContent, sandbox);
-
-    window.ReceiverPairingState.pairingId = 'pair-test-id';
-    const pinInput = document.querySelector('#pair-pin-input');
-    pinInput.value = '123'; // invalid length
-
-    await window.submitReceiverPairPin();
-    assert(!confirmCalled, 'UX TEST 20: Short PIN rejected without API request');
-    const pinErr = document.querySelector('#pair-pin-error')?.textContent || '';
-    assert(pinErr.includes('Enter the six-digit code'), 'UX TEST 20: Displays validation error for invalid PIN');
-  }
-
-  // 21. submitReceiverPairPin with presence='verified_online' displays truthful verified success
+  // 22. Revoked device renders Revoked badge and Revoked in Home status
   {
     const fetchImpl = async (url) => {
-      if (url.includes('/pair/confirm')) {
+      if (url.includes('/api/v1/devices/discover')) {
         return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
-          status: 'paired', presence: 'verified_online'
+          receivers: [{ receiver_id: 'rx-rev-badge', name: 'Revoked Stream', presence: 'verified_online', revoked: true }]
         }) };
       }
       return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
@@ -1766,41 +1775,12 @@ async function runE2E() {
     const { sandbox, window, document } = makeSandbox({ fetchImpl });
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
 
-    window.ReceiverPairingState.pairingId = 'pair-verified-id';
-    const pinInput = document.querySelector('#pair-pin-input');
-    pinInput.value = '654321';
-
-    await window.submitReceiverPairPin();
-    const title = document.querySelector('#pair-success-title')?.textContent || '';
-    const msg = document.querySelector('#pair-success-message')?.textContent || '';
-    assert(title.includes('Michi Music Stream paired'), `UX TEST 21: Step 3 shows Michi Music Stream paired (${title})`);
-    assert(msg.includes('Identity verified. The receiver is ready for playback.'), `UX TEST 21: Step 3 shows verified online message (${msg})`);
-  }
-
-  // 22. submitReceiverPairPin with presence='provisional_mdns' displays truthful provisional success
-  {
-    const fetchImpl = async (url) => {
-      if (url.includes('/pair/confirm')) {
-        return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
-          status: 'paired', presence: 'provisional_mdns'
-        }) };
-      }
-      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
-    };
-    const { sandbox, window, document } = makeSandbox({ fetchImpl });
-    vm.createContext(sandbox);
-    vm.runInContext(jsContent, sandbox);
-
-    window.ReceiverPairingState.pairingId = 'pair-prov-id';
-    const pinInput = document.querySelector('#pair-pin-input');
-    pinInput.value = '112233';
-
-    await window.submitReceiverPairPin();
-    const title = document.querySelector('#pair-success-title')?.textContent || '';
-    const msg = document.querySelector('#pair-success-message')?.textContent || '';
-    assert(title.includes('Michi Music Stream paired'), `UX TEST 22: Step 3 shows Michi Music Stream paired (${title})`);
-    assert(msg.includes('Pairing completed. Waiting for signed Michi Link presence.'), `UX TEST 22: Step 3 shows truthful provisional message (${msg})`);
+    await window.discoverDevices();
+    const html = document.querySelector('#discover-result')?.innerHTML || '';
+    assert(html.includes('Revoked in Home'), 'UX TEST 22: Revoked device displays Revoked in Home status');
+    assert(html.includes('device-badge--danger') && html.includes('Revoked'), 'UX TEST 22: Revoked badge rendered');
   }
 
   // 23. Discovered · mDNS badge and provisional explanatory text rendered for provisional_mdns
@@ -1808,7 +1788,7 @@ async function runE2E() {
     const fetchImpl = async (url) => {
       if (url.includes('/api/v1/devices/discover')) {
         return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
-          receivers: [{ receiver_id: 'rx-prov-test', name: 'Provisional Stream', presence: 'provisional_mdns', paired: false, pairable: true }]
+          receivers: [{ receiver_id: 'rx-prov-test', name: 'Provisional Stream', presence: 'provisional_mdns', authenticated: false }]
         }) };
       }
       return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
@@ -1913,35 +1893,35 @@ async function runE2E() {
     assert(badge.textContent.includes('Discovery unavailable'), 'UX TEST 26: Error sets text Discovery unavailable');
   }
 
-  // 27. Step 1: Prepare Michi Music Stream wording and button Continue
+  // 27. Device card does not contain legacy action-pair or modal references
   {
-    const { sandbox, window, document } = makeSandbox();
-    vm.createContext(sandbox);
-    vm.runInContext(jsContent, sandbox);
-
-    window.openReceiverPairModal('rx-test', 'Living Room Stream');
-    const title = document.querySelector('#pair-modal-title')?.textContent || '';
-    const desc = document.querySelector('#pair-step-button-desc')?.textContent || '';
-    const readyBtn = document.querySelector('#btn-pair-ready')?.textContent || '';
-    assert(title.includes('Prepare Living Room Stream'), `UX TEST 27: Title has Prepare (${title})`);
-    assert(desc.includes('Press and hold the button on your Michi Music Stream for 5 seconds'), `UX TEST 27: Step 1 description matches canonical wording (${desc})`);
-    assert(readyBtn.includes('Continue'), `UX TEST 27: Button is Continue (${readyBtn})`);
-  }
-
-  // 28. Step 2: Enter pairing code wording + PIN validation accepts leading zeros like 000123
-  {
-    let sentPin = null;
-    const fetchImpl = async (url, opts) => {
-      if (url.includes('/pair/start')) {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/devices/discover')) {
         return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
-          pairing_id: 'sess-zeros-1', expires_at: new Date(Date.now() + 60000).toISOString()
+          receivers: [{ receiver_id: 'rx-clean', name: 'Clean Stream', presence: 'verified_online', authenticated: false }]
         }) };
       }
-      if (url.includes('/pair/confirm')) {
-        const body = JSON.parse(opts.body);
-        sentPin = body.pin;
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+    window.AuthSession.state = 'authenticated';
+
+    await window.discoverDevices();
+    const html = document.querySelector('#discover-result')?.innerHTML || '';
+    assert(!html.includes('action-pair'), 'UX TEST 27: Device cards do not contain legacy action-pair class');
+    assert(!html.includes('receiver-pair-modal'), 'UX TEST 27: Device cards do not reference receiver-pair-modal');
+  }
+
+  // 28. loadHomeTrustInfo populates Home ID and Root Authority Key
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/home/info')) {
         return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({
-          status: 'paired', presence: 'verified_online'
+          home_id: 'home-trust-uuid-1234',
+          root_authority_public_key: 'ed25519-pk-test-base64',
+          server_membership: { roles: ['root_authority', 'music_server'] }
         }) };
       }
       return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
@@ -1950,17 +1930,13 @@ async function runE2E() {
     vm.createContext(sandbox);
     vm.runInContext(jsContent, sandbox);
 
-    window.ReceiverPairingState.receiverId = 'rx-zeros';
-    await window.proceedToPairingPin();
-
-    const title = document.querySelector('#pair-modal-title')?.textContent || '';
-    assert(title.includes('Enter pairing code'), `UX TEST 28: Title changed to Enter pairing code (${title})`);
-
-    const pinInput = document.querySelector('#pair-pin-input');
-    pinInput.value = '000123'; // Leading zeros
-    await window.submitReceiverPairPin();
-
-    assert(sentPin === '000123', `UX TEST 28: PIN with leading zeros accepted and sent (${sentPin})`);
+    await window.loadHomeTrustInfo();
+    const homeIdVal = document.querySelector('#home-id-val')?.textContent || '';
+    const rootPkVal = document.querySelector('#home-root-pk-val')?.textContent || '';
+    const badge = document.querySelector('#home-trust-badge')?.textContent || '';
+    assert(homeIdVal === 'home-trust-uuid-1234', `UX TEST 28: Home ID populated (${homeIdVal})`);
+    assert(rootPkVal === 'ed25519-pk-test-base64', `UX TEST 28: Root authority key populated (${rootPkVal})`);
+    assert(badge.includes('Root Authority Active'), `UX TEST 28: Badge displays Root Authority Active (${badge})`);
   }
 
   console.log('======================================================================');
