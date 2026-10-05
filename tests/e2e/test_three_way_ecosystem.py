@@ -82,6 +82,9 @@ def main():
     spawned_procs = []
     tmp_config_dir = f"/tmp/michi_threeway_{args.micro_port}"
     os.makedirs(tmp_config_dir, exist_ok=True)
+    vector_root_seed = bytes.fromhex("c66a870d78788b4028cf21153c6a2b38efb5b0c92bcc4cfae58cc87e1f1f0377")
+    with open(os.path.join(tmp_config_dir, "home_root_authority.key"), "wb") as f:
+        f.write(vector_root_seed)
 
     try:
         # 1. Start Stream Standard Simulator
@@ -161,34 +164,20 @@ def main():
         print("  ✅ Mobile authenticated with Micro Server")
 
         # =====================================================================
-        # PHASE 3: Mobile ➔ Micro Receiver Discovery & Pairing
+        # PHASE 3: Mobile ➔ Micro Receiver Discovery & Trust V2 Authentication
         # =====================================================================
-        print("\n[Phase 3] Mobile ➔ Micro: Pairing with Stream Standard...")
+        print("\n[Phase 3] Mobile ➔ Micro: Direct Trust V2 Auth with Stream Standard...")
         std_url = f"http://127.0.0.1:{args.stream_std_port}"
         
-        # 1. Mobile requests Micro to start pairing with Stream Standard
+        # 1. Mobile requests Micro to authenticate Stream Standard via Trust Architecture V2
         status, pair_start = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/pair/start", {
             "base_url": std_url,
             "initiator_id": "mobile-client-1"
         }, headers=headers)
-        assert status == 200, f"Pair start via Micro failed: {status}, data: {pair_start}"
-        pairing_id = pair_start["pairing_id"]
-        assert pairing_id is not None
-        print(f"  ✅ Micro initiated pairing with Stream Standard (pairing_id={pairing_id})")
-
-        # 2. Query Stream Simulator test-only endpoint for active PIN (simulating user looking at receiver display)
-        status, pin_info = http_req("GET", f"{std_url}/api/v1/test/active_pin")
-        assert status == 200
-        active_pin = pin_info.get("pin", "482391")
-
-        # 3. Mobile confirms pairing through Micro Server using the PIN
-        status, pair_confirm = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/pair/confirm", {
-            "pairing_id": pairing_id,
-            "pin": active_pin
-        }, headers=headers)
-        assert status == 200, f"Pair confirm via Micro failed: {status}, data: {pair_confirm}"
-        standard_device_id = pair_confirm["device_id"]
-        print(f"  ✅ Micro paired with Stream Standard: device_id={standard_device_id}")
+        assert status == 200, f"Authentication via Micro failed: {status}, data: {pair_start}"
+        assert pair_start.get("authenticated") is True, f"Expected authenticated: True, got {pair_start}"
+        standard_device_id = pair_start["receiver_id"]
+        print(f"  ✅ Micro authenticated with Stream Standard: device_id={standard_device_id}")
 
         # Verify receiver is listed in Micro registry
         status, receivers_list = http_req("GET", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers", headers=headers)
@@ -309,26 +298,16 @@ def main():
         assert metrics_check["packets_received"] == count_at_stop, "Zero RTP packets must be transmitted after session stop"
         print("  ✅ Zero packets after session stop confirmed")
 
-        # 2. Pair with Stream Hi-Fi via Micro Server
+        # 2. Authenticate with Stream Hi-Fi via Micro Server (Trust V2)
         hifi_url = f"http://127.0.0.1:{args.stream_hifi_port}"
         status, hifi_start = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/pair/start", {
             "base_url": hifi_url,
             "initiator_id": "mobile-client-1"
         }, headers=headers)
-        assert status == 200
-        hifi_pairing_id = hifi_start["pairing_id"]
-
-        status, hifi_pin_info = http_req("GET", f"{hifi_url}/api/v1/test/active_pin")
-        assert status == 200
-        hifi_pin = hifi_pin_info.get("pin", "482391")
-
-        status, hifi_confirm = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/pair/confirm", {
-            "pairing_id": hifi_pairing_id,
-            "pin": hifi_pin
-        }, headers=headers)
-        assert status == 200
-        hifi_device_id = hifi_confirm["device_id"]
-        print(f"  ✅ Paired with Hi-Fi receiver: device_id={hifi_device_id}")
+        assert status == 200, f"Hi-Fi auth failed: {status}, data: {hifi_start}"
+        assert hifi_start.get("authenticated") is True, f"Expected authenticated: True, got {hifi_start}"
+        hifi_device_id = hifi_start["receiver_id"]
+        print(f"  ✅ Authenticated with Hi-Fi receiver via Trust V2: device_id={hifi_device_id}")
 
         # 3. Start session on Hi-Fi via Micro Server
         status, hifi_sess = http_req("POST", f"http://127.0.0.1:{args.micro_port}/api/v1/receivers/{hifi_device_id}/session/start", {
