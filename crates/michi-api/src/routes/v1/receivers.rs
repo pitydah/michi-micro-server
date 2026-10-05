@@ -626,7 +626,9 @@ pub async fn receiver_pair_start_handler(
                 return Err(v1_error(
                     StatusCode::UNAUTHORIZED,
                     "STREAM_AUTH_FAILED",
-                    &format!("Music Stream authentication failed under Michi Trust Architecture V2: {e}"),
+                    &format!(
+                        "Music Stream authentication failed under Michi Trust Architecture V2: {e}"
+                    ),
                 ));
             }
         }

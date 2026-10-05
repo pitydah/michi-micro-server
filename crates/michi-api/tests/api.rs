@@ -8742,49 +8742,57 @@ async fn spawn_test_mock_receiver_v2(
         )
         .route(
             "/api/v1/auth/challenge",
-            post(move |axum::Json(_req): axum::Json<michi_identity::types::DeviceAuthChallengeRequest>| {
-                let m = chal_michi_id.clone();
-                let pk = chal_pub_key.clone();
-                async move {
-                    axum::Json(michi_identity::types::DeviceAuthChallengeResponse {
-                        challenge_id: uuid::Uuid::new_v4(),
-                        challenge_nonce: "mock-nonce-12345678901234567890".to_string(),
-                        server_michi_id: m,
-                        server_public_key: pk,
-                        expires_in: 60,
-                    })
-                }
-            }),
+            post(
+                move |axum::Json(_req): axum::Json<
+                    michi_identity::types::DeviceAuthChallengeRequest,
+                >| {
+                    let m = chal_michi_id.clone();
+                    let pk = chal_pub_key.clone();
+                    async move {
+                        axum::Json(michi_identity::types::DeviceAuthChallengeResponse {
+                            challenge_id: uuid::Uuid::new_v4(),
+                            challenge_nonce: "mock-nonce-12345678901234567890".to_string(),
+                            server_michi_id: m,
+                            server_public_key: pk,
+                            expires_in: 60,
+                        })
+                    }
+                },
+            ),
         )
         .route(
             "/api/v1/auth/session",
-            post(move |axum::Json(req): axum::Json<michi_identity::types::DeviceAuthSessionRequest>| {
-                let sk = sess_sk.clone();
-                let m = sess_michi_id.clone();
-                let hid = sess_home_id.clone();
-                let memb = (*sess_membership).clone();
-                async move {
-                    let session_token = "mock-token-xyz-12345".to_string();
-                    let payload = michi_identity::home::server_auth_confirm_payload(
-                        &hid,
-                        &m,
-                        &req.client_michi_id,
-                        &req.challenge_id.to_string(),
-                        &session_token,
-                    );
-                    let sig = sk.sign(&payload);
-                    let server_signature = michi_identity::encode_base64url(&sig.to_bytes());
+            post(
+                move |axum::Json(req): axum::Json<
+                    michi_identity::types::DeviceAuthSessionRequest,
+                >| {
+                    let sk = sess_sk.clone();
+                    let m = sess_michi_id.clone();
+                    let hid = sess_home_id.clone();
+                    let memb = (*sess_membership).clone();
+                    async move {
+                        let session_token = "mock-token-xyz-12345".to_string();
+                        let payload = michi_identity::home::server_auth_confirm_payload(
+                            &hid,
+                            &m,
+                            &req.client_michi_id,
+                            &req.challenge_id.to_string(),
+                            &session_token,
+                        );
+                        let sig = sk.sign(&payload);
+                        let server_signature = michi_identity::encode_base64url(&sig.to_bytes());
 
-                    axum::Json(michi_identity::types::DeviceAuthSessionResponse {
-                        session_token,
-                        token_type: "Bearer".to_string(),
-                        expires_in: 86400,
-                        server_michi_id: m,
-                        server_membership: memb,
-                        server_signature,
-                    })
-                }
-            }),
+                        axum::Json(michi_identity::types::DeviceAuthSessionResponse {
+                            session_token,
+                            token_type: "Bearer".to_string(),
+                            expires_in: 86400,
+                            server_michi_id: m,
+                            server_membership: memb,
+                            server_signature,
+                        })
+                    }
+                },
+            ),
         );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -9401,8 +9409,7 @@ async fn test_pair_start_with_re_pair_flag_allows_re_pairing_already_paired_rece
     let (app, _pool, state) = make_app_with_state().await;
 
     let rec_id = "550e8400-e29b-41d4-a716-446655440077";
-    let (mock_url, mock_michi_id, handle) =
-        spawn_test_mock_receiver_v2(&state, rec_id).await;
+    let (mock_url, mock_michi_id, handle) = spawn_test_mock_receiver_v2(&state, rec_id).await;
 
     // Seed paired receiver in registry
     let entry = michi_receivers::ReceiverRegistryEntry {
