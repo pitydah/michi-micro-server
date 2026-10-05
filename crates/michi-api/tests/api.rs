@@ -9016,6 +9016,67 @@ async fn test_receiver_pair_start_gating_identity_mismatch_and_already_paired() 
 }
 
 #[tokio::test]
+async fn test_receiver_music_stream_profile_requires_trust_v2_zero_fallback() {
+    use axum::http::StatusCode;
+    use axum::routing::get;
+
+    // Start a mock server exposing Music Stream profile (service: michi-stream-standard)
+    let mock_stream = axum::Router::new().route(
+        "/api/v1/server/info",
+        get(|| async {
+            axum::Json(serde_json::json!({
+                "service": "michi-stream-standard",
+                "name": "Living Room Stream",
+                "version": "0.3.0",
+                "api_version": "v1-lite",
+                "roles": ["audio_receiver"],
+                "auth": {
+                    "required": true,
+                    "strategy": "HOME_MEMBERSHIP",
+                    "token_refresh": false
+                },
+                "audio": {
+                    "codecs": ["pcm_s16le"],
+                    "sample_rates": [48000],
+                    "bit_depths": [16],
+                    "channels": [2],
+                    "transports": ["rtp_udp"]
+                }
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, mock_stream).await.unwrap();
+    });
+
+    let (app, _pool, _state) = make_app_with_state().await;
+
+    // Attempting pair_start without Home configured MUST return STREAM_AUTH_REQUIRED (zero fallback to RECEIVER_BUTTON)
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/receivers/pair/start")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "base_url": format!("http://127.0.0.1:{port}")
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let err: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(err["error"]["code"], "STREAM_AUTH_FAILED");
+}
+
+
+#[tokio::test]
 async fn test_receivers_api_presence_consistency_and_anti_elevation() {
     let (app, _pool, state) = make_app_with_state().await;
 

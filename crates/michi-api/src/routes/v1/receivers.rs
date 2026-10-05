@@ -593,7 +593,37 @@ pub async fn receiver_pair_start_handler(
         ));
     };
 
-    if state.receiver_manager.home_id().await.is_some() {
+    // Music Stream profile detection: Music Stream receivers require Trust Architecture V2
+    let is_music_stream = {
+        let check_client = michi_receivers::ReceiverClient::with_identity(
+            &target_base_url,
+            state.identity.clone(),
+        );
+        match check_client.get_info().await {
+            Ok(info) => {
+                info.service
+                    .as_deref()
+                    .map_or(false, |s| s.starts_with("michi-stream"))
+                    || info
+                        .auth
+                        .as_ref()
+                        .and_then(|a| a.get("strategy"))
+                        .and_then(|s| s.as_str())
+                        == Some("HOME_MEMBERSHIP")
+            }
+            Err(_) => false,
+        }
+    };
+
+    if is_music_stream || state.receiver_manager.home_id().await.is_some() {
+        if state.receiver_manager.home_id().await.is_none() {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "STREAM_AUTH_REQUIRED",
+                "Music Stream receivers require Michi Trust Architecture V2 mutual authentication (HOME_MEMBERSHIP); legacy pair_start/RECEIVER_BUTTON is retired and not available as fallback. Please configure a Home first.",
+            ));
+        }
+
         match state
             .receiver_manager
             .authenticate_url(&target_base_url)
@@ -995,6 +1025,49 @@ pub async fn reconcile_unrecovered_pairings(state: &AppState) -> Result<usize, S
             &journal.base_url,
             state.identity.clone(),
         );
+
+        // Music Stream receivers use Michi Trust Architecture V2 mutual reauthentication, not legacy pair_recover
+        let is_stream = match client.get_info().await {
+            Ok(ref info) => {
+                info.service
+                    .as_deref()
+                    .map_or(false, |s| s.starts_with("michi-stream"))
+                    || info
+                        .auth
+                        .as_ref()
+                        .and_then(|a| a.get("strategy"))
+                        .and_then(|s| s.as_str())
+                        == Some("HOME_MEMBERSHIP")
+            }
+            Err(_) => false,
+        };
+        if is_stream {
+            if state.receiver_manager.home_id().await.is_some() {
+                match state
+                    .receiver_manager
+                    .authenticate_url(&journal.base_url)
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = michi_db::record_pairing_journal_completed_db(
+                            &state.db,
+                            &journal.pairing_id,
+                        )
+                        .await;
+                        recovered_count += 1;
+                    }
+                    Err(e) => {
+                        let _ = michi_db::record_pairing_journal_recovery_required_db(
+                            &state.db,
+                            &journal.pairing_id,
+                            &format!("Trust V2 reauth failed: {e}"),
+                        )
+                        .await;
+                    }
+                }
+            }
+            continue;
+        }
 
         // Check remote status of the pairing session
         let status_resp = match client.pair_status(remote_session_id).await {

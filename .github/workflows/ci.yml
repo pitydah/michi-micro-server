@@ -93,7 +93,7 @@ jobs:
           toolchain: 1.88.0
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config ffmpeg
+        run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" update && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" install -y libsqlite3-dev pkg-config ffmpeg
       - name: Run Receiver Simulator E2E Integration Tests (Matrix, PIN & Fault Injection)
         run: bash scripts/test_receiver_e2e.sh 8080 8081
       - name: Record release evidence
