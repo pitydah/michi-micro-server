@@ -4102,16 +4102,17 @@ window.discoverDevices = discoverDevices;
 
 async function unpairReceiver(receiverId) {
   if (!canPerformProtectedAction()) return;
-  if (!confirm('Are you sure you want to unpair this receiver?')) return;
+  if (!confirm('Are you sure you want to forget this receiver from the local list?')) return;
   try {
     await MichiAPI.request('/api/v1/receivers/' + encodeURIComponent(receiverId), { method: 'DELETE' });
-    showToast('Receiver unpaired');
+    showToast('Receiver removed');
     discoverDevices();
   } catch (e) {
     showToast('Failed to unpair: ' + e.message, true);
   }
 }
 window.unpairReceiver = unpairReceiver;
+window.forgetReceiver = unpairReceiver;
 
 async function selectOutputTarget(type, id) {
   try {
@@ -4155,6 +4156,7 @@ async function revokeDevicePrompt(michiId) {
 window.revokeDevicePrompt = revokeDevicePrompt;
 
 async function loadHomeTrustInfo() {
+  var badgeEl = $('#home-trust-badge');
   try {
     var info = await MichiAPI.homeInfo();
     var hidEl = $('#home-id-val');
@@ -4166,8 +4168,24 @@ async function loadHomeTrustInfo() {
       var roles = (info.server_membership && info.server_membership.roles) ? info.server_membership.roles.join(', ') : 'Server';
       hroleEl.textContent = roles;
     }
+    if (badgeEl) {
+      if (info && info.home_id && info.root_authority_public_key) {
+        badgeEl.className = 'badge badge-success';
+        badgeEl.textContent = 'Root Authority Active';
+      } else if (info && (info.home_id || info.root_authority_public_key)) {
+        badgeEl.className = 'badge badge-warning';
+        badgeEl.textContent = 'Authority Misconfigured';
+      } else {
+        badgeEl.className = 'badge badge-warning';
+        badgeEl.textContent = 'Authority Initializing';
+      }
+    }
   } catch (err) {
     console.warn('Failed to load Home Trust info:', err);
+    if (badgeEl) {
+      badgeEl.className = 'badge badge-danger';
+      badgeEl.textContent = 'Authority Unavailable';
+    }
   }
 }
 window.loadHomeTrustInfo = loadHomeTrustInfo;
@@ -4175,6 +4193,18 @@ window.loadHomeTrustInfo = loadHomeTrustInfo;
 async function refreshHomeRoster() {
   var listEl = $('#home-roster-list');
   if (!listEl) return;
+  if (!listEl.__michi_revoke_bound) {
+    listEl.__michi_revoke_bound = true;
+    listEl.addEventListener('click', function(ev) {
+      var revokeBtn = ev.target.closest ? ev.target.closest('.action-revoke-device') : null;
+      if (revokeBtn && !revokeBtn.disabled) {
+        var mid = revokeBtn.getAttribute('data-michi-id');
+        if (mid) {
+          revokeDevicePrompt(mid);
+        }
+      }
+    });
+  }
   try {
     var rosterRes = await MichiAPI.homeRoster();
     var revocationsRes = await MichiAPI.homeRevocations();
