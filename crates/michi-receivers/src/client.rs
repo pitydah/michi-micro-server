@@ -306,6 +306,35 @@ impl ReceiverClient {
         Ok(())
     }
 
+    /// Push a signed revocation record to the receiver (POST /api/v1/home/revocations).
+    pub async fn push_revocation(
+        &self,
+        revocation: &michi_identity::types::HomeDeviceRevocationDto,
+    ) -> Result<(), ReceiverClientError> {
+        let url = format!("{}/api/v1/home/revocations", self.base_url);
+        let mut req = self.client.post(&url).json(revocation);
+        if let Some(ref token) = self.token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await.map_err(|e| {
+            if e.is_timeout() {
+                ReceiverClientError::Timeout
+            } else {
+                ReceiverClientError::Offline(e.to_string())
+            }
+        })?;
+        let status = resp.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            let body = resp.text().await.unwrap_or_default();
+            Err(ReceiverClientError::from_response_parts(
+                status.as_u16(),
+                &body,
+            ))
+        }
+    }
+
     /// POST /api/v1/pair/start (canonical) with Ed25519 challenge signature over RAW nonce bytes
     pub async fn pair_start(&mut self, _initiator_id: &str) -> Result<PairStartResponse, String> {
         let (michi_id, public_key, challenge_nonce, challenge_signature) =

@@ -1027,6 +1027,7 @@ document.addEventListener('keydown', function (e) {
     closeModal();
     closeAuthModal();
     closeTrackDetailModal();
+    closeReceiverDiagnosticsModal();
   }
 });
 
@@ -3590,13 +3591,19 @@ async function discoverDevices(silent) {
               revokeDevicePrompt(mid);
               return;
             }
+            var diagBtn = ev.target.closest ? ev.target.closest('.action-diagnostics') : null;
+            if (diagBtn && !diagBtn.disabled) {
+              var id = diagBtn.getAttribute('data-receiver-id');
+              openReceiverDiagnostics(id);
+              return;
+            }
             var outputBtn = ev.target.closest ? ev.target.closest('.action-use-output') : null;
             if (outputBtn && !outputBtn.disabled) {
               var id = outputBtn.getAttribute('data-receiver-id');
               selectOutputTarget('receiver', id);
               return;
             }
-            var unpairBtn = ev.target.closest ? ev.target.closest('.action-unpair') : null;
+            var unpairBtn = ev.target.closest ? (ev.target.closest('.action-forget') || ev.target.closest('.action-unpair')) : null;
             if (unpairBtn && !unpairBtn.disabled) {
               var id = unpairBtn.getAttribute('data-receiver-id');
               unpairReceiver(id);
@@ -3658,14 +3665,16 @@ async function discoverDevices(silent) {
             presenceText = 'Revoked in Home';
             actionsHtml = '<div class="device-card__actions">' +
               '<span class="device-badge device-badge--danger">Revoked</span>' +
-              '<button class="btn btn-sm btn-ghost action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
+              '<button class="btn btn-sm btn-ghost action-diagnostics" data-receiver-id="' + esc(receiverId) + '">Diagnostics</button>' +
+              '<button class="btn btn-sm btn-ghost action-forget action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
               '</div>';
           } else if (isAuthenticated) {
             if (isIdentityMismatch) {
               actionsHtml = '<div class="device-card__actions">' +
                 '<span class="device-badge device-badge--danger">Identity Conflict</span>' +
                 '<button class="btn btn-sm btn-primary action-use-output" data-receiver-id="' + esc(receiverId) + '" disabled title="Output blocked due to identity conflict">Use as Output</button>' +
-                '<button class="btn btn-sm btn-ghost action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
+                '<button class="btn btn-sm btn-ghost action-diagnostics" data-receiver-id="' + esc(receiverId) + '">Diagnostics</button>' +
+                '<button class="btn btn-sm btn-ghost action-forget action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
                 '</div>';
             } else {
               var canUseOutput = (presence === 'verified_online') && (qualification === 'qualified');
@@ -3675,8 +3684,9 @@ async function discoverDevices(silent) {
                 '<button class="btn btn-sm btn-primary action-use-output" data-receiver-id="' + esc(receiverId) + '"' +
                   (canUseOutput ? '' : ' disabled title="Device must be verified online and qualified to use as output"') +
                 '>Use as Output</button>' +
+                '<button class="btn btn-sm btn-ghost action-diagnostics" data-receiver-id="' + esc(receiverId) + '">Diagnostics</button>' +
                 (d.michi_id ? '<button class="btn btn-sm btn-ghost action-revoke-device" data-michi-id="' + esc(d.michi_id) + '">Revoke</button>' : '') +
-                '<button class="btn btn-sm btn-ghost action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
+                '<button class="btn btn-sm btn-ghost action-forget action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
                 '</div>';
             }
           } else {
@@ -3684,6 +3694,8 @@ async function discoverDevices(silent) {
               actionsHtml = '<div class="device-card__actions">' +
                 '<span class="device-badge device-badge--offline">Unauthenticated</span>' +
                 '<button class="btn btn-sm btn-primary action-auth-device" data-receiver-id="' + esc(receiverId) + '" disabled title="Authentication blocked due to identity conflict">Authenticate</button>' +
+                '<button class="btn btn-sm btn-ghost action-diagnostics" data-receiver-id="' + esc(receiverId) + '">Diagnostics</button>' +
+                '<button class="btn btn-sm btn-ghost action-forget action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
                 '</div>';
             } else {
               actionsHtml = '<div class="device-card__actions">' +
@@ -3691,6 +3703,8 @@ async function discoverDevices(silent) {
                 '<button class="btn btn-sm btn-primary action-auth-device" data-receiver-id="' + esc(receiverId) + '" data-name="' + esc(name) + '"' +
                   (isOnline ? '' : ' disabled title="Device must be online to authenticate"') +
                 '>Authenticate</button>' +
+                '<button class="btn btn-sm btn-ghost action-diagnostics" data-receiver-id="' + esc(receiverId) + '">Diagnostics</button>' +
+                '<button class="btn btn-sm btn-ghost action-forget action-unpair" data-receiver-id="' + esc(receiverId) + '">Forget</button>' +
                 '</div>';
             }
           }
@@ -3823,6 +3837,51 @@ async function revokeDevicePrompt(michiId) {
   }
 }
 window.revokeDevicePrompt = revokeDevicePrompt;
+
+async function openReceiverDiagnostics(receiverId) {
+  var overlay = $('#receiver-diagnostics-modal');
+  var body = $('#rd-modal-body');
+  if (!overlay || !body) return;
+  body.innerHTML = '<div style="text-align:center;padding:24px 0;color:var(--text-dim)">Loading receiver telemetry & diagnostics...</div>';
+  overlay.classList.remove('hidden');
+
+  try {
+    var data = await MichiAPI.request('/api/v1/receivers/' + encodeURIComponent(receiverId));
+    var rec = data && (data.receiver || data);
+    var rows = [
+      ['Receiver ID', rec.receiver_id || rec.id || receiverId],
+      ['Michi ID', rec.michi_id || 'None'],
+      ['Name', rec.name || 'Unknown'],
+      ['Device Type', rec.device_type || 'Standard'],
+      ['Endpoint / Base URL', rec.base_url || rec.host || 'Unavailable'],
+      ['Presence State', rec.presence || (rec.online ? 'Online' : 'Offline')],
+      ['Home Trust', rec.revoked ? 'Revoked' : (rec.authenticated ? 'Authenticated Member' : 'Unauthenticated')],
+      ['Home ID', rec.michi_home_id || '--'],
+      ['Qualification', rec.qualification || '--'],
+      ['Max Sample Rate', rec.max_sample_rate ? (rec.max_sample_rate + ' Hz') : '--'],
+      ['Max Bit Depth', rec.max_bit_depth ? (rec.max_bit_depth + '-bit') : '--'],
+      ['Codecs', Array.isArray(rec.supported_codecs) ? rec.supported_codecs.join(', ') : '--'],
+      ['Active Session', rec.active_session_id || (rec.session_active ? 'Active' : 'None')],
+      ['Last Seen', rec.last_seen ? formatRelativeTime(rec.last_seen) : '--']
+    ];
+
+    var html = '<div class="panel" style="margin-top:8px">';
+    rows.forEach(function (r) {
+      html += '<div class="panel-row"><span class="panel-label">' + esc(r[0]) + '</span><span class="panel-mono" style="word-break:break-all">' + esc(String(r[1])) + '</span></div>';
+    });
+    html += '</div>';
+    body.innerHTML = html;
+  } catch (err) {
+    body.innerHTML = '<div class="alert alert-danger" style="margin-top:8px">Failed to load diagnostics: ' + esc(err.message || String(err)) + '</div>';
+  }
+}
+window.openReceiverDiagnostics = openReceiverDiagnostics;
+
+function closeReceiverDiagnosticsModal() {
+  var overlay = $('#receiver-diagnostics-modal');
+  if (overlay) overlay.classList.add('hidden');
+}
+window.closeReceiverDiagnosticsModal = closeReceiverDiagnosticsModal;
 
 async function loadHomeTrustInfo() {
   var badgeEl = $('#home-trust-badge');

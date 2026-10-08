@@ -111,6 +111,17 @@ impl ReceiverDiscoveryBridge {
             } else {
                 "standard".to_string()
             };
+            if !entry.authenticated && !entry.revoked {
+                let mgr = self.receiver_manager.clone();
+                let mid = record.michi_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = mgr.authenticate_receiver(&mid).await {
+                        debug!("Auto-auth for updated receiver {} deferred: {}", mid, e);
+                    } else {
+                        info!("Auto-auth completed successfully for receiver {}", mid);
+                    }
+                });
+            }
         } else {
             // Check if there is an entry by device_id or legacy ID
             let mut found_legacy = false;

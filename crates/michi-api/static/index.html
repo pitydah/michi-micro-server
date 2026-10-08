@@ -1058,6 +1058,17 @@
         </div>
     </div>
 
+    <!-- Receiver Diagnostics Modal -->
+    <div class="modal-overlay hidden" id="receiver-diagnostics-modal" onclick="closeReceiverDiagnosticsModal()">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="rd-modal-title" onclick="event.stopPropagation()" style="max-width:540px">
+            <h2 id="rd-modal-title">Receiver Diagnostics</h2>
+            <div id="rd-modal-body" style="font-size:.82rem;line-height:1.6;margin:16px 0;max-height:60vh;overflow-y:auto"></div>
+            <div class="modal-actions" id="rd-modal-actions">
+                <button class="btn btn-ghost" onclick="closeReceiverDiagnosticsModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
     <script src="/static/app.js?v=__MICHI_ASSET_HASH__"></script>
 </body>
 </html>

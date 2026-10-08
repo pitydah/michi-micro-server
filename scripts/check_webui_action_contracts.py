@@ -42,6 +42,7 @@ ALLOWED_UI_HELPERS = {
     "closeAuthModal",
     "closeChainDetail",
     "closeTrackDetailModal",
+    "closeReceiverDiagnosticsModal",
     "openAuthModal",
     "showCreateChain",
     "hideCreateChain",

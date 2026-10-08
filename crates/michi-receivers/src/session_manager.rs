@@ -7,6 +7,7 @@ use crate::client::ReceiverClient;
 use crate::models::*;
 use crate::session_supervisor::ReceiverClientError;
 use crate::transport::{AudioTransport, RtpReceiverTransport, TransportStreamConfig};
+use tracing::{debug, info};
 
 pub type SharedAudioTransport = Arc<tokio::sync::Mutex<Box<dyn AudioTransport>>>;
 
@@ -424,6 +425,30 @@ impl ReceiverSessionManager {
             }
         }
 
+        // Reconcile revocations to the freshly authenticated receiver
+        let current_revs = self.get_revocations().await;
+        if !current_revs.is_empty() {
+            let base_url = {
+                let reg = self.registry.read().await;
+                reg.get(receiver_id).map(|e| e.base_url.clone())
+            };
+            if let Some(b_url) = base_url {
+                let client = if let Some(ref id_mgr) = self.identity {
+                    ReceiverClient::with_identity(&b_url, id_mgr.clone())
+                } else {
+                    ReceiverClient::new(&b_url)
+                };
+                let r_id = receiver_id.to_string();
+                tokio::spawn(async move {
+                    for rev in current_revs {
+                        if let Err(e) = client.push_revocation(&rev).await {
+                            debug!(receiver_id = %r_id, error = %e, "Reconciliation revocation push deferred");
+                        }
+                    }
+                });
+            }
+        }
+
         Ok(info)
     }
 
@@ -517,6 +542,34 @@ impl ReceiverSessionManager {
 
         for rid in receiver_ids_to_stop {
             let _ = self.stop_session(&rid).await;
+        }
+
+        // Push revocation to all active/online receivers in the home
+        let online_targets: Vec<(String, String)> = {
+            let reg = self.registry.read().await;
+            reg.receivers
+                .iter()
+                .filter(|(_, e)| {
+                    !e.revoked && e.presence != ReceiverPresence::Offline && !e.base_url.is_empty()
+                })
+                .map(|(id, e)| (id.clone(), e.base_url.clone()))
+                .collect()
+        };
+
+        for (id, base_url) in online_targets {
+            let client = if let Some(ref id_mgr) = self.identity {
+                ReceiverClient::with_identity(&base_url, id_mgr.clone())
+            } else {
+                ReceiverClient::new(&base_url)
+            };
+            let rev_dto = revocation.clone();
+            tokio::spawn(async move {
+                if let Err(e) = client.push_revocation(&rev_dto).await {
+                    debug!(receiver_id = %id, error = %e, "Revocation push to receiver deferred");
+                } else {
+                    info!(receiver_id = %id, "Revocation pushed successfully to receiver");
+                }
+            });
         }
 
         Ok(revocation)

@@ -441,6 +441,14 @@ function createDOM() {
   doc.body.appendChild(homePanel);
   doc.body.appendChild(el('span', 'devices-last-updated'));
 
+  const diagModal = el('div', 'receiver-diagnostics-modal');
+  diagModal.classList.add('hidden');
+  const rdTitle = el('h2', 'rd-modal-title');
+  const rdBody = el('div', 'rd-modal-body');
+  diagModal.appendChild(rdTitle);
+  diagModal.appendChild(rdBody);
+  doc.body.appendChild(diagModal);
+
   doc.body.appendChild(pageSettings);
 
   const localStorage = {
@@ -1937,6 +1945,59 @@ async function runE2E() {
     assert(homeIdVal === 'home-trust-uuid-1234', `UX TEST 28: Home ID populated (${homeIdVal})`);
     assert(rootPkVal === 'ed25519-pk-test-base64', `UX TEST 28: Root authority key populated (${rootPkVal})`);
     assert(badge.includes('Root Authority Active'), `UX TEST 28: Badge displays Root Authority Active (${badge})`);
+  }
+
+  // 29. Receiver diagnostics modal opens, fetches receiver details, and closes
+  {
+    let fetchedReceiverUrl = null;
+    const fetchImpl = async (url) => {
+      if (url.includes('/api/v1/receivers/rx-diag-1')) {
+        fetchedReceiverUrl = url;
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            id: 'rx-diag-1',
+            receiver_id: 'rx-diag-1',
+            michi_id: 'michi:stream:living-room',
+            name: 'Living Room HiFi',
+            device_type: 'esp32s3',
+            base_url: 'http://192.168.1.105:8080',
+            online: true,
+            presence: 'verified_online',
+            qualification: 'qualified',
+            max_sample_rate: 48000,
+            max_bit_depth: 16,
+            supported_codecs: ['pcm', 'flac'],
+            active_session_id: null,
+            authenticated: true,
+            michi_home_id: 'home-trust-uuid-1234',
+            revoked: false,
+            last_seen: new Date().toISOString()
+          })
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    const { sandbox, window, document } = makeSandbox({ fetchImpl });
+    vm.createContext(sandbox);
+    vm.runInContext(jsContent, sandbox);
+
+    const modal = document.querySelector('#receiver-diagnostics-modal');
+    assert(modal && modal.classList.contains('hidden'), 'UX TEST 29: Modal initially hidden');
+
+    await window.openReceiverDiagnostics('rx-diag-1');
+    assert(fetchedReceiverUrl && fetchedReceiverUrl.includes('/api/v1/receivers/rx-diag-1'), 'UX TEST 29: Diagnostics fetched receiver telemetry');
+    assert(!modal.classList.contains('hidden'), 'UX TEST 29: Modal visible after openReceiverDiagnostics');
+
+    const body = document.querySelector('#rd-modal-body');
+    assert(body && body.textContent.includes('Living Room HiFi'), 'UX TEST 29: Diagnostics rendered receiver name');
+    assert(body && body.textContent.includes('michi:stream:living-room'), 'UX TEST 29: Diagnostics rendered michi_id');
+    assert(body && body.textContent.includes('Authenticated Member'), 'UX TEST 29: Diagnostics rendered trust status');
+
+    window.closeReceiverDiagnosticsModal();
+    assert(modal.classList.contains('hidden'), 'UX TEST 29: Modal hidden after closeReceiverDiagnosticsModal');
   }
 
   console.log('======================================================================');
