@@ -2314,12 +2314,14 @@ pub async fn home_info_handler(
         .await
         .unwrap_or_else(|| state.home_root_authority.public_key_base64url());
     let server_michi_id = state.identity.michi_id().to_base64url();
+    let trust_state = state.receiver_manager.trust_state().await;
 
     Ok(Json(serde_json::json!({
         "home_id": home_id,
         "root_authority_public_key": root_pk,
         "server_michi_id": server_michi_id,
         "server_membership": state.server_membership,
+        "trust_state": trust_state.to_string(),
     })))
 }
 

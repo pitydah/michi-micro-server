@@ -3796,7 +3796,7 @@ async function unpairReceiver(receiverId) {
     showToast('Receiver removed');
     discoverDevices();
   } catch (e) {
-    showToast('Failed to unpair: ' + e.message, true);
+    showToast('Failed to forget receiver: ' + e.message, true);
   }
 }
 window.unpairReceiver = unpairReceiver;
@@ -3852,9 +3852,45 @@ async function openReceiverDiagnostics(receiverId) {
   body.innerHTML = '<div style="text-align:center;padding:24px 0;color:var(--text-dim)">Loading receiver telemetry & diagnostics...</div>';
   overlay.classList.remove('hidden');
 
+  if (!body.__michi_diag_bound) {
+    body.__michi_diag_bound = true;
+    body.addEventListener('click', async function(ev) {
+      var authBtn = ev.target.closest ? ev.target.closest('.action-diag-auth') : null;
+      if (authBtn && !authBtn.disabled) {
+        var rid = authBtn.getAttribute('data-receiver-id');
+        if (rid) {
+          authenticateReceiver(rid);
+          closeReceiverDiagnosticsModal();
+        }
+        return;
+      }
+      var retryBtn = ev.target.closest ? ev.target.closest('.action-diag-retry') : null;
+      if (retryBtn && !retryBtn.disabled) {
+        try {
+          retryBtn.disabled = true;
+          var revId = retryBtn.getAttribute('data-revocation-id') || null;
+          await MichiAPI.homeRetryOutbox(revId);
+          showToast('Retry triggered');
+          closeReceiverDiagnosticsModal();
+        } catch (e) {
+          showToast('Retry failed: ' + (e.message || e), true);
+        } finally {
+          retryBtn.disabled = false;
+        }
+      }
+    });
+  }
+
   try {
     var data = await MichiAPI.request('/api/v1/receivers/' + encodeURIComponent(receiverId));
-    var outboxRes = await MichiAPI.homeOutbox().catch(function() { return { outbox: [] }; });
+    var outboxRes = null;
+    var outboxError = null;
+    try {
+      outboxRes = await MichiAPI.homeOutbox();
+    } catch (e) {
+      outboxError = e.message || String(e);
+    }
+
     var rec = data && (data.receiver || data);
     var mid = rec.michi_id || rec.device_michi_id || '';
     var outboxEntries = (outboxRes && outboxRes.outbox) ? outboxRes.outbox.filter(function(o) {
@@ -3904,7 +3940,10 @@ async function openReceiverDiagnostics(receiverId) {
 
     // Section 4: Revocation & Outbox
     var outboxPairs = [];
-    if (outboxEntries.length > 0) {
+    if (outboxError) {
+      outboxPairs.push(['Outbox Status', 'Error querying outbox API']);
+      outboxPairs.push(['Error Detail', outboxError]);
+    } else if (outboxEntries.length > 0) {
       var latest = outboxEntries[0];
       outboxPairs.push(['Outbox Status', latest.status]);
       outboxPairs.push(['Attempt Count', String(latest.attempt_count)]);
@@ -3919,12 +3958,12 @@ async function openReceiverDiagnostics(receiverId) {
     // Section 5: Diagnostic Actions
     html += '<div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">';
     if (!rec.revoked && !rec.authenticated) {
-      html += '<button class="btn btn-sm btn-primary action-auth-device" data-receiver-id="' + esc(receiverId) + '" onclick="authenticateReceiver(\'' + esc(receiverId) + '\');closeReceiverDiagnosticsModal();">Authenticate Now</button>';
+      html += '<button type="button" class="btn btn-sm btn-primary action-diag-auth" data-receiver-id="' + esc(receiverId) + '">Authenticate Now</button>';
     }
     var failedEntry = outboxEntries.find(function(o) { return o.status === 'failed'; });
     if (failedEntry) {
-      var revParam = failedEntry.revocation_id ? '"' + esc(failedEntry.revocation_id) + '"' : 'null';
-      html += '<button class="btn btn-sm btn-ghost" onclick="MichiAPI.homeRetryOutbox(' + revParam + ').then(function(){showToast(\'Retry triggered\');closeReceiverDiagnosticsModal();});">Retry Sync</button>';
+      var revIdAttr = failedEntry.revocation_id ? ' data-revocation-id="' + esc(failedEntry.revocation_id) + '"' : '';
+      html += '<button type="button" class="btn btn-sm btn-ghost action-diag-retry"' + revIdAttr + '>Retry Sync</button>';
     }
     html += '</div>';
 
@@ -3955,7 +3994,13 @@ async function loadHomeTrustInfo() {
       hroleEl.textContent = roles;
     }
     if (badgeEl) {
-      if (info && info.home_id && info.root_authority_public_key) {
+      if (info && info.trust_state === 'recovery_required') {
+        badgeEl.className = 'badge badge-danger';
+        badgeEl.textContent = 'Trust Recovery Required';
+      } else if (info && info.trust_state === 'degraded') {
+        badgeEl.className = 'badge badge-warning';
+        badgeEl.textContent = 'Trust Degraded';
+      } else if (info && info.home_id && info.root_authority_public_key) {
         badgeEl.className = 'badge badge-success';
         badgeEl.textContent = 'Root Authority Active';
       } else if (info && (info.home_id || info.root_authority_public_key)) {
@@ -4009,10 +4054,16 @@ async function refreshHomeRoster() {
   try {
     var rosterRes = await MichiAPI.homeRoster();
     var revocationsRes = await MichiAPI.homeRevocations();
-    var outboxRes = await MichiAPI.homeOutbox().catch(function() { return { outbox: [] }; });
+    var outboxRes = null;
+    var outboxError = null;
+    try {
+      outboxRes = await MichiAPI.homeOutbox();
+    } catch (e) {
+      outboxError = e.message || String(e);
+    }
     var devices = rosterRes.devices || [];
     var revocations = revocationsRes.revocations || [];
-    var outbox = outboxRes.outbox || [];
+    var outbox = (outboxRes && outboxRes.outbox) || [];
     var revokedIds = new Set(revocations.map(function(r) { return r.revoked_device_michi_id; }));
 
     if (devices.length === 0) {

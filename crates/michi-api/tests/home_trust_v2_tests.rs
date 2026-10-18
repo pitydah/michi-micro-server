@@ -235,4 +235,207 @@ async fn test_home_trust_v2_info_roster_and_revocation() {
     assert_eq!(receivers.len(), 1);
     assert_eq!(receivers[0]["revoked"], true);
     assert_eq!(receivers[0]["authenticated"], false);
+
+    // 7. Verify trust_state field in /api/v1/home/info
+    let req = Request::builder()
+        .uri("/api/v1/home/info")
+        .method("GET")
+        .header("Authorization", &auth_header)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let info: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(info["trust_state"], "ready");
+}
+
+#[tokio::test]
+async fn test_multi_device_revocation_outbox_targeting() {
+    let (app, pool, state, token) = make_app().await;
+    let auth_header = format!("Bearer {token}");
+
+    // Add three receivers: DevA (to be revoked), DevB, DevC
+    let dev_a = "michi-dev-a";
+    let dev_b = "michi-dev-b";
+    let dev_c = "michi-dev-c";
+
+    {
+        let reg_arc = state.receiver_manager.registry().await;
+        let mut reg = reg_arc.write().await;
+        for (idx, (mid, name)) in [
+            (dev_a, "Device A"),
+            (dev_b, "Device B"),
+            (dev_c, "Device C"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            reg.add(michi_receivers::ReceiverRegistryEntry {
+                receiver_id: format!("rec-{}", idx + 1),
+                michi_id: Some(mid.to_string()),
+                name: name.to_string(),
+                device_type: "standard".to_string(),
+                base_url: format!("http://127.0.0.1:899{}", idx + 1),
+                authenticated: true,
+                revoked: false,
+                presence: michi_receivers::ReceiverPresence::VerifiedOnline,
+                ..Default::default()
+            });
+        }
+    }
+
+    // Revoke Device A
+    let req = Request::builder()
+        .uri("/api/v1/home/revoke")
+        .method("POST")
+        .header("Authorization", &auth_header)
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "device_michi_id": dev_a,
+                "reason": "Compromised device A"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Verify outbox entries created for remaining members (DevB and DevC)
+    let home_id = state.receiver_manager.home_id().await.unwrap();
+    let outbox = michi_db::list_revocation_outbox_db(&pool, &home_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        outbox.len(),
+        2,
+        "Outbox should target remaining active members B and C"
+    );
+    assert!(outbox.iter().any(|o| o.receiver_michi_id == dev_b));
+    assert!(outbox.iter().any(|o| o.receiver_michi_id == dev_c));
+    assert!(
+        !outbox.iter().any(|o| o.receiver_michi_id == dev_a),
+        "Revoked device A should not be targeted in outbox"
+    );
+
+    // All outbox entries reference the same revocation_id
+    let rev_id = &outbox[0].revocation_id;
+    assert_eq!(&outbox[1].revocation_id, rev_id);
+
+    // Verify that looking up revocation_id from DB yields device_a as revoked_device_michi_id
+    let rev_row = michi_db::get_home_revocation_by_id_db(&pool, rev_id)
+        .await
+        .unwrap()
+        .expect("revocation exists");
+    assert_eq!(rev_row.revoked_device_michi_id, dev_a);
+}
+
+#[tokio::test]
+async fn test_fail_closed_trust_recovery_on_corrupt_revocation() {
+    let (app, pool, state, token) = make_app().await;
+    let auth_header = format!("Bearer {token}");
+    let home_id = state.receiver_manager.home_id().await.unwrap();
+
+    // Insert a forged / corrupted revocation directly into DB with bad signature
+    let corrupt_rev = michi_db::PersistedHomeRevocation {
+        id: uuid::Uuid::new_v4().to_string(),
+        home_id: home_id.clone(),
+        revoked_device_michi_id: "forged-device-id".to_string(),
+        revoked_at: chrono::Utc::now().to_rfc3339(),
+        reason: "Forged revocation".to_string(),
+        version: 1,
+        signature: "invalid-signature-tampered".to_string(),
+        signed_payload: "dGFtcGVyZWQ".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    michi_db::persist_home_revocation_transaction(&pool, &corrupt_rev, &[])
+        .await
+        .unwrap();
+
+    // Call load_persisted_revocations: MUST fail and set TrustState::RecoveryRequired
+    let res = state.receiver_manager.load_persisted_revocations().await;
+    assert!(res.is_err(), "Must reject corrupted signature");
+    assert_eq!(
+        state.receiver_manager.trust_state().await,
+        michi_receivers::TrustState::RecoveryRequired
+    );
+
+    // Verify /api/v1/home/info reflects recovery_required
+    let req = Request::builder()
+        .uri("/api/v1/home/info")
+        .method("GET")
+        .header("Authorization", &auth_header)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let info: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(info["trust_state"], "recovery_required");
+
+    // Authenticate receiver MUST be blocked with TRUST_RECOVERY_REQUIRED
+    let auth_res = state
+        .receiver_manager
+        .authenticate_receiver("nonexistent")
+        .await;
+    assert!(auth_res.is_err());
+    let err_msg = auth_res.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("TRUST_RECOVERY_REQUIRED"),
+        "Authentication must fail-closed under recovery required"
+    );
+}
+
+#[tokio::test]
+async fn test_double_revocation_idempotent_and_non_monotonic() {
+    let (_app, pool, state, _token) = make_app().await;
+    let home_id = state.receiver_manager.home_id().await.unwrap();
+    let dev = "device-double-rev";
+
+    let rev_v2 = michi_db::PersistedHomeRevocation {
+        id: uuid::Uuid::new_v4().to_string(),
+        home_id: home_id.clone(),
+        revoked_device_michi_id: dev.to_string(),
+        revoked_at: chrono::Utc::now().to_rfc3339(),
+        reason: "Version 2 revocation".to_string(),
+        version: 2,
+        signature: "valid-sig-v2".to_string(),
+        signed_payload: "payload-v2".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    // First persist version 2
+    michi_db::persist_home_revocation_transaction(&pool, &rev_v2, &[])
+        .await
+        .unwrap();
+
+    // Idempotent duplicate persist of version 2: MUST succeed without error
+    let dup_res = michi_db::persist_home_revocation_transaction(&pool, &rev_v2, &[]).await;
+    assert!(
+        dup_res.is_ok(),
+        "Identical duplicate revocation must be handled idempotently"
+    );
+
+    // Attempting to persist an older version (version 1): MUST fail
+    let rev_v1 = michi_db::PersistedHomeRevocation {
+        id: uuid::Uuid::new_v4().to_string(),
+        home_id: home_id.clone(),
+        revoked_device_michi_id: dev.to_string(),
+        revoked_at: chrono::Utc::now().to_rfc3339(),
+        reason: "Stale Version 1 revocation".to_string(),
+        version: 1,
+        signature: "valid-sig-v1".to_string(),
+        signed_payload: "payload-v1".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let stale_res = michi_db::persist_home_revocation_transaction(&pool, &rev_v1, &[]).await;
+    assert!(
+        stale_res.is_err(),
+        "Non-monotonic older revocation version must be rejected"
+    );
 }

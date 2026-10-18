@@ -595,6 +595,8 @@ impl AppState {
             }
             let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
             let key_bytes = sk.to_bytes();
+            let tmp_key_path =
+                home_key_path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
 
             #[cfg(unix)]
             {
@@ -605,17 +607,31 @@ impl AppState {
                     .create(true)
                     .truncate(true)
                     .mode(0o600)
-                    .open(&home_key_path)
+                    .open(&tmp_key_path)
                 {
                     let _ = f.write_all(&key_bytes);
                     let _ = f.flush();
+                    let _ = f.sync_all();
+                    drop(f);
+                    if let Err(e) = std::fs::rename(&tmp_key_path, &home_key_path) {
+                        tracing::warn!("Failed to atomically rename home_root_authority key file: {e}; falling back to direct write");
+                        let _ = std::fs::write(&home_key_path, key_bytes);
+                        let _ = std::fs::remove_file(&tmp_key_path);
+                    }
                 } else {
                     let _ = std::fs::write(&home_key_path, key_bytes);
                 }
             }
             #[cfg(not(unix))]
             {
-                let _ = std::fs::write(&home_key_path, key_bytes);
+                if let Err(e) = std::fs::write(&tmp_key_path, key_bytes) {
+                    tracing::warn!(
+                        "Failed to write tmp home_root_authority key file: {e}; writing directly"
+                    );
+                    let _ = std::fs::write(&home_key_path, key_bytes);
+                } else {
+                    let _ = std::fs::rename(&tmp_key_path, &home_key_path);
+                }
             }
 
             michi_identity::HomeRootAuthority::from_signing_key(sk)
