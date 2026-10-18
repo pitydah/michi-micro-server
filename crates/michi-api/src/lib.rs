@@ -243,6 +243,18 @@ impl AppState {
     }
 
     pub async fn bootstrap_runtime(&self) -> Result<(), String> {
+        // Synchronous restoration of persisted revocations *before* enabling auth/discovery or restoring receivers
+        match self.receiver_manager.load_persisted_revocations().await {
+            Ok(n) => tracing::info!(
+                "loaded {} persisted home revocations synchronously from DB",
+                n
+            ),
+            Err(e) => tracing::warn!(
+                "failed to load persisted home revocations during bootstrap: {}",
+                e
+            ),
+        }
+
         tracing::info!(
             "bootstrapping runtime: loading persisted receivers and restoring credentials"
         );
@@ -558,15 +570,54 @@ impl AppState {
                     let sk = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
                     michi_identity::HomeRootAuthority::from_signing_key(sk)
                 }
-                _ => {
-                    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-                    let _ = std::fs::write(&home_key_path, sk.to_bytes());
-                    michi_identity::HomeRootAuthority::from_signing_key(sk)
+                Ok(bytes) => {
+                    tracing::error!(
+                        path = ?home_key_path,
+                        len = bytes.len(),
+                        "FATAL: home_root_authority.key exists but has invalid length (expected 32 bytes). HOME_AUTHORITY_RECOVERY_REQUIRED: silent key regeneration refused to prevent breaking trust domain"
+                    );
+                    panic!("HOME_AUTHORITY_RECOVERY_REQUIRED: home_root_authority.key corrupt or invalid length");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        path = ?home_key_path,
+                        error = %e,
+                        "FATAL: home_root_authority.key exists but cannot be read. HOME_AUTHORITY_RECOVERY_REQUIRED: silent key regeneration refused to prevent breaking trust domain"
+                    );
+                    panic!(
+                        "HOME_AUTHORITY_RECOVERY_REQUIRED: home_root_authority.key unreadable: {e}"
+                    );
                 }
             }
         } else {
+            if let Some(parent) = home_key_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-            let _ = std::fs::write(&home_key_path, sk.to_bytes());
+            let key_bytes = sk.to_bytes();
+
+            #[cfg(unix)]
+            {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&home_key_path)
+                {
+                    let _ = f.write_all(&key_bytes);
+                    let _ = f.flush();
+                } else {
+                    let _ = std::fs::write(&home_key_path, key_bytes);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = std::fs::write(&home_key_path, key_bytes);
+            }
+
             michi_identity::HomeRootAuthority::from_signing_key(sk)
         }));
 
@@ -588,13 +639,7 @@ impl AppState {
         receiver_manager = receiver_manager
             .with_home_authority(home_root_authority.0.clone(), server_membership.clone());
 
-        let rm_for_revs = receiver_manager.clone();
-        tokio::spawn(async move {
-            match rm_for_revs.load_persisted_revocations().await {
-                Ok(n) => tracing::info!("loaded {} persisted home revocations from DB", n),
-                Err(e) => tracing::warn!("failed to load persisted home revocations: {}", e),
-            }
-        });
+        // Persisted revocations are restored synchronously in bootstrap_runtime() before discovery and networking start.
 
         let resolver = Arc::new(michi_playback::SqliteTrackResolver::new(
             db.clone(),

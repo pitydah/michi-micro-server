@@ -35,6 +35,7 @@ pub struct ReceiverSessionManager {
     server_membership: Arc<RwLock<Option<michi_identity::types::DeviceMembershipDto>>>,
     revocations: Arc<RwLock<Vec<michi_identity::types::HomeDeviceRevocationDto>>>,
     single_flight_auth: Arc<Mutex<HashSet<String>>>,
+    single_flight_outbox: Arc<Mutex<HashSet<String>>>,
 }
 
 impl std::fmt::Debug for ReceiverSessionManager {
@@ -71,6 +72,7 @@ impl ReceiverSessionManager {
             server_membership: Arc::new(RwLock::new(None)),
             revocations: Arc::new(RwLock::new(Vec::new())),
             single_flight_auth: Arc::new(Mutex::new(HashSet::new())),
+            single_flight_outbox: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -96,6 +98,7 @@ impl ReceiverSessionManager {
             server_membership: Arc::new(RwLock::new(None)),
             revocations: Arc::new(RwLock::new(Vec::new())),
             single_flight_auth: Arc::new(Mutex::new(HashSet::new())),
+            single_flight_outbox: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -130,6 +133,7 @@ impl ReceiverSessionManager {
             server_membership: Arc::new(RwLock::new(None)),
             revocations: Arc::new(RwLock::new(Vec::new())),
             single_flight_auth: Arc::new(Mutex::new(HashSet::new())),
+            single_flight_outbox: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -241,6 +245,10 @@ impl ReceiverSessionManager {
             Some(h) => h,
             None => return Ok(0),
         };
+        let root_pk = match self.home_root_public_key().await {
+            Some(pk) => pk,
+            None => return Ok(0),
+        };
 
         let persisted = michi_db::list_home_revocations_db(pool, &hid)
             .await
@@ -249,18 +257,30 @@ impl ReceiverSessionManager {
         let mut count = 0;
         let mut revs_write = self.revocations.write().await;
         for p in persisted {
+            let rev_dto = michi_identity::types::HomeDeviceRevocationDto {
+                version: p.version as u32,
+                home_id: p.home_id,
+                revoked_device_michi_id: p.revoked_device_michi_id.clone(),
+                revoked_at: p.revoked_at,
+                reason: p.reason,
+                signature: p.signature,
+            };
+
+            // Cryptographically verify revocation against trusted home root key
+            if let Err(e) = michi_identity::home::verify_revocation(&rev_dto, &root_pk, &hid) {
+                warn!(
+                    revoked_device = %rev_dto.revoked_device_michi_id,
+                    error = %e,
+                    "Skipping persisted revocation with invalid cryptographic signature"
+                );
+                continue;
+            }
+
             if !revs_write
                 .iter()
-                .any(|r| r.revoked_device_michi_id == p.revoked_device_michi_id)
+                .any(|r| r.revoked_device_michi_id == rev_dto.revoked_device_michi_id)
             {
-                revs_write.push(michi_identity::types::HomeDeviceRevocationDto {
-                    version: p.version as u32,
-                    home_id: p.home_id,
-                    revoked_device_michi_id: p.revoked_device_michi_id.clone(),
-                    revoked_at: p.revoked_at,
-                    reason: p.reason,
-                    signature: p.signature,
-                });
+                revs_write.push(rev_dto);
                 count += 1;
             }
         }
@@ -696,15 +716,64 @@ impl ReceiverSessionManager {
         let current_revs = self.get_revocations().await;
 
         for item in pending_items {
-            let rev_dto = match current_revs.iter().find(|r| r.home_id == item.home_id) {
+            // Atomic single-flight delivery claim per outbox entry
+            {
+                let mut flight = self.single_flight_outbox.lock().await;
+                if flight.contains(&item.id) {
+                    continue;
+                }
+                flight.insert(item.id.clone());
+            }
+
+            // Find exact revocation DTO
+            let rev_dto = match current_revs.iter().find(|r| {
+                r.home_id == item.home_id && r.revoked_device_michi_id == item.receiver_michi_id
+            }) {
                 Some(r) => r.clone(),
-                None => continue,
+                None => {
+                    // Fallback to DB lookup by item.revocation_id
+                    if let Ok(Some(p_rev)) =
+                        michi_db::get_home_revocation_by_id_db(&pool, &item.revocation_id).await
+                    {
+                        michi_identity::types::HomeDeviceRevocationDto {
+                            version: p_rev.version as u32,
+                            home_id: p_rev.home_id,
+                            revoked_device_michi_id: p_rev.revoked_device_michi_id,
+                            revoked_at: p_rev.revoked_at,
+                            reason: p_rev.reason,
+                            signature: p_rev.signature,
+                        }
+                    } else {
+                        warn!(outbox_id = %item.id, revocation_id = %item.revocation_id, "Revocation outbox record missing referenced revocation; skipping");
+                        let mut flight = self.single_flight_outbox.lock().await;
+                        flight.remove(&item.id);
+                        continue;
+                    }
+                }
+            };
+
+            // Dynamic endpoint resolution: inspect registry to see if endpoint changed (e.g. mDNS IP change)
+            let endpoint = {
+                let reg = self.registry.read().await;
+                if let Some(entry) = reg.get(&item.receiver_id).or_else(|| {
+                    reg.receivers
+                        .values()
+                        .find(|e| e.michi_id.as_deref() == Some(&item.receiver_michi_id))
+                }) {
+                    if !entry.base_url.is_empty() {
+                        entry.base_url.clone()
+                    } else {
+                        item.target_endpoint.clone()
+                    }
+                } else {
+                    item.target_endpoint.clone()
+                }
             };
 
             let client = if let Some(ref id_mgr) = self.identity {
-                ReceiverClient::with_identity(&item.target_endpoint, id_mgr.clone())
+                ReceiverClient::with_identity(&endpoint, id_mgr.clone())
             } else {
-                ReceiverClient::new(&item.target_endpoint)
+                ReceiverClient::new(&endpoint)
             };
 
             match client.push_revocation(&rev_dto).await {
@@ -712,6 +781,7 @@ impl ReceiverSessionManager {
                     info!(
                         outbox_id = %item.id,
                         receiver_id = %item.receiver_id,
+                        endpoint = %endpoint,
                         "Revocation outbox entry delivered successfully"
                     );
                     let _ = michi_db::mark_revocation_outbox_acknowledged_db(&pool, &item.id).await;
@@ -725,6 +795,7 @@ impl ReceiverSessionManager {
                     debug!(
                         outbox_id = %item.id,
                         receiver_id = %item.receiver_id,
+                        endpoint = %endpoint,
                         error = %err_str,
                         next_attempt_at = %next_str,
                         "Revocation outbox push failed; scheduled backoff"
@@ -734,6 +805,11 @@ impl ReceiverSessionManager {
                     )
                     .await;
                 }
+            }
+
+            {
+                let mut flight = self.single_flight_outbox.lock().await;
+                flight.remove(&item.id);
             }
         }
     }

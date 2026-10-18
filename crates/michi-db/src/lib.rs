@@ -2124,27 +2124,51 @@ pub async fn persist_home_revocation_transaction(
 ) -> Result<(), DbError> {
     let mut tx = pool.begin().await?;
 
-    sqlx::query(
-        "INSERT INTO home_revocations (id, home_id, revoked_device_michi_id, revoked_at, reason, version, signature, signed_payload, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(home_id, revoked_device_michi_id) DO UPDATE SET
-            revoked_at = excluded.revoked_at,
-            reason = excluded.reason,
-            version = excluded.version,
-            signature = excluded.signature,
-            signed_payload = excluded.signed_payload",
-    )
-    .bind(&revocation.id)
-    .bind(&revocation.home_id)
-    .bind(&revocation.revoked_device_michi_id)
-    .bind(&revocation.revoked_at)
-    .bind(&revocation.reason)
-    .bind(revocation.version)
-    .bind(&revocation.signature)
-    .bind(&revocation.signed_payload)
-    .bind(&revocation.created_at)
-    .execute(&mut *tx)
-    .await?;
+    let effective_revocation_id: String = if let Some(existing_id) =
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM home_revocations WHERE home_id = ? AND revoked_device_michi_id = ?",
+        )
+        .bind(&revocation.home_id)
+        .bind(&revocation.revoked_device_michi_id)
+        .fetch_optional(&mut *tx)
+        .await?
+    {
+        sqlx::query(
+            "UPDATE home_revocations SET
+                revoked_at = ?,
+                reason = ?,
+                version = ?,
+                signature = ?,
+                signed_payload = ?
+             WHERE id = ?",
+        )
+        .bind(&revocation.revoked_at)
+        .bind(&revocation.reason)
+        .bind(revocation.version)
+        .bind(&revocation.signature)
+        .bind(&revocation.signed_payload)
+        .bind(&existing_id)
+        .execute(&mut *tx)
+        .await?;
+        existing_id
+    } else {
+        sqlx::query(
+            "INSERT INTO home_revocations (id, home_id, revoked_device_michi_id, revoked_at, reason, version, signature, signed_payload, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&revocation.id)
+        .bind(&revocation.home_id)
+        .bind(&revocation.revoked_device_michi_id)
+        .bind(&revocation.revoked_at)
+        .bind(&revocation.reason)
+        .bind(revocation.version)
+        .bind(&revocation.signature)
+        .bind(&revocation.signed_payload)
+        .bind(&revocation.created_at)
+        .execute(&mut *tx)
+        .await?;
+        revocation.id.clone()
+    };
 
     let now = chrono::Utc::now().to_rfc3339();
     for (receiver_id, receiver_michi_id, target_endpoint) in targets {
@@ -2158,7 +2182,7 @@ pub async fn persist_home_revocation_transaction(
                 next_attempt_at = excluded.next_attempt_at",
         )
         .bind(&outbox_id)
-        .bind(&revocation.id)
+        .bind(&effective_revocation_id)
         .bind(&revocation.home_id)
         .bind(receiver_id)
         .bind(receiver_michi_id)
@@ -2203,6 +2227,33 @@ pub async fn list_home_revocations_db(
         });
     }
     Ok(out)
+}
+
+pub async fn get_home_revocation_by_id_db(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<Option<PersistedHomeRevocation>, DbError> {
+    use sqlx::Row;
+    let row = sqlx::query(
+        "SELECT id, home_id, revoked_device_michi_id, revoked_at, reason, version, signature, signed_payload, created_at
+         FROM home_revocations
+         WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| PersistedHomeRevocation {
+        id: r.get("id"),
+        home_id: r.get("home_id"),
+        revoked_device_michi_id: r.get("revoked_device_michi_id"),
+        revoked_at: r.get("revoked_at"),
+        reason: r.get("reason"),
+        version: r.get("version"),
+        signature: r.get("signature"),
+        signed_payload: r.get("signed_payload"),
+        created_at: r.get("created_at"),
+    }))
 }
 
 pub async fn list_revocation_outbox_db(
