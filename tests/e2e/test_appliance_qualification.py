@@ -128,7 +128,7 @@ def main():
         cursor = conn.cursor()
         cursor.execute("SELECT MAX(version) FROM _migrations")
         max_ver = cursor.fetchone()[0]
-        assert max_ver == 52, f"expected exact schema version 52, got {max_ver}"
+        assert max_ver == 53, f"expected exact schema version 53, got {max_ver}"
 
         # Assert play_history client_event_id column is present
         cursor.execute("PRAGMA table_info(play_history)")
@@ -140,13 +140,15 @@ def main():
         indexes = [row[1] for row in cursor.fetchall()]
         assert "idx_play_history_client_event_id" in indexes, f"idx_play_history_client_event_id missing: {indexes}"
 
-        # Assert auth_sessions table is present
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='auth_sessions'")
+        # Assert auth_sessions, home_revocations and revocation_outbox tables are present
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = [row[0] for row in cursor.fetchall()]
         assert "auth_sessions" in tables, f"auth_sessions table missing: {tables}"
+        assert "home_revocations" in tables, f"home_revocations table missing: {tables}"
+        assert "revocation_outbox" in tables, f"revocation_outbox table missing: {tables}"
 
         conn.close()
-    test("Database Migrations Complete & Schema Invariants (version == 52, client_event_id unique index, auth_sessions table)", test_schema_version)
+    test("Database Migrations Complete & Schema Invariants (version == 53, home_revocations, revocation_outbox, auth_sessions)", test_schema_version)
 
     # 4. Range Streaming Verification
     def test_range_streaming():

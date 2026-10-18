@@ -588,6 +588,14 @@ impl AppState {
         receiver_manager = receiver_manager
             .with_home_authority(home_root_authority.0.clone(), server_membership.clone());
 
+        let rm_for_revs = receiver_manager.clone();
+        tokio::spawn(async move {
+            match rm_for_revs.load_persisted_revocations().await {
+                Ok(n) => tracing::info!("loaded {} persisted home revocations from DB", n),
+                Err(e) => tracing::warn!("failed to load persisted home revocations: {}", e),
+            }
+        });
+
         let resolver = Arc::new(michi_playback::SqliteTrackResolver::new(
             db.clone(),
             config.music_paths.clone(),
@@ -751,6 +759,22 @@ impl AppState {
                     _ = sec_prune_shutdown.cancelled() => break,
                     _ = interval.tick() => {
                         sec_state_for_prune.prune_stale_limiters();
+                    }
+                }
+            }
+        }));
+
+        // Periodic revocation outbox delivery loop (runs every 30s)
+        let outbox_mgr = self.receiver_manager.clone();
+        let outbox_shutdown = shutdown.clone();
+        self.track_task(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = outbox_shutdown.cancelled() => break,
+                    _ = interval.tick() => {
+                        outbox_mgr.flush_revocation_outbox().await;
                     }
                 }
             }
@@ -1983,6 +2007,14 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/home/revoke",
             post(routes::v1::receivers::home_revoke_handler),
+        )
+        .route(
+            "/api/v1/home/outbox",
+            get(routes::v1::receivers::home_revocation_outbox_handler),
+        )
+        .route(
+            "/api/v1/home/outbox/retry",
+            post(routes::v1::receivers::home_retry_outbox_handler),
         )
         .route(
             "/api/v1/receivers/:id/auth",

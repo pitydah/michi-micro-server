@@ -2396,3 +2396,40 @@ pub async fn receiver_auth_handler(
         )),
     }
 }
+
+pub async fn home_revocation_outbox_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let outbox = state.receiver_manager.get_revocation_outbox().await;
+    Ok(Json(serde_json::json!({
+        "outbox": outbox,
+        "total": outbox.len(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RetryOutboxBody {
+    pub revocation_id: Option<String>,
+}
+
+pub async fn home_retry_outbox_handler(
+    State(state): State<AppState>,
+    Json(body): Json<Option<RetryOutboxBody>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let rev_id = body.and_then(|b| b.revocation_id);
+    match state
+        .receiver_manager
+        .retry_outbox_delivery(rev_id.as_deref())
+        .await
+    {
+        Ok(retried_count) => Ok(Json(serde_json::json!({
+            "status": "scheduled",
+            "retried_count": retried_count,
+        }))),
+        Err(e) => Err(v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RETRY_FAILED",
+            &e,
+        )),
+    }
+}

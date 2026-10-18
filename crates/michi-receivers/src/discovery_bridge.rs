@@ -39,20 +39,41 @@ impl ReceiverDiscoveryBridge {
                 presence_source,
                 verified,
             } => {
-                let registry_arc = self.receiver_manager.registry().await;
-                let mut reg = registry_arc.write().await;
-                if let Some(entry) = reg.get_mut(&michi_id) {
-                    debug!(michi_id = %michi_id, new_endpoint = %new, "ReceiverDiscoveryBridge: updating endpoint");
-                    entry.base_url = new.to_string();
-                    entry.presence = match presence_source {
-                        michi_connect::scent_store::ScentPresenceSource::WhiskerSigned
-                            if verified =>
-                        {
-                            ReceiverPresence::VerifiedOnline
+                let (should_reauth, receiver_id) = {
+                    let registry_arc = self.receiver_manager.registry().await;
+                    let mut reg = registry_arc.write().await;
+                    if let Some(entry) = reg.get_mut(&michi_id) {
+                        debug!(michi_id = %michi_id, new_endpoint = %new, "ReceiverDiscoveryBridge: updating endpoint");
+                        entry.base_url = new.to_string();
+                        entry.presence = match presence_source {
+                            michi_connect::scent_store::ScentPresenceSource::WhiskerSigned
+                                if verified =>
+                            {
+                                ReceiverPresence::VerifiedOnline
+                            }
+                            _ => ReceiverPresence::ProvisionalMdns,
+                        };
+                        entry.last_seen = Some(chrono::Utc::now());
+                        let rid = entry.receiver_id.clone();
+                        let need_auth = !entry.authenticated && !entry.revoked;
+                        (need_auth, Some(rid))
+                    } else {
+                        (false, None)
+                    }
+                };
+
+                let mgr = self.receiver_manager.clone();
+                if let Some(rid) = receiver_id {
+                    tokio::spawn(async move {
+                        if should_reauth {
+                            if let Err(e) = mgr.authenticate_receiver(&rid).await {
+                                debug!("Re-auth after IP change for {} deferred: {}", rid, e);
+                            } else {
+                                info!("Re-auth after IP change completed for {}", rid);
+                            }
                         }
-                        _ => ReceiverPresence::ProvisionalMdns,
-                    };
-                    entry.last_seen = Some(chrono::Utc::now());
+                        mgr.flush_revocation_outbox().await;
+                    });
                 }
             }
             ScentEvent::Offline { michi_id } => {

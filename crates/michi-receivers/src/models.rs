@@ -68,6 +68,12 @@ pub struct HomeRosterDevice {
     pub revoked: bool,
     pub online: bool,
     pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbox_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_revocation_ack: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_revocation_error: Option<String>,
 }
 
 /// Pending pairing state held in memory between `/pair/start` and `/pair/confirm`.

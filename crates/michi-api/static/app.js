@@ -333,6 +333,13 @@ const MichiAPI = {
       body: { device_michi_id, reason }
     });
   },
+  homeOutbox() { return this.request('/api/v1/home/outbox'); },
+  homeRetryOutbox(revocation_id) {
+    return this.request('/api/v1/home/outbox/retry', {
+      method: 'POST',
+      body: { revocation_id }
+    });
+  },
 
   // Rooms & Chains
   roomGroups() { return this.request('/api/v1/rooms/groups'); },
@@ -3847,29 +3854,78 @@ async function openReceiverDiagnostics(receiverId) {
 
   try {
     var data = await MichiAPI.request('/api/v1/receivers/' + encodeURIComponent(receiverId));
+    var outboxRes = await MichiAPI.homeOutbox().catch(function() { return { outbox: [] }; });
     var rec = data && (data.receiver || data);
-    var rows = [
+    var mid = rec.michi_id || rec.device_michi_id || '';
+    var outboxEntries = (outboxRes && outboxRes.outbox) ? outboxRes.outbox.filter(function(o) {
+      return o.receiver_id === receiverId || (mid && o.receiver_michi_id === mid);
+    }) : [];
+
+    var renderSection = function(title, pairs) {
+      var s = '<div style="margin-bottom:14px"><strong style="display:block;margin-bottom:6px;font-size:0.85rem;color:var(--text-1)">' + esc(title) + '</strong>';
+      s += '<div class="panel" style="padding:4px 8px">';
+      pairs.forEach(function(p) {
+        s += '<div class="panel-row" style="padding:4px 0;display:flex;justify-content:space-between;border-bottom:1px solid var(--border-subtle)">' +
+          '<span class="panel-label" style="color:var(--text-dim);font-size:0.8rem">' + esc(p[0]) + '</span>' +
+          '<span class="panel-mono" style="word-break:break-all;font-size:0.8rem;text-align:right">' + esc(String(p[1])) + '</span></div>';
+      });
+      s += '</div></div>';
+      return s;
+    };
+
+    var html = '';
+
+    // Section 1: Overview
+    html += renderSection('Overview', [
       ['Receiver ID', rec.receiver_id || rec.id || receiverId],
-      ['Michi ID', rec.michi_id || 'None'],
+      ['Michi ID', mid || 'None'],
       ['Name', rec.name || 'Unknown'],
       ['Device Type', rec.device_type || 'Standard'],
-      ['Endpoint / Base URL', rec.base_url || rec.host || 'Unavailable'],
       ['Presence State', rec.presence || (rec.online ? 'Online' : 'Offline')],
-      ['Home Trust', rec.revoked ? 'Revoked' : (rec.authenticated ? 'Authenticated Member' : 'Unauthenticated')],
+      ['Last Seen', rec.last_seen ? formatRelativeTime(rec.last_seen) : '--']
+    ]);
+
+    // Section 2: Identity & Home Trust
+    html += renderSection('Identity & Home Trust', [
       ['Home ID', rec.michi_home_id || '--'],
+      ['Authority Supported', rec.authority_supported ? 'Yes (v1)' : 'No'],
+      ['Home Trust State', rec.revoked ? 'Revoked' : (rec.authenticated ? 'Authenticated Member' : 'Unauthenticated')],
+      ['Auth Strategy', rec.authority_supported ? 'HOME_MEMBERSHIP (Michi Link V1/V2)' : 'Legacy Pair (Deprecated)']
+    ]);
+
+    // Section 3: Audio & Sessions
+    html += renderSection('Audio & Sessions', [
       ['Qualification', rec.qualification || '--'],
       ['Max Sample Rate', rec.max_sample_rate ? (rec.max_sample_rate + ' Hz') : '--'],
       ['Max Bit Depth', rec.max_bit_depth ? (rec.max_bit_depth + '-bit') : '--'],
       ['Codecs', Array.isArray(rec.supported_codecs) ? rec.supported_codecs.join(', ') : '--'],
-      ['Active Session', rec.active_session_id || (rec.session_active ? 'Active' : 'None')],
-      ['Last Seen', rec.last_seen ? formatRelativeTime(rec.last_seen) : '--']
-    ];
+      ['Active Session', rec.active_session_id || (rec.session_active ? 'Active' : 'None')]
+    ]);
 
-    var html = '<div class="panel" style="margin-top:8px">';
-    rows.forEach(function (r) {
-      html += '<div class="panel-row"><span class="panel-label">' + esc(r[0]) + '</span><span class="panel-mono" style="word-break:break-all">' + esc(String(r[1])) + '</span></div>';
-    });
+    // Section 4: Revocation & Outbox
+    var outboxPairs = [];
+    if (outboxEntries.length > 0) {
+      var latest = outboxEntries[0];
+      outboxPairs.push(['Outbox Status', latest.status]);
+      outboxPairs.push(['Attempt Count', String(latest.attempt_count)]);
+      outboxPairs.push(['Last Attempt', latest.last_attempt_at ? formatRelativeTime(latest.last_attempt_at) : '--']);
+      if (latest.acknowledged_at) outboxPairs.push(['Acknowledged At', formatRelativeTime(latest.acknowledged_at)]);
+      if (latest.last_error) outboxPairs.push(['Last Error', latest.last_error]);
+    } else {
+      outboxPairs.push(['Outbox Status', rec.revoked ? 'Local Only' : 'Clean (No pending tasks)']);
+    }
+    html += renderSection('Revocation Outbox', outboxPairs);
+
+    // Section 5: Diagnostic Actions
+    html += '<div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">';
+    if (!rec.revoked && !rec.authenticated) {
+      html += '<button class="btn btn-sm btn-primary action-auth-device" data-receiver-id="' + esc(receiverId) + '" onclick="authenticateReceiver(\'' + esc(receiverId) + '\');closeReceiverDiagnosticsModal();">Authenticate Now</button>';
+    }
+    if (outboxEntries.some(function(o) { return o.status === 'failed'; })) {
+      html += '<button class="btn btn-sm btn-ghost" onclick="MichiAPI.homeRetryOutbox().then(function(){showToast(\'Retry triggered\');closeReceiverDiagnosticsModal();});">Retry Sync</button>';
+    }
     html += '</div>';
+
     body.innerHTML = html;
   } catch (err) {
     body.innerHTML = '<div class="alert alert-danger" style="margin-top:8px">Failed to load diagnostics: ' + esc(err.message || String(err)) + '</div>';
@@ -3923,12 +3979,26 @@ async function refreshHomeRoster() {
   if (!listEl) return;
   if (!listEl.__michi_revoke_bound) {
     listEl.__michi_revoke_bound = true;
-    listEl.addEventListener('click', function(ev) {
+    listEl.addEventListener('click', async function(ev) {
       var revokeBtn = ev.target.closest ? ev.target.closest('.action-revoke-device') : null;
       if (revokeBtn && !revokeBtn.disabled) {
         var mid = revokeBtn.getAttribute('data-michi-id');
         if (mid) {
           revokeDevicePrompt(mid);
+        }
+        return;
+      }
+      var retryBtn = ev.target.closest ? ev.target.closest('.action-retry-outbox') : null;
+      if (retryBtn && !retryBtn.disabled) {
+        try {
+          retryBtn.disabled = true;
+          await MichiAPI.homeRetryOutbox();
+          showToast('Revocation sync retried');
+          await refreshHomeRoster();
+        } catch (e) {
+          showToast('Retry failed: ' + (e.message || e), true);
+        } finally {
+          retryBtn.disabled = false;
         }
       }
     });
@@ -3936,8 +4006,10 @@ async function refreshHomeRoster() {
   try {
     var rosterRes = await MichiAPI.homeRoster();
     var revocationsRes = await MichiAPI.homeRevocations();
+    var outboxRes = await MichiAPI.homeOutbox().catch(function() { return { outbox: [] }; });
     var devices = rosterRes.devices || [];
     var revocations = revocationsRes.revocations || [];
+    var outbox = outboxRes.outbox || [];
     var revokedIds = new Set(revocations.map(function(r) { return r.revoked_device_michi_id; }));
 
     if (devices.length === 0) {
@@ -3945,14 +4017,32 @@ async function refreshHomeRoster() {
       return;
     }
 
-    var html = '<table class="table" style="width:100%;font-size:0.85rem">' +
-      '<thead><tr><th>Device</th><th>Michi ID</th><th>Status</th><th>Action</th></tr></thead><tbody>';
+    var hasFailedOutbox = outbox.some(function(o) { return o.status === 'failed'; });
+    var retryHeaderBtn = hasFailedOutbox
+      ? '<button class="btn btn-sm btn-ghost action-retry-outbox" style="margin-left:8px;font-size:0.75rem">Retry Pending Delivery</button>'
+      : '';
+
+    var html = (retryHeaderBtn ? '<div style="text-align:right;margin-bottom:8px">' + retryHeaderBtn + '</div>' : '') +
+      '<table class="table" style="width:100%;font-size:0.85rem">' +
+      '<thead><tr><th>Device</th><th>Michi ID</th><th>Status</th><th>Outbox Delivery</th><th>Action</th></tr></thead><tbody>';
     devices.forEach(function(d) {
       var mid = d.device_michi_id || d.michi_id || d.receiver_id || '';
       var isRev = d.revoked || (mid && revokedIds.has(mid));
       var statusBadge = isRev
         ? '<span class="device-badge device-badge--danger">Revoked</span>'
         : (d.authenticated ? '<span class="device-badge device-badge--verified">Authenticated</span>' : '<span class="device-badge device-badge--warning">Pending</span>');
+
+      var outboxBadge = '<span style="color:var(--text-3)">--</span>';
+      if (d.outbox_status) {
+        if (d.outbox_status === 'acknowledged') {
+          outboxBadge = '<span class="device-badge device-badge--verified" title="Delivered at ' + esc(d.last_revocation_ack || '') + '">Synchronized</span>';
+        } else if (d.outbox_status === 'failed') {
+          outboxBadge = '<span class="device-badge device-badge--danger" title="' + esc(d.last_revocation_error || 'Delivery failed') + '">Distribution Failed</span>';
+        } else {
+          outboxBadge = '<span class="device-badge device-badge--warning">Distribution Pending</span>';
+        }
+      }
+
       var actionBtn = isRev
         ? '<span style="color:var(--text-3)">Revoked</span>'
         : '<button class="btn btn-sm btn-ghost action-revoke-device" data-michi-id="' + esc(mid) + '">Revoke</button>';
@@ -3961,6 +4051,7 @@ async function refreshHomeRoster() {
         '<td><strong>' + esc(d.name || d.receiver_id || 'Unknown') + '</strong></td>' +
         '<td class="panel-mono text-sm">' + esc(mid) + '</td>' +
         '<td>' + statusBadge + '</td>' +
+        '<td>' + outboxBadge + '</td>' +
         '<td>' + actionBtn + '</td>' +
         '</tr>';
     });

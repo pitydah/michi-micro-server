@@ -342,8 +342,16 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
             migration_052
         );
     }
+    if current < 53 {
+        run_migration_step!(
+            conn,
+            53,
+            "home_revocations and revocation_outbox durable storage",
+            migration_053
+        );
+    }
 
-    info!("database schema at version 52");
+    info!("database schema at version 53");
     Ok(())
 }
 
@@ -1458,6 +1466,82 @@ async fn migration_052(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
     Ok(())
 }
 
+async fn migration_053(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS home_revocations (
+            id TEXT PRIMARY KEY,
+            home_id TEXT NOT NULL,
+            revoked_device_michi_id TEXT NOT NULL,
+            revoked_at TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            signature TEXT NOT NULL,
+            signed_payload TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_home_revocations_unique_device
+         ON home_revocations(home_id, revoked_device_michi_id)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_home_revocations_home_id
+         ON home_revocations(home_id)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS revocation_outbox (
+            id TEXT PRIMARY KEY,
+            revocation_id TEXT NOT NULL,
+            home_id TEXT NOT NULL,
+            receiver_id TEXT NOT NULL,
+            receiver_michi_id TEXT NOT NULL,
+            target_endpoint TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at TEXT,
+            next_attempt_at TEXT,
+            last_error TEXT,
+            acknowledged_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (revocation_id) REFERENCES home_revocations(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_revocation_outbox_status_next
+         ON revocation_outbox(status, next_attempt_at)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_revocation_outbox_receiver
+         ON revocation_outbox(receiver_id)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_revocation_outbox_unique_target
+         ON revocation_outbox(revocation_id, receiver_id)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedReceiver {
     pub id: String,
@@ -2001,6 +2085,267 @@ pub async fn list_unrecovered_pairing_journals_db(
         });
     }
     Ok(out)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedHomeRevocation {
+    pub id: String,
+    pub home_id: String,
+    pub revoked_device_michi_id: String,
+    pub revoked_at: String,
+    pub reason: String,
+    pub version: i64,
+    pub signature: String,
+    pub signed_payload: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedRevocationOutboxEntry {
+    pub id: String,
+    pub revocation_id: String,
+    pub home_id: String,
+    pub receiver_id: String,
+    pub receiver_michi_id: String,
+    pub target_endpoint: String,
+    pub status: String,
+    pub attempt_count: i64,
+    pub last_attempt_at: Option<String>,
+    pub next_attempt_at: Option<String>,
+    pub last_error: Option<String>,
+    pub acknowledged_at: Option<String>,
+    pub created_at: String,
+}
+
+pub async fn persist_home_revocation_transaction(
+    pool: &SqlitePool,
+    revocation: &PersistedHomeRevocation,
+    targets: &[(String, String, String)], // (receiver_id, receiver_michi_id, target_endpoint)
+) -> Result<(), DbError> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO home_revocations (id, home_id, revoked_device_michi_id, revoked_at, reason, version, signature, signed_payload, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(home_id, revoked_device_michi_id) DO UPDATE SET
+            revoked_at = excluded.revoked_at,
+            reason = excluded.reason,
+            version = excluded.version,
+            signature = excluded.signature,
+            signed_payload = excluded.signed_payload",
+    )
+    .bind(&revocation.id)
+    .bind(&revocation.home_id)
+    .bind(&revocation.revoked_device_michi_id)
+    .bind(&revocation.revoked_at)
+    .bind(&revocation.reason)
+    .bind(revocation.version)
+    .bind(&revocation.signature)
+    .bind(&revocation.signed_payload)
+    .bind(&revocation.created_at)
+    .execute(&mut *tx)
+    .await?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for (receiver_id, receiver_michi_id, target_endpoint) in targets {
+        let outbox_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO revocation_outbox (id, revocation_id, home_id, receiver_id, receiver_michi_id, target_endpoint, status, attempt_count, next_attempt_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+             ON CONFLICT(revocation_id, receiver_id) DO UPDATE SET
+                target_endpoint = excluded.target_endpoint,
+                status = 'pending',
+                next_attempt_at = excluded.next_attempt_at",
+        )
+        .bind(&outbox_id)
+        .bind(&revocation.id)
+        .bind(&revocation.home_id)
+        .bind(receiver_id)
+        .bind(receiver_michi_id)
+        .bind(target_endpoint)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn list_home_revocations_db(
+    pool: &SqlitePool,
+    home_id: &str,
+) -> Result<Vec<PersistedHomeRevocation>, DbError> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT id, home_id, revoked_device_michi_id, revoked_at, reason, version, signature, signed_payload, created_at
+         FROM home_revocations
+         WHERE home_id = ?
+         ORDER BY revoked_at ASC",
+    )
+    .bind(home_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(PersistedHomeRevocation {
+            id: row.get("id"),
+            home_id: row.get("home_id"),
+            revoked_device_michi_id: row.get("revoked_device_michi_id"),
+            revoked_at: row.get("revoked_at"),
+            reason: row.get("reason"),
+            version: row.get("version"),
+            signature: row.get("signature"),
+            signed_payload: row.get("signed_payload"),
+            created_at: row.get("created_at"),
+        });
+    }
+    Ok(out)
+}
+
+pub async fn list_revocation_outbox_db(
+    pool: &SqlitePool,
+    home_id: &str,
+) -> Result<Vec<PersistedRevocationOutboxEntry>, DbError> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT id, revocation_id, home_id, receiver_id, receiver_michi_id, target_endpoint, status, attempt_count, last_attempt_at, next_attempt_at, last_error, acknowledged_at, created_at
+         FROM revocation_outbox
+         WHERE home_id = ?
+         ORDER BY created_at DESC",
+    )
+    .bind(home_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(PersistedRevocationOutboxEntry {
+            id: row.get("id"),
+            revocation_id: row.get("revocation_id"),
+            home_id: row.get("home_id"),
+            receiver_id: row.get("receiver_id"),
+            receiver_michi_id: row.get("receiver_michi_id"),
+            target_endpoint: row.get("target_endpoint"),
+            status: row.get("status"),
+            attempt_count: row.get("attempt_count"),
+            last_attempt_at: row.get("last_attempt_at"),
+            next_attempt_at: row.get("next_attempt_at"),
+            last_error: row.get("last_error"),
+            acknowledged_at: row.get("acknowledged_at"),
+            created_at: row.get("created_at"),
+        });
+    }
+    Ok(out)
+}
+
+pub async fn list_due_revocation_outbox_db(
+    pool: &SqlitePool,
+) -> Result<Vec<PersistedRevocationOutboxEntry>, DbError> {
+    use sqlx::Row;
+    let now = chrono::Utc::now().to_rfc3339();
+    let rows = sqlx::query(
+        "SELECT id, revocation_id, home_id, receiver_id, receiver_michi_id, target_endpoint, status, attempt_count, last_attempt_at, next_attempt_at, last_error, acknowledged_at, created_at
+         FROM revocation_outbox
+         WHERE status IN ('pending', 'failed') AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+         ORDER BY attempt_count ASC, created_at ASC",
+    )
+    .bind(&now)
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(PersistedRevocationOutboxEntry {
+            id: row.get("id"),
+            revocation_id: row.get("revocation_id"),
+            home_id: row.get("home_id"),
+            receiver_id: row.get("receiver_id"),
+            receiver_michi_id: row.get("receiver_michi_id"),
+            target_endpoint: row.get("target_endpoint"),
+            status: row.get("status"),
+            attempt_count: row.get("attempt_count"),
+            last_attempt_at: row.get("last_attempt_at"),
+            next_attempt_at: row.get("next_attempt_at"),
+            last_error: row.get("last_error"),
+            acknowledged_at: row.get("acknowledged_at"),
+            created_at: row.get("created_at"),
+        });
+    }
+    Ok(out)
+}
+
+pub async fn mark_revocation_outbox_acknowledged_db(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<(), DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE revocation_outbox
+         SET status = 'acknowledged', acknowledged_at = ?, last_attempt_at = ?, last_error = NULL
+         WHERE id = ?",
+    )
+    .bind(&now)
+    .bind(&now)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn mark_revocation_outbox_attempt_failed_db(
+    pool: &SqlitePool,
+    id: &str,
+    error: &str,
+    next_attempt_at: &str,
+) -> Result<(), DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE revocation_outbox
+         SET status = 'failed',
+             attempt_count = attempt_count + 1,
+             last_attempt_at = ?,
+             next_attempt_at = ?,
+             last_error = ?
+         WHERE id = ?",
+    )
+    .bind(&now)
+    .bind(next_attempt_at)
+    .bind(error)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn reset_revocation_outbox_for_retry_db(
+    pool: &SqlitePool,
+    revocation_id: Option<&str>,
+) -> Result<u64, DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let res = if let Some(rev_id) = revocation_id {
+        sqlx::query(
+            "UPDATE revocation_outbox
+             SET status = 'pending', next_attempt_at = ?
+             WHERE revocation_id = ? AND status != 'acknowledged'",
+        )
+        .bind(&now)
+        .bind(rev_id)
+        .execute(pool)
+        .await?
+    } else {
+        sqlx::query(
+            "UPDATE revocation_outbox
+             SET status = 'pending', next_attempt_at = ?
+             WHERE status != 'acknowledged'",
+        )
+        .bind(&now)
+        .execute(pool)
+        .await?
+    };
+    Ok(res.rows_affected())
 }
 
 pub async fn save_room_group_db(
