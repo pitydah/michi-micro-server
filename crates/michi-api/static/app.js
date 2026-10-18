@@ -3664,7 +3664,7 @@ async function discoverDevices(silent) {
           var relativeSeenHtml = relativeSeen ? ' · ' + esc(relativeSeen) : '';
 
           var isRevoked = d.revoked === true;
-          var isAuthenticated = d.authenticated === true || isPaired;
+          var isAuthenticated = d.authenticated !== undefined ? d.authenticated === true : isPaired;
           var actionsHtml = '';
 
           if (isRevoked) {
@@ -3921,8 +3921,10 @@ async function openReceiverDiagnostics(receiverId) {
     if (!rec.revoked && !rec.authenticated) {
       html += '<button class="btn btn-sm btn-primary action-auth-device" data-receiver-id="' + esc(receiverId) + '" onclick="authenticateReceiver(\'' + esc(receiverId) + '\');closeReceiverDiagnosticsModal();">Authenticate Now</button>';
     }
-    if (outboxEntries.some(function(o) { return o.status === 'failed'; })) {
-      html += '<button class="btn btn-sm btn-ghost" onclick="MichiAPI.homeRetryOutbox().then(function(){showToast(\'Retry triggered\');closeReceiverDiagnosticsModal();});">Retry Sync</button>';
+    var failedEntry = outboxEntries.find(function(o) { return o.status === 'failed'; });
+    if (failedEntry) {
+      var revParam = failedEntry.revocation_id ? '"' + esc(failedEntry.revocation_id) + '"' : 'null';
+      html += '<button class="btn btn-sm btn-ghost" onclick="MichiAPI.homeRetryOutbox(' + revParam + ').then(function(){showToast(\'Retry triggered\');closeReceiverDiagnosticsModal();});">Retry Sync</button>';
     }
     html += '</div>';
 
@@ -3992,7 +3994,8 @@ async function refreshHomeRoster() {
       if (retryBtn && !retryBtn.disabled) {
         try {
           retryBtn.disabled = true;
-          await MichiAPI.homeRetryOutbox();
+          var specificRevId = retryBtn.getAttribute('data-revocation-id') || null;
+          await MichiAPI.homeRetryOutbox(specificRevId);
           showToast('Revocation sync retried');
           await refreshHomeRoster();
         } catch (e) {
@@ -4043,9 +4046,18 @@ async function refreshHomeRoster() {
         }
       }
 
-      var actionBtn = isRev
-        ? '<span style="color:var(--text-3)">Revoked</span>'
-        : '<button class="btn btn-sm btn-ghost action-revoke-device" data-michi-id="' + esc(mid) + '">Revoke</button>';
+      var actionBtn = '';
+      if (isRev) {
+        if (d.outbox_status === 'failed') {
+          var matchedOutbox = outbox.find(function(o) { return o.receiver_michi_id === mid || o.receiver_id === (d.receiver_id || mid); });
+          var revIdAttr = (matchedOutbox && matchedOutbox.revocation_id) ? ' data-revocation-id="' + esc(matchedOutbox.revocation_id) + '"' : '';
+          actionBtn = '<button class="btn btn-sm btn-ghost action-retry-outbox"' + revIdAttr + ' style="font-size:0.75rem">Retry Sync</button>';
+        } else {
+          actionBtn = '<span style="color:var(--text-3)">Revoked</span>';
+        }
+      } else {
+        actionBtn = '<button class="btn btn-sm btn-ghost action-revoke-device" data-michi-id="' + esc(mid) + '">Revoke</button>';
+      }
 
       html += '<tr>' +
         '<td><strong>' + esc(d.name || d.receiver_id || 'Unknown') + '</strong></td>' +
