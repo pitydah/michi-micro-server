@@ -4346,7 +4346,11 @@ mod tests {
         let outbox = michi_db::list_revocation_outbox_db(&pool, &root.home_id())
             .await
             .unwrap();
-        assert_eq!(outbox.len(), 1, "Only non-revoked receiver should be targeted in outbox");
+        assert_eq!(
+            outbox.len(),
+            1,
+            "Only non-revoked receiver should be targeted in outbox"
+        );
         assert_eq!(outbox[0].receiver_id, "stream-bedroom");
         assert_eq!(outbox[0].receiver_michi_id, "stream-dev-id-67890");
 
