@@ -32,4 +32,4 @@ pub trait ReceiverAdapter: Send + Sync {
 pub use client::ReceiverClient;
 pub use credentials::ReceiverCredentialStore;
 pub use models::*;
-pub use session_manager::ReceiverSessionManager;
+pub use session_manager::{ReceiverSessionManager, TrustState};
