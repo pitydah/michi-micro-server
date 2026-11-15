@@ -26,6 +26,9 @@ use tracing::{info, warn};
 use utoipa::OpenApi;
 use uuid::Uuid;
 
+pub mod aircat_grants;
+pub mod aircat_original_file;
+pub mod aircat_producer_security;
 pub mod assets;
 pub mod auth;
 mod library;
@@ -131,6 +134,8 @@ pub struct AppState {
     pub home_root_authority: AppHomeAuthority,
     /// Server's signed membership certificate within this home.
     pub server_membership: michi_identity::DeviceMembershipDto,
+    /// On-demand, bounded original-file snapshot and anti-replay state.
+    pub aircat_security: Arc<aircat_producer_security::AirCatProducerSecurityState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -750,6 +755,7 @@ impl AppState {
             module_runtime_info,
             home_root_authority,
             server_membership,
+            aircat_security: Arc::new(aircat_producer_security::AirCatProducerSecurityState::new()),
         };
 
         state.spawn_background_tasks();

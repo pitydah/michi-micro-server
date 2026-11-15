@@ -211,9 +211,24 @@ def main():
         print("  Skipping real Mosquitto test (marked SKIPPED_BINARY_NOT_FOUND).")
         sys.exit(0)
 
-    tmp_conf = f"/tmp/mosquitto_test_{args.broker_port}.conf"
-    with open(tmp_conf, "w") as f:
+    # AppArmor on Ubuntu restricts native /usr/sbin/mosquitto to /etc/mosquitto/
+    target_conf = os.path.abspath(f"target/mosquitto_test_{args.broker_port}.conf")
+    os.makedirs(os.path.dirname(target_conf), exist_ok=True)
+    with open(target_conf, "w") as f:
         f.write(f"listener {args.broker_port} 127.0.0.1\nallow_anonymous true\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(target_conf, 0o644)
+
+    etc_conf = f"/etc/mosquitto/conf.d/test_{args.broker_port}.conf"
+    tmp_conf = target_conf
+    try:
+        if os.path.exists("/etc/mosquitto/conf.d") and os.access("/etc/mosquitto/conf.d", os.W_OK):
+            with open(etc_conf, "w") as f:
+                f.write(f"listener {args.broker_port} 127.0.0.1\nallow_anonymous true\n")
+            tmp_conf = etc_conf
+    except Exception:
+        pass
 
     broker_proc = None
     server_proc = None
@@ -227,8 +242,11 @@ def main():
             stderr=subprocess.PIPE
         )
 
-        if not wait_for_port(args.broker_port, timeout=5.0):
+        if not wait_for_port(args.broker_port, timeout=10.0):
             print("❌ Failed to bind Mosquitto broker port.")
+            if broker_proc.poll() is not None:
+                _, err = broker_proc.communicate()
+                print(f"  Mosquitto stderr: {err.decode('utf-8', errors='replace')}")
             sys.exit(1)
         print(f"  ✅ Mosquitto broker live on 127.0.0.1:{args.broker_port}")
 
@@ -335,7 +353,11 @@ def main():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
-        assert wait_for_port(args.broker_port, timeout=5.0), "Mosquitto failed to restart"
+        if not wait_for_port(args.broker_port, timeout=10.0):
+            if broker_proc.poll() is not None:
+                _, err = broker_proc.communicate()
+                print(f"  Mosquitto restart stderr: {err.decode('utf-8', errors='replace')}")
+            assert False, "Mosquitto failed to restart"
         print("  ✅ 4. Mosquitto restarted; waiting for Michi auto-reconnection...")
 
         # Reconnect observer
