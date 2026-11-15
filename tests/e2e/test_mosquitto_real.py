@@ -227,8 +227,11 @@ def main():
             stderr=subprocess.PIPE
         )
 
-        if not wait_for_port(args.broker_port, timeout=5.0):
+        if not wait_for_port(args.broker_port, timeout=10.0):
             print("❌ Failed to bind Mosquitto broker port.")
+            if broker_proc.poll() is not None:
+                _, err = broker_proc.communicate()
+                print(f"  Mosquitto stderr: {err.decode('utf-8', errors='replace')}")
             sys.exit(1)
         print(f"  ✅ Mosquitto broker live on 127.0.0.1:{args.broker_port}")
 
