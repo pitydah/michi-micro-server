@@ -211,9 +211,13 @@ def main():
         print("  Skipping real Mosquitto test (marked SKIPPED_BINARY_NOT_FOUND).")
         sys.exit(0)
 
-    tmp_conf = f"/tmp/mosquitto_test_{args.broker_port}.conf"
+    tmp_conf = os.path.abspath(f"target/mosquitto_test_{args.broker_port}.conf")
+    os.makedirs(os.path.dirname(tmp_conf), exist_ok=True)
     with open(tmp_conf, "w") as f:
         f.write(f"listener {args.broker_port} 127.0.0.1\nallow_anonymous true\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp_conf, 0o644)
 
     broker_proc = None
     server_proc = None
@@ -338,7 +342,11 @@ def main():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
-        assert wait_for_port(args.broker_port, timeout=5.0), "Mosquitto failed to restart"
+        if not wait_for_port(args.broker_port, timeout=10.0):
+            if broker_proc.poll() is not None:
+                _, err = broker_proc.communicate()
+                print(f"  Mosquitto restart stderr: {err.decode('utf-8', errors='replace')}")
+            assert False, "Mosquitto failed to restart"
         print("  ✅ 4. Mosquitto restarted; waiting for Michi auto-reconnection...")
 
         # Reconnect observer
