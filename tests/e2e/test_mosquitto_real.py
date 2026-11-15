@@ -211,13 +211,24 @@ def main():
         print("  Skipping real Mosquitto test (marked SKIPPED_BINARY_NOT_FOUND).")
         sys.exit(0)
 
-    tmp_conf = os.path.abspath(f"target/mosquitto_test_{args.broker_port}.conf")
-    os.makedirs(os.path.dirname(tmp_conf), exist_ok=True)
-    with open(tmp_conf, "w") as f:
+    # AppArmor on Ubuntu restricts native /usr/sbin/mosquitto to /etc/mosquitto/
+    target_conf = os.path.abspath(f"target/mosquitto_test_{args.broker_port}.conf")
+    os.makedirs(os.path.dirname(target_conf), exist_ok=True)
+    with open(target_conf, "w") as f:
         f.write(f"listener {args.broker_port} 127.0.0.1\nallow_anonymous true\n")
         f.flush()
         os.fsync(f.fileno())
-    os.chmod(tmp_conf, 0o644)
+    os.chmod(target_conf, 0o644)
+
+    etc_conf = f"/etc/mosquitto/conf.d/test_{args.broker_port}.conf"
+    tmp_conf = target_conf
+    try:
+        if os.path.exists("/etc/mosquitto/conf.d") and os.access("/etc/mosquitto/conf.d", os.W_OK):
+            with open(etc_conf, "w") as f:
+                f.write(f"listener {args.broker_port} 127.0.0.1\nallow_anonymous true\n")
+            tmp_conf = etc_conf
+    except Exception:
+        pass
 
     broker_proc = None
     server_proc = None

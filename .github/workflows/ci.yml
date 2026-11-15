@@ -215,8 +215,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies & Mosquitto broker
         run: |
-          sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config mosquitto
+          sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config mosquitto apparmor-utils
           sudo systemctl stop mosquitto || true
+          sudo aa-disable /usr/sbin/mosquitto 2>/dev/null || sudo ln -s /etc/apparmor.d/usr.sbin.mosquitto /etc/apparmor.d/disable/ 2>/dev/null || true
+          sudo systemctl restart apparmor 2>/dev/null || true
+          sudo mkdir -p /etc/mosquitto/conf.d && sudo chmod 777 /etc/mosquitto/conf.d
       - name: Build michi-server binary
         run: cargo build --bin michi-server
       - name: Run Mosquitto Real Integration Tests
