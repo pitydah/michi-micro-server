@@ -122,6 +122,22 @@ async fn test_aircat_manifest_empty_and_populated() {
 
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("X-Michi-AirCat-Protocol")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "michi.aircat.original.v1"
+    );
+    assert_eq!(
+        resp.headers()
+            .get(header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "no-store"
+    );
     let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
         .await
         .unwrap();
@@ -178,6 +194,22 @@ async fn test_aircat_manifest_empty_and_populated() {
 
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("X-Michi-AirCat-Protocol")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "michi.aircat.original.v1"
+    );
+    assert_eq!(
+        resp.headers()
+            .get(header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "no-store"
+    );
     let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
         .await
         .unwrap();
@@ -295,6 +327,22 @@ async fn test_aircat_authorize_and_download_full_flow() {
 
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("X-Michi-AirCat-Protocol")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "michi.aircat.original.v1"
+    );
+    assert_eq!(
+        resp.headers()
+            .get(header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "no-store"
+    );
     let grant_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
         .await
         .unwrap();
@@ -332,6 +380,24 @@ async fn test_aircat_authorize_and_download_full_flow() {
 
     let resp_dl = app.clone().oneshot(req_dl).await.unwrap();
     assert_eq!(resp_dl.status(), StatusCode::OK);
+    assert_eq!(
+        resp_dl
+            .headers()
+            .get("X-Michi-AirCat-Protocol")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "michi.aircat.original.v1"
+    );
+    assert_eq!(
+        resp_dl
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/octet-stream"
+    );
     assert_eq!(
         resp_dl
             .headers()
@@ -373,6 +439,24 @@ async fn test_aircat_authorize_and_download_full_flow() {
     assert_eq!(
         resp_range
             .headers()
+            .get("X-Michi-AirCat-Protocol")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "michi.aircat.original.v1"
+    );
+    assert_eq!(
+        resp_range
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/octet-stream"
+    );
+    assert_eq!(
+        resp_range
+            .headers()
             .get("X-Michi-AirCat-Authorized-Grant-SHA256")
             .unwrap()
             .to_str()
@@ -405,6 +489,15 @@ async fn test_aircat_authorize_and_download_full_flow() {
 
     let resp_inv_range = app.clone().oneshot(req_invalid_range).await.unwrap();
     assert_eq!(resp_inv_range.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        resp_inv_range
+            .headers()
+            .get("X-Michi-AirCat-Protocol")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "michi.aircat.original.v1"
+    );
 
     // 6. Adversarial: Download an unselected track ID -> 403 / 404
     let unselected_uuid = Uuid::new_v4();
@@ -452,6 +545,22 @@ async fn test_aircat_enrollment_qr_handler() {
 
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("X-Michi-AirCat-Protocol")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "michi.aircat.original.v1"
+    );
+    assert_eq!(
+        resp.headers()
+            .get(header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "no-store"
+    );
     let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
         .await
         .unwrap();

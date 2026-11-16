@@ -32,6 +32,22 @@ use crate::{
     AppState,
 };
 
+pub const AIRCAT_PROTOCOL_HEADER: &str = "X-Michi-AirCat-Protocol";
+pub const AIRCAT_PROTOCOL_VALUE: &str = "michi.aircat.original.v1";
+
+pub fn aircat_json_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::HeaderName::from_static("x-michi-aircat-protocol"),
+        header::HeaderValue::from_static(AIRCAT_PROTOCOL_VALUE),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    headers
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AirCatCatalogTrack {
     pub track_id: String,
@@ -263,7 +279,7 @@ pub async fn resolve_authenticated_caller(
 pub async fn aircat_manifest_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<AirCatCatalogManifest>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(HeaderMap, Json<AirCatCatalogManifest>), (StatusCode, Json<serde_json::Value>)> {
     let _authenticated_member = resolve_authenticated_caller(&state, &headers, None).await?;
 
     let producer_michi_id = state.identity.michi_id().to_base64url();
@@ -301,14 +317,17 @@ pub async fn aircat_manifest_handler(
 
     let total_tracks = catalog_tracks.len() as i32;
 
-    Ok(Json(AirCatCatalogManifest {
-        schema: "michi.aircat.manifest.v1".to_string(),
-        version: 1,
-        device_id: producer_michi_id,
-        total_tracks,
-        total_size,
-        tracks: catalog_tracks,
-    }))
+    Ok((
+        aircat_json_headers(),
+        Json(AirCatCatalogManifest {
+            schema: "michi.aircat.manifest.v1".to_string(),
+            version: 1,
+            device_id: producer_michi_id,
+            total_tracks,
+            total_size,
+            tracks: catalog_tracks,
+        }),
+    ))
 }
 
 /// POST /api/v1/aircat/authorize
@@ -319,7 +338,7 @@ pub async fn aircat_authorize_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<aircat_grants::Request>,
-) -> Result<Json<aircat_grants::Grant>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(HeaderMap, Json<aircat_grants::Grant>), (StatusCode, Json<serde_json::Value>)> {
     let authenticated_member =
         resolve_authenticated_caller(&state, &headers, Some(&body.intent.destination_michi_id))
             .await?;
@@ -475,7 +494,7 @@ pub async fn aircat_authorize_handler(
             aircat_error(status, code, msg)
         })?;
 
-    Ok(Json(grant))
+    Ok((aircat_json_headers(), Json(grant)))
 }
 
 /// GET /api/v1/aircat/download/:remote_id
@@ -636,7 +655,6 @@ pub async fn aircat_download_handler(
         ));
     }
 
-    let mime = track.format.mime_type();
     let filename = format!("{}.{}", track.id, track.format.as_str());
 
     // Check If-Range header
@@ -667,7 +685,8 @@ pub async fn aircat_download_handler(
 
                     let response = Response::builder()
                         .status(StatusCode::PARTIAL_CONTENT)
-                        .header(header::CONTENT_TYPE, mime)
+                        .header(AIRCAT_PROTOCOL_HEADER, AIRCAT_PROTOCOL_VALUE)
+                        .header(header::CONTENT_TYPE, "application/octet-stream")
                         .header(header::CONTENT_RANGE, range.content_range_header())
                         .header(header::CONTENT_LENGTH, range.content_length().to_string())
                         .header(header::ACCEPT_RANGES, "bytes")
@@ -691,6 +710,7 @@ pub async fn aircat_download_handler(
                 Err(_) => {
                     let resp = Response::builder()
                         .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .header(AIRCAT_PROTOCOL_HEADER, AIRCAT_PROTOCOL_VALUE)
                         .header(header::CONTENT_RANGE, format!("bytes */{file_len}"))
                         .header("X-Michi-AirCat-Authorized-Grant-SHA256", receipt)
                         .body(Body::empty())
@@ -705,7 +725,8 @@ pub async fn aircat_download_handler(
     let stream = tokio_util::io::ReaderStream::new(file);
     let response = Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mime)
+        .header(AIRCAT_PROTOCOL_HEADER, AIRCAT_PROTOCOL_VALUE)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::CONTENT_LENGTH, file_len.to_string())
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::ETAG, &revision.strong_etag)
@@ -732,7 +753,7 @@ pub async fn aircat_download_handler(
 pub async fn aircat_enrollment_qr_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<AirCatTrustedEnrollmentQr>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(HeaderMap, Json<AirCatTrustedEnrollmentQr>), (StatusCode, Json<serde_json::Value>)> {
     let _authenticated_member = resolve_authenticated_caller(&state, &headers, None).await?;
 
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -756,16 +777,19 @@ pub async fn aircat_enrollment_qr_handler(
         )
     };
 
-    Ok(Json(AirCatTrustedEnrollmentQr {
-        qr_type: "michi.aircat.home.enrollment.v1".to_string(),
-        home_id: home_id.clone(),
-        authority_michi_id: home_id,
-        authority_public_key_base64_url: root_pk,
-        source_michi_id,
-        pinned_base_url,
-        tls_spki_sha256: tls_spki,
-        nonce_base64_url,
-        issued_at_millis: now_ms,
-        expires_at_millis: now_ms + 600_000,
-    }))
+    Ok((
+        aircat_json_headers(),
+        Json(AirCatTrustedEnrollmentQr {
+            qr_type: "michi.aircat.home.enrollment.v1".to_string(),
+            home_id: home_id.clone(),
+            authority_michi_id: home_id,
+            authority_public_key_base64_url: root_pk,
+            source_michi_id,
+            pinned_base_url,
+            tls_spki_sha256: tls_spki,
+            nonce_base64_url,
+            issued_at_millis: now_ms,
+            expires_at_millis: now_ms + 600_000,
+        }),
+    ))
 }
