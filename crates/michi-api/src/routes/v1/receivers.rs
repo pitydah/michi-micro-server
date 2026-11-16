@@ -2367,6 +2367,12 @@ pub async fn home_revoke_handler(
     {
         Ok(revocation) => {
             state.aircat_security.revoke_member(&body.device_michi_id);
+            let synthetic_uuid =
+                Uuid::new_v5(&Uuid::NAMESPACE_OID, body.device_michi_id.as_bytes());
+            state.token_store.revoke_all_by_device(synthetic_uuid).await;
+            if let Ok(uuid) = Uuid::parse_str(&body.device_michi_id) {
+                state.token_store.revoke_all_by_device(uuid).await;
+            }
             Ok(Json(serde_json::json!({
                 "status": "revoked",
                 "revocation": revocation,

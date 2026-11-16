@@ -304,11 +304,20 @@ impl AirCatProducerSecurityState {
     ) {
         if let Ok(mut inner) = self.inner.lock() {
             Self::prune(&mut inner, now_ms);
-            if inner.home_sessions.len() < MAX_ACTIVE {
-                inner
+            if inner.home_sessions.len() >= MAX_ACTIVE && !inner.home_sessions.contains_key(&token)
+            {
+                if let Some(evict_key) = inner
                     .home_sessions
-                    .insert(token, (client_michi_id, now_ms.saturating_add(ttl_ms)));
+                    .iter()
+                    .min_by_key(|(_, (_, exp))| *exp)
+                    .map(|(k, _)| k.clone())
+                {
+                    inner.home_sessions.remove(&evict_key);
+                }
             }
+            inner
+                .home_sessions
+                .insert(token, (client_michi_id, now_ms.saturating_add(ttl_ms)));
         }
     }
 
@@ -334,6 +343,9 @@ impl AirCatProducerSecurityState {
             .digest_cache
             .get(remote_track_id)
             .cloned()?;
+        if rev.dev_ino.is_none() || rev.modified_unix_ns.is_none() {
+            return None;
+        }
         if crate::aircat_original_file::revision_matches_metadata(&rev, meta) {
             self.digest_cache_hits.fetch_add(1, Ordering::Relaxed);
             Some(rev)
@@ -409,7 +421,9 @@ impl AirCatProducerSecurityState {
     /// at each file/stream request; this map is a cache, NOT the authority.
     pub fn revoke_member(&self, member: &str) {
         if let Ok(mut inner) = self.inner.lock() {
-            inner.revoked_members.insert(member.to_string());
+            if inner.revoked_members.len() < MAX_DIGEST_CACHE {
+                inner.revoked_members.insert(member.to_string());
+            }
             inner.nonces.retain(|(id, _), _| id != member);
             inner
                 .snapshots

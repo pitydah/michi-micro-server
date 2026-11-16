@@ -2350,7 +2350,7 @@ fn v1_link_routes() -> Router<AppState> {
         )
 }
 
-fn v1_public_routes() -> Router<AppState> {
+fn v1_home_auth_routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route(
             "/api/v1/auth/challenge",
@@ -2360,6 +2360,14 @@ fn v1_public_routes() -> Router<AppState> {
             "/api/v1/auth/session",
             post(routes::v1::aircat::home_auth_session_handler),
         )
+        .layer(middleware::from_fn_with_state(
+            state.security_state,
+            michi_security::rate_limit_middleware,
+        ))
+}
+
+fn v1_public_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/api/v1/server/info",
             get(routes::v1::server::server_info_handler),
@@ -2594,6 +2602,7 @@ pub fn create_router(state: AppState) -> Router {
             )),
         )
         .merge(v1_link_routes_with_auth(state.clone()))
+        .merge(v1_home_auth_routes(state.clone()))
         .merge(v1_public_routes())
         .layer(middleware::from_fn(michi_security::content_type_middleware))
         .layer(TraceLayer::new_for_http())

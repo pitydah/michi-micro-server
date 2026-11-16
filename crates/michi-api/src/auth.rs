@@ -65,10 +65,9 @@ fn make_session_cookie(token: &str, max_age_secs: u64, secure: bool) -> String {
     }
 }
 
-fn extract_token(request: &Request) -> Option<String> {
-    if let Some(auth_header) = request
-        .headers()
-        .get("Authorization")
+pub(crate) fn extract_token_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(auth_header) = headers
+        .get(axum::http::header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
     {
         if let Some(token) = auth_header.strip_prefix("Bearer ") {
@@ -78,8 +77,7 @@ fn extract_token(request: &Request) -> Option<String> {
             }
         }
     }
-    if let Some(cookie_header) = request
-        .headers()
+    if let Some(cookie_header) = headers
         .get(axum::http::header::COOKIE)
         .and_then(|h| h.to_str().ok())
     {
@@ -94,6 +92,10 @@ fn extract_token(request: &Request) -> Option<String> {
         }
     }
     None
+}
+
+fn extract_token(request: &Request) -> Option<String> {
+    extract_token_from_headers(request.headers())
 }
 
 /// Resolve the device_id from a request using either link tokens or auth sessions
@@ -351,6 +353,7 @@ fn is_admin_route(path: &str) -> bool {
         return false;
     }
     [
+        "/api/v1/aircat/enrollment-qr",
         "/api/v1/audit",
         "/api/v1/backup",
         "/api/v1/config",

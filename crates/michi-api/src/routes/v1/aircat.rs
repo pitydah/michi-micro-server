@@ -229,6 +229,7 @@ pub async fn is_member_revoked(state: &AppState, home_id: &str, device_michi_id:
         .iter()
         .any(|r| r.revoked_device_michi_id == device_michi_id)
     {
+        state.aircat_security.revoke_member(device_michi_id);
         return true;
     }
 
@@ -238,6 +239,7 @@ pub async fn is_member_revoked(state: &AppState, home_id: &str, device_michi_id:
             .iter()
             .any(|r| r.revoked_device_michi_id == device_michi_id)
         {
+            state.aircat_security.revoke_member(device_michi_id);
             return true;
         }
     }
@@ -245,29 +247,22 @@ pub async fn is_member_revoked(state: &AppState, home_id: &str, device_michi_id:
     false
 }
 
-/// Resolves and cryptographically checks the caller's Home session and identity.
-pub async fn resolve_authenticated_caller(
+async fn resolve_caller_with_token(
     state: &AppState,
     headers: &HeaderMap,
+    token: &str,
     claimed_destination: Option<&str>,
+    require_admin_user: bool,
 ) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok());
-
-    let token = match auth_header {
-        Some(h) if h.starts_with("Bearer ") => h[7..].trim(),
-        _ => {
-            return Err(aircat_error(
-                StatusCode::UNAUTHORIZED,
-                "UNAUTHORIZED",
-                "missing or malformed authorization header",
-            ));
-        }
-    };
-
     let now_ms = chrono::Utc::now().timestamp_millis();
     if let Some(verified_home_member) = state.aircat_security.lookup_home_session(token, now_ms) {
+        if require_admin_user {
+            return Err(aircat_error(
+                StatusCode::FORBIDDEN,
+                "ADMIN_REQUIRED",
+                "administrator session required",
+            ));
+        }
         if let Some(claimed) = claimed_destination {
             if claimed != verified_home_member {
                 return Err(aircat_error(
@@ -300,21 +295,75 @@ pub async fn resolve_authenticated_caller(
         return Ok(verified_home_member);
     }
 
-    let is_user_session = state.auth_sessions.validate(token).await;
-    let is_device_token = state
-        .token_store
-        .validate(token, michi_link::TokenType::Device)
-        .await;
+    let user_id_opt = state.auth_sessions.extract_user_id(token).await;
+    let device_uuid_opt = if user_id_opt.is_none() {
+        state
+            .token_store
+            .validate(token, michi_link::TokenType::Device)
+            .await
+            .ok()
+    } else {
+        None
+    };
 
-    if !is_user_session && is_device_token.is_err() {
-        return Err(aircat_error(
-            StatusCode::UNAUTHORIZED,
-            "INVALID_TOKEN",
-            "invalid or expired session token",
-        ));
-    }
+    let authenticated_member = if let Some(user_id) = user_id_opt {
+        let is_admin = michi_db::get_user_by_id(&state.db, &user_id)
+            .await
+            .map_err(|e| {
+                aircat_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DB_ERROR",
+                    &e.to_string(),
+                )
+            })?
+            .map(|(_, _, _, admin)| admin)
+            .unwrap_or(false);
 
-    let authenticated_member = if let Ok(device_uuid) = is_device_token {
+        if require_admin_user && !is_admin {
+            return Err(aircat_error(
+                StatusCode::FORBIDDEN,
+                "ADMIN_REQUIRED",
+                "administrator privileges required",
+            ));
+        }
+
+        // Active user/admin session (WebUI / paired admin operator)
+        if let Some(claimed) = claimed_destination {
+            if !is_admin {
+                return Err(aircat_error(
+                    StatusCode::FORBIDDEN,
+                    "ADMIN_REQUIRED",
+                    "non-admin user session cannot authorize transfers for another destinationMichiId",
+                ));
+            }
+            let valid_id = claimed.len() == 43
+                && decode_base64url_strict(claimed)
+                    .map(|b| b.len() == 32)
+                    .unwrap_or(false);
+            if !valid_id {
+                return Err(aircat_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "INVALID_FIELDS",
+                    "destinationMichiId must be a canonical 43-character base64url Michi ID",
+                ));
+            }
+            claimed.to_string()
+        } else if let Some(hdr_dev) = headers
+            .get("X-Michi-Device-Id")
+            .and_then(|h| h.to_str().ok())
+        {
+            hdr_dev.to_string()
+        } else {
+            state.identity.michi_id().to_base64url()
+        }
+    } else if let Some(device_uuid) = device_uuid_opt {
+        if require_admin_user {
+            return Err(aircat_error(
+                StatusCode::UNAUTHORIZED,
+                "ADMIN_REQUIRED",
+                "administrator session required",
+            ));
+        }
         let dev = michi_db::get_link_device(&state.db, &device_uuid)
             .await
             .map_err(|e| {
@@ -356,28 +405,11 @@ pub async fn resolve_authenticated_caller(
             dev.device_id.to_string()
         }
     } else {
-        // Active user/admin session (WebUI / paired admin operator)
-        if let Some(claimed) = claimed_destination {
-            let valid_id = claimed.len() == 43
-                && decode_base64url_strict(claimed)
-                    .map(|b| b.len() == 32)
-                    .unwrap_or(false);
-            if !valid_id {
-                return Err(aircat_error(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "INVALID_FIELDS",
-                    "destinationMichiId must be a canonical 43-character base64url Michi ID",
-                ));
-            }
-            claimed.to_string()
-        } else if let Some(hdr_dev) = headers
-            .get("X-Michi-Device-Id")
-            .and_then(|h| h.to_str().ok())
-        {
-            hdr_dev.to_string()
-        } else {
-            state.identity.michi_id().to_base64url()
-        }
+        return Err(aircat_error(
+            StatusCode::UNAUTHORIZED,
+            "INVALID_TOKEN",
+            "invalid or expired session token",
+        ));
     };
 
     // Header identity coherence check: if X-Michi-Device-Id header is provided, it MUST match
@@ -405,6 +437,47 @@ pub async fn resolve_authenticated_caller(
     }
 
     Ok(authenticated_member)
+}
+
+/// Resolves and cryptographically checks the caller's Home session and identity via
+/// `Authorization: Bearer ...` strictly (no browser cookies on AirCat wire transfer APIs).
+pub async fn resolve_authenticated_caller(
+    state: &AppState,
+    headers: &HeaderMap,
+    claimed_destination: Option<&str>,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+
+    let token = match auth_header {
+        Some(h) if h.starts_with("Bearer ") => h[7..].trim(),
+        _ => {
+            return Err(aircat_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "missing or malformed authorization header",
+            ));
+        }
+    };
+
+    resolve_caller_with_token(state, headers, token, claimed_destination, false).await
+}
+
+/// Resolves WebUI (`michi_web_session` cookie) or Bearer callers for WebUI/admin AirCat panels.
+async fn resolve_webui_or_bearer_caller(
+    state: &AppState,
+    headers: &HeaderMap,
+    require_admin_user: bool,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let token = crate::auth::extract_token_from_headers(headers).ok_or_else(|| {
+        aircat_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "missing authorization header or session cookie",
+        )
+    })?;
+    resolve_caller_with_token(state, headers, &token, None, require_admin_user).await
 }
 
 /// GET /api/v1/aircat/manifest
@@ -683,72 +756,97 @@ struct DownloadStreamGuard {
     manifest_sha256: String,
     remote_id: String,
     expires_at_millis: i64,
+    remaining_bytes: u64,
+    expected_file_size: i64,
+    expected_modified_unix_ns: Option<i128>,
 }
 
-fn checked_download_stream<R>(
-    reader: R,
+fn checked_download_stream(
+    file: tokio::fs::File,
     guard: DownloadStreamGuard,
-) -> impl futures_util::Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send + 'static
-where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
+) -> impl futures_util::Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send + 'static {
     let last_db_check = tokio::time::Instant::now();
     futures_util::stream::unfold(
-        (Some(reader), last_db_check),
-        move |(maybe_reader, mut last_db_check)| {
-            let state = guard.state.clone();
-            let home_id = guard.home_id.clone();
-            let authenticated_member = guard.authenticated_member.clone();
-            let transfer_id = guard.transfer_id.clone();
-            let manifest_sha256 = guard.manifest_sha256.clone();
-            let remote_id = guard.remote_id.clone();
-            let expires_at_millis = guard.expires_at_millis;
-            async move {
-                let mut reader = maybe_reader?;
-                let now_ms = chrono::Utc::now().timestamp_millis();
-                let mut revoked = state
-                    .aircat_security
-                    .is_member_revoked_in_memory(&authenticated_member);
-                if !revoked && last_db_check.elapsed() >= DB_REVOCATION_RECHECK_INTERVAL {
-                    revoked = is_member_revoked(&state, &home_id, &authenticated_member).await;
-                    last_db_check = tokio::time::Instant::now();
-                }
+        (Some((file, guard)), last_db_check),
+        move |(state_tuple, mut last_db_check)| async move {
+            let (mut file, mut guard) = state_tuple?;
+            if guard.remaining_bytes == 0 {
+                return None;
+            }
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let mut revoked = guard
+                .state
+                .aircat_security
+                .is_member_revoked_in_memory(&guard.authenticated_member);
+            if !revoked && last_db_check.elapsed() >= DB_REVOCATION_RECHECK_INTERVAL {
+                revoked =
+                    is_member_revoked(&guard.state, &guard.home_id, &guard.authenticated_member)
+                        .await;
+                last_db_check = tokio::time::Instant::now();
+            }
 
-                if now_ms >= expires_at_millis
-                    || revoked
-                    || state
-                        .aircat_security
-                        .selected_original(
-                            &transfer_id,
-                            &manifest_sha256,
-                            &authenticated_member,
-                            &remote_id,
-                            now_ms,
-                        )
-                        .is_err()
-                {
-                    state.aircat_security.record_midstream_revocation();
+            if now_ms >= guard.expires_at_millis
+                || revoked
+                || guard
+                    .state
+                    .aircat_security
+                    .selected_original(
+                        &guard.transfer_id,
+                        &guard.manifest_sha256,
+                        &guard.authenticated_member,
+                        &guard.remote_id,
+                        now_ms,
+                    )
+                    .is_err()
+            {
+                guard.state.aircat_security.record_midstream_revocation();
+                return Some((
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "aircat grant expired or member revoked mid-stream",
+                    )),
+                    (None, last_db_check),
+                ));
+            }
+
+            match file.metadata().await {
+                Ok(meta)
+                    if meta.is_file()
+                        && meta.len() as i64 == guard.expected_file_size
+                        && (guard.expected_modified_unix_ns.is_none()
+                            || aircat_original_file::metadata_modified_unix_ns(&meta)
+                                == guard.expected_modified_unix_ns) => {}
+                _ => {
                     return Some((
                         Err(std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            "aircat grant expired or member revoked mid-stream",
+                            std::io::ErrorKind::InvalidData,
+                            "original file modified mid-stream",
                         )),
                         (None, last_db_check),
                     ));
                 }
-                let mut buf = vec![0u8; AIRCAT_CHUNK_BYTES];
-                match reader.read(&mut buf).await {
-                    Ok(0) => None,
-                    Ok(n) => {
-                        state.aircat_security.record_bytes_served(n as u64);
-                        buf.truncate(n);
-                        Some((
-                            Ok(axum::body::Bytes::from(buf)),
-                            (Some(reader), last_db_check),
-                        ))
-                    }
-                    Err(e) => Some((Err(e), (None, last_db_check))),
+            }
+
+            let to_read = AIRCAT_CHUNK_BYTES.min(guard.remaining_bytes as usize);
+            let mut buf = vec![0u8; to_read];
+            match file.read(&mut buf).await {
+                Ok(0) => Some((
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "original file truncated mid-stream",
+                    )),
+                    (None, last_db_check),
+                )),
+                Ok(n) => {
+                    guard.remaining_bytes -= n as u64;
+                    guard.state.aircat_security.record_bytes_served(n as u64);
+                    buf.truncate(n);
+                    Some((
+                        Ok(axum::body::Bytes::from(buf)),
+                        (Some((file, guard)), last_db_check),
+                    ))
                 }
+                Err(e) => Some((Err(e), (None, last_db_check))),
             }
         },
     )
@@ -774,43 +872,58 @@ pub async fn aircat_download_handler(
 
     let now_ms = chrono::Utc::now().timestamp_millis();
 
-    // Extract X-Michi-AirCat-Grant header
-    let grant_header_raw = headers
+    let grant_header_raw = match headers
         .get("X-Michi-AirCat-Grant")
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| {
-            aircat_error(
+    {
+        Some(raw) => raw,
+        None => {
+            let _ = resolve_authenticated_caller(&state, &headers, None).await?;
+            return Err(aircat_error(
                 StatusCode::UNAUTHORIZED,
                 "MISSING_GRANT",
                 "missing X-Michi-AirCat-Grant header",
-            )
-        })?;
+            ));
+        }
+    };
 
     // Compute mandatory protocol receipt header: lowercase_hex(sha256(ASCII(header_value)))
-    let receipt = aircat_grants::receipt_for_grant_header(grant_header_raw).map_err(|_| {
-        aircat_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "INVALID_GRANT_HEADER",
-            "grant header is not valid base64url or exceeds size limits",
-        )
-    })?;
+    let receipt = match aircat_grants::receipt_for_grant_header(grant_header_raw) {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = resolve_authenticated_caller(&state, &headers, None).await?;
+            return Err(aircat_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "INVALID_GRANT_HEADER",
+                "grant header is not valid base64url or exceeds size limits",
+            ));
+        }
+    };
 
     // Decode grant JSON
-    let grant_json_bytes = URL_SAFE_NO_PAD.decode(grant_header_raw).map_err(|_| {
-        aircat_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "INVALID_GRANT_BASE64",
-            "failed to decode base64url grant payload",
-        )
-    })?;
+    let grant_json_bytes = match URL_SAFE_NO_PAD.decode(grant_header_raw) {
+        Ok(b) => b,
+        Err(_) => {
+            let _ = resolve_authenticated_caller(&state, &headers, None).await?;
+            return Err(aircat_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "INVALID_GRANT_BASE64",
+                "failed to decode base64url grant payload",
+            ));
+        }
+    };
 
-    let grant: aircat_grants::Grant = serde_json::from_slice(&grant_json_bytes).map_err(|_| {
-        aircat_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "INVALID_GRANT_JSON",
-            "failed to parse grant json",
-        )
-    })?;
+    let grant: aircat_grants::Grant = match serde_json::from_slice(&grant_json_bytes) {
+        Ok(g) => g,
+        Err(_) => {
+            let _ = resolve_authenticated_caller(&state, &headers, None).await?;
+            return Err(aircat_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "INVALID_GRANT_JSON",
+                "failed to parse grant json",
+            ));
+        }
+    };
 
     // Authenticate caller session
     let authenticated_member =
@@ -933,7 +1046,10 @@ pub async fn aircat_download_handler(
             .get(header::IF_NONE_MATCH)
             .and_then(|v| v.to_str().ok())
         {
-            if inm.trim() == revision.strong_etag {
+            if inm
+                .split(',')
+                .any(|tag| tag.trim() == revision.strong_etag || tag.trim() == "*")
+            {
                 let resp = Response::builder()
                     .status(StatusCode::NOT_MODIFIED)
                     .header(AIRCAT_PROTOCOL_HEADER, AIRCAT_PROTOCOL_VALUE)
@@ -978,9 +1094,8 @@ pub async fn aircat_download_handler(
                             )
                         })?;
 
-                    let taken = file.take(range.content_length());
                     let stream = checked_download_stream(
-                        taken,
+                        file,
                         DownloadStreamGuard {
                             state: state.clone(),
                             home_id: grant.home_id.clone(),
@@ -989,6 +1104,9 @@ pub async fn aircat_download_handler(
                             manifest_sha256: grant.manifest_sha256.clone(),
                             remote_id: remote_id.clone(),
                             expires_at_millis: grant.expires_at_millis,
+                            remaining_bytes: range.content_length(),
+                            expected_file_size: revision.exact_size,
+                            expected_modified_unix_ns: revision.modified_unix_ns,
                         },
                     );
 
@@ -1021,6 +1139,7 @@ pub async fn aircat_download_handler(
                     let resp = Response::builder()
                         .status(StatusCode::RANGE_NOT_SATISFIABLE)
                         .header(AIRCAT_PROTOCOL_HEADER, AIRCAT_PROTOCOL_VALUE)
+                        .header(header::CACHE_CONTROL, "no-store, no-transform")
                         .header(header::CONTENT_RANGE, format!("bytes */{file_len}"))
                         .header("X-Michi-AirCat-Authorized-Grant-SHA256", receipt)
                         .body(Body::empty())
@@ -1048,6 +1167,9 @@ pub async fn aircat_download_handler(
             manifest_sha256: grant.manifest_sha256,
             remote_id,
             expires_at_millis: grant.expires_at_millis,
+            remaining_bytes: file_len as u64,
+            expected_file_size: revision.exact_size,
+            expected_modified_unix_ns: revision.modified_unix_ns,
         },
     );
     let response = Response::builder()
@@ -1083,7 +1205,7 @@ pub async fn aircat_enrollment_qr_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<AirCatTrustedEnrollmentQr>), (StatusCode, Json<serde_json::Value>)> {
-    let _authenticated_member = resolve_authenticated_caller(&state, &headers, None).await?;
+    let _authenticated_admin = resolve_webui_or_bearer_caller(&state, &headers, true).await?;
 
     let tls_info = state.aircat_tls.read().await.clone().ok_or_else(|| {
         aircat_error(
@@ -1326,7 +1448,7 @@ pub async fn aircat_status_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
-    let _authenticated_member = resolve_authenticated_caller(&state, &headers, None).await?;
+    let _authenticated_member = resolve_webui_or_bearer_caller(&state, &headers, false).await?;
     let now_ms = chrono::Utc::now().timestamp_millis();
     let tls_info = state.aircat_tls.read().await.clone();
     let stats = state.aircat_security.stats_snapshot(now_ms);

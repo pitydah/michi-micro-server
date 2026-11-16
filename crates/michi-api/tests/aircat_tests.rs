@@ -1593,3 +1593,434 @@ async fn test_aircat_cleartext_http_rejected_when_tls_active() {
 
     srv.abort();
 }
+
+#[tokio::test]
+async fn test_aircat_webui_cookie_auth_and_admin_enrollment_rbac() {
+    let (app, pool, state, admin_token, _music_dir) = make_app().await;
+
+    let cert_der = sample_x509_der_cert();
+    *state.aircat_tls.write().await = Some(michi_api::AirCatTlsInfo {
+        pinned_base_url: "https://192.168.1.50:9443".into(),
+        tls_spki_sha256: michi_api::extract_spki_sha256_from_pem(&cert_der).unwrap(),
+        cert_path: std::path::PathBuf::from("/tmp/c.crt"),
+        key_path: std::path::PathBuf::from("/tmp/c.key"),
+        tls_port: 9443,
+    });
+
+    // 1. Admin WebUI michi_web_session cookie succeeds on /status and /enrollment-qr
+    let admin_cookie = format!("michi_web_session={admin_token}");
+    let status_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/aircat/status")
+                .method("GET")
+                .header(header::COOKIE, &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status_resp.status(), StatusCode::OK);
+
+    let qr_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/aircat/enrollment-qr")
+                .method("GET")
+                .header(header::COOKIE, &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(qr_resp.status(), StatusCode::OK);
+
+    // 2. Wire protocol endpoints (/manifest) MUST still reject browser cookies without Bearer
+    let manifest_cookie_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/aircat/manifest")
+                .method("GET")
+                .header(header::COOKIE, &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(manifest_cookie_resp.status(), StatusCode::UNAUTHORIZED);
+
+    // 3. Non-admin user MUST be rejected on /enrollment-qr and cannot authorize for another device
+    let user_id = Uuid::new_v4();
+    michi_db::create_user(&pool, &user_id, "regular-user", "password", false)
+        .await
+        .unwrap();
+    let user_token = state.auth_sessions.create_session(user_id).await.unwrap();
+    let user_auth = format!("Bearer {user_token}");
+
+    let qr_user_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/aircat/enrollment-qr")
+                .method("GET")
+                .header(header::AUTHORIZATION, &user_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(qr_user_resp.status(), StatusCode::FORBIDDEN);
+
+    // 4. HOME_MEMBERSHIP device token MUST also be rejected on admin /enrollment-qr
+    let client_sk = ed25519_dalek::SigningKey::from_bytes(&[0x61u8; 32]);
+    let client_pk_b64 = URL_SAFE_NO_PAD.encode(client_sk.verifying_key().to_bytes());
+    let client_michi_id =
+        URL_SAFE_NO_PAD.encode(blake3::hash(&client_sk.verifying_key().to_bytes()).as_bytes());
+    let home_id = state.home_root_authority.home_id();
+    let membership = state.home_root_authority.issue_membership(
+        &home_id,
+        &client_michi_id,
+        &client_pk_b64,
+        "mobile",
+        vec![michi_identity::Role::MobilePlayer],
+        "2026-11-16T00:00:00Z",
+        12,
+    );
+    let chal_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/challenge")
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&michi_identity::types::DeviceAuthChallengeRequest {
+                        client_michi_id: client_michi_id.clone(),
+                        client_public_key: client_pk_b64,
+                        home_id: home_id.clone(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let chal: michi_identity::types::DeviceAuthChallengeResponse = serde_json::from_slice(
+        &axum::body::to_bytes(chal_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let sig = michi_identity::home::sign_device_auth_challenge(
+        &client_sk,
+        &home_id,
+        &chal.server_michi_id,
+        &client_michi_id,
+        &chal.challenge_id.to_string(),
+        &chal.challenge_nonce,
+    );
+    let sess_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/session")
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&michi_identity::types::DeviceAuthSessionRequest {
+                        challenge_id: chal.challenge_id,
+                        client_michi_id,
+                        membership,
+                        client_signature: sig,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let sess: michi_identity::types::DeviceAuthSessionResponse = serde_json::from_slice(
+        &axum::body::to_bytes(sess_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let member_auth = format!("Bearer {}", sess.session_token);
+
+    let qr_member_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/aircat/enrollment-qr")
+                .method("GET")
+                .header(header::AUTHORIZATION, &member_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        qr_member_resp.status(),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
+}
+
+#[tokio::test]
+async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_mutation() {
+    use futures_util::StreamExt;
+    use std::io::{Seek, SeekFrom};
+
+    let (app, pool, state, admin_token, music_dir) = make_app().await;
+    let admin_auth = format!("Bearer {admin_token}");
+
+    let client_sk = ed25519_dalek::SigningKey::from_bytes(&[0x62u8; 32]);
+    let client_pk_b64 = URL_SAFE_NO_PAD.encode(client_sk.verifying_key().to_bytes());
+    let client_michi_id =
+        URL_SAFE_NO_PAD.encode(blake3::hash(&client_sk.verifying_key().to_bytes()).as_bytes());
+    let home_id = state.home_root_authority.home_id();
+    let membership = state.home_root_authority.issue_membership(
+        &home_id,
+        &client_michi_id,
+        &client_pk_b64,
+        "mobile",
+        vec![michi_identity::Role::MobilePlayer],
+        "2026-11-16T00:00:00Z",
+        13,
+    );
+
+    let big_bytes = vec![0xCDu8; 256 * 1024];
+    let filename = format!("mutate-{}.flac", Uuid::new_v4());
+    let (sha, size, path) = create_test_file(&music_dir, &filename, &big_bytes);
+    let track_id = michi_core::track_id_from_library_path(&music_dir, &path);
+    michi_db::upsert_track(
+        &pool,
+        &Track {
+            id: track_id,
+            file_path: path.to_string_lossy().to_string(),
+            title: Some("Mutate Track".into()),
+            artist: Some("A".into()),
+            album: Some("B".into()),
+            album_artist: None,
+            duration_ms: Some(10_000),
+            format: AudioFormat::Flac,
+            sample_rate: Some(48000),
+            bit_depth: Some(16),
+            channels: Some(2),
+            artwork_id: None,
+            genre: None,
+            year: Some(2026),
+            track_number: Some(1),
+            disc_number: None,
+            content_hash: Some(sha.clone()),
+            file_size: Some(size as u64),
+            file_mtime_ns: None,
+            starred: false,
+            rating: 0,
+            starred_at: None,
+            replaygain_track_gain: None,
+            replaygain_track_peak: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let chal_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/challenge")
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&michi_identity::types::DeviceAuthChallengeRequest {
+                        client_michi_id: client_michi_id.clone(),
+                        client_public_key: client_pk_b64,
+                        home_id: home_id.clone(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let chal: michi_identity::types::DeviceAuthChallengeResponse = serde_json::from_slice(
+        &axum::body::to_bytes(chal_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let sig = michi_identity::home::sign_device_auth_challenge(
+        &client_sk,
+        &home_id,
+        &chal.server_michi_id,
+        &client_michi_id,
+        &chal.challenge_id.to_string(),
+        &chal.challenge_nonce,
+    );
+    let sess_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/session")
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&michi_identity::types::DeviceAuthSessionRequest {
+                        challenge_id: chal.challenge_id,
+                        client_michi_id: client_michi_id.clone(),
+                        membership,
+                        client_signature: sig,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let sess: michi_identity::types::DeviceAuthSessionResponse = serde_json::from_slice(
+        &axum::body::to_bytes(sess_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let member_auth = format!("Bearer {}", sess.session_token);
+
+    // 1. Mid-stream in-place file mutation must abort stream after chunk 1
+    let source_id = state.identity.michi_id().to_base64url();
+    let sel_manifest = michi_api::aircat_grants::Manifest {
+        manifest_version: 1,
+        transfer_id: "tx-mutate-stream".into(),
+        source_device_id: source_id.clone(),
+        total_tracks: 1,
+        total_bytes: size,
+        items: vec![michi_api::aircat_grants::FileItem {
+            logical_track_id: track_id.to_string(),
+            remote_track_id: track_id.to_string(),
+            title: "Mutate Track".into(),
+            artist: "A".into(),
+            album: "B".into(),
+            format: "flac".into(),
+            size,
+            sha256: sha,
+        }],
+    };
+    let manifest_sha = michi_api::aircat_grants::manifest_sha256(&sel_manifest).unwrap();
+    let auth_req = michi_api::aircat_grants::Request {
+        intent: michi_api::aircat_grants::Intent {
+            transfer_id: "tx-mutate-stream".into(),
+            source_michi_id: source_id,
+            destination_michi_id: client_michi_id.clone(),
+            source_library_id: "lib-src".into(),
+            destination_library_id: "lib-dst".into(),
+            selection_scope: "ALBUMS".into(),
+            manifest_version: 1,
+            required_scopes: vec!["content:read".into(), "content:transfer".into()],
+            expires_at: chrono::Utc::now().timestamp_millis() + 300_000,
+            signed_grant: None,
+            authorization_nonce_base64_url: String::new(),
+        },
+        manifest: sel_manifest,
+        manifest_sha256: manifest_sha,
+        client_nonce_base64_url: URL_SAFE_NO_PAD.encode([0x44u8; 24]),
+    };
+    let auth_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/aircat/authorize")
+                .method("POST")
+                .header(header::AUTHORIZATION, &member_auth)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&auth_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(auth_resp.status(), StatusCode::OK);
+    let grant_bytes = axum::body::to_bytes(auth_resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let grant_header = URL_SAFE_NO_PAD.encode(&grant_bytes);
+
+    let dl_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/aircat/download/{track_id}"))
+                .method("GET")
+                .header(header::AUTHORIZATION, &member_auth)
+                .header("X-Michi-AirCat-Grant", &grant_header)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dl_resp.status(), StatusCode::OK);
+    let mut stream = dl_resp.into_body().into_data_stream();
+    let chunk1 = stream.next().await.unwrap().unwrap();
+    assert_eq!(chunk1.len(), 64 * 1024);
+
+    // Mutate file in-place (same inode, shifted bytes/size) mid-stream
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.set_len(128 * 1024).unwrap();
+        f.write_all(b"CORRUPTED").unwrap();
+    }
+    assert!(stream.next().await.unwrap().is_err());
+
+    // 2. General /api/v1/tracks accepts member_auth before revoke, rejects with 401 after /home/revoke
+    let tracks_before = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tracks")
+                .method("GET")
+                .header(header::AUTHORIZATION, &member_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tracks_before.status(), StatusCode::OK);
+
+    let revoke_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/home/revoke")
+                .method("POST")
+                .header(header::AUTHORIZATION, &admin_auth)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "device_michi_id": client_michi_id,
+                        "reason": "revoke_token_store_test"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoke_resp.status(), StatusCode::OK);
+
+    let tracks_after = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tracks")
+                .method("GET")
+                .header(header::AUTHORIZATION, &member_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tracks_after.status(), StatusCode::UNAUTHORIZED);
+}

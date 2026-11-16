@@ -142,7 +142,15 @@ pub async fn rate_limit_middleware(
         .map(|ci| ci.0.ip().to_string())
         .unwrap_or_else(|| "127.0.0.1".to_string());
     let is_aircat_grant_download = req.uri().path().starts_with("/api/v1/aircat/download/")
-        && req.headers().contains_key("x-michi-aircat-grant");
+        && req
+            .headers()
+            .contains_key(axum::http::header::AUTHORIZATION)
+        && req
+            .headers()
+            .get("x-michi-aircat-grant")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.len() >= 32)
+            .unwrap_or(false);
     let ip = if is_aircat_grant_download {
         format!("{raw_ip}:aircat_dl")
     } else {
