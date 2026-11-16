@@ -308,6 +308,54 @@ async fn async_main(config: michi_config::Config) -> Result<()> {
     let shutdown_tx = state.tx.clone();
     let shutdown_db = state.db.clone();
 
+    if let Some(tls_info) = state.aircat_tls.read().await.clone() {
+        let cert_bytes = std::fs::read(&tls_info.cert_path)?;
+        let key_bytes = std::fs::read(&tls_info.key_path)?;
+        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut cert_bytes.as_slice())
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+        let key = rustls_pemfile::private_key(&mut key_bytes.as_slice())?.ok_or_else(|| {
+            anyhow::anyhow!("no private key found in {}", tls_info.key_path.display())
+        })?;
+        let tls_cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_cfg));
+        let tls_addr = SocketAddr::from(([0, 0, 0, 0], tls_info.tls_port));
+        let tls_listener = tokio::net::TcpListener::bind(tls_addr).await?;
+        info!(
+            "AirCat HTTPS/TLS listener active on https://0.0.0.0:{} (spki={})",
+            tls_info.tls_port, tls_info.tls_spki_sha256
+        );
+        let tls_app = app.clone();
+        let tls_shutdown = state.shutdown_token.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tls_shutdown.cancelled() => break,
+                    accept_res = tls_listener.accept() => {
+                        let Ok((tcp_stream, _peer)) = accept_res else {
+                            continue;
+                        };
+                        let acceptor = acceptor.clone();
+                        let svc = hyper_util::service::TowerToHyperService::new(tls_app.clone());
+                        tokio::spawn(async move {
+                            let Ok(tls_stream) = acceptor.accept(tcp_stream).await else {
+                                return;
+                            };
+                            let io = hyper_util::rt::TokioIo::new(tls_stream);
+                            let _ = hyper_util::server::conn::auto::Builder::new(
+                                hyper_util::rt::TokioExecutor::new(),
+                            )
+                            .serve_connection(io, svc)
+                            .await;
+                        });
+                    }
+                }
+            }
+        });
+    }
+
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

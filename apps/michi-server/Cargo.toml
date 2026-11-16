@@ -21,6 +21,12 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 sqlx.workspace = true
 futures-util.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile = "2"
+hyper = { version = "1", features = ["server"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
+tower = "0.5"
 
 [features]
 default = []
