@@ -308,6 +308,8 @@ async fn async_main(config: michi_config::Config) -> Result<()> {
     let shutdown_tx = state.tx.clone();
     let shutdown_db = state.db.clone();
 
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     if let Some(tls_info) = state.aircat_tls.read().await.clone() {
         let cert_bytes = std::fs::read(&tls_info.cert_path)?;
         let key_bytes = std::fs::read(&tls_info.key_path)?;
@@ -340,7 +342,12 @@ async fn async_main(config: michi_config::Config) -> Result<()> {
                         let acceptor = acceptor.clone();
                         let tls_app_conn = tls_app.clone();
                         tokio::spawn(async move {
-                            let Ok(tls_stream) = acceptor.accept(tcp_stream).await else {
+                            let Ok(Ok(tls_stream)) = tokio::time::timeout(
+                                Duration::from_secs(10),
+                                acceptor.accept(tcp_stream),
+                            )
+                            .await
+                            else {
                                 return;
                             };
                             let io = hyper_util::rt::TokioIo::new(tls_stream);
