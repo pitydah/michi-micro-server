@@ -11,12 +11,14 @@
 use crate::aircat_grants::{manifest_sha256, Manifest, Refusal, Request};
 use crate::aircat_original_file::expected_strong_etag;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 const MAX_ACTIVE: usize = 1024;
 const MAX_REPLAY_NONCES: usize = 4096;
 const MAX_LIFETIME_MS: i64 = 600_000;
+const MAX_DIGEST_CACHE: usize = 10_000;
 
 #[derive(Clone, Debug)]
 pub struct OriginalAssetRevision {
@@ -40,17 +42,50 @@ pub struct ProducerSnapshot {
     pub originals: Vec<OriginalAssetRevision>,
 }
 
+#[derive(Clone, Debug)]
+struct HomeAuthChallengeEntry {
+    client_michi_id: String,
+    nonce: String,
+    expires_at_ms: i64,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct AirCatStatsSnapshot {
+    pub active_snapshots: usize,
+    pub active_home_sessions: usize,
+    pub cached_digests: usize,
+    pub revoked_members_cached: usize,
+    pub downloads_started: u64,
+    pub bytes_served: u64,
+    pub digest_cache_hits: u64,
+    pub midstream_revocations: u64,
+    pub tls_rejections: u64,
+}
+
 #[derive(Default, Debug)]
 struct Inner {
     /// key: (destination Michi ID, canonical base64url nonce)
     nonces: HashMap<(String, String), i64>,
     /// key: (transfer ID, exact SHA-256 canonical manifest)
     snapshots: HashMap<(String, String), ProducerSnapshot>,
+    /// key: challenge UUID for HOME_MEMBERSHIP mutual auth
+    home_challenges: HashMap<uuid::Uuid, HomeAuthChallengeEntry>,
+    /// key: opaque bearer token -> (verified client_michi_id, expires_at_ms)
+    home_sessions: HashMap<String, (String, i64)>,
+    /// key: remote_track_id -> verified original file revision matched by (size, dev_ino, mtime_ns)
+    digest_cache: HashMap<String, OriginalAssetRevision>,
+    /// in-memory set of revoked member IDs for zero-SQLite chunk-boundary abort
+    revoked_members: HashSet<String>,
 }
 
 #[derive(Default, Debug)]
 pub struct AirCatProducerSecurityState {
     inner: Mutex<Inner>,
+    downloads_started: AtomicU64,
+    bytes_served: AtomicU64,
+    digest_cache_hits: AtomicU64,
+    midstream_revocations: AtomicU64,
+    tls_rejections: AtomicU64,
 }
 
 impl AirCatProducerSecurityState {
@@ -218,21 +253,192 @@ impl AirCatProducerSecurityState {
         Ok(original.clone())
     }
 
+    pub fn issue_home_challenge(
+        &self,
+        client_michi_id: &str,
+        nonce: String,
+        now_ms: i64,
+        ttl_ms: i64,
+    ) -> Result<uuid::Uuid, Refusal> {
+        let mut inner = self.inner.lock().map_err(|_| Refusal::InvalidFields)?;
+        Self::prune(&mut inner, now_ms);
+        if inner.home_challenges.len() >= MAX_ACTIVE {
+            return Err(Refusal::InvalidFields);
+        }
+        let id = uuid::Uuid::new_v4();
+        inner.home_challenges.insert(
+            id,
+            HomeAuthChallengeEntry {
+                client_michi_id: client_michi_id.to_string(),
+                nonce,
+                expires_at_ms: now_ms.saturating_add(ttl_ms),
+            },
+        );
+        Ok(id)
+    }
+
+    pub fn consume_home_challenge(
+        &self,
+        challenge_id: &uuid::Uuid,
+        client_michi_id: &str,
+        now_ms: i64,
+    ) -> Result<String, Refusal> {
+        let mut inner = self.inner.lock().map_err(|_| Refusal::InvalidFields)?;
+        Self::prune(&mut inner, now_ms);
+        let entry = inner
+            .home_challenges
+            .remove(challenge_id)
+            .ok_or(Refusal::Expired)?;
+        if entry.expires_at_ms <= now_ms || entry.client_michi_id != client_michi_id {
+            return Err(Refusal::WrongAudience);
+        }
+        Ok(entry.nonce)
+    }
+
+    pub fn record_home_session(
+        &self,
+        token: String,
+        client_michi_id: String,
+        now_ms: i64,
+        ttl_ms: i64,
+    ) {
+        if let Ok(mut inner) = self.inner.lock() {
+            Self::prune(&mut inner, now_ms);
+            if inner.home_sessions.len() >= MAX_ACTIVE && !inner.home_sessions.contains_key(&token)
+            {
+                if let Some(evict_key) = inner
+                    .home_sessions
+                    .iter()
+                    .min_by_key(|(_, (_, exp))| *exp)
+                    .map(|(k, _)| k.clone())
+                {
+                    inner.home_sessions.remove(&evict_key);
+                }
+            }
+            inner
+                .home_sessions
+                .insert(token, (client_michi_id, now_ms.saturating_add(ttl_ms)));
+        }
+    }
+
+    pub fn lookup_home_session(&self, token: &str, now_ms: i64) -> Option<String> {
+        let mut inner = self.inner.lock().ok()?;
+        Self::prune(&mut inner, now_ms);
+        inner
+            .home_sessions
+            .get(token)
+            .filter(|(_, exp)| *exp > now_ms)
+            .map(|(id, _)| id.clone())
+    }
+
+    pub fn cached_original_if_fresh(
+        &self,
+        remote_track_id: &str,
+        meta: &std::fs::Metadata,
+    ) -> Option<OriginalAssetRevision> {
+        let rev = self
+            .inner
+            .lock()
+            .ok()?
+            .digest_cache
+            .get(remote_track_id)
+            .cloned()?;
+        if rev.dev_ino.is_none() || rev.modified_unix_ns.is_none() {
+            return None;
+        }
+        if crate::aircat_original_file::revision_matches_metadata(&rev, meta) {
+            self.digest_cache_hits.fetch_add(1, Ordering::Relaxed);
+            Some(rev)
+        } else {
+            None
+        }
+    }
+
+    pub fn cache_original_revision(&self, rev: OriginalAssetRevision) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if inner.digest_cache.len() >= MAX_DIGEST_CACHE
+                && !inner.digest_cache.contains_key(&rev.remote_track_id)
+            {
+                if let Some(evict_key) = inner.digest_cache.keys().next().cloned() {
+                    inner.digest_cache.remove(&evict_key);
+                }
+            }
+            inner.digest_cache.insert(rev.remote_track_id.clone(), rev);
+        }
+    }
+
+    pub fn is_member_revoked_in_memory(&self, member: &str) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| inner.revoked_members.contains(member))
+            .unwrap_or(false)
+    }
+
+    pub fn record_download_started(&self) {
+        self.downloads_started.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_bytes_served(&self, bytes: u64) {
+        self.bytes_served.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn record_midstream_revocation(&self) {
+        self.midstream_revocations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tls_rejection(&self) {
+        self.tls_rejections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn stats_snapshot(&self, now_ms: i64) -> AirCatStatsSnapshot {
+        let (active_snapshots, active_home_sessions, cached_digests, revoked_members_cached) =
+            if let Ok(mut inner) = self.inner.lock() {
+                Self::prune(&mut inner, now_ms);
+                (
+                    inner.snapshots.len(),
+                    inner.home_sessions.len(),
+                    inner.digest_cache.len(),
+                    inner.revoked_members.len(),
+                )
+            } else {
+                (0, 0, 0, 0)
+            };
+        AirCatStatsSnapshot {
+            active_snapshots,
+            active_home_sessions,
+            cached_digests,
+            revoked_members_cached,
+            downloads_started: self.downloads_started.load(Ordering::Relaxed),
+            bytes_served: self.bytes_served.load(Ordering::Relaxed),
+            digest_cache_hits: self.digest_cache_hits.load(Ordering::Relaxed),
+            midstream_revocations: self.midstream_revocations.load(Ordering::Relaxed),
+            tls_rejections: self.tls_rejections.load(Ordering::Relaxed),
+        }
+    }
+
     /// Explicit Home revocation invalidates all sessions for a destination.
     /// The caller must still consult the authoritative Home revocation roster
     /// at each file/stream request; this map is a cache, NOT the authority.
     pub fn revoke_member(&self, member: &str) {
         if let Ok(mut inner) = self.inner.lock() {
+            if inner.revoked_members.len() < MAX_DIGEST_CACHE {
+                inner.revoked_members.insert(member.to_string());
+            }
             inner.nonces.retain(|(id, _), _| id != member);
             inner
                 .snapshots
                 .retain(|_, s| s.authenticated_destination_michi_id != member);
+            inner.home_sessions.retain(|_, (id, _)| id != member);
         }
     }
 
     fn prune(inner: &mut Inner, now_ms: i64) {
         inner.nonces.retain(|_, expires| *expires > now_ms);
         inner.snapshots.retain(|_, s| s.expires_at_ms > now_ms);
+        inner
+            .home_challenges
+            .retain(|_, c| c.expires_at_ms > now_ms);
+        inner.home_sessions.retain(|_, (_, exp)| *exp > now_ms);
     }
 }
 

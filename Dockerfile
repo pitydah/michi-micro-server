@@ -86,11 +86,12 @@ COPY --from=builder /app/target/release/michi-server /usr/local/bin/michi-server
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-EXPOSE 9090
+EXPOSE 9090 9443
 
 VOLUME ["/config", "/cache", "/music"]
 
 ENV MICHI_PORT=9090
+ENV MICHI_TLS_PORT=9443
 ENV MICHI_MUSIC_PATH=/music
 ENV MICHI_CONFIG_PATH=/config
 ENV MICHI_CACHE_PATH=/cache

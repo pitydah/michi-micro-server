@@ -5,6 +5,7 @@ services:
     container_name: michi
     ports:
       - "9090:9090"
+      - "9443:9443"
     volumes:
       - ./music:/music:ro
       - ./config:/config
@@ -12,6 +13,7 @@ services:
     environment:
       - MICHI_DEPLOYMENT_PLATFORM=docker
       - MICHI_PORT=9090
+      - MICHI_TLS_PORT=9443
       - MICHI_MUSIC_PATH=/music
       - MICHI_DATABASE=sqlite:///config/michi.db
       - MICHI_CACHE_PATH=/cache

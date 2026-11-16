@@ -396,6 +396,20 @@
       "auth": "protected"
     },
     {
+      "id": "michilink.aircat_status",
+      "surface": "michilink",
+      "element": "button[onclick='loadAirCatStatus()']",
+      "frontend_handler": "loadAirCatStatus",
+      "authority": "server",
+      "endpoint": {
+        "method": "GET",
+        "path": "/api/v1/aircat/status"
+      },
+      "effect": "Fetches AirCat producer TLS SPKI readiness and transfer observability counters",
+      "test": "WEBUI-ACT-ML-004",
+      "auth": "protected"
+    },
+    {
       "id": "receivers.discover",
       "surface": "settings.receivers",
       "element": "button[onclick='discoverDevices()']",

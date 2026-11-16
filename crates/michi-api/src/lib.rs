@@ -140,6 +140,10 @@ pub struct AppState {
     pub aircat_tls: Arc<RwLock<Option<AirCatTlsInfo>>>,
 }
 
+/// Marker inserted into request extensions exclusively by the HTTPS/TLS accept loop.
+#[derive(Clone, Copy, Debug)]
+pub struct AirCatTlsVerifiedConnection;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AirCatTlsInfo {
     pub pinned_base_url: String,
@@ -1796,6 +1800,10 @@ fn v1_link_routes() -> Router<AppState> {
             get(routes::v1::aircat::aircat_enrollment_qr_handler),
         )
         .route(
+            "/api/v1/aircat/status",
+            get(routes::v1::aircat::aircat_status_handler),
+        )
+        .route(
             "/api/v1/artwork/:id",
             get(routes::v1::artwork::artwork_handler),
         )
@@ -2342,6 +2350,22 @@ fn v1_link_routes() -> Router<AppState> {
         )
 }
 
+fn v1_home_auth_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/v1/auth/challenge",
+            post(routes::v1::aircat::home_auth_challenge_handler),
+        )
+        .route(
+            "/api/v1/auth/session",
+            post(routes::v1::aircat::home_auth_session_handler),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.security_state,
+            michi_security::rate_limit_middleware,
+        ))
+}
+
 fn v1_public_routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -2578,6 +2602,7 @@ pub fn create_router(state: AppState) -> Router {
             )),
         )
         .merge(v1_link_routes_with_auth(state.clone()))
+        .merge(v1_home_auth_routes(state.clone()))
         .merge(v1_public_routes())
         .layer(middleware::from_fn(michi_security::content_type_middleware))
         .layer(TraceLayer::new_for_http())

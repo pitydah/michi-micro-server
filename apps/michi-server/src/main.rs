@@ -308,6 +308,8 @@ async fn async_main(config: michi_config::Config) -> Result<()> {
     let shutdown_tx = state.tx.clone();
     let shutdown_db = state.db.clone();
 
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     if let Some(tls_info) = state.aircat_tls.read().await.clone() {
         let cert_bytes = std::fs::read(&tls_info.cert_path)?;
         let key_bytes = std::fs::read(&tls_info.key_path)?;
@@ -334,16 +336,34 @@ async fn async_main(config: michi_config::Config) -> Result<()> {
                 tokio::select! {
                     _ = tls_shutdown.cancelled() => break,
                     accept_res = tls_listener.accept() => {
-                        let Ok((tcp_stream, _peer)) = accept_res else {
+                        let Ok((tcp_stream, peer)) = accept_res else {
                             continue;
                         };
                         let acceptor = acceptor.clone();
-                        let svc = hyper_util::service::TowerToHyperService::new(tls_app.clone());
+                        let tls_app_conn = tls_app.clone();
                         tokio::spawn(async move {
-                            let Ok(tls_stream) = acceptor.accept(tcp_stream).await else {
+                            let Ok(Ok(tls_stream)) = tokio::time::timeout(
+                                Duration::from_secs(10),
+                                acceptor.accept(tcp_stream),
+                            )
+                            .await
+                            else {
                                 return;
                             };
                             let io = hyper_util::rt::TokioIo::new(tls_stream);
+                            let svc = hyper::service::service_fn(
+                                move |req: hyper::Request<hyper::body::Incoming>| {
+                                    let mut axum_req = req.map(axum::body::Body::new);
+                                    axum_req
+                                        .extensions_mut()
+                                        .insert(axum::extract::ConnectInfo(peer));
+                                    axum_req
+                                        .extensions_mut()
+                                        .insert(michi_api::AirCatTlsVerifiedConnection);
+                                    let svc = tls_app_conn.clone();
+                                    async move { tower::ServiceExt::oneshot(svc, axum_req).await }
+                                },
+                            );
                             let _ = hyper_util::server::conn::auto::Builder::new(
                                 hyper_util::rt::TokioExecutor::new(),
                             )

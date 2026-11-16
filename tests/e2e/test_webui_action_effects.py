@@ -716,6 +716,7 @@ class TestWebUIActionContractsComprehensive:
         WEBUI-ACT-ML-001: michilink.qr_generate (POST /api/v1/pair/qr)
         WEBUI-ACT-ML-002: michilink.self_test (GET /api/v1/link/self-test)
         WEBUI-ACT-ML-003: michilink.device_revoke (POST /api/v1/devices/revoke)
+        WEBUI-ACT-ML-004: michilink.aircat_status (GET /api/v1/aircat/status)
         WEBUI-ACT-RX-001: receivers.discover (POST /api/v1/devices/discover)
         WEBUI-ACT-RX-002: receivers.auth (POST /api/v1/receivers/:id/auth)
         WEBUI-ACT-RX-003: home.revoke (POST /api/v1/home/revoke)
@@ -738,6 +739,11 @@ class TestWebUIActionContractsComprehensive:
             _post(opener, "/api/v1/devices/revoke", {"device_id": fake_id})
         except urllib.error.HTTPError as e:
             assert e.code in (400, 404)
+
+        # AirCat status
+        status, payload = _get(opener, "/api/v1/aircat/status")
+        assert status == 200
+        assert "stats" in payload
 
         # Discover
         status, _ = _post(opener, "/api/v1/devices/discover", {})

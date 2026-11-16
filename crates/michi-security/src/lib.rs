@@ -105,6 +105,14 @@ impl SecurityState {
         Arc::new(RateLimiter::direct(quota))
     }
 
+    fn make_batch_transfer_limiter(&self) -> SingleRateLimiter {
+        let rps = self.config.rate_limit_rps.max(10).saturating_mul(10);
+        let burst = self.config.rate_limit_burst.max(20).saturating_mul(10);
+        let quota = Quota::per_second(NonZeroU32::new(rps).unwrap())
+            .allow_burst(NonZeroU32::new(burst).unwrap());
+        Arc::new(RateLimiter::direct(quota))
+    }
+
     /// Evict all rate limiter entries and pairing attempts that have exceeded their idle TTL.
     pub fn prune_stale_limiters(&self) {
         let now = Instant::now();
@@ -130,9 +138,24 @@ pub async fn rate_limit_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, (StatusCode, String)> {
-    let ip = connect_info
+    let raw_ip = connect_info
         .map(|ci| ci.0.ip().to_string())
         .unwrap_or_else(|| "127.0.0.1".to_string());
+    let is_aircat_grant_download = req.uri().path().starts_with("/api/v1/aircat/download/")
+        && req
+            .headers()
+            .contains_key(axum::http::header::AUTHORIZATION)
+        && req
+            .headers()
+            .get("x-michi-aircat-grant")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.len() >= 32)
+            .unwrap_or(false);
+    let ip = if is_aircat_grant_download {
+        format!("{raw_ip}:aircat_dl")
+    } else {
+        raw_ip
+    };
     let now = Instant::now();
 
     // Evict stale entry if TTL has elapsed.
@@ -145,10 +168,14 @@ pub async fn rate_limit_middleware(
 
     // Look up or create a limiter for this IP, then touch the timestamp.
     let limiter = {
-        let mut entry = state
-            .ip_rate_limiter
-            .entry(ip.clone())
-            .or_insert_with(|| (state.make_limiter(), now));
+        let mut entry = state.ip_rate_limiter.entry(ip.clone()).or_insert_with(|| {
+            let l = if is_aircat_grant_download {
+                state.make_batch_transfer_limiter()
+            } else {
+                state.make_limiter()
+            };
+            (l, now)
+        });
         entry.1 = now;
         Arc::clone(&entry.0)
     };

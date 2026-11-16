@@ -340,6 +340,11 @@ pub async fn link_devices_revoke(
             )
         })?;
 
+    let existing_dev = michi_db::get_link_device(&state.db, &device_id)
+        .await
+        .ok()
+        .flatten();
+
     let revoked = michi_db::revoke_link_device(&state.db, &device_id)
         .await
         .map_err(|e| v1_internal_error(&e.to_string()))?;
@@ -353,6 +358,12 @@ pub async fn link_devices_revoke(
     }
 
     state.token_store.revoke_all_by_device(device_id).await;
+    state.aircat_security.revoke_member(&device_id.to_string());
+    if let Some(dev) = existing_dev {
+        if !dev.alias.is_empty() {
+            state.aircat_security.revoke_member(&dev.alias);
+        }
+    }
 
     Ok(Json(serde_json::json!({ "status": "revoked" })))
 }
