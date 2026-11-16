@@ -30,7 +30,7 @@
       "scheme": "http",
       "index": "/",
       "version": "1.0.0-rc.4",
-      "content_hash": "fb925efd2e618af8c885b070bb82a7afda3168916c117c116ca0d3d5d29df52e",
+      "content_hash": "726f8a9e30226a0b999b36f6316ebdfe888abe75a90a8b28df5f628456bfeb4f",
       "architectures": [
         "amd64",
         "arm64"

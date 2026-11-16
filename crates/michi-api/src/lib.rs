@@ -140,6 +140,10 @@ pub struct AppState {
     pub aircat_tls: Arc<RwLock<Option<AirCatTlsInfo>>>,
 }
 
+/// Marker inserted into request extensions exclusively by the HTTPS/TLS accept loop.
+#[derive(Clone, Copy, Debug)]
+pub struct AirCatTlsVerifiedConnection;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AirCatTlsInfo {
     pub pinned_base_url: String,
@@ -1794,6 +1798,10 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/aircat/enrollment-qr",
             get(routes::v1::aircat::aircat_enrollment_qr_handler),
+        )
+        .route(
+            "/api/v1/aircat/status",
+            get(routes::v1::aircat::aircat_status_handler),
         )
         .route(
             "/api/v1/artwork/:id",

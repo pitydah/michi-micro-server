@@ -350,6 +350,9 @@ async fn async_main(config: michi_config::Config) -> Result<()> {
                                     axum_req
                                         .extensions_mut()
                                         .insert(axum::extract::ConnectInfo(peer));
+                                    axum_req
+                                        .extensions_mut()
+                                        .insert(michi_api::AirCatTlsVerifiedConnection);
                                     let svc = tls_app_conn.clone();
                                     async move { tower::ServiceExt::oneshot(svc, axum_req).await }
                                 },

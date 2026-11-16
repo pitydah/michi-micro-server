@@ -2365,10 +2365,13 @@ pub async fn home_revoke_handler(
         .revoke_device(&body.device_michi_id, reason)
         .await
     {
-        Ok(revocation) => Ok(Json(serde_json::json!({
-            "status": "revoked",
-            "revocation": revocation,
-        }))),
+        Ok(revocation) => {
+            state.aircat_security.revoke_member(&body.device_michi_id);
+            Ok(Json(serde_json::json!({
+                "status": "revoked",
+                "revocation": revocation,
+            })))
+        }
         Err(e) => Err(v1_error(StatusCode::BAD_REQUEST, "REVOCATION_FAILED", &e)),
     }
 }

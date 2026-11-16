@@ -11,12 +11,14 @@
 use crate::aircat_grants::{manifest_sha256, Manifest, Refusal, Request};
 use crate::aircat_original_file::expected_strong_etag;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 const MAX_ACTIVE: usize = 1024;
 const MAX_REPLAY_NONCES: usize = 4096;
 const MAX_LIFETIME_MS: i64 = 600_000;
+const MAX_DIGEST_CACHE: usize = 10_000;
 
 #[derive(Clone, Debug)]
 pub struct OriginalAssetRevision {
@@ -47,6 +49,19 @@ struct HomeAuthChallengeEntry {
     expires_at_ms: i64,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct AirCatStatsSnapshot {
+    pub active_snapshots: usize,
+    pub active_home_sessions: usize,
+    pub cached_digests: usize,
+    pub revoked_members_cached: usize,
+    pub downloads_started: u64,
+    pub bytes_served: u64,
+    pub digest_cache_hits: u64,
+    pub midstream_revocations: u64,
+    pub tls_rejections: u64,
+}
+
 #[derive(Default, Debug)]
 struct Inner {
     /// key: (destination Michi ID, canonical base64url nonce)
@@ -57,11 +72,20 @@ struct Inner {
     home_challenges: HashMap<uuid::Uuid, HomeAuthChallengeEntry>,
     /// key: opaque bearer token -> (verified client_michi_id, expires_at_ms)
     home_sessions: HashMap<String, (String, i64)>,
+    /// key: remote_track_id -> verified original file revision matched by (size, dev_ino, mtime_ns)
+    digest_cache: HashMap<String, OriginalAssetRevision>,
+    /// in-memory set of revoked member IDs for zero-SQLite chunk-boundary abort
+    revoked_members: HashSet<String>,
 }
 
 #[derive(Default, Debug)]
 pub struct AirCatProducerSecurityState {
     inner: Mutex<Inner>,
+    downloads_started: AtomicU64,
+    bytes_served: AtomicU64,
+    digest_cache_hits: AtomicU64,
+    midstream_revocations: AtomicU64,
+    tls_rejections: AtomicU64,
 }
 
 impl AirCatProducerSecurityState {
@@ -298,11 +322,94 @@ impl AirCatProducerSecurityState {
             .map(|(id, _)| id.clone())
     }
 
+    pub fn cached_original_if_fresh(
+        &self,
+        remote_track_id: &str,
+        meta: &std::fs::Metadata,
+    ) -> Option<OriginalAssetRevision> {
+        let rev = self
+            .inner
+            .lock()
+            .ok()?
+            .digest_cache
+            .get(remote_track_id)
+            .cloned()?;
+        if crate::aircat_original_file::revision_matches_metadata(&rev, meta) {
+            self.digest_cache_hits.fetch_add(1, Ordering::Relaxed);
+            Some(rev)
+        } else {
+            None
+        }
+    }
+
+    pub fn cache_original_revision(&self, rev: OriginalAssetRevision) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if inner.digest_cache.len() >= MAX_DIGEST_CACHE
+                && !inner.digest_cache.contains_key(&rev.remote_track_id)
+            {
+                if let Some(evict_key) = inner.digest_cache.keys().next().cloned() {
+                    inner.digest_cache.remove(&evict_key);
+                }
+            }
+            inner.digest_cache.insert(rev.remote_track_id.clone(), rev);
+        }
+    }
+
+    pub fn is_member_revoked_in_memory(&self, member: &str) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| inner.revoked_members.contains(member))
+            .unwrap_or(false)
+    }
+
+    pub fn record_download_started(&self) {
+        self.downloads_started.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_bytes_served(&self, bytes: u64) {
+        self.bytes_served.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn record_midstream_revocation(&self) {
+        self.midstream_revocations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tls_rejection(&self) {
+        self.tls_rejections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn stats_snapshot(&self, now_ms: i64) -> AirCatStatsSnapshot {
+        let (active_snapshots, active_home_sessions, cached_digests, revoked_members_cached) =
+            if let Ok(mut inner) = self.inner.lock() {
+                Self::prune(&mut inner, now_ms);
+                (
+                    inner.snapshots.len(),
+                    inner.home_sessions.len(),
+                    inner.digest_cache.len(),
+                    inner.revoked_members.len(),
+                )
+            } else {
+                (0, 0, 0, 0)
+            };
+        AirCatStatsSnapshot {
+            active_snapshots,
+            active_home_sessions,
+            cached_digests,
+            revoked_members_cached,
+            downloads_started: self.downloads_started.load(Ordering::Relaxed),
+            bytes_served: self.bytes_served.load(Ordering::Relaxed),
+            digest_cache_hits: self.digest_cache_hits.load(Ordering::Relaxed),
+            midstream_revocations: self.midstream_revocations.load(Ordering::Relaxed),
+            tls_rejections: self.tls_rejections.load(Ordering::Relaxed),
+        }
+    }
+
     /// Explicit Home revocation invalidates all sessions for a destination.
     /// The caller must still consult the authoritative Home revocation roster
     /// at each file/stream request; this map is a cache, NOT the authority.
     pub fn revoke_member(&self, member: &str) {
         if let Ok(mut inner) = self.inner.lock() {
+            inner.revoked_members.insert(member.to_string());
             inner.nonces.retain(|(id, _), _| id != member);
             inner
                 .snapshots

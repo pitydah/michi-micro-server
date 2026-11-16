@@ -251,6 +251,14 @@
       "auth_condition": null,
       "frontend_handler": "revokeDevice"
     },
+    "michilink.aircat_status": {
+      "test_id": "WEBUI-ACT-ML-004",
+      "test_file": "tests/e2e/test_webui_action_effects.py",
+      "test_function": "test_link_and_receivers_actions_contract",
+      "auth": "protected",
+      "auth_condition": null,
+      "frontend_handler": "loadAirCatStatus"
+    },
     "receivers.discover": {
       "test_id": "WEBUI-ACT-RX-001",
       "test_file": "tests/e2e/test_webui_action_effects.py",

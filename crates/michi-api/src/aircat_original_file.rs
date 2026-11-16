@@ -124,6 +124,40 @@ pub async fn open_original_file_no_symlinks(
     Ok((safe_path, file))
 }
 
+/// Returns original track file metadata and SHA-256 revision using the bounded
+/// in-memory `(size, dev_ino, modified_unix_ns)` cache on `/manifest` calls.
+/// Falls back to full 64 KiB streaming SHA-256 hashing whenever the file is
+/// unseen or any metadata field changed.
+pub async fn inspect_original_asset_cached(
+    music_paths: &[PathBuf],
+    track: &Track,
+    security: &crate::aircat_producer_security::AirCatProducerSecurityState,
+) -> Result<(FileItem, OriginalAssetRevision), Refusal> {
+    let (_canonical_path, original) = open_original_file_no_symlinks(music_paths, track).await?;
+    let meta = original
+        .metadata()
+        .await
+        .map_err(|_| Refusal::NotOriginalBytes)?;
+    let remote_id = track.id.to_string();
+    if let Some(cached) = security.cached_original_if_fresh(&remote_id, &meta) {
+        let item = FileItem {
+            logical_track_id: remote_id.clone(),
+            remote_track_id: remote_id,
+            title: track.title.clone().unwrap_or_default(),
+            artist: track.artist.clone().unwrap_or_default(),
+            album: track.album.clone().unwrap_or_default(),
+            format: track.format.as_str().to_owned(),
+            size: cached.exact_size,
+            sha256: cached.exact_sha256.clone(),
+        };
+        return Ok((item, cached));
+    }
+    drop(original);
+    let (item, revision) = inspect_original_asset(music_paths, track).await?;
+    security.cache_original_revision(revision.clone());
+    Ok((item, revision))
+}
+
 /// Hashes the original file as bounded 64KiB chunks, without loading it fully
 /// into RAM, modifying the library or launching a background worker. This is
 /// on-demand, and is not allowed on an audio realtime thread.

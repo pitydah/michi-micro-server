@@ -249,6 +249,12 @@
                     <button class="btn btn-primary" onclick="generateQR()">Generate QR Code</button>
                 </div>
             </div>
+            <div class="panel" id="aircat-producer-panel">
+                <div class="panel-header">AirCat Original Transfer &amp; TLS</div>
+                <p style="color:var(--text-3);font-size:.78rem;margin-bottom:12px">Original bit-perfect transfer readiness, TLS SPKI pin, and session observability.</p>
+                <button class="btn btn-primary" onclick="loadAirCatStatus()">Inspect AirCat &amp; TLS Pin</button>
+                <div id="aircat-status-panel" class="panel-result" style="margin-top:10px"><p style="color:var(--text-dim);font-size:.78rem">Click to inspect TLS SPKI status and transfer counters.</p></div>
+            </div>
             <div class="panel">
                 <button class="btn btn-primary" onclick="testMichiLink()">Run Michi Link Self-Test</button>
                 <div id="michilink-self-test-results" class="panel-result" style="margin-top:10px"></div>

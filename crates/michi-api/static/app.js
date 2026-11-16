@@ -333,6 +333,8 @@ const MichiAPI = {
       body: { device_michi_id, reason }
     });
   },
+  aircatStatus() { return this.request('/api/v1/aircat/status'); },
+  aircatEnrollmentQr() { return this.request('/api/v1/aircat/enrollment-qr'); },
   homeOutbox() { return this.request('/api/v1/home/outbox'); },
   homeRetryOutbox(revocation_id) {
     return this.request('/api/v1/home/outbox/retry', {
@@ -1385,6 +1387,8 @@ const FEATURE_LABELS = {
   events:      { label: 'Events',      beta: true },
   transcoding: { label: 'Transcoding', future: true },
   token_refresh: { label: 'Token Refresh', stable: true },
+  aircat_original_v1: { label: 'AirCat Original v1', beta: true },
+  home_tls_spki_pinned: { label: 'Home TLS SPKI Pin', beta: true },
 };
 
 function hasServerFeature(featureName) {
@@ -2358,6 +2362,38 @@ async function testMichiLink() {
     if (btn) { btn.disabled = false; btn.textContent = 'Run Michi Link Self-Test'; }
   }
 }
+
+async function loadAirCatStatus() {
+  if (!canPerformProtectedAction()) {
+    return;
+  }
+  var out = $('#aircat-status-panel');
+  if (out) out.innerHTML = '<p style="color:var(--text-dim);font-size:.78rem">Inspecting AirCat producer...</p>';
+  try {
+    var st = await MichiAPI.aircatStatus();
+    var qrPayload = null;
+    if (st && st.tls_configured) {
+      qrPayload = await MichiAPI.aircatEnrollmentQr();
+    }
+    if (out && st) {
+      var stats = st.stats || {};
+      out.innerHTML =
+        '<div class="panel-row"><span class="panel-label">Protocol</span><span class="panel-mono">' + esc(st.protocol || 'michi.aircat.original.v1') + '</span></div>' +
+        '<div class="panel-row"><span class="panel-label">TLS Ready</span><span class="badge ' + (st.tls_configured ? 'stable' : 'disabled') + '">' + (st.tls_configured ? 'HTTPS ACTIVE' : 'TLS NOT CONFIGURED') + '</span></div>' +
+        '<div class="panel-row"><span class="panel-label">Pinned URL</span><span class="panel-mono">' + esc(st.pinned_base_url || 'N/A (configure tls.crt / tls.key)') + '</span></div>' +
+        '<div class="panel-row"><span class="panel-label">SPKI Pin</span><span class="panel-mono">' + esc(st.tls_spki_sha256 || 'N/A') + '</span></div>' +
+        '<div class="panel-row"><span class="panel-label">Snapshots / Cache</span><span class="panel-mono">' + (stats.active_snapshots || 0) + ' active · ' + (stats.cached_digests || 0) + ' cached (' + (stats.digest_cache_hits || 0) + ' hits)</span></div>' +
+        '<div class="panel-row"><span class="panel-label">Transfers / Revocations</span><span class="panel-mono">' + (stats.downloads_started || 0) + ' downloads · ' + (stats.bytes_served || 0) + ' B · ' + (stats.midstream_revocations || 0) + ' aborts</span></div>' +
+        (qrPayload ? '<div class="panel-row"><span class="panel-label">Home ID</span><span class="panel-mono">' + esc(qrPayload.homeId || '') + '</span></div>' : '');
+    }
+  } catch (err) {
+    if (out) {
+      out.innerHTML = '<p style="color:var(--danger);font-size:.78rem">Error: ' + esc(err.message || 'Request failed') + '</p>';
+    }
+    showToast('AirCat status failed: ' + (err.message || 'Error'), true);
+  }
+}
+window.loadAirCatStatus = loadAirCatStatus;
 
 async function loadEcosystemDevices() {
   if (AuthSession.state !== 'authenticated') return;
