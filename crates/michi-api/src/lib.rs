@@ -136,6 +136,138 @@ pub struct AppState {
     pub server_membership: michi_identity::DeviceMembershipDto,
     /// On-demand, bounded original-file snapshot and anti-replay state.
     pub aircat_security: Arc<aircat_producer_security::AirCatProducerSecurityState>,
+    /// Real HTTPS/TLS configuration and RFC 7469 SPKI SHA-256 pin when TLS is active.
+    pub aircat_tls: Arc<RwLock<Option<AirCatTlsInfo>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AirCatTlsInfo {
+    pub pinned_base_url: String,
+    pub tls_spki_sha256: String,
+    pub cert_path: std::path::PathBuf,
+    pub key_path: std::path::PathBuf,
+    pub tls_port: u16,
+}
+
+impl AirCatTlsInfo {
+    pub fn from_env_and_config(config: &michi_config::Config) -> Option<Self> {
+        let cert_path = std::env::var("MICHI_TLS_CERT_PATH")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| config.config_path.join("tls.crt"));
+        let key_path = std::env::var("MICHI_TLS_KEY_PATH")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| config.config_path.join("tls.key"));
+
+        if !cert_path.is_file() || !key_path.is_file() {
+            return None;
+        }
+        let cert_pem = std::fs::read(&cert_path).ok()?;
+        let tls_spki_sha256 = extract_spki_sha256_from_pem(&cert_pem)?;
+        let tls_port = std::env::var("MICHI_TLS_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or_else(|| config.port.saturating_add(353));
+        let pinned_base_url = std::env::var("MICHI_PUBLIC_HTTPS_URL")
+            .ok()
+            .filter(|u| u.starts_with("https://"))
+            .unwrap_or_else(|| {
+                let host = michi_connect::MichiConnect::resolve_lan_ip();
+                format!("https://{host}:{tls_port}")
+            });
+
+        Some(Self {
+            pinned_base_url,
+            tls_spki_sha256,
+            cert_path,
+            key_path,
+            tls_port,
+        })
+    }
+}
+
+/// Parses the first X.509 PEM certificate (or raw DER) and computes its RFC 7469
+/// SubjectPublicKeyInfo SHA-256 pin (`sha256/<BASE64_STANDARD>`).
+pub fn extract_spki_sha256_from_pem(pem_or_der: &[u8]) -> Option<String> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    let der = if let Ok(text) = std::str::from_utf8(pem_or_der) {
+        if let Some(start) = text.find("-----BEGIN CERTIFICATE-----") {
+            let after_header = &text[start + "-----BEGIN CERTIFICATE-----".len()..];
+            let end = after_header.find("-----END CERTIFICATE-----")?;
+            let b64: String = after_header[..end]
+                .chars()
+                .filter(|c| !c.is_ascii_whitespace())
+                .collect();
+            base64::engine::general_purpose::STANDARD.decode(b64).ok()?
+        } else {
+            pem_or_der.to_vec()
+        }
+    } else {
+        pem_or_der.to_vec()
+    };
+
+    let spki = extract_x509_spki_der(&der)?;
+    let digest = Sha256::digest(spki);
+    Some(format!(
+        "sha256/{}",
+        base64::engine::general_purpose::STANDARD.encode(digest)
+    ))
+}
+
+fn read_der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let &tag = input.first()?;
+    let &len_byte = input.get(1)?;
+    let (len, header_len) = if len_byte & 0x80 == 0 {
+        (len_byte as usize, 2usize)
+    } else {
+        let num_bytes = (len_byte & 0x7f) as usize;
+        if num_bytes == 0 || num_bytes > 4 || input.len() < 2 + num_bytes {
+            return None;
+        }
+        let mut len = 0usize;
+        for &b in &input[2..2 + num_bytes] {
+            len = (len << 8) | (b as usize);
+        }
+        (len, 2 + num_bytes)
+    };
+    let end = header_len.checked_add(len)?;
+    if end > input.len() {
+        return None;
+    }
+    Some((tag, &input[header_len..end], &input[end..]))
+}
+
+fn extract_x509_spki_der(cert_der: &[u8]) -> Option<&[u8]> {
+    let (cert_tag, cert_body, _) = read_der_tlv(cert_der)?;
+    if cert_tag != 0x30 {
+        return None;
+    }
+    let (tbs_tag, mut tbs_rest, _) = read_der_tlv(cert_body)?;
+    if tbs_tag != 0x30 {
+        return None;
+    }
+    // Optional explicit [0] version
+    if tbs_rest.first().copied() == Some(0xA0) {
+        let (_, _, after_ver) = read_der_tlv(tbs_rest)?;
+        tbs_rest = after_ver;
+    }
+    // Skip: serialNumber, signature, issuer, validity, subject (5 elements)
+    for _ in 0..5 {
+        let (_, _, next) = read_der_tlv(tbs_rest)?;
+        tbs_rest = next;
+    }
+    // Next element is subjectPublicKeyInfo (SEQUENCE 0x30); include full TLV header+body.
+    let (spki_tag, spki_body, _) = read_der_tlv(tbs_rest)?;
+    if spki_tag != 0x30 {
+        return None;
+    }
+    let header_len = (spki_body.as_ptr() as usize) - (tbs_rest.as_ptr() as usize);
+    Some(&tbs_rest[..header_len + spki_body.len()])
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -718,6 +850,8 @@ impl AppState {
         }
         let module_runtime_info = Arc::new(RwLock::new(initial_runtime));
 
+        let aircat_tls = Arc::new(RwLock::new(AirCatTlsInfo::from_env_and_config(&config)));
+
         let state = Self {
             config,
             db,
@@ -756,6 +890,7 @@ impl AppState {
             home_root_authority,
             server_membership,
             aircat_security: Arc::new(aircat_producer_security::AirCatProducerSecurityState::new()),
+            aircat_tls,
         };
 
         state.spawn_background_tasks();
@@ -2446,7 +2581,12 @@ pub fn create_router(state: AppState) -> Router {
         .merge(v1_public_routes())
         .layer(middleware::from_fn(michi_security::content_type_middleware))
         .layer(TraceLayer::new_for_http())
-        .layer(CompressionLayer::new())
+        .layer(CompressionLayer::new().compress_when({
+            use tower_http::compression::predicate::{
+                DefaultPredicate, NotForContentType, Predicate,
+            };
+            DefaultPredicate::new().and(NotForContentType::const_new("application/octet-stream"))
+        }))
         .layer(cors_layer(&state))
         .with_state(state)
 }

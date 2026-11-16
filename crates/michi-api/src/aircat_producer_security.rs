@@ -25,6 +25,10 @@ pub struct OriginalAssetRevision {
     pub exact_sha256: String,
     /// Quoted strong revision, established from immutable original bytes.
     pub strong_etag: String,
+    /// Device + inode pair on POSIX filesystems to detect file swaps of equal size.
+    pub dev_ino: Option<(u64, u64)>,
+    /// Modification timestamp in nanoseconds since UNIX_EPOCH.
+    pub modified_unix_ns: Option<i128>,
 }
 
 #[derive(Clone, Debug)]
@@ -268,6 +272,8 @@ mod tests {
                         exact_size: 6,
                         exact_sha256: "a".repeat(64),
                         strong_etag: format!("\"sha256-{}-6\"", "a".repeat(64)),
+                        dev_ino: None,
+                        modified_unix_ns: None,
                     }],
                 },
                 1_000_000,

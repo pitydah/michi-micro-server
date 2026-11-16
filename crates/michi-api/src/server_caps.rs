@@ -344,6 +344,32 @@ impl ServerCapabilities {
             },
         ));
 
+        let tls_ready = state.aircat_tls.read().await.is_some();
+        features.push(ServerFeature {
+            name: "aircat_original_v1",
+            version: "1.0",
+            description: "AirCat v1 original file transfer (requires active TLS/SPKI)",
+            enabled: tls_ready,
+            maturity: FeatureMaturity::Beta,
+            evidence: if tls_ready {
+                EvidenceLevel::EffectVerified
+            } else {
+                EvidenceLevel::Implemented
+            },
+        });
+        features.push(ServerFeature {
+            name: "home_tls_spki_pinned",
+            version: "1.0",
+            description: "RFC 7469 TLS SPKI pin active on HTTPS listener",
+            enabled: tls_ready,
+            maturity: FeatureMaturity::Beta,
+            evidence: if tls_ready {
+                EvidenceLevel::EffectVerified
+            } else {
+                EvidenceLevel::Implemented
+            },
+        });
+
         ServerCapabilities {
             version: env!("CARGO_PKG_VERSION").to_string(),
             features,
@@ -385,21 +411,22 @@ impl ServerCapabilities {
         for feat in &self.features {
             map.insert(feat.name.to_string(), serde_json::Value::Bool(feat.enabled));
         }
+        let tls_ready = self.feature_enabled("home_tls_spki_pinned");
         map.insert(
             "aircat_manifest_v1".to_string(),
-            serde_json::Value::Bool(true),
+            serde_json::Value::Bool(tls_ready),
         );
         map.insert(
             "aircat_authorize_v1".to_string(),
-            serde_json::Value::Bool(true),
+            serde_json::Value::Bool(tls_ready),
         );
         map.insert(
             "aircat_original_download_v1".to_string(),
-            serde_json::Value::Bool(true),
+            serde_json::Value::Bool(tls_ready),
         );
         map.insert(
             "home_tls_spki_pinned".to_string(),
-            serde_json::Value::Bool(true),
+            serde_json::Value::Bool(tls_ready),
         );
         serde_json::Value::Object(map)
     }

@@ -42,6 +42,8 @@ pub struct V1Features {
     pub events: bool,
     pub transcoding: bool,
     pub token_refresh: bool,
+    pub aircat_original_v1: bool,
+    pub home_tls_spki_pinned: bool,
 }
 
 pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1ServerInfo> {
@@ -74,6 +76,8 @@ pub async fn server_info_handler(State(state): State<AppState>) -> Json<V1Server
             events: caps.feature_enabled("events"),
             transcoding: caps.feature_enabled("transcoding"),
             token_refresh: caps.feature_enabled("token_refresh"),
+            aircat_original_v1: caps.feature_enabled("aircat_original_v1"),
+            home_tls_spki_pinned: caps.feature_enabled("home_tls_spki_pinned"),
         },
         auth: V1AuthInfo {
             required: true,

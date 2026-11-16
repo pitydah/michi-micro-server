@@ -6,8 +6,123 @@ use crate::aircat_grants::{FileItem, Refusal};
 use crate::aircat_producer_security::OriginalAssetRevision;
 use michi_core::Track;
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
+use std::time::UNIX_EPOCH;
 use tokio::io::AsyncReadExt;
+
+pub fn metadata_dev_ino(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
+pub fn metadata_modified_unix_ns(meta: &std::fs::Metadata) -> Option<i128> {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i128)
+}
+
+pub fn revision_matches_metadata(rev: &OriginalAssetRevision, meta: &std::fs::Metadata) -> bool {
+    if !meta.is_file() || meta.len() as i64 != rev.exact_size {
+        return false;
+    }
+    if let (Some(expected), Some(actual)) = (rev.dev_ino, metadata_dev_ino(meta)) {
+        if expected != actual {
+            return false;
+        }
+    }
+    if let (Some(expected), Some(actual)) = (rev.modified_unix_ns, metadata_modified_unix_ns(meta))
+    {
+        if expected != actual {
+            return false;
+        }
+    }
+    true
+}
+
+/// Opens an original track file only if it resides strictly inside `music_paths`,
+/// has zero symlink components along the relative path, and is a regular file.
+pub async fn open_original_file_no_symlinks(
+    music_paths: &[PathBuf],
+    track: &Track,
+) -> Result<(PathBuf, tokio::fs::File), Refusal> {
+    let file_path = Path::new(&track.file_path);
+    if track.file_path.is_empty() {
+        return Err(Refusal::NotOriginalBytes);
+    }
+
+    // Reject if the target path itself is a symlink or non-regular file.
+    let target_sym_meta =
+        std::fs::symlink_metadata(file_path).map_err(|_| Refusal::NotOriginalBytes)?;
+    if target_sym_meta.file_type().is_symlink() || !target_sym_meta.is_file() {
+        return Err(Refusal::NotOriginalBytes);
+    }
+
+    let canonical_file = file_path
+        .canonicalize()
+        .map_err(|_| Refusal::NotOriginalBytes)?;
+
+    let mut matched_root: Option<PathBuf> = None;
+    for music_path in music_paths {
+        let Ok(canonical_root) = music_path.canonicalize() else {
+            continue;
+        };
+        if canonical_file.starts_with(&canonical_root) {
+            // Walk every component from canonical_root to the relative target and reject symlinks.
+            let rel = file_path
+                .strip_prefix(music_path)
+                .or_else(|_| canonical_file.strip_prefix(&canonical_root))
+                .map_err(|_| Refusal::NotOriginalBytes)?;
+            let mut cursor = canonical_root.clone();
+            for comp in rel.components() {
+                match comp {
+                    Component::Normal(part) => {
+                        cursor.push(part);
+                        let meta = std::fs::symlink_metadata(&cursor)
+                            .map_err(|_| Refusal::NotOriginalBytes)?;
+                        if meta.file_type().is_symlink() {
+                            return Err(Refusal::NotOriginalBytes);
+                        }
+                    }
+                    Component::CurDir => {}
+                    _ => return Err(Refusal::NotOriginalBytes),
+                }
+            }
+            matched_root = Some(canonical_file.clone());
+            break;
+        }
+    }
+
+    let safe_path = matched_root.ok_or(Refusal::NotOriginalBytes)?;
+    let file = tokio::fs::File::open(&safe_path)
+        .await
+        .map_err(|_| Refusal::NotOriginalBytes)?;
+    let opened_meta = file
+        .metadata()
+        .await
+        .map_err(|_| Refusal::NotOriginalBytes)?;
+    if !opened_meta.is_file() {
+        return Err(Refusal::NotOriginalBytes);
+    }
+    if let (Some(a), Some(b)) = (
+        metadata_dev_ino(&target_sym_meta),
+        metadata_dev_ino(&opened_meta),
+    ) {
+        if a != b {
+            return Err(Refusal::NotOriginalBytes);
+        }
+    }
+
+    Ok((safe_path, file))
+}
 
 /// Hashes the original file as bounded 64KiB chunks, without loading it fully
 /// into RAM, modifying the library or launching a background worker. This is
@@ -18,9 +133,7 @@ pub async fn inspect_original_asset(
     track: &Track,
 ) -> Result<(FileItem, OriginalAssetRevision), Refusal> {
     let (_canonical_path, mut original) =
-        michi_streaming::open_track_file_async(music_paths, track)
-            .await
-            .map_err(|_| Refusal::NotOriginalBytes)?;
+        open_original_file_no_symlinks(music_paths, track).await?;
     let before = original
         .metadata()
         .await
@@ -71,6 +184,8 @@ pub async fn inspect_original_asset(
         exact_size: size,
         exact_sha256: digest.clone(),
         strong_etag: format!("\"sha256-{digest}-{size}\""),
+        dev_ino: metadata_dev_ino(&after),
+        modified_unix_ns: metadata_modified_unix_ns(&after),
     };
     Ok((item, revision))
 }

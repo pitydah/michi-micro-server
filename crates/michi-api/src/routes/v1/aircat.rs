@@ -21,7 +21,6 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use ed25519_dalek::VerifyingKey;
 use michi_identity::types::decode_base64url_strict;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use uuid::Uuid;
 
@@ -31,6 +30,25 @@ use crate::{
     aircat_producer_security::ProducerSnapshot,
     AppState,
 };
+
+pub const AIRCAT_PROTOCOL_HEADER: &str = "X-Michi-AirCat-Protocol";
+pub const AIRCAT_PROTOCOL_VALUE: &str = "michi.aircat.original.v1";
+const MAX_MANIFEST_TRACKS: usize = 10_000;
+const AIRCAT_CHUNK_BYTES: usize = 64 * 1024;
+static AIRCAT_HASH_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+pub fn aircat_json_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::HeaderName::from_static("x-michi-aircat-protocol"),
+        header::HeaderValue::from_static(AIRCAT_PROTOCOL_VALUE),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    headers
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AirCatCatalogTrack {
@@ -123,7 +141,7 @@ fn refusal_to_status(refusal: Refusal) -> (StatusCode, &'static str, &'static st
             "invalid Home signature",
         ),
         Refusal::InvalidFields => (
-            StatusCode::BAD_REQUEST,
+            StatusCode::UNPROCESSABLE_ENTITY,
             "INVALID_FIELDS",
             "invalid fields or canonical schema violation",
         ),
@@ -190,35 +208,56 @@ pub async fn resolve_authenticated_caller(
     }
 
     let authenticated_member = if let Ok(device_uuid) = is_device_token {
-        if let Ok(Some(dev)) = michi_db::get_link_device(&state.db, &device_uuid).await {
-            if dev.revoked {
+        let dev = michi_db::get_link_device(&state.db, &device_uuid)
+            .await
+            .map_err(|e| {
+                aircat_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DB_ERROR",
+                    &e.to_string(),
+                )
+            })?
+            .ok_or_else(|| {
+                aircat_error(
+                    StatusCode::FORBIDDEN,
+                    "UNTRUSTED_MEMBER",
+                    "authenticated device token has no registered link device",
+                )
+            })?;
+        if dev.revoked {
+            return Err(aircat_error(
+                StatusCode::FORBIDDEN,
+                "DEVICE_REVOKED",
+                "device is revoked",
+            ));
+        }
+        if let Some(claimed) = claimed_destination {
+            if dev.device_id.to_string() == claimed
+                || (!dev.alias.is_empty() && dev.alias == claimed)
+            {
+                claimed.to_string()
+            } else {
                 return Err(aircat_error(
                     StatusCode::FORBIDDEN,
-                    "DEVICE_REVOKED",
-                    "device is revoked",
+                    "WRONG_AUDIENCE",
+                    "destinationMichiId does not match authenticated device identity",
                 ));
             }
-            if let Some(claimed) = claimed_destination {
-                if dev.alias == claimed || dev.device_id.to_string() == claimed {
-                    claimed.to_string()
-                } else if !dev.alias.is_empty() {
-                    dev.alias
-                } else {
-                    claimed.to_string()
-                }
-            } else if !dev.alias.is_empty() {
-                dev.alias
-            } else {
-                dev.device_id.to_string()
-            }
-        } else if let Some(claimed) = claimed_destination {
-            claimed.to_string()
+        } else if !dev.alias.is_empty() {
+            dev.alias
         } else {
-            device_uuid.to_string()
+            dev.device_id.to_string()
         }
     } else {
         // Active user/admin session
         if let Some(claimed) = claimed_destination {
+            if claimed.trim().is_empty() {
+                return Err(aircat_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "INVALID_FIELDS",
+                    "destinationMichiId cannot be empty",
+                ));
+            }
             claimed.to_string()
         } else if let Some(hdr_dev) = headers
             .get("X-Michi-Device-Id")
@@ -263,7 +302,7 @@ pub async fn resolve_authenticated_caller(
 pub async fn aircat_manifest_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<AirCatCatalogManifest>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(HeaderMap, Json<AirCatCatalogManifest>), (StatusCode, Json<serde_json::Value>)> {
     let _authenticated_member = resolve_authenticated_caller(&state, &headers, None).await?;
 
     let producer_michi_id = state.identity.michi_id().to_base64url();
@@ -279,7 +318,14 @@ pub async fn aircat_manifest_handler(
     let mut catalog_tracks = Vec::new();
     let mut total_size: i64 = 0;
 
-    for track in tracks {
+    for track in tracks.into_iter().take(MAX_MANIFEST_TRACKS) {
+        let _permit = AIRCAT_HASH_SEMAPHORE.acquire().await.map_err(|_| {
+            aircat_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "CONCURRENCY_LIMIT",
+                "aircat hashing semaphore unavailable",
+            )
+        })?;
         if let Ok((_item, revision)) =
             aircat_original_file::inspect_original_asset(&state.config.music_paths, &track).await
         {
@@ -301,14 +347,17 @@ pub async fn aircat_manifest_handler(
 
     let total_tracks = catalog_tracks.len() as i32;
 
-    Ok(Json(AirCatCatalogManifest {
-        schema: "michi.aircat.manifest.v1".to_string(),
-        version: 1,
-        device_id: producer_michi_id,
-        total_tracks,
-        total_size,
-        tracks: catalog_tracks,
-    }))
+    Ok((
+        aircat_json_headers(),
+        Json(AirCatCatalogManifest {
+            schema: "michi.aircat.manifest.v1".to_string(),
+            version: 1,
+            device_id: producer_michi_id,
+            total_tracks,
+            total_size,
+            tracks: catalog_tracks,
+        }),
+    ))
 }
 
 /// POST /api/v1/aircat/authorize
@@ -319,7 +368,7 @@ pub async fn aircat_authorize_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<aircat_grants::Request>,
-) -> Result<Json<aircat_grants::Grant>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(HeaderMap, Json<aircat_grants::Grant>), (StatusCode, Json<serde_json::Value>)> {
     let authenticated_member =
         resolve_authenticated_caller(&state, &headers, Some(&body.intent.destination_michi_id))
             .await?;
@@ -367,7 +416,7 @@ pub async fn aircat_authorize_handler(
     for item in &body.manifest.items {
         let track_uuid = Uuid::parse_str(&item.remote_track_id).map_err(|_| {
             aircat_error(
-                StatusCode::BAD_REQUEST,
+                StatusCode::UNPROCESSABLE_ENTITY,
                 "INVALID_TRACK_ID",
                 "remoteTrackId is not a valid UUID",
             )
@@ -390,6 +439,13 @@ pub async fn aircat_authorize_handler(
                 )
             })?;
 
+        let _permit = AIRCAT_HASH_SEMAPHORE.acquire().await.map_err(|_| {
+            aircat_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "CONCURRENCY_LIMIT",
+                "aircat hashing semaphore unavailable",
+            )
+        })?;
         let (_file_item, revision) =
             aircat_original_file::inspect_original_asset(&state.config.music_paths, &track)
                 .await
@@ -475,7 +531,83 @@ pub async fn aircat_authorize_handler(
             aircat_error(status, code, msg)
         })?;
 
-    Ok(Json(grant))
+    Ok((aircat_json_headers(), Json(grant)))
+}
+
+fn accept_encoding_forbids_identity(headers: &HeaderMap) -> bool {
+    let Some(raw) = headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let lower = raw.to_ascii_lowercase();
+    let has_transform = ["gzip", "br", "deflate", "zstd"]
+        .iter()
+        .any(|enc| lower.contains(enc));
+    has_transform && !lower.contains("identity") && !lower.contains('*')
+}
+
+struct DownloadStreamGuard {
+    state: AppState,
+    home_id: String,
+    authenticated_member: String,
+    transfer_id: String,
+    manifest_sha256: String,
+    remote_id: String,
+    expires_at_millis: i64,
+}
+
+fn checked_download_stream<R>(
+    reader: R,
+    guard: DownloadStreamGuard,
+) -> impl futures_util::Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send + 'static
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    futures_util::stream::unfold(Some(reader), move |maybe_reader| {
+        let state = guard.state.clone();
+        let home_id = guard.home_id.clone();
+        let authenticated_member = guard.authenticated_member.clone();
+        let transfer_id = guard.transfer_id.clone();
+        let manifest_sha256 = guard.manifest_sha256.clone();
+        let remote_id = guard.remote_id.clone();
+        let expires_at_millis = guard.expires_at_millis;
+        async move {
+            let mut reader = maybe_reader?;
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            if now_ms >= expires_at_millis
+                || is_member_revoked(&state, &home_id, &authenticated_member).await
+                || state
+                    .aircat_security
+                    .selected_original(
+                        &transfer_id,
+                        &manifest_sha256,
+                        &authenticated_member,
+                        &remote_id,
+                        now_ms,
+                    )
+                    .is_err()
+            {
+                return Some((
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "aircat grant expired or member revoked mid-stream",
+                    )),
+                    None,
+                ));
+            }
+            let mut buf = vec![0u8; AIRCAT_CHUNK_BYTES];
+            match reader.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    Some((Ok(axum::body::Bytes::from(buf)), Some(reader)))
+                }
+                Err(e) => Some((Err(e), None)),
+            }
+        }
+    })
 }
 
 /// GET /api/v1/aircat/download/:remote_id
@@ -486,6 +618,14 @@ pub async fn aircat_download_handler(
     Path(remote_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    if accept_encoding_forbids_identity(&headers) {
+        return Err(aircat_error(
+            StatusCode::NOT_ACCEPTABLE,
+            "TRANSFORM_ENCODING_REJECTED",
+            "AirCat original downloads require identity encoding without compression",
+        ));
+    }
+
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     // Extract X-Michi-AirCat-Grant header
@@ -503,7 +643,7 @@ pub async fn aircat_download_handler(
     // Compute mandatory protocol receipt header: lowercase_hex(sha256(ASCII(header_value)))
     let receipt = aircat_grants::receipt_for_grant_header(grant_header_raw).map_err(|_| {
         aircat_error(
-            StatusCode::BAD_REQUEST,
+            StatusCode::UNPROCESSABLE_ENTITY,
             "INVALID_GRANT_HEADER",
             "grant header is not valid base64url or exceeds size limits",
         )
@@ -512,7 +652,7 @@ pub async fn aircat_download_handler(
     // Decode grant JSON
     let grant_json_bytes = URL_SAFE_NO_PAD.decode(grant_header_raw).map_err(|_| {
         aircat_error(
-            StatusCode::BAD_REQUEST,
+            StatusCode::UNPROCESSABLE_ENTITY,
             "INVALID_GRANT_BASE64",
             "failed to decode base64url grant payload",
         )
@@ -520,7 +660,7 @@ pub async fn aircat_download_handler(
 
     let grant: aircat_grants::Grant = serde_json::from_slice(&grant_json_bytes).map_err(|_| {
         aircat_error(
-            StatusCode::BAD_REQUEST,
+            StatusCode::UNPROCESSABLE_ENTITY,
             "INVALID_GRANT_JSON",
             "failed to parse grant json",
         )
@@ -589,7 +729,7 @@ pub async fn aircat_download_handler(
     // Lookup track in DB
     let track_uuid = Uuid::parse_str(&remote_id).map_err(|_| {
         aircat_error(
-            StatusCode::BAD_REQUEST,
+            StatusCode::UNPROCESSABLE_ENTITY,
             "INVALID_TRACK_ID",
             "remote_id is not a valid UUID",
         )
@@ -612,13 +752,16 @@ pub async fn aircat_download_handler(
             )
         })?;
 
-    // Concurrently open original file descriptor
+    // Open original file descriptor without following symlinks
     let (_path, mut file) =
-        michi_streaming::open_track_file_async(&state.config.music_paths, &track)
+        aircat_original_file::open_original_file_no_symlinks(&state.config.music_paths, &track)
             .await
-            .map_err(|e| aircat_error(StatusCode::NOT_FOUND, "FILE_NOT_FOUND", &e.to_string()))?;
+            .map_err(|r| {
+                let (status, code, msg) = refusal_to_status(r);
+                aircat_error(status, code, msg)
+            })?;
 
-    // Verify file revision in descriptor has not changed
+    // Verify file revision (size + inode + mtime) in descriptor has not changed
     let metadata = file.metadata().await.map_err(|e| {
         aircat_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -628,15 +771,14 @@ pub async fn aircat_download_handler(
     })?;
 
     let file_len = metadata.len() as i64;
-    if file_len != revision.exact_size {
+    if !aircat_original_file::revision_matches_metadata(&revision, &metadata) {
         return Err(aircat_error(
             StatusCode::CONFLICT,
             "FILE_REVISION_CHANGED",
-            "original file size changed during transfer",
+            "original file size, inode, or mtime changed during transfer",
         ));
     }
 
-    let mime = track.format.mime_type();
     let filename = format!("{}.{}", track.id, track.format.as_str());
 
     // Check If-Range header
@@ -663,11 +805,24 @@ pub async fn aircat_download_handler(
                         })?;
 
                     let taken = file.take(range.content_length());
-                    let stream = tokio_util::io::ReaderStream::new(taken);
+                    let stream = checked_download_stream(
+                        taken,
+                        DownloadStreamGuard {
+                            state: state.clone(),
+                            home_id: grant.home_id.clone(),
+                            authenticated_member: authenticated_member.clone(),
+                            transfer_id: grant.transfer_id.clone(),
+                            manifest_sha256: grant.manifest_sha256.clone(),
+                            remote_id: remote_id.clone(),
+                            expires_at_millis: grant.expires_at_millis,
+                        },
+                    );
 
                     let response = Response::builder()
                         .status(StatusCode::PARTIAL_CONTENT)
-                        .header(header::CONTENT_TYPE, mime)
+                        .header(AIRCAT_PROTOCOL_HEADER, AIRCAT_PROTOCOL_VALUE)
+                        .header(header::CONTENT_TYPE, "application/octet-stream")
+                        .header(header::CACHE_CONTROL, "no-store, no-transform")
                         .header(header::CONTENT_RANGE, range.content_range_header())
                         .header(header::CONTENT_LENGTH, range.content_length().to_string())
                         .header(header::ACCEPT_RANGES, "bytes")
@@ -691,10 +846,17 @@ pub async fn aircat_download_handler(
                 Err(_) => {
                     let resp = Response::builder()
                         .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .header(AIRCAT_PROTOCOL_HEADER, AIRCAT_PROTOCOL_VALUE)
                         .header(header::CONTENT_RANGE, format!("bytes */{file_len}"))
                         .header("X-Michi-AirCat-Authorized-Grant-SHA256", receipt)
                         .body(Body::empty())
-                        .unwrap();
+                        .map_err(|e| {
+                            aircat_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "RESPONSE_BUILD_ERROR",
+                                &e.to_string(),
+                            )
+                        })?;
                     return Ok(resp);
                 }
             }
@@ -702,10 +864,23 @@ pub async fn aircat_download_handler(
     }
 
     // Full 200 OK download
-    let stream = tokio_util::io::ReaderStream::new(file);
+    let stream = checked_download_stream(
+        file,
+        DownloadStreamGuard {
+            state: state.clone(),
+            home_id: grant.home_id.clone(),
+            authenticated_member,
+            transfer_id: grant.transfer_id,
+            manifest_sha256: grant.manifest_sha256,
+            remote_id,
+            expires_at_millis: grant.expires_at_millis,
+        },
+    );
     let response = Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mime)
+        .header(AIRCAT_PROTOCOL_HEADER, AIRCAT_PROTOCOL_VALUE)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CACHE_CONTROL, "no-store, no-transform")
         .header(header::CONTENT_LENGTH, file_len.to_string())
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::ETAG, &revision.strong_etag)
@@ -729,11 +904,20 @@ pub async fn aircat_download_handler(
 /// GET /api/v1/aircat/enrollment-qr
 ///
 /// Generates an administrative AirCat enrollment QR payload (michi.aircat.home.enrollment.v1).
+/// Fails closed with 503 if real HTTPS/TLS + SPKI pinning is not configured.
 pub async fn aircat_enrollment_qr_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<AirCatTrustedEnrollmentQr>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(HeaderMap, Json<AirCatTrustedEnrollmentQr>), (StatusCode, Json<serde_json::Value>)> {
     let _authenticated_member = resolve_authenticated_caller(&state, &headers, None).await?;
+
+    let tls_info = state.aircat_tls.read().await.clone().ok_or_else(|| {
+        aircat_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TLS_NOT_CONFIGURED",
+            "HTTPS/TLS certificate and SPKI pin are not configured for AirCat enrollment",
+        )
+    })?;
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let home_id = state.home_root_authority.home_id();
@@ -745,27 +929,19 @@ pub async fn aircat_enrollment_qr_handler(
     rand::rngs::OsRng.fill_bytes(&mut random_nonce);
     let nonce_base64_url = URL_SAFE_NO_PAD.encode(random_nonce);
 
-    // Compute or format pinnedBaseUrl and tlsSpkiSha256
-    let pinned_base_url = format!("https://localhost:{}", state.config.port);
-    let tls_spki = {
-        let pk_bytes = decode_base64url_strict(&root_pk).unwrap_or_default();
-        let digest = Sha256::digest(&pk_bytes);
-        format!(
-            "sha256/{}",
-            base64::engine::general_purpose::STANDARD.encode(digest)
-        )
-    };
-
-    Ok(Json(AirCatTrustedEnrollmentQr {
-        qr_type: "michi.aircat.home.enrollment.v1".to_string(),
-        home_id: home_id.clone(),
-        authority_michi_id: home_id,
-        authority_public_key_base64_url: root_pk,
-        source_michi_id,
-        pinned_base_url,
-        tls_spki_sha256: tls_spki,
-        nonce_base64_url,
-        issued_at_millis: now_ms,
-        expires_at_millis: now_ms + 600_000,
-    }))
+    Ok((
+        aircat_json_headers(),
+        Json(AirCatTrustedEnrollmentQr {
+            qr_type: "michi.aircat.home.enrollment.v1".to_string(),
+            home_id: home_id.clone(),
+            authority_michi_id: home_id,
+            authority_public_key_base64_url: root_pk,
+            source_michi_id,
+            pinned_base_url: tls_info.pinned_base_url,
+            tls_spki_sha256: tls_info.tls_spki_sha256,
+            nonce_base64_url,
+            issued_at_millis: now_ms,
+            expires_at_millis: now_ms + 600_000,
+        }),
+    ))
 }

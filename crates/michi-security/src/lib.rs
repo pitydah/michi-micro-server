@@ -225,9 +225,11 @@ pub async fn security_headers_middleware(req: Request<Body>, next: Next) -> Resp
             .parse()
             .unwrap(),
     );
-    response
-        .headers_mut()
-        .insert("Cache-Control", "no-store".parse().unwrap());
+    if !response.headers().contains_key("Cache-Control") {
+        response
+            .headers_mut()
+            .insert("Cache-Control", "no-store".parse().unwrap());
+    }
 
     response
 }
