@@ -1,3 +1,4 @@
+pub mod aircat;
 pub mod announce;
 pub mod artwork;
 pub mod audit;

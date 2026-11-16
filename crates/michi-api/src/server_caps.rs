@@ -360,6 +360,10 @@ impl ServerCapabilities {
                     name: "homeassistant",
                     version: "2024.1",
                 },
+                ServerProtocol {
+                    name: "aircat",
+                    version: "1.0",
+                },
             ],
             runtime: ServerRuntime {
                 receivers_connected: receiver_count,
@@ -381,6 +385,22 @@ impl ServerCapabilities {
         for feat in &self.features {
             map.insert(feat.name.to_string(), serde_json::Value::Bool(feat.enabled));
         }
+        map.insert(
+            "aircat_manifest_v1".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        map.insert(
+            "aircat_authorize_v1".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        map.insert(
+            "aircat_original_download_v1".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        map.insert(
+            "home_tls_spki_pinned".to_string(),
+            serde_json::Value::Bool(true),
+        );
         serde_json::Value::Object(map)
     }
 

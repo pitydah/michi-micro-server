@@ -1645,6 +1645,22 @@ fn v1_link_routes() -> Router<AppState> {
             get(routes::v1::stream::download_handler),
         )
         .route(
+            "/api/v1/aircat/manifest",
+            get(routes::v1::aircat::aircat_manifest_handler),
+        )
+        .route(
+            "/api/v1/aircat/authorize",
+            post(routes::v1::aircat::aircat_authorize_handler),
+        )
+        .route(
+            "/api/v1/aircat/download/:remote_id",
+            get(routes::v1::aircat::aircat_download_handler),
+        )
+        .route(
+            "/api/v1/aircat/enrollment-qr",
+            get(routes::v1::aircat::aircat_enrollment_qr_handler),
+        )
+        .route(
             "/api/v1/artwork/:id",
             get(routes::v1::artwork::artwork_handler),
         )
