@@ -40,12 +40,23 @@ pub struct ProducerSnapshot {
     pub originals: Vec<OriginalAssetRevision>,
 }
 
+#[derive(Clone, Debug)]
+struct HomeAuthChallengeEntry {
+    client_michi_id: String,
+    nonce: String,
+    expires_at_ms: i64,
+}
+
 #[derive(Default, Debug)]
 struct Inner {
     /// key: (destination Michi ID, canonical base64url nonce)
     nonces: HashMap<(String, String), i64>,
     /// key: (transfer ID, exact SHA-256 canonical manifest)
     snapshots: HashMap<(String, String), ProducerSnapshot>,
+    /// key: challenge UUID for HOME_MEMBERSHIP mutual auth
+    home_challenges: HashMap<uuid::Uuid, HomeAuthChallengeEntry>,
+    /// key: opaque bearer token -> (verified client_michi_id, expires_at_ms)
+    home_sessions: HashMap<String, (String, i64)>,
 }
 
 #[derive(Default, Debug)]
@@ -218,6 +229,75 @@ impl AirCatProducerSecurityState {
         Ok(original.clone())
     }
 
+    pub fn issue_home_challenge(
+        &self,
+        client_michi_id: &str,
+        nonce: String,
+        now_ms: i64,
+        ttl_ms: i64,
+    ) -> Result<uuid::Uuid, Refusal> {
+        let mut inner = self.inner.lock().map_err(|_| Refusal::InvalidFields)?;
+        Self::prune(&mut inner, now_ms);
+        if inner.home_challenges.len() >= MAX_ACTIVE {
+            return Err(Refusal::InvalidFields);
+        }
+        let id = uuid::Uuid::new_v4();
+        inner.home_challenges.insert(
+            id,
+            HomeAuthChallengeEntry {
+                client_michi_id: client_michi_id.to_string(),
+                nonce,
+                expires_at_ms: now_ms.saturating_add(ttl_ms),
+            },
+        );
+        Ok(id)
+    }
+
+    pub fn consume_home_challenge(
+        &self,
+        challenge_id: &uuid::Uuid,
+        client_michi_id: &str,
+        now_ms: i64,
+    ) -> Result<String, Refusal> {
+        let mut inner = self.inner.lock().map_err(|_| Refusal::InvalidFields)?;
+        Self::prune(&mut inner, now_ms);
+        let entry = inner
+            .home_challenges
+            .remove(challenge_id)
+            .ok_or(Refusal::Expired)?;
+        if entry.expires_at_ms <= now_ms || entry.client_michi_id != client_michi_id {
+            return Err(Refusal::WrongAudience);
+        }
+        Ok(entry.nonce)
+    }
+
+    pub fn record_home_session(
+        &self,
+        token: String,
+        client_michi_id: String,
+        now_ms: i64,
+        ttl_ms: i64,
+    ) {
+        if let Ok(mut inner) = self.inner.lock() {
+            Self::prune(&mut inner, now_ms);
+            if inner.home_sessions.len() < MAX_ACTIVE {
+                inner
+                    .home_sessions
+                    .insert(token, (client_michi_id, now_ms.saturating_add(ttl_ms)));
+            }
+        }
+    }
+
+    pub fn lookup_home_session(&self, token: &str, now_ms: i64) -> Option<String> {
+        let mut inner = self.inner.lock().ok()?;
+        Self::prune(&mut inner, now_ms);
+        inner
+            .home_sessions
+            .get(token)
+            .filter(|(_, exp)| *exp > now_ms)
+            .map(|(id, _)| id.clone())
+    }
+
     /// Explicit Home revocation invalidates all sessions for a destination.
     /// The caller must still consult the authoritative Home revocation roster
     /// at each file/stream request; this map is a cache, NOT the authority.
@@ -227,12 +307,17 @@ impl AirCatProducerSecurityState {
             inner
                 .snapshots
                 .retain(|_, s| s.authenticated_destination_michi_id != member);
+            inner.home_sessions.retain(|_, (id, _)| id != member);
         }
     }
 
     fn prune(inner: &mut Inner, now_ms: i64) {
         inner.nonces.retain(|_, expires| *expires > now_ms);
         inner.snapshots.retain(|_, s| s.expires_at_ms > now_ms);
+        inner
+            .home_challenges
+            .retain(|_, c| c.expires_at_ms > now_ms);
+        inner.home_sessions.retain(|_, (_, exp)| *exp > now_ms);
     }
 }
 

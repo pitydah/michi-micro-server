@@ -2345,6 +2345,14 @@ fn v1_link_routes() -> Router<AppState> {
 fn v1_public_routes() -> Router<AppState> {
     Router::new()
         .route(
+            "/api/v1/auth/challenge",
+            post(routes::v1::aircat::home_auth_challenge_handler),
+        )
+        .route(
+            "/api/v1/auth/session",
+            post(routes::v1::aircat::home_auth_session_handler),
+        )
+        .route(
             "/api/v1/server/info",
             get(routes::v1::server::server_info_handler),
         )

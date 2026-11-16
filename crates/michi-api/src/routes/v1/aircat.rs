@@ -193,6 +193,40 @@ pub async fn resolve_authenticated_caller(
         }
     };
 
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if let Some(verified_home_member) = state.aircat_security.lookup_home_session(token, now_ms) {
+        if let Some(claimed) = claimed_destination {
+            if claimed != verified_home_member {
+                return Err(aircat_error(
+                    StatusCode::FORBIDDEN,
+                    "WRONG_AUDIENCE",
+                    "destinationMichiId does not match cryptographically verified Home member session",
+                ));
+            }
+        }
+        if let Some(hdr_dev) = headers
+            .get("X-Michi-Device-Id")
+            .and_then(|h| h.to_str().ok())
+        {
+            if !hdr_dev.is_empty() && hdr_dev != verified_home_member {
+                return Err(aircat_error(
+                    StatusCode::FORBIDDEN,
+                    "IDENTITY_MISMATCH",
+                    "X-Michi-Device-Id header does not match verified Home member session",
+                ));
+            }
+        }
+        let home_id = state.home_root_authority.home_id();
+        if is_member_revoked(state, &home_id, &verified_home_member).await {
+            return Err(aircat_error(
+                StatusCode::FORBIDDEN,
+                "MEMBER_REVOKED",
+                "authenticated member is revoked in this Home",
+            ));
+        }
+        return Ok(verified_home_member);
+    }
+
     let is_user_session = state.auth_sessions.validate(token).await;
     let is_device_token = state
         .token_store
@@ -944,4 +978,203 @@ pub async fn aircat_enrollment_qr_handler(
             expires_at_millis: now_ms + 600_000,
         }),
     ))
+}
+
+/// POST /api/v1/auth/challenge
+///
+/// Issues a one-time cryptographic challenge for HOME_MEMBERSHIP mutual device authentication.
+pub async fn home_auth_challenge_handler(
+    State(state): State<AppState>,
+    Json(body): Json<michi_identity::types::DeviceAuthChallengeRequest>,
+) -> Result<
+    Json<michi_identity::types::DeviceAuthChallengeResponse>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    if body.client_michi_id.len() != 43
+        || decode_base64url_strict(&body.client_michi_id)
+            .map(|b| b.len() != 32)
+            .unwrap_or(true)
+    {
+        return Err(aircat_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_FIELDS",
+            "client_michi_id must be a canonical 43-character base64url Michi ID",
+        ));
+    }
+
+    let home_id = state.home_root_authority.home_id();
+    if body.home_id != home_id {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "HOME_ID_MISMATCH",
+            "home_id does not match this server's Home authority",
+        ));
+    }
+    let derived_client_id = michi_identity::IdentityManager::derive_michi_id(
+        &body.client_public_key,
+    )
+    .map_err(|_| {
+        aircat_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_FIELDS",
+            "invalid client_public_key",
+        )
+    })?;
+    if derived_client_id.to_base64url() != body.client_michi_id {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "IDENTITY_MISMATCH",
+            "client_michi_id does not match client_public_key",
+        ));
+    }
+
+    if is_member_revoked(&state, &home_id, &body.client_michi_id).await {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "MEMBER_REVOKED",
+            "device identity is revoked in this Home",
+        ));
+    }
+
+    let mut nonce_bytes = [0u8; 32];
+    use rand::RngCore;
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    let challenge_nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    let challenge_id = state
+        .aircat_security
+        .issue_home_challenge(
+            &body.client_michi_id,
+            challenge_nonce.clone(),
+            now_ms,
+            60_000,
+        )
+        .map_err(|r| {
+            let (status, code, msg) = refusal_to_status(r);
+            aircat_error(status, code, msg)
+        })?;
+
+    Ok(Json(michi_identity::types::DeviceAuthChallengeResponse {
+        challenge_id,
+        challenge_nonce,
+        server_michi_id: state.identity.michi_id().to_base64url(),
+        server_public_key: state.identity.public_key_base64url(),
+        expires_in: 60,
+    }))
+}
+
+/// POST /api/v1/auth/session
+///
+/// Verifies Home membership certificate + Ed25519 challenge signature and establishes a
+/// bound HOME_MEMBERSHIP bearer session.
+pub async fn home_auth_session_handler(
+    State(state): State<AppState>,
+    Json(body): Json<michi_identity::types::DeviceAuthSessionRequest>,
+) -> Result<
+    Json<michi_identity::types::DeviceAuthSessionResponse>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let home_id = state.home_root_authority.home_id();
+    let root_pk = state.home_root_authority.public_key_base64url();
+
+    if body.client_michi_id != body.membership.device_michi_id {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "IDENTITY_MISMATCH",
+            "client_michi_id does not match membership.device_michi_id",
+        ));
+    }
+
+    if is_member_revoked(&state, &home_id, &body.client_michi_id).await {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "MEMBER_REVOKED",
+            "member is revoked",
+        ));
+    }
+
+    let challenge_nonce = state
+        .aircat_security
+        .consume_home_challenge(&body.challenge_id, &body.client_michi_id, now_ms)
+        .map_err(|r| {
+            let (status, code, msg) = refusal_to_status(r);
+            aircat_error(status, code, msg)
+        })?;
+
+    let revocations = state.receiver_manager.get_revocations().await;
+
+    michi_identity::home::verify_membership(&body.membership, &root_pk, &home_id, &revocations)
+        .map_err(|e| match e {
+            michi_identity::home::HomeAuthError::DeviceRevoked => {
+                aircat_error(StatusCode::FORBIDDEN, "MEMBER_REVOKED", "member is revoked")
+            }
+            _ => aircat_error(
+                StatusCode::FORBIDDEN,
+                "UNTRUSTED_MEMBER",
+                &format!("membership verification failed: {e}"),
+            ),
+        })?;
+
+    let server_michi_id = state.identity.michi_id().to_base64url();
+    let challenge_id_str = body.challenge_id.to_string();
+    let sig_ok = michi_identity::home::verify_device_auth_challenge(
+        &body.membership.device_public_key,
+        &body.client_signature,
+        &home_id,
+        &server_michi_id,
+        &body.client_michi_id,
+        &challenge_id_str,
+        &challenge_nonce,
+    )
+    .unwrap_or(false);
+
+    if !sig_ok {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "BAD_SIGNATURE",
+            "invalid device challenge signature",
+        ));
+    }
+
+    let mut token_bytes = [0u8; 32];
+    use rand::RngCore;
+    rand::rngs::OsRng.fill_bytes(&mut token_bytes);
+    let session_token = format!("michi_home_{}", URL_SAFE_NO_PAD.encode(token_bytes));
+
+    let ttl_secs: u64 = 3600;
+    let synthetic_device_uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, body.client_michi_id.as_bytes());
+    state
+        .token_store
+        .store(
+            &session_token,
+            michi_link::TokenType::Device,
+            synthetic_device_uuid,
+        )
+        .await;
+    state.aircat_security.record_home_session(
+        session_token.clone(),
+        body.client_michi_id.clone(),
+        now_ms,
+        (ttl_secs as i64) * 1000,
+    );
+
+    let confirm_payload = michi_identity::home::server_auth_confirm_payload(
+        &home_id,
+        &server_michi_id,
+        &body.client_michi_id,
+        &challenge_id_str,
+        &challenge_nonce,
+    );
+    let (server_signature, _) = state.identity.sign_base64url(&confirm_payload);
+
+    Ok(Json(michi_identity::types::DeviceAuthSessionResponse {
+        session_token,
+        token_type: "Bearer".to_string(),
+        expires_in: ttl_secs,
+        server_michi_id,
+        server_membership: state.server_membership.clone(),
+        server_signature,
+    }))
 }

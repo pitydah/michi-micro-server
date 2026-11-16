@@ -20,6 +20,8 @@ services:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
       - MICHI_PORT=${WEBUI_PORT:-9090}
+      - MICHI_TLS_PORT=${TLS_PORT:-9443}
+      - MICHI_PUBLIC_HTTPS_URL=${MICHI_PUBLIC_HTTPS_URL:-}
       - MICHI_MUSIC_PATH=/music
       - MICHI_CONFIG_PATH=/config
       - MICHI_CACHE_PATH=/cache

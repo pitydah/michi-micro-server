@@ -900,3 +900,385 @@ async fn test_aircat_rejects_symlinks_and_detects_same_size_file_swap() {
         .unwrap();
     assert_eq!(resp_swap.status(), StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn test_aircat_home_membership_mutual_auth_and_audience_binding() {
+    let (app, pool, state, _admin_token, music_dir) = make_app().await;
+
+    // Provision a real Mobile member identity + Home membership certificate
+    let client_sk = ed25519_dalek::SigningKey::from_bytes(&[0x77u8; 32]);
+    let client_pk_b64 = URL_SAFE_NO_PAD.encode(client_sk.verifying_key().to_bytes());
+    let client_michi_id =
+        URL_SAFE_NO_PAD.encode(blake3::hash(&client_sk.verifying_key().to_bytes()).as_bytes());
+    let home_id = state.home_root_authority.home_id();
+
+    let membership = state.home_root_authority.issue_membership(
+        &home_id,
+        &client_michi_id,
+        &client_pk_b64,
+        "mobile",
+        vec![michi_identity::Role::MobilePlayer],
+        "2026-11-16T00:00:00Z",
+        10,
+    );
+
+    // 1. Request challenge
+    let chal_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/challenge")
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&michi_identity::types::DeviceAuthChallengeRequest {
+                        client_michi_id: client_michi_id.clone(),
+                        client_public_key: client_pk_b64.clone(),
+                        home_id: home_id.clone(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(chal_resp.status(), StatusCode::OK);
+    let chal_json: michi_identity::types::DeviceAuthChallengeResponse = serde_json::from_slice(
+        &axum::body::to_bytes(chal_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    // 2. Sign challenge and establish HOME_MEMBERSHIP session
+    let sig = michi_identity::home::sign_device_auth_challenge(
+        &client_sk,
+        &home_id,
+        &chal_json.server_michi_id,
+        &client_michi_id,
+        &chal_json.challenge_id.to_string(),
+        &chal_json.challenge_nonce,
+    );
+    let sess_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/session")
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&michi_identity::types::DeviceAuthSessionRequest {
+                        challenge_id: chal_json.challenge_id,
+                        client_michi_id: client_michi_id.clone(),
+                        membership,
+                        client_signature: sig,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sess_resp.status(), StatusCode::OK);
+    let sess_json: michi_identity::types::DeviceAuthSessionResponse = serde_json::from_slice(
+        &axum::body::to_bytes(sess_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let server_ok = michi_identity::home::verify_server_auth_confirm(
+        &chal_json.server_public_key,
+        &sess_json.server_signature,
+        &home_id,
+        &chal_json.server_michi_id,
+        &client_michi_id,
+        &chal_json.challenge_id.to_string(),
+        &chal_json.challenge_nonce,
+    )
+    .unwrap();
+    assert!(server_ok);
+
+    // 3. Access AirCat manifest with the HOME_MEMBERSHIP bearer token
+    let member_auth = format!("Bearer {}", sess_json.session_token);
+    let manifest_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/aircat/manifest")
+                .method("GET")
+                .header(header::AUTHORIZATION, &member_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(manifest_resp.status(), StatusCode::OK);
+
+    // 4. Attempting to authorize for a DIFFERENT destinationMichiId MUST fail with 403 WRONG_AUDIENCE
+    let filename = format!("home-auth-{}.flac", Uuid::new_v4());
+    let (sha, size, path) = create_test_file(&music_dir, &filename, b"HOME_AUTH_BOUND_BYTES");
+    let track_id = michi_core::track_id_from_library_path(&music_dir, &path);
+    michi_db::upsert_track(
+        &pool,
+        &Track {
+            id: track_id,
+            file_path: path.to_string_lossy().to_string(),
+            title: Some("Home Auth".into()),
+            artist: Some("A".into()),
+            album: Some("B".into()),
+            album_artist: None,
+            duration_ms: Some(1000),
+            format: AudioFormat::Flac,
+            sample_rate: Some(48000),
+            bit_depth: Some(16),
+            channels: Some(2),
+            artwork_id: None,
+            genre: None,
+            year: Some(2026),
+            track_number: Some(1),
+            disc_number: None,
+            content_hash: Some(sha.clone()),
+            file_size: Some(size as u64),
+            file_mtime_ns: None,
+            starred: false,
+            rating: 0,
+            starred_at: None,
+            replaygain_track_gain: None,
+            replaygain_track_peak: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let source_id = state.identity.michi_id().to_base64url();
+    let sel_manifest = michi_api::aircat_grants::Manifest {
+        manifest_version: 1,
+        transfer_id: "tx-spoof-check".into(),
+        source_device_id: source_id.clone(),
+        total_tracks: 1,
+        total_bytes: size,
+        items: vec![michi_api::aircat_grants::FileItem {
+            logical_track_id: track_id.to_string(),
+            remote_track_id: track_id.to_string(),
+            title: "Home Auth".into(),
+            artist: "A".into(),
+            album: "B".into(),
+            format: "flac".into(),
+            size,
+            sha256: sha,
+        }],
+    };
+    let manifest_sha = michi_api::aircat_grants::manifest_sha256(&sel_manifest).unwrap();
+    let spoofed_req = michi_api::aircat_grants::Request {
+        intent: michi_api::aircat_grants::Intent {
+            transfer_id: "tx-spoof-check".into(),
+            source_michi_id: source_id,
+            destination_michi_id: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            source_library_id: "lib-src".into(),
+            destination_library_id: "lib-dst".into(),
+            selection_scope: "ALBUMS".into(),
+            manifest_version: 1,
+            required_scopes: vec!["content:read".into(), "content:transfer".into()],
+            expires_at: chrono::Utc::now().timestamp_millis() + 300_000,
+            signed_grant: None,
+            authorization_nonce_base64_url: String::new(),
+        },
+        manifest: sel_manifest,
+        manifest_sha256: manifest_sha,
+        client_nonce_base64_url: URL_SAFE_NO_PAD.encode([9u8; 24]),
+    };
+
+    let spoof_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/aircat/authorize")
+                .method("POST")
+                .header(header::AUTHORIZATION, &member_auth)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&spoofed_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(spoof_resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[derive(Debug)]
+struct TestSpkiPinVerifier {
+    expected_spki_pin: String,
+}
+
+impl rustls::client::danger::ServerCertVerifier for TestSpkiPinVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let actual = michi_api::extract_spki_sha256_from_pem(end_entity.as_ref())
+            .ok_or_else(|| rustls::Error::General("missing SPKI".into()))?;
+        if actual == self.expected_spki_pin {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General(format!(
+                "SPKI pin mismatch: expected {}, got {}",
+                self.expected_spki_pin, actual
+            )))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+        ]
+    }
+}
+
+#[tokio::test]
+async fn test_aircat_real_tls_tcp_spki_pin_handshake() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBfDCCASOgAwIBAgIUX7+g6Mk29y5KfTOGXHe5zyKqbhkwCgYIKoZIzj0EAwIw\n\
+FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MTExNjEwNTYzMFoXDTM2MTExMzEw\n\
+NTYzMFowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0D\n\
+AQcDQgAE9b6n1FluIRt/L4sx6mYwC20FZ6V0Ne0bahTAmzNlaJzfBzkeAo1rcPXW\n\
+Hod/mKFcAbKHkhorJgM1Fh7CmHpS8qNTMFEwHQYDVR0OBBYEFAduYBSvyRtn8UeM\n\
+laec+KX3P9EvMB8GA1UdIwQYMBaAFAduYBSvyRtn8UeMlaec+KX3P9EvMA8GA1Ud\n\
+EwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIgWElFfyZMxUAzFn7KTWn8Dmij\n\
+nMMDCY8mkO05LpzdwBwCIDve7yHZxu7MzWPGpJKO0wfE7N9JWrOLOC9ZVClYaR9h\n\
+-----END CERTIFICATE-----\n";
+    const TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg0xUZgFY/U5uw8OWx\n\
+RNNxv6f+JRUS/DdOdg1MtwyavMahRANCAAT1vqfUWW4hG38vizHqZjALbQVnpXQ1\n\
+7RtqFMCbM2VonN8HOR4CjWtw9dYeh3+YoVwBsoeSGismAzUWHsKYelLy\n\
+-----END PRIVATE KEY-----\n";
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let expected_spki = michi_api::extract_spki_sha256_from_pem(TEST_CERT_PEM.as_bytes()).unwrap();
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut TEST_CERT_PEM.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+    let key = rustls_pemfile::private_key(&mut TEST_KEY_PEM.as_bytes())
+        .unwrap()
+        .unwrap();
+    let server_tls_cfg = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_tls_cfg));
+
+    let (app, _pool, _state, token, _music_dir) = make_app().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        for _ in 0..2 {
+            let Ok((tcp, _)) = listener.accept().await else {
+                break;
+            };
+            let acceptor = acceptor.clone();
+            let app = app.clone();
+            tokio::spawn(async move {
+                let Ok(mut tls_stream) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 4096];
+                let n = tls_stream.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                let raw_req = String::from_utf8_lossy(&buf[..n]);
+                let auth_val = raw_req
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Authorization: "))
+                    .unwrap_or("")
+                    .trim();
+                let resp = app
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/v1/aircat/manifest")
+                            .method("GET")
+                            .header(header::AUTHORIZATION, auth_val)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let proto = resp
+                    .headers()
+                    .get("X-Michi-AirCat-Protocol")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                let wire = format!(
+                    "HTTP/1.1 {} OK\r\nX-Michi-AirCat-Protocol: {proto}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+                    resp.status().as_u16()
+                );
+                let _ = tls_stream.write_all(wire.as_bytes()).await;
+                let _ = tls_stream.shutdown().await;
+            });
+        }
+    });
+
+    // 1. Valid SPKI pin connects and receives X-Michi-AirCat-Protocol over real TLS
+    let ok_cfg = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(TestSpkiPinVerifier {
+            expected_spki_pin: expected_spki,
+        }))
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(ok_cfg));
+    let tcp_ok = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let domain = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+    let mut tls_ok = connector.connect(domain.clone(), tcp_ok).await.unwrap();
+    let req_wire = format!(
+        "GET /api/v1/aircat/manifest HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    tls_ok.write_all(req_wire.as_bytes()).await.unwrap();
+    let mut resp_buf = Vec::new();
+    let _ = tls_ok.read_to_end(&mut resp_buf).await;
+    let resp_str = String::from_utf8_lossy(&resp_buf);
+    assert!(resp_str.contains("200 OK"));
+    assert!(resp_str.contains("X-Michi-AirCat-Protocol: michi.aircat.original.v1"));
+
+    // 2. Mismatched SPKI pin rejects TLS handshake before sending HTTP bytes
+    let bad_cfg = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(TestSpkiPinVerifier {
+            expected_spki_pin: "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+        }))
+        .with_no_client_auth();
+    let bad_connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(bad_cfg));
+    let tcp_bad = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert!(bad_connector.connect(domain, tcp_bad).await.is_err());
+
+    server_task.abort();
+}
