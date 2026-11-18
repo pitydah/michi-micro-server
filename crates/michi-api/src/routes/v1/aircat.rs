@@ -37,6 +37,9 @@ use crate::{
 pub const AIRCAT_PROTOCOL_HEADER: &str = "X-Michi-AirCat-Protocol";
 pub const AIRCAT_PROTOCOL_VALUE: &str = "michi.aircat.original.v1";
 const MAX_MANIFEST_TRACKS: usize = 10_000;
+const MAX_MANIFEST_JSON_BYTES: usize = 8 * 1024 * 1024;
+const AUTHORIZE_MAX_BODY_BYTES: usize = 64 * 1024;
+const MAX_ERROR_MESSAGE_BYTES: usize = 512;
 const AIRCAT_CHUNK_BYTES: usize = 64 * 1024;
 const DB_REVOCATION_RECHECK_INTERVAL: Duration = Duration::from_secs(2);
 static AIRCAT_HASH_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
@@ -162,12 +165,17 @@ pub fn aircat_error(
     code: &str,
     message: &str,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let mut end = message.len().min(MAX_ERROR_MESSAGE_BYTES);
+    while end > 0 && !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    let bounded_message = &message[..end];
     (
         status,
         Json(serde_json::json!({
             "error": {
                 "code": code,
-                "message": message,
+                "message": bounded_message,
                 "details": {}
             }
         })),
@@ -310,10 +318,11 @@ async fn resolve_caller_with_token(
         let is_admin = michi_db::get_user_by_id(&state.db, &user_id)
             .await
             .map_err(|e| {
+                tracing::warn!("aircat auth user lookup failed: {e}");
                 aircat_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "DB_ERROR",
-                    &e.to_string(),
+                    "database error resolving authenticated session",
                 )
             })?
             .map(|(_, _, _, admin)| admin)
@@ -348,13 +357,17 @@ async fn resolve_caller_with_token(
                 ));
             }
             claimed.to_string()
-        } else if let Some(hdr_dev) = headers
-            .get("X-Michi-Device-Id")
-            .and_then(|h| h.to_str().ok())
-        {
-            hdr_dev.to_string()
+        } else if is_admin {
+            if let Some(hdr_dev) = headers
+                .get("X-Michi-Device-Id")
+                .and_then(|h| h.to_str().ok())
+            {
+                hdr_dev.to_string()
+            } else {
+                state.identity.michi_id().to_base64url()
+            }
         } else {
-            state.identity.michi_id().to_base64url()
+            format!("user:{user_id}")
         }
     } else if let Some(device_uuid) = device_uuid_opt {
         if require_admin_user {
@@ -367,10 +380,11 @@ async fn resolve_caller_with_token(
         let dev = michi_db::get_link_device(&state.db, &device_uuid)
             .await
             .map_err(|e| {
+                tracing::warn!("aircat auth device lookup failed: {e}");
                 aircat_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "DB_ERROR",
-                    &e.to_string(),
+                    "database error resolving authenticated device",
                 )
             })?
             .ok_or_else(|| {
@@ -494,15 +508,17 @@ pub async fn aircat_manifest_handler(
     let producer_michi_id = state.identity.michi_id().to_base64url();
 
     let tracks = michi_db::list_tracks(&state.db).await.map_err(|e| {
+        tracing::warn!("aircat manifest track listing failed: {e}");
         aircat_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DB_ERROR",
-            &e.to_string(),
+            "database error loading original track catalog",
         )
     })?;
 
     let mut catalog_tracks = Vec::new();
     let mut total_size: i64 = 0;
+    let mut estimated_json_bytes: usize = 512;
 
     for track in tracks.into_iter().take(MAX_MANIFEST_TRACKS) {
         let _permit = AIRCAT_HASH_SEMAPHORE.acquire().await.map_err(|_| {
@@ -519,9 +535,8 @@ pub async fn aircat_manifest_handler(
         )
         .await
         {
-            total_size = total_size.saturating_add(revision.exact_size);
             let track_id_str = track.id.to_string();
-            catalog_tracks.push(AirCatCatalogTrack {
+            let entry = AirCatCatalogTrack {
                 track_id: track_id_str.clone(),
                 logical_track_id: Some(track_id_str.clone()),
                 remote_track_id: Some(track_id_str),
@@ -531,7 +546,16 @@ pub async fn aircat_manifest_handler(
                 format: track.format.as_str().to_string(),
                 size: revision.exact_size,
                 checksum: revision.exact_sha256,
-            });
+            };
+            let entry_len = serde_json::to_vec(&entry)
+                .map(|v| v.len().saturating_add(1))
+                .unwrap_or(usize::MAX);
+            if estimated_json_bytes.saturating_add(entry_len) > MAX_MANIFEST_JSON_BYTES {
+                break;
+            }
+            estimated_json_bytes = estimated_json_bytes.saturating_add(entry_len);
+            total_size = total_size.saturating_add(revision.exact_size);
+            catalog_tracks.push(entry);
         }
     }
 
@@ -558,9 +582,23 @@ pub async fn aircat_authorize_handler(
     State(state): State<AppState>,
     transport: AirCatTransportInfo,
     headers: HeaderMap,
-    Json(body): Json<aircat_grants::Request>,
+    body_bytes: axum::body::Bytes,
 ) -> Result<(HeaderMap, Json<aircat_grants::Grant>), (StatusCode, Json<serde_json::Value>)> {
     enforce_aircat_tls_transport(&state, &transport).await?;
+    if body_bytes.len() > AUTHORIZE_MAX_BODY_BYTES {
+        return Err(aircat_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "PAYLOAD_TOO_LARGE",
+            "authorize request payload exceeds 64 KiB limit",
+        ));
+    }
+    let body: aircat_grants::Request = serde_json::from_slice(&body_bytes).map_err(|_| {
+        aircat_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_FIELDS",
+            "invalid JSON AirCat authorization payload",
+        )
+    })?;
     let authenticated_member =
         resolve_authenticated_caller(&state, &headers, Some(&body.intent.destination_michi_id))
             .await?;
@@ -624,17 +662,18 @@ pub async fn aircat_authorize_handler(
         let track = michi_db::get_track(&state.db, &track_uuid)
             .await
             .map_err(|e| {
+                tracing::warn!("aircat authorize track lookup failed: {e}");
                 aircat_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "DB_ERROR",
-                    &e.to_string(),
+                    "database error validating authorized track",
                 )
             })?
             .ok_or_else(|| {
                 aircat_error(
                     StatusCode::NOT_FOUND,
                     "TRACK_NOT_FOUND",
-                    &format!("track {} not found in library", item.remote_track_id),
+                    "requested track not found in library",
                 )
             })?;
 
@@ -997,10 +1036,11 @@ pub async fn aircat_download_handler(
     let track = michi_db::get_track(&state.db, &track_uuid)
         .await
         .map_err(|e| {
+            tracing::warn!("aircat download track lookup failed: {e}");
             aircat_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "DB_ERROR",
-                &e.to_string(),
+                "database error looking up track",
             )
         })?
         .ok_or_else(|| {
@@ -1022,14 +1062,22 @@ pub async fn aircat_download_handler(
 
     // Verify file revision (size + inode + mtime) in descriptor has not changed
     let metadata = file.metadata().await.map_err(|e| {
+        tracing::warn!("aircat download fstat failed: {e}");
         aircat_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "IO_ERROR",
-            &e.to_string(),
+            "I/O error inspecting original file metadata",
         )
     })?;
 
     let file_len = metadata.len() as i64;
+    if file_len <= 0 {
+        return Err(aircat_error(
+            StatusCode::NOT_FOUND,
+            "ASSET_NOT_FOUND",
+            "original asset is empty",
+        ));
+    }
     if !aircat_original_file::revision_matches_metadata(&revision, &metadata) {
         return Err(aircat_error(
             StatusCode::CONFLICT,
@@ -1058,10 +1106,11 @@ pub async fn aircat_download_handler(
                     .header("X-Michi-AirCat-Authorized-Grant-SHA256", &receipt)
                     .body(Body::empty())
                     .map_err(|e| {
+                        tracing::warn!("aircat 304 response build error: {e}");
                         aircat_error(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "RESPONSE_BUILD_ERROR",
-                            &e.to_string(),
+                            "failed to construct AirCat response",
                         )
                     })?;
                 return Ok(resp);
@@ -1087,10 +1136,11 @@ pub async fn aircat_download_handler(
                     file.seek(std::io::SeekFrom::Start(range.start))
                         .await
                         .map_err(|e| {
+                            tracing::warn!("aircat seek failed: {e}");
                             aircat_error(
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 "IO_ERROR",
-                                &e.to_string(),
+                                "I/O error seeking original file range",
                             )
                         })?;
 
@@ -1126,10 +1176,11 @@ pub async fn aircat_download_handler(
                         )
                         .body(Body::from_stream(stream))
                         .map_err(|e| {
+                            tracing::warn!("aircat 206 response build error: {e}");
                             aircat_error(
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 "RESPONSE_BUILD_ERROR",
-                                &e.to_string(),
+                                "failed to construct AirCat partial response",
                             )
                         })?;
 
@@ -1141,13 +1192,15 @@ pub async fn aircat_download_handler(
                         .header(AIRCAT_PROTOCOL_HEADER, AIRCAT_PROTOCOL_VALUE)
                         .header(header::CACHE_CONTROL, "no-store, no-transform")
                         .header(header::CONTENT_RANGE, format!("bytes */{file_len}"))
+                        .header(header::ETAG, &revision.strong_etag)
                         .header("X-Michi-AirCat-Authorized-Grant-SHA256", receipt)
                         .body(Body::empty())
                         .map_err(|e| {
+                            tracing::warn!("aircat 416 response build error: {e}");
                             aircat_error(
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 "RESPONSE_BUILD_ERROR",
-                                &e.to_string(),
+                                "failed to construct AirCat 416 response",
                             )
                         })?;
                     return Ok(resp);
@@ -1187,10 +1240,11 @@ pub async fn aircat_download_handler(
         )
         .body(Body::from_stream(stream))
         .map_err(|e| {
+            tracing::warn!("aircat 200 response build error: {e}");
             aircat_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "RESPONSE_BUILD_ERROR",
-                &e.to_string(),
+                "failed to construct AirCat download response",
             )
         })?;
 
@@ -1372,11 +1426,14 @@ pub async fn home_auth_session_handler(
             michi_identity::home::HomeAuthError::DeviceRevoked => {
                 aircat_error(StatusCode::FORBIDDEN, "MEMBER_REVOKED", "member is revoked")
             }
-            _ => aircat_error(
-                StatusCode::FORBIDDEN,
-                "UNTRUSTED_MEMBER",
-                &format!("membership verification failed: {e}"),
-            ),
+            other => {
+                tracing::warn!("aircat membership verification failed: {other}");
+                aircat_error(
+                    StatusCode::FORBIDDEN,
+                    "UNTRUSTED_MEMBER",
+                    "membership certificate verification failed",
+                )
+            }
         })?;
 
     let server_michi_id = state.identity.michi_id().to_base64url();

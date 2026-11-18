@@ -10,7 +10,7 @@ Michi follows standard CasaOS/ZimaOS directory conventions:
 
 | Host Path (Default) | Container Path | Purpose | Access |
 |---------------------|----------------|---------|--------|
-| `/DATA/AppData/michi/config` | `/config` | SQLite database (`michi.db`), server secrets, auth sessions | Read / Write |
+| `/DATA/AppData/michi/config` | `/config` | SQLite database (`michi.db`), server secrets, `home_root_authority.key`, TLS cert/key (`tls.crt`, `tls.key`), auth sessions | Read / Write |
 | `/DATA/AppData/michi/cache` | `/cache` | Audio transcode cache, artwork cache, temp sync storage | Read / Write |
 | `/DATA/Media/Music` | `/music` | Music library root | Read Only |
 
@@ -51,19 +51,22 @@ docker run -d \
   -e PUID=1000 \
   -e PGID=1000 \
   -e MICHI_PORT=9090 \
+  -e MICHI_TLS_PORT=9443 \
+  -e MICHI_PUBLIC_HTTPS_URL="" \
   -e MICHI_DEPLOYMENT_PLATFORM=zimaos \
   -e MICHI_AUTH_USERNAME=admin \
   -e MICHI_AUTH_PASSWORD="YourStrongPasswordHere" \
   --restart unless-stopped \
-  ghcr.io/pitydah/michi-micro-server:1.0.0-rc.2
+  ghcr.io/pitydah/michi-micro-server:r3.1-zima
 ```
 
 ---
 
 ## 3. Access & Networking
 
-- **Default Web UI & API Port**: `http://<APPLIANCE_IP>:9090`
-- **Tailscale**: `http://<TAILSCALE_DEVICE_NAME>:9090`
+- **Default Web UI & HTTP Port**: `http://<APPLIANCE_IP>:9090`
+- **AirCat HTTPS/TLS Port (SPKI-pinned)**: `https://<APPLIANCE_IP>:9443` (`MICHI_TLS_PORT`, requiring persisted `/config/tls.crt` and `/config/tls.key`; see [`docs/AIRCAT_RUNBOOK.md`](./AIRCAT_RUNBOOK.md))
+- **Tailscale**: `http://<TAILSCALE_DEVICE_NAME>:9090` (or pinned HTTPS via `MICHI_PUBLIC_HTTPS_URL`)
 - **Host Network Mode**: Michi Micro Server uses `network_mode: host` to allow automatic local mDNS discovery of Michi Stream Hi-Fi receivers and Snapcast audio clients without complex Docker port forwards.
 
 ---

@@ -1789,7 +1789,8 @@ fn v1_link_routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/aircat/authorize",
-            post(routes::v1::aircat::aircat_authorize_handler),
+            post(routes::v1::aircat::aircat_authorize_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
         )
         .route(
             "/api/v1/aircat/download/:remote_id",

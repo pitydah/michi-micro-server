@@ -102,9 +102,23 @@ pub async fn open_original_file_no_symlinks(
     }
 
     let safe_path = matched_root.ok_or(Refusal::NotOriginalBytes)?;
-    let file = tokio::fs::File::open(&safe_path)
-        .await
-        .map_err(|_| Refusal::NotOriginalBytes)?;
+    let file = {
+        #[cfg(unix)]
+        {
+            let mut opts = tokio::fs::OpenOptions::new();
+            opts.read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            opts.open(&safe_path)
+                .await
+                .map_err(|_| Refusal::NotOriginalBytes)?
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::fs::File::open(&safe_path)
+                .await
+                .map_err(|_| Refusal::NotOriginalBytes)?
+        }
+    };
     let opened_meta = file
         .metadata()
         .await
@@ -126,14 +140,15 @@ pub async fn open_original_file_no_symlinks(
 
 /// Returns original track file metadata and SHA-256 revision using the bounded
 /// in-memory `(size, dev_ino, modified_unix_ns)` cache on `/manifest` calls.
-/// Falls back to full 64 KiB streaming SHA-256 hashing whenever the file is
-/// unseen or any metadata field changed.
+/// Falls back to full 64 KiB streaming SHA-256 hashing on the SAME opened file
+/// descriptor whenever the file is unseen or any metadata field changed.
 pub async fn inspect_original_asset_cached(
     music_paths: &[PathBuf],
     track: &Track,
     security: &crate::aircat_producer_security::AirCatProducerSecurityState,
 ) -> Result<(FileItem, OriginalAssetRevision), Refusal> {
-    let (_canonical_path, original) = open_original_file_no_symlinks(music_paths, track).await?;
+    let (_canonical_path, mut original) =
+        open_original_file_no_symlinks(music_paths, track).await?;
     let meta = original
         .metadata()
         .await
@@ -152,22 +167,17 @@ pub async fn inspect_original_asset_cached(
         };
         return Ok((item, cached));
     }
-    drop(original);
-    let (item, revision) = inspect_original_asset(music_paths, track).await?;
+    let (item, revision) = inspect_opened_original_file(track, &mut original).await?;
     security.cache_original_revision(revision.clone());
     Ok((item, revision))
 }
 
-/// Hashes the original file as bounded 64KiB chunks, without loading it fully
-/// into RAM, modifying the library or launching a background worker. This is
-/// on-demand, and is not allowed on an audio realtime thread.
-/// Must compare the file snapshot once more before sending each response.
-pub async fn inspect_original_asset(
-    music_paths: &[PathBuf],
+/// Hashes an already-opened original file descriptor as bounded 64KiB chunks,
+/// without reopening the path, loading it into RAM, or touching playback threads.
+async fn inspect_opened_original_file(
     track: &Track,
+    original: &mut tokio::fs::File,
 ) -> Result<(FileItem, OriginalAssetRevision), Refusal> {
-    let (_canonical_path, mut original) =
-        open_original_file_no_symlinks(music_paths, track).await?;
     let before = original
         .metadata()
         .await
@@ -222,6 +232,19 @@ pub async fn inspect_original_asset(
         modified_unix_ns: metadata_modified_unix_ns(&after),
     };
     Ok((item, revision))
+}
+
+/// Hashes the original file as bounded 64KiB chunks, without loading it fully
+/// into RAM, modifying the library or launching a background worker. This is
+/// on-demand, and is not allowed on an audio realtime thread.
+/// Must compare the file snapshot once more before sending each response.
+pub async fn inspect_original_asset(
+    music_paths: &[PathBuf],
+    track: &Track,
+) -> Result<(FileItem, OriginalAssetRevision), Refusal> {
+    let (_canonical_path, mut original) =
+        open_original_file_no_symlinks(music_paths, track).await?;
+    inspect_opened_original_file(track, &mut original).await
 }
 
 /// A revision is a digest receipt, not merely mtime or file length. Before

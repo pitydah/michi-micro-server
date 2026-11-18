@@ -4,8 +4,8 @@
 **CURRENT PHASE:** R3.1 — CERTIFICATION BASELINE (PINNED & HARNESS VERIFIED)  
 **STATUS DATE:** 2026-08-23  
 **PINNED NORMATIVE REFERENCES:**
-- `pitydah/michi-link` @ `1b0684a9457beb0f8d78b491af16a06541f8508d` (submodule `vendor/michi-link`)
-- `pitydah/michi-music-stream` @ `05265da00d9186dbae810a4cbad448ed6438f943` (submodule `vendor/michi-music-stream`)
+- `pitydah/michi-link` @ `efed82be38a7f3ed08d4c5070b77803048bc7d20` (submodule `vendor/michi-link`)
+- `pitydah/michi-music-stream` @ `c7b80f588369cb02179ebbc987944ff40eb9248b` (submodule `vendor/michi-music-stream`)
 
 ---
 
