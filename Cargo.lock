@@ -1901,6 +1901,7 @@ dependencies = [
  "infer",
  "jsonschema",
  "lazy_static",
+ "libc",
  "md5",
  "mdns-sd",
  "michi-config",

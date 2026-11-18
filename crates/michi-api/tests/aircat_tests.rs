@@ -2024,3 +2024,299 @@ async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_m
         .unwrap();
     assert_eq!(tracks_after.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninterference() {
+    let (app, pool, state, admin_token, music_dir) = make_app().await;
+    let auth = format!("Bearer {admin_token}");
+
+    // 1. A zero-byte original audio file must never appear in /manifest
+    let empty_name = format!("empty-{}.flac", Uuid::new_v4());
+    let (_empty_sha, _empty_size, empty_path) = create_test_file(&music_dir, &empty_name, b"");
+    let empty_track_id = michi_core::track_id_from_library_path(&music_dir, &empty_path);
+    michi_db::upsert_track(
+        &pool,
+        &Track {
+            id: empty_track_id,
+            file_path: empty_path.to_string_lossy().to_string(),
+            title: Some("Zero Byte Track".into()),
+            artist: Some("A".into()),
+            album: Some("B".into()),
+            album_artist: None,
+            duration_ms: Some(1000),
+            format: AudioFormat::Flac,
+            sample_rate: Some(48000),
+            bit_depth: Some(16),
+            channels: Some(2),
+            artwork_id: None,
+            genre: None,
+            year: Some(2026),
+            track_number: Some(1),
+            disc_number: None,
+            content_hash: None,
+            file_size: Some(0),
+            file_mtime_ns: None,
+            starred: false,
+            rating: 0,
+            starred_at: None,
+            replaygain_track_gain: None,
+            replaygain_track_peak: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Insert a valid non-empty track for If-Range, gzip-identity & concurrency tests
+    let payload: Vec<u8> = (0..(128 * 1024)).map(|i| (i % 251) as u8).collect();
+    let valid_name = format!("concurrent-{}.flac", Uuid::new_v4());
+    let (sha256, size, valid_path) = create_test_file(&music_dir, &valid_name, &payload);
+    let track_id = michi_core::track_id_from_library_path(&music_dir, &valid_path);
+    michi_db::upsert_track(
+        &pool,
+        &Track {
+            id: track_id,
+            file_path: valid_path.to_string_lossy().to_string(),
+            title: Some("Non-Interference Track".into()),
+            artist: Some("Artist".into()),
+            album: Some("Album".into()),
+            album_artist: None,
+            duration_ms: Some(12_000),
+            format: AudioFormat::Flac,
+            sample_rate: Some(48000),
+            bit_depth: Some(16),
+            channels: Some(2),
+            artwork_id: None,
+            genre: None,
+            year: Some(2026),
+            track_number: Some(2),
+            disc_number: None,
+            content_hash: Some(sha256.clone()),
+            file_size: Some(size as u64),
+            file_mtime_ns: None,
+            starred: false,
+            rating: 0,
+            starred_at: None,
+            replaygain_track_gain: None,
+            replaygain_track_peak: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // 2. Non-admin user cannot spoof X-Michi-Device-Id on /manifest
+    let non_admin_id = Uuid::new_v4();
+    michi_db::create_user(&pool, &non_admin_id, "listener", "password", false)
+        .await
+        .unwrap();
+    let non_admin_token = state
+        .auth_sessions
+        .create_session(non_admin_id)
+        .await
+        .unwrap();
+    let spoof_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/aircat/manifest")
+                .method("GET")
+                .header(header::AUTHORIZATION, format!("Bearer {non_admin_token}"))
+                .header("X-Michi-Device-Id", "victim-spoofed-device-id")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(spoof_resp.status(), StatusCode::FORBIDDEN);
+
+    // 3. Manifest excludes the 0-byte track and includes only the valid track
+    let manifest_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/aircat/manifest")
+                .method("GET")
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(manifest_resp.status(), StatusCode::OK);
+    let manifest: Value = serde_json::from_slice(
+        &axum::body::to_bytes(manifest_resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["total_tracks"], 1);
+    assert_eq!(manifest["total_size"], size);
+    assert_eq!(
+        manifest["tracks"][0]["remote_track_id"],
+        track_id.to_string()
+    );
+
+    // 4. POST /api/v1/aircat/authorize > 64 KiB rejected <= 4 KiB canonical error envelope
+    let oversized_body = vec![b' '; 64 * 1024 + 128];
+    let oversized_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/aircat/authorize")
+                .method("POST")
+                .header(header::AUTHORIZATION, &auth)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(oversized_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oversized_resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let oversized_err_bytes = axum::body::to_bytes(oversized_resp.into_body(), 8192)
+        .await
+        .unwrap();
+    assert!(oversized_err_bytes.len() <= 4096);
+    let oversized_err: Value = serde_json::from_slice(&oversized_err_bytes).unwrap();
+    assert_eq!(oversized_err["error"]["code"], "PAYLOAD_TOO_LARGE");
+
+    // 5. Authorize the valid track
+    let source_id = state.identity.michi_id().to_base64url();
+    let dest_id = "lhlxbEOUgOykbYw6mg4McXy75xBWBX5HOn8pVbixqbY";
+    let sel_manifest = michi_api::aircat_grants::Manifest {
+        manifest_version: 1,
+        transfer_id: "tx-noninterference".into(),
+        source_device_id: source_id.clone(),
+        total_tracks: 1,
+        total_bytes: size,
+        items: vec![michi_api::aircat_grants::FileItem {
+            logical_track_id: track_id.to_string(),
+            remote_track_id: track_id.to_string(),
+            title: "Non-Interference Track".into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            format: "flac".into(),
+            size,
+            sha256: sha256.clone(),
+        }],
+    };
+    let manifest_sha = michi_api::aircat_grants::manifest_sha256(&sel_manifest).unwrap();
+    let auth_req = michi_api::aircat_grants::Request {
+        intent: michi_api::aircat_grants::Intent {
+            transfer_id: "tx-noninterference".into(),
+            source_michi_id: source_id,
+            destination_michi_id: dest_id.into(),
+            source_library_id: "lib-src".into(),
+            destination_library_id: "lib-dst".into(),
+            selection_scope: "ALBUMS".into(),
+            manifest_version: 1,
+            required_scopes: vec!["content:read".into(), "content:transfer".into()],
+            expires_at: chrono::Utc::now().timestamp_millis() + 300_000,
+            signed_grant: None,
+            authorization_nonce_base64_url: String::new(),
+        },
+        manifest: sel_manifest,
+        manifest_sha256: manifest_sha,
+        client_nonce_base64_url: URL_SAFE_NO_PAD.encode([0x77u8; 24]),
+    };
+    let auth_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/aircat/authorize")
+                .method("POST")
+                .header(header::AUTHORIZATION, &auth)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&auth_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(auth_resp.status(), StatusCode::OK);
+    let grant_header = URL_SAFE_NO_PAD.encode(
+        axum::body::to_bytes(auth_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap(),
+    );
+
+    // 6. If-Range mismatch MUST ignore Range and serve full 200 OK; Accept-Encoding: gzip, identity MUST remain uncompressed
+    let if_range_mismatch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/aircat/download/{track_id}"))
+                .method("GET")
+                .header(header::AUTHORIZATION, &auth)
+                .header("X-Michi-AirCat-Grant", &grant_header)
+                .header(header::RANGE, "bytes=0-15")
+                .header(
+                    header::IF_RANGE,
+                    "\"sha256-0000000000000000000000000000000000000000000000000000000000000000-1\"",
+                )
+                .header(header::ACCEPT_ENCODING, "gzip, identity")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(if_range_mismatch.status(), StatusCode::OK);
+    assert!(if_range_mismatch
+        .headers()
+        .get(header::CONTENT_ENCODING)
+        .is_none());
+    let full_dl = axum::body::to_bytes(if_range_mismatch.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(full_dl.as_ref(), payload.as_slice());
+
+    // 7. Concurrent AirCat downloads + /manifest + /playback/state non-interference (MICRO-18 / MICRO-32)
+    let mut handles = Vec::new();
+    for i in 0..6 {
+        let app_i = app.clone();
+        let auth_i = auth.clone();
+        let grant_i = grant_header.clone();
+        let tid_i = track_id;
+        handles.push(tokio::spawn(async move {
+            let dl = app_i
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/aircat/download/{tid_i}"))
+                        .method("GET")
+                        .header(header::AUTHORIZATION, &auth_i)
+                        .header("X-Michi-AirCat-Grant", &grant_i)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(dl.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(dl.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            assert_eq!(bytes.len(), 128 * 1024);
+
+            let pb = app_i
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/playback/state")
+                        .method("GET")
+                        .header(header::AUTHORIZATION, &auth_i)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                pb.status(),
+                StatusCode::OK,
+                "playback state failed on iter {i}"
+            );
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+}
