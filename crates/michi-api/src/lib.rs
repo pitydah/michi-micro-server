@@ -31,6 +31,7 @@ pub mod aircat_original_file;
 pub mod aircat_producer_security;
 pub mod assets;
 pub mod auth;
+pub mod home_tls_policy;
 mod library;
 mod openapi;
 mod players;
@@ -146,6 +147,18 @@ pub struct AppState {
 #[derive(Clone, Copy, Debug)]
 pub struct AirCatTlsVerifiedConnection;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsTrustMode {
+    /// Leaf signed by an issuer distinct from subject (Public CA such as Let's Encrypt
+    /// DNS-01 / Tailscale HTTPS, or a Home Private CA chain).
+    CaChained,
+    /// Single self-signed leaf certificate (issuer == subject). Android's default
+    /// X509TrustManager rejects self-signed certificates even with matching SAN + SPKI pin.
+    #[default]
+    SelfSigned,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AirCatTlsInfo {
     pub pinned_base_url: String,
@@ -153,6 +166,95 @@ pub struct AirCatTlsInfo {
     pub cert_path: std::path::PathBuf,
     pub key_path: std::path::PathBuf,
     pub tls_port: u16,
+    #[serde(default)]
+    pub tls_trust_mode: TlsTrustMode,
+    #[serde(default)]
+    pub cert_chain_len: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_not_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_not_after: Option<String>,
+}
+
+/// Verified X.509 metadata extracted from a PEM certificate chain and private key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedX509Metadata {
+    pub tls_spki_sha256: String,
+    pub tls_trust_mode: TlsTrustMode,
+    pub cert_chain_len: usize,
+    pub not_before: chrono::DateTime<chrono::Utc>,
+    pub not_after: chrono::DateTime<chrono::Utc>,
+}
+
+/// Validates a PEM certificate chain + private key for AirCat/Home HTTPS:
+/// 1. Parses PEM certs (>= 1) and private key, verifying cryptographic cert/key match via rustls.
+/// 2. Verifies X.509 validity window (`notBefore <= now <= notAfter`).
+/// 3. Verifies X.509 v3 SubjectAltName covers `pinned_base_url` host/IP.
+/// 4. Computes RFC 7469 SPKI SHA-256 pin and classifies `CaChained` vs `SelfSigned`.
+pub fn validate_x509_for_home_tls(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    pinned_base_url: &str,
+    now_utc: chrono::DateTime<chrono::Utc>,
+) -> Result<VerifiedX509Metadata, String> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut std::io::Cursor::new(cert_pem))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("invalid TLS certificate PEM: {e}"))?;
+    if certs.is_empty() {
+        return Err("no X.509 certificate found in TLS cert PEM".into());
+    }
+    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(key_pem))
+        .map_err(|e| format!("invalid TLS private key PEM: {e}"))?
+        .ok_or_else(|| "no private key found in TLS key PEM".to_string())?;
+
+    // Verify cert chain + key match cryptographically via rustls ServerConfig
+    let cert_chain_len = certs.len();
+    let leaf_der = certs[0].as_ref().to_vec();
+    rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("TLS certificate and private key mismatch or invalid: {e}"))?;
+
+    let tls_spki_sha256 = extract_spki_sha256_from_pem(&leaf_der)
+        .ok_or_else(|| "failed to extract SPKI SHA-256 from leaf X.509 certificate".to_string())?;
+
+    let (not_before, not_after) = extract_x509_validity(&leaf_der)
+        .ok_or_else(|| "failed to parse X.509 validity window (notBefore/notAfter)".to_string())?;
+    if now_utc < not_before {
+        return Err(format!(
+            "TLS certificate is not yet valid (notBefore={})",
+            not_before.to_rfc3339()
+        ));
+    }
+    if now_utc > not_after {
+        return Err(format!(
+            "TLS certificate is expired (notAfter={})",
+            not_after.to_rfc3339()
+        ));
+    }
+
+    if !validate_x509_san_for_url(&leaf_der, pinned_base_url) {
+        return Err(format!(
+            "X.509 SubjectAltName does not match pinned_base_url '{pinned_base_url}'"
+        ));
+    }
+
+    let is_self_signed = cert_chain_len == 1 && is_x509_self_issued(&leaf_der).unwrap_or(true);
+    let tls_trust_mode = if is_self_signed {
+        TlsTrustMode::SelfSigned
+    } else {
+        TlsTrustMode::CaChained
+    };
+
+    Ok(VerifiedX509Metadata {
+        tls_spki_sha256,
+        tls_trust_mode,
+        cert_chain_len,
+        not_before,
+        not_after,
+    })
 }
 
 impl AirCatTlsInfo {
@@ -186,7 +288,7 @@ impl AirCatTlsInfo {
             }
         }
         let cert_pem = std::fs::read(&cert_path).ok()?;
-        let tls_spki_sha256 = extract_spki_sha256_from_pem(&cert_pem)?;
+        let key_pem = std::fs::read(&key_path).ok()?;
         let tls_port = std::env::var("MICHI_TLS_PORT")
             .ok()
             .and_then(|v| v.parse::<u16>().ok())
@@ -199,23 +301,144 @@ impl AirCatTlsInfo {
                 format!("https://{host}:{tls_port}")
             });
 
-        if !validate_x509_san_for_url(&cert_pem, &pinned_base_url) {
-            tracing::error!(
+        let verified = match validate_x509_for_home_tls(
+            &cert_pem,
+            &key_pem,
+            &pinned_base_url,
+            chrono::Utc::now(),
+        ) {
+            Ok(v) => v,
+            Err(reason) => {
+                tracing::error!(
+                    cert = %cert_path.display(),
+                    pinned_base_url = %pinned_base_url,
+                    reason = %reason,
+                    "Refusing Home/AirCat TLS activation due to invalid X.509 certificate or key"
+                );
+                return None;
+            }
+        };
+
+        if verified.tls_trust_mode == TlsTrustMode::SelfSigned {
+            tracing::warn!(
                 cert = %cert_path.display(),
                 pinned_base_url = %pinned_base_url,
-                "Refusing AirCat TLS activation: X.509 certificate SubjectAltName does not match pinned_base_url host/IP (required by Android TLS hostname verification)"
+                "Loaded self-signed TLS certificate: Android's default X509TrustManager rejects self-signed certificates even with matching SAN + SPKI pin. Use a CA-chained certificate (Mode A: Let's Encrypt DNS-01 / Tailscale HTTPS) for production Android interoperability."
             );
-            return None;
         }
 
         Some(Self {
             pinned_base_url,
-            tls_spki_sha256,
+            tls_spki_sha256: verified.tls_spki_sha256,
             cert_path,
             key_path,
             tls_port,
+            tls_trust_mode: verified.tls_trust_mode,
+            cert_chain_len: verified.cert_chain_len,
+            cert_not_before: Some(verified.not_before.to_rfc3339()),
+            cert_not_after: Some(verified.not_after.to_rfc3339()),
         })
     }
+}
+
+fn parse_asn1_time(tag: u8, bytes: &[u8]) -> Option<chrono::DateTime<chrono::Utc>> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    match tag {
+        // UTCTime: YYMMDDHHMMSSZ
+        0x17 => {
+            if s.len() != 13 || !s.ends_with('Z') {
+                return None;
+            }
+            let yy: i32 = s[0..2].parse().ok()?;
+            let year = if yy >= 50 { 1900 + yy } else { 2000 + yy };
+            let month: u32 = s[2..4].parse().ok()?;
+            let day: u32 = s[4..6].parse().ok()?;
+            let hour: u32 = s[6..8].parse().ok()?;
+            let min: u32 = s[8..10].parse().ok()?;
+            let sec: u32 = s[10..12].parse().ok()?;
+            chrono::NaiveDate::from_ymd_opt(year, month, day)?
+                .and_hms_opt(hour, min, sec)
+                .map(|ndt| {
+                    chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(ndt, chrono::Utc)
+                })
+        }
+        // GeneralizedTime: YYYYMMDDHHMMSSZ
+        0x18 => {
+            if s.len() != 15 || !s.ends_with('Z') {
+                return None;
+            }
+            let year: i32 = s[0..4].parse().ok()?;
+            let month: u32 = s[4..6].parse().ok()?;
+            let day: u32 = s[6..8].parse().ok()?;
+            let hour: u32 = s[8..10].parse().ok()?;
+            let min: u32 = s[10..12].parse().ok()?;
+            let sec: u32 = s[12..14].parse().ok()?;
+            chrono::NaiveDate::from_ymd_opt(year, month, day)?
+                .and_hms_opt(hour, min, sec)
+                .map(|ndt| {
+                    chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(ndt, chrono::Utc)
+                })
+        }
+        _ => None,
+    }
+}
+
+/// Extracts `(notBefore, notAfter)` UTC timestamps from a DER X.509 certificate.
+pub fn extract_x509_validity(
+    cert_der: &[u8],
+) -> Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+    let (cert_tag, cert_body, _) = read_der_tlv(cert_der)?;
+    if cert_tag != 0x30 {
+        return None;
+    }
+    let (tbs_tag, mut tbs_rest, _) = read_der_tlv(cert_body)?;
+    if tbs_tag != 0x30 {
+        return None;
+    }
+    if tbs_rest.first().copied() == Some(0xA0) {
+        let (_, _, after_ver) = read_der_tlv(tbs_rest)?;
+        tbs_rest = after_ver;
+    }
+    // Skip serialNumber, signature, issuer (3 elements) -> validity is 4th
+    for _ in 0..3 {
+        let (_, _, next) = read_der_tlv(tbs_rest)?;
+        tbs_rest = next;
+    }
+    let (val_tag, val_body, _) = read_der_tlv(tbs_rest)?;
+    if val_tag != 0x30 {
+        return None;
+    }
+    let (nb_tag, nb_bytes, after_nb) = read_der_tlv(val_body)?;
+    let (na_tag, na_bytes, _) = read_der_tlv(after_nb)?;
+    Some((
+        parse_asn1_time(nb_tag, nb_bytes)?,
+        parse_asn1_time(na_tag, na_bytes)?,
+    ))
+}
+
+/// Returns `true` when the X.509 DER certificate's issuer Name equals its subject Name.
+pub fn is_x509_self_issued(cert_der: &[u8]) -> Option<bool> {
+    let (cert_tag, cert_body, _) = read_der_tlv(cert_der)?;
+    if cert_tag != 0x30 {
+        return None;
+    }
+    let (tbs_tag, mut tbs_rest, _) = read_der_tlv(cert_body)?;
+    if tbs_tag != 0x30 {
+        return None;
+    }
+    if tbs_rest.first().copied() == Some(0xA0) {
+        let (_, _, after_ver) = read_der_tlv(tbs_rest)?;
+        tbs_rest = after_ver;
+    }
+    // Skip serialNumber, signature
+    for _ in 0..2 {
+        let (_, _, next) = read_der_tlv(tbs_rest)?;
+        tbs_rest = next;
+    }
+    let (_, issuer_body, after_issuer) = read_der_tlv(tbs_rest)?;
+    let (_, _, after_validity) = read_der_tlv(after_issuer)?;
+    let (_, subject_body, _) = read_der_tlv(after_validity)?;
+    Some(issuer_body == subject_body)
 }
 
 /// Parses the first X.509 PEM certificate (or raw DER) into DER bytes.
@@ -2568,6 +2791,10 @@ fn v1_home_auth_routes(state: AppState) -> Router<AppState> {
             "/api/v1/home/enrollment/:request_id/status",
             get(routes::v1::aircat::home_enrollment_status_handler),
         )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            home_tls_policy::home_tls_required_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             state.security_state,
             michi_security::rate_limit_middleware,

@@ -128,7 +128,7 @@ def main():
         cursor = conn.cursor()
         cursor.execute("SELECT MAX(version) FROM _migrations")
         max_ver = cursor.fetchone()[0]
-        assert max_ver == 53, f"expected exact schema version 53, got {max_ver}"
+        assert max_ver == 55, f"expected exact schema version 55, got {max_ver}"
 
         # Assert play_history client_event_id column is present
         cursor.execute("PRAGMA table_info(play_history)")
@@ -140,15 +140,19 @@ def main():
         indexes = [row[1] for row in cursor.fetchall()]
         assert "idx_play_history_client_event_id" in indexes, f"idx_play_history_client_event_id missing: {indexes}"
 
-        # Assert auth_sessions, home_revocations and revocation_outbox tables are present
+        # Assert auth_sessions, home_revocations, revocation_outbox, home_members,
+        # home_enrollment_requests and home_serial_counters tables are present
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = [row[0] for row in cursor.fetchall()]
         assert "auth_sessions" in tables, f"auth_sessions table missing: {tables}"
         assert "home_revocations" in tables, f"home_revocations table missing: {tables}"
         assert "revocation_outbox" in tables, f"revocation_outbox table missing: {tables}"
+        assert "home_members" in tables, f"home_members table missing: {tables}"
+        assert "home_enrollment_requests" in tables, f"home_enrollment_requests table missing: {tables}"
+        assert "home_serial_counters" in tables, f"home_serial_counters table missing: {tables}"
 
         conn.close()
-    test("Database Migrations Complete & Schema Invariants (version == 53, home_revocations, revocation_outbox, auth_sessions)", test_schema_version)
+    test("Database Migrations Complete & Schema Invariants (version == 55, home_revocations, home_members, home_enrollment_requests, auth_sessions)", test_schema_version)
 
     # 4. Range Streaming Verification
     def test_range_streaming():

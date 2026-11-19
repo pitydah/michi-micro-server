@@ -335,6 +335,19 @@ const MichiAPI = {
   },
   aircatStatus() { return this.request('/api/v1/aircat/status'); },
   aircatEnrollmentQr() { return this.request('/api/v1/aircat/enrollment-qr'); },
+  homePendingEnrollments() { return this.request('/api/v1/home/enrollment/pending'); },
+  approveHomeEnrollment(requestId) {
+    return this.request('/api/v1/home/enrollment/' + encodeURIComponent(requestId) + '/approve', {
+      method: 'POST',
+      body: {}
+    });
+  },
+  rejectHomeEnrollment(requestId) {
+    return this.request('/api/v1/home/enrollment/' + encodeURIComponent(requestId) + '/reject', {
+      method: 'POST',
+      body: {}
+    });
+  },
   homeOutbox() { return this.request('/api/v1/home/outbox'); },
   homeRetryOutbox(revocation_id) {
     return this.request('/api/v1/home/outbox/retry', {
@@ -2363,28 +2376,119 @@ async function testMichiLink() {
   }
 }
 
+async function approveHomeEnrollmentRequest(requestId) {
+  if (!canPerformProtectedAction() || !requestId) {
+    return;
+  }
+  try {
+    await MichiAPI.approveHomeEnrollment(requestId);
+    showToast('Home enrollment approved');
+    await loadAirCatStatus();
+    if (typeof refreshHomeRoster === 'function') {
+      await refreshHomeRoster();
+    }
+  } catch (err) {
+    showToast('Failed to approve enrollment: ' + (err.message || 'Error'), true);
+  }
+}
+
+async function rejectHomeEnrollmentRequest(requestId) {
+  if (!canPerformProtectedAction() || !requestId) {
+    return;
+  }
+  try {
+    await MichiAPI.rejectHomeEnrollment(requestId);
+    showToast('Home enrollment rejected');
+    await loadAirCatStatus();
+  } catch (err) {
+    showToast('Failed to reject enrollment: ' + (err.message || 'Error'), true);
+  }
+}
+
 async function loadAirCatStatus() {
   if (!canPerformProtectedAction()) {
     return;
   }
   var out = $('#aircat-status-panel');
-  if (out) out.innerHTML = '<p style="color:var(--text-dim);font-size:.78rem">Inspecting AirCat producer...</p>';
+  if (out) out.innerHTML = '<p style="color:var(--text-dim);font-size:.78rem">Inspecting AirCat producer &amp; Home enrollments...</p>';
   try {
     var st = await MichiAPI.aircatStatus();
     var qrPayload = null;
-    if (st && st.tls_configured) {
-      qrPayload = await MichiAPI.aircatEnrollmentQr();
+    var pendingRequests = [];
+    var tlsAdminNote = '';
+    if (st && st.tls_listener_ready) {
+      try {
+        qrPayload = await MichiAPI.aircatEnrollmentQr();
+      } catch (qrErr) {
+        tlsAdminNote = 'Open the HTTPS WebUI (' + (st.pinned_base_url || 'HTTPS') + ') to manage Home enrollments and generate enrollment QRs (' + (qrErr.message || 'HTTPS required') + ').';
+      }
+      try {
+        var pendRes = await MichiAPI.homePendingEnrollments();
+        pendingRequests = (pendRes && Array.isArray(pendRes.requests)) ? pendRes.requests : [];
+      } catch (pendErr) {
+        if (!tlsAdminNote) {
+          tlsAdminNote = 'Pending Home enrollments require HTTPS admin access (' + (pendErr.message || 'HTTPS required') + ').';
+        }
+      }
     }
     if (out && st) {
       var stats = st.stats || {};
+      var trustLabel = 'NOT CONFIGURED';
+      var trustBadge = 'disabled';
+      if (st.tls_configured) {
+        if (st.android_default_trust_compatible) {
+          trustLabel = 'CA-CHAINED (ANDROID COMPATIBLE)';
+          trustBadge = 'stable';
+        } else {
+          trustLabel = 'SELF-SIGNED (REJECTED BY ANDROID DEFAULT)';
+          trustBadge = 'warning';
+        }
+      }
+      var pendingHtml = '';
+      if (tlsAdminNote) {
+        pendingHtml = '<div class="panel-row"><span class="panel-label">HTTPS Admin</span><span style="color:var(--warning,#f59e0b);font-size:.78rem">' + esc(tlsAdminNote) + '</span></div>';
+      } else if (st.tls_listener_ready) {
+        if (pendingRequests.length === 0) {
+          pendingHtml = '<div class="panel-row"><span class="panel-label">Pending Enrollments</span><span style="color:var(--text-dim);font-size:.78rem">No pending Home enrollment requests.</span></div>';
+        } else {
+          pendingHtml = '<div class="panel-row" style="flex-direction:column;align-items:stretch;gap:8px">' +
+            '<span class="panel-label">Pending Home Enrollment Requests (' + pendingRequests.length + ')</span>' +
+            pendingRequests.map(function (req) {
+              var rolesText = Array.isArray(req.requested_roles) ? req.requested_roles.join(', ') : '';
+              return '<div class="chain-item" style="cursor:default;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;gap:10px">' +
+                '<div class="info"><div class="name">' + esc(req.device_name || 'Device') + ' <span class="badge">' + esc(req.device_type || 'unknown') + '</span></div>' +
+                '<div class="meta">Michi ID: <code>' + esc(req.client_michi_id || '') + '</code> · Roles: ' + esc(rolesText) + '</div></div>' +
+                '<div style="display:flex;gap:6px">' +
+                '<button class="btn btn-sm btn-primary" data-home-enroll-approve="' + esc(req.request_id || '') + '">Approve</button>' +
+                '<button class="btn btn-sm btn-ghost" data-home-enroll-reject="' + esc(req.request_id || '') + '">Reject</button>' +
+                '</div></div>';
+            }).join('') +
+            '</div>';
+        }
+      }
+
       out.innerHTML =
         '<div class="panel-row"><span class="panel-label">Protocol</span><span class="panel-mono">' + esc(st.protocol || 'michi.aircat.original.v1') + '</span></div>' +
-        '<div class="panel-row"><span class="panel-label">TLS Ready</span><span class="badge ' + (st.tls_configured ? 'stable' : 'disabled') + '">' + (st.tls_configured ? 'HTTPS ACTIVE' : 'TLS NOT CONFIGURED') + '</span></div>' +
+        '<div class="panel-row"><span class="panel-label">TLS Ready</span><span class="badge ' + (st.tls_listener_ready ? 'stable' : 'disabled') + '">' + (st.tls_listener_ready ? 'HTTPS ACTIVE' : 'TLS NOT CONFIGURED') + '</span></div>' +
+        '<div class="panel-row"><span class="panel-label">TLS Trust Mode</span><span class="badge ' + trustBadge + '">' + esc(trustLabel) + '</span></div>' +
         '<div class="panel-row"><span class="panel-label">Pinned URL</span><span class="panel-mono">' + esc(st.pinned_base_url || 'N/A (configure tls.crt / tls.key)') + '</span></div>' +
         '<div class="panel-row"><span class="panel-label">SPKI Pin</span><span class="panel-mono">' + esc(st.tls_spki_sha256 || 'N/A') + '</span></div>' +
+        (st.cert_not_after ? '<div class="panel-row"><span class="panel-label">Cert Valid Until</span><span class="panel-mono">' + esc(st.cert_not_after) + ' (chain: ' + (st.cert_chain_len || 0) + ')</span></div>' : '') +
         '<div class="panel-row"><span class="panel-label">Snapshots / Cache</span><span class="panel-mono">' + (stats.active_snapshots || 0) + ' active · ' + (stats.cached_digests || 0) + ' cached (' + (stats.digest_cache_hits || 0) + ' hits)</span></div>' +
-        '<div class="panel-row"><span class="panel-label">Transfers / Revocations</span><span class="panel-mono">' + (stats.downloads_started || 0) + ' downloads · ' + (stats.bytes_served || 0) + ' B · ' + (stats.midstream_revocations || 0) + ' aborts</span></div>' +
-        (qrPayload ? '<div class="panel-row"><span class="panel-label">Home ID</span><span class="panel-mono">' + esc(qrPayload.homeId || '') + '</span></div>' : '');
+        '<div class="panel-row"><span class="panel-label">Transfers / Revocations</span><span class="panel-mono">' + (stats.downloads_started || 0) + ' downloads · ' + (stats.bytes_served || 0) + ' B · ' + (stats.midstream_revocations || 0) + ' aborts · ' + (st.pending_enrollments || 0) + ' pending</span></div>' +
+        (qrPayload ? '<div class="panel-row"><span class="panel-label">Home ID</span><span class="panel-mono">' + esc(qrPayload.homeId || '') + '</span></div>' : '') +
+        pendingHtml;
+
+      out.querySelectorAll('[data-home-enroll-approve]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          approveHomeEnrollmentRequest(btn.getAttribute('data-home-enroll-approve'));
+        });
+      });
+      out.querySelectorAll('[data-home-enroll-reject]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          rejectHomeEnrollmentRequest(btn.getAttribute('data-home-enroll-reject'));
+        });
+      });
     }
   } catch (err) {
     if (out) {

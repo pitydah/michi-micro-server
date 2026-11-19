@@ -111,6 +111,10 @@ async fn enable_tls(state: &michi_api::AppState) {
         cert_path: PathBuf::from("/tmp/r1-tls.crt"),
         key_path: PathBuf::from("/tmp/r1-tls.key"),
         tls_port: 9443,
+        tls_trust_mode: michi_api::TlsTrustMode::CaChained,
+        cert_chain_len: 2,
+        cert_not_before: Some("2026-01-01T00:00:00Z".into()),
+        cert_not_after: Some("2027-01-01T00:00:00Z".into()),
     });
     state.set_aircat_tls_listener_ready(true);
 }
@@ -289,6 +293,10 @@ async fn test_r1_capability_normalization_across_server_info_capabilities_and_wh
         cert_path: PathBuf::from("/tmp/c.crt"),
         key_path: PathBuf::from("/tmp/c.key"),
         tls_port: 9443,
+        tls_trust_mode: michi_api::TlsTrustMode::CaChained,
+        cert_chain_len: 2,
+        cert_not_before: None,
+        cert_not_after: None,
     });
     let caps_unready = michi_api::server_caps::ServerCapabilities::from_state(&state).await;
     assert!(!caps_unready.feature_enabled("aircat_original_v1"));
@@ -369,10 +377,10 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
     let client_michi_id = michi_identity::MichiId::from_public_key(&client_vk).to_base64url();
     let home_id = state.home_root_authority.home_id();
 
-    // Step 1: Request enrollment challenge
+    // Step 1: Request enrollment challenge (HTTPS required by P0-A)
     let ch_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/home/enrollment/challenge")
                 .method("POST")
@@ -387,7 +395,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(ch_resp.status(), StatusCode::OK);
@@ -401,7 +409,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
     // Step 2: Tampered PoP signature must fail (and consumes challenge)
     let bad_req = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/home/enrollment/request")
                 .method("POST")
@@ -420,7 +428,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(bad_req.status(), StatusCode::FORBIDDEN);
@@ -428,7 +436,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
     // Request a fresh challenge and sign valid Ed25519 PoP
     let ch2_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/home/enrollment/challenge")
                 .method("POST")
@@ -443,7 +451,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     let ch2: michi_identity::HomeEnrollmentChallengeResponse = serde_json::from_slice(
@@ -465,7 +473,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
 
     let req_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/home/enrollment/request")
                 .method("POST")
@@ -487,7 +495,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(req_resp.status(), StatusCode::ACCEPTED);
@@ -505,21 +513,21 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
     // Step 3: Non-admin user MUST NOT list pending or approve
     let non_admin_pending = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/home/enrollment/pending")
                 .method("GET")
                 .header(header::AUTHORIZATION, &non_admin_auth)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(non_admin_pending.status(), StatusCode::FORBIDDEN);
 
     let non_admin_approve = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri(format!(
                     "/api/v1/home/enrollment/{}/approve",
@@ -530,7 +538,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(b"{}".as_slice()))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(non_admin_approve.status(), StatusCode::FORBIDDEN);
@@ -556,7 +564,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
     // Wrong claim token on /status is rejected
     let wrong_claim = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri(format!(
                     "/api/v1/home/enrollment/{}/status",
@@ -566,7 +574,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
                 .header("X-Michi-Enrollment-Claim", "wrong_claim_token")
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(wrong_claim.status(), StatusCode::FORBIDDEN);
@@ -574,7 +582,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
     // Valid claim token while pending -> pending & membership = None
     let pending_status_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri(format!(
                     "/api/v1/home/enrollment/{}/status",
@@ -584,7 +592,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
                 .header("X-Michi-Enrollment-Claim", &enrolled.claim_token)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(pending_status_resp.status(), StatusCode::OK);
@@ -603,14 +611,14 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
     // Step 4: Admin lists pending and explicitly approves
     let pending_list = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/home/enrollment/pending")
                 .method("GET")
                 .header(header::AUTHORIZATION, &admin_auth)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(pending_list.status(), StatusCode::OK);
@@ -624,7 +632,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
 
     let approve_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri(format!(
                     "/api/v1/home/enrollment/{}/approve",
@@ -635,7 +643,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(b"{}".as_slice()))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(approve_resp.status(), StatusCode::OK);
@@ -643,7 +651,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
     // Step 5: Client polls /status with claim token and receives signed MichiMembership
     let approved_status_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri(format!(
                     "/api/v1/home/enrollment/{}/status",
@@ -653,7 +661,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
                 .header("X-Michi-Enrollment-Claim", &enrolled.claim_token)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(approved_status_resp.status(), StatusCode::OK);
@@ -698,12 +706,12 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
         .iter()
         .any(|d| d["device_michi_id"] == client_michi_id && d["revoked"] == false));
 
-    // Step 6: Mutual Auth + Renewal (2 consecutive challenge/session handshakes)
+    // Step 6: Mutual Auth + Renewal (2 consecutive challenge/session handshakes over HTTPS)
     let mut latest_session_token = String::new();
     for _ in 0..2 {
         let auth_ch_resp = app
             .clone()
-            .oneshot(
+            .oneshot(with_tls(
                 Request::builder()
                     .uri("/api/v1/auth/challenge")
                     .method("POST")
@@ -717,7 +725,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
                         .unwrap(),
                     ))
                     .unwrap(),
-            )
+            ))
             .await
             .unwrap();
         assert_eq!(auth_ch_resp.status(), StatusCode::OK);
@@ -738,7 +746,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
         );
         let sess_resp = app
             .clone()
-            .oneshot(
+            .oneshot(with_tls(
                 Request::builder()
                     .uri("/api/v1/auth/session")
                     .method("POST")
@@ -753,7 +761,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
                         .unwrap(),
                     ))
                     .unwrap(),
-            )
+            ))
             .await
             .unwrap();
         assert_eq!(sess_resp.status(), StatusCode::OK);
@@ -839,7 +847,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
 
     let after_revoke_challenge = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/auth/challenge")
                 .method("POST")
@@ -853,7 +861,7 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(after_revoke_challenge.status(), StatusCode::FORBIDDEN);
@@ -1027,7 +1035,7 @@ async fn test_r1_legacy_server_code_preserved_but_rejected_by_aircat_strict_and_
     let ch: michi_identity::DeviceAuthChallengeResponse = serde_json::from_slice(
         &axum::body::to_bytes(
             app.clone()
-                .oneshot(
+                .oneshot(with_tls(
                     Request::builder()
                         .uri("/api/v1/auth/challenge")
                         .method("POST")
@@ -1041,7 +1049,7 @@ async fn test_r1_legacy_server_code_preserved_but_rejected_by_aircat_strict_and_
                             .unwrap(),
                         ))
                         .unwrap(),
-                )
+                ))
                 .await
                 .unwrap()
                 .into_body(),
@@ -1062,7 +1070,7 @@ async fn test_r1_legacy_server_code_preserved_but_rejected_by_aircat_strict_and_
     let sess: michi_identity::DeviceAuthSessionResponse = serde_json::from_slice(
         &axum::body::to_bytes(
             app.clone()
-                .oneshot(
+                .oneshot(with_tls(
                     Request::builder()
                         .uri("/api/v1/auth/session")
                         .method("POST")
@@ -1077,7 +1085,7 @@ async fn test_r1_legacy_server_code_preserved_but_rejected_by_aircat_strict_and_
                             .unwrap(),
                         ))
                         .unwrap(),
-                )
+                ))
                 .await
                 .unwrap()
                 .into_body(),

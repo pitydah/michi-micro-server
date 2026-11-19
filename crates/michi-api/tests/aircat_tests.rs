@@ -104,6 +104,10 @@ async fn enable_test_tls(state: &michi_api::AppState) {
         cert_path: std::path::PathBuf::from("/tmp/test-tls.crt"),
         key_path: std::path::PathBuf::from("/tmp/test-tls.key"),
         tls_port: 9443,
+        tls_trust_mode: michi_api::TlsTrustMode::CaChained,
+        cert_chain_len: 2,
+        cert_not_before: None,
+        cert_not_after: None,
     });
     state.set_aircat_tls_listener_ready(true);
 }
@@ -135,7 +139,7 @@ async fn establish_home_session(
 
     let chal_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/auth/challenge")
                 .method("POST")
@@ -149,7 +153,7 @@ async fn establish_home_session(
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(chal_resp.status(), StatusCode::OK);
@@ -170,7 +174,7 @@ async fn establish_home_session(
     );
     let sess_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/auth/session")
                 .method("POST")
@@ -185,7 +189,7 @@ async fn establish_home_session(
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(sess_resp.status(), StatusCode::OK);
@@ -766,6 +770,10 @@ async fn test_aircat_enrollment_qr_handler() {
         cert_path: std::path::PathBuf::from("/tmp/test-tls.crt"),
         key_path: std::path::PathBuf::from("/tmp/test-tls.key"),
         tls_port: 9443,
+        tls_trust_mode: michi_api::TlsTrustMode::CaChained,
+        cert_chain_len: 2,
+        cert_not_before: None,
+        cert_not_after: None,
     });
     state.set_aircat_tls_listener_ready(true);
 
@@ -789,12 +797,14 @@ async fn test_aircat_enrollment_qr_handler() {
     assert_eq!(info_2["features"]["aircat_original_v1"], true);
     assert_eq!(info_2["features"]["home_tls_spki_pinned"], true);
 
-    let req = Request::builder()
-        .uri("/api/v1/aircat/enrollment-qr")
-        .method("GET")
-        .header(header::AUTHORIZATION, &auth)
-        .body(Body::empty())
-        .unwrap();
+    let req = with_tls(
+        Request::builder()
+            .uri("/api/v1/aircat/enrollment-qr")
+            .method("GET")
+            .header(header::AUTHORIZATION, &auth)
+            .body(Body::empty())
+            .unwrap(),
+    );
 
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1058,10 +1068,10 @@ async fn test_aircat_home_membership_mutual_auth_and_audience_binding() {
         10,
     );
 
-    // 1. Request challenge
+    // 1. Request challenge (HTTPS required by P0-A)
     let chal_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/auth/challenge")
                 .method("POST")
@@ -1075,7 +1085,7 @@ async fn test_aircat_home_membership_mutual_auth_and_audience_binding() {
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(chal_resp.status(), StatusCode::OK);
@@ -1097,7 +1107,7 @@ async fn test_aircat_home_membership_mutual_auth_and_audience_binding() {
     );
     let sess_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/auth/session")
                 .method("POST")
@@ -1112,7 +1122,7 @@ async fn test_aircat_home_membership_mutual_auth_and_audience_binding() {
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(sess_resp.status(), StatusCode::OK);
@@ -1330,15 +1340,19 @@ RNNxv6f+JRUS/DdOdg1MtwyavMahRANCAAT1vqfUWW4hG38vizHqZjALbQVnpXQ1\n\
     let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_tls_cfg));
 
     let (app, _pool, state, _admin_token, _music_dir) = make_app().await;
-    let (token, _member_id) = establish_home_session(&app, &state).await;
     *state.aircat_tls.write().await = Some(michi_api::AirCatTlsInfo {
         pinned_base_url: "https://localhost:9443".to_string(),
         tls_spki_sha256: expected_spki.clone(),
         cert_path: std::path::PathBuf::from("/tmp/test-tls.crt"),
         key_path: std::path::PathBuf::from("/tmp/test-tls.key"),
         tls_port: 9443,
+        tls_trust_mode: michi_api::TlsTrustMode::CaChained,
+        cert_chain_len: 2,
+        cert_not_before: None,
+        cert_not_after: None,
     });
     state.set_aircat_tls_listener_ready(true);
+    let (token, _member_id) = establish_home_session(&app, &state).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -1474,10 +1488,10 @@ async fn test_aircat_midstream_revocation_aborts_large_stream_and_tracks_cache()
     .await
     .unwrap();
 
-    // Establish HOME_MEMBERSHIP session
+    // Establish HOME_MEMBERSHIP session (HTTPS required by P0-A)
     let chal_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/auth/challenge")
                 .method("POST")
@@ -1491,7 +1505,7 @@ async fn test_aircat_midstream_revocation_aborts_large_stream_and_tracks_cache()
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     let chal: michi_identity::types::DeviceAuthChallengeResponse = serde_json::from_slice(
@@ -1510,7 +1524,7 @@ async fn test_aircat_midstream_revocation_aborts_large_stream_and_tracks_cache()
     );
     let sess_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/auth/session")
                 .method("POST")
@@ -1525,7 +1539,7 @@ async fn test_aircat_midstream_revocation_aborts_large_stream_and_tracks_cache()
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     let sess: michi_identity::types::DeviceAuthSessionResponse = serde_json::from_slice(
@@ -1710,6 +1724,10 @@ async fn test_aircat_cleartext_http_rejected_when_tls_active() {
         cert_path: std::path::PathBuf::from("/tmp/c.crt"),
         key_path: std::path::PathBuf::from("/tmp/c.key"),
         tls_port: 9443,
+        tls_trust_mode: michi_api::TlsTrustMode::CaChained,
+        cert_chain_len: 2,
+        cert_not_before: None,
+        cert_not_after: None,
     });
     state.set_aircat_tls_listener_ready(true);
 
@@ -1750,10 +1768,14 @@ async fn test_aircat_webui_cookie_auth_and_admin_enrollment_rbac() {
         cert_path: std::path::PathBuf::from("/tmp/c.crt"),
         key_path: std::path::PathBuf::from("/tmp/c.key"),
         tls_port: 9443,
+        tls_trust_mode: michi_api::TlsTrustMode::CaChained,
+        cert_chain_len: 2,
+        cert_not_before: None,
+        cert_not_after: None,
     });
     state.set_aircat_tls_listener_ready(true);
 
-    // 1. Admin WebUI michi_web_session cookie succeeds on /status and /enrollment-qr
+    // 1. Admin WebUI michi_web_session cookie succeeds on /status and over HTTPS on /enrollment-qr
     let admin_cookie = format!("michi_web_session={admin_token}");
     let status_resp = app
         .clone()
@@ -1771,14 +1793,14 @@ async fn test_aircat_webui_cookie_auth_and_admin_enrollment_rbac() {
 
     let qr_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/enrollment-qr")
                 .method("GET")
                 .header(header::COOKIE, &admin_cookie)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(qr_resp.status(), StatusCode::OK);
@@ -1808,14 +1830,14 @@ async fn test_aircat_webui_cookie_auth_and_admin_enrollment_rbac() {
 
     let qr_user_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/enrollment-qr")
                 .method("GET")
                 .header(header::AUTHORIZATION, &user_auth)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(qr_user_resp.status(), StatusCode::FORBIDDEN);
@@ -1837,7 +1859,7 @@ async fn test_aircat_webui_cookie_auth_and_admin_enrollment_rbac() {
     );
     let chal_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/auth/challenge")
                 .method("POST")
@@ -1851,7 +1873,7 @@ async fn test_aircat_webui_cookie_auth_and_admin_enrollment_rbac() {
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     let chal: michi_identity::types::DeviceAuthChallengeResponse = serde_json::from_slice(
@@ -1870,7 +1892,7 @@ async fn test_aircat_webui_cookie_auth_and_admin_enrollment_rbac() {
     );
     let sess_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/auth/session")
                 .method("POST")
@@ -1885,7 +1907,7 @@ async fn test_aircat_webui_cookie_auth_and_admin_enrollment_rbac() {
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     let sess: michi_identity::types::DeviceAuthSessionResponse = serde_json::from_slice(
@@ -1898,14 +1920,14 @@ async fn test_aircat_webui_cookie_auth_and_admin_enrollment_rbac() {
 
     let qr_member_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/enrollment-qr")
                 .method("GET")
                 .header(header::AUTHORIZATION, &member_auth)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert!(matches!(
@@ -1978,7 +2000,7 @@ async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_m
 
     let chal_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/auth/challenge")
                 .method("POST")
@@ -1992,7 +2014,7 @@ async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_m
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     let chal: michi_identity::types::DeviceAuthChallengeResponse = serde_json::from_slice(
@@ -2011,7 +2033,7 @@ async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_m
     );
     let sess_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/auth/session")
                 .method("POST")
@@ -2026,7 +2048,7 @@ async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_m
                     .unwrap(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     let sess: michi_identity::types::DeviceAuthSessionResponse = serde_json::from_slice(
@@ -2121,17 +2143,17 @@ async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_m
     }
     assert!(stream.next().await.unwrap().is_err());
 
-    // 2. General /api/v1/tracks accepts member_auth before revoke, rejects with 401 after /home/revoke
+    // 2. General /api/v1/tracks accepts member_auth over HTTPS before revoke, rejects after /home/revoke
     let tracks_before = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/tracks")
                 .method("GET")
                 .header(header::AUTHORIZATION, &member_auth)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(tracks_before.status(), StatusCode::OK);
@@ -2159,14 +2181,14 @@ async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_m
 
     let tracks_after = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/tracks")
                 .method("GET")
                 .header(header::AUTHORIZATION, &member_auth)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(tracks_after.status(), StatusCode::UNAUTHORIZED);
@@ -2447,14 +2469,14 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
             assert_eq!(bytes.len(), 128 * 1024);
 
             let pb = app_i
-                .oneshot(
+                .oneshot(with_tls(
                     Request::builder()
                         .uri("/api/v1/playback/state")
                         .method("GET")
                         .header(header::AUTHORIZATION, &auth_i)
                         .body(Body::empty())
                         .unwrap(),
-                )
+                ))
                 .await
                 .unwrap();
             assert_eq!(

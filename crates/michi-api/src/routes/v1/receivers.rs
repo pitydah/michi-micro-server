@@ -2330,48 +2330,85 @@ pub async fn home_roster_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let mut roster = state.receiver_manager.get_home_roster().await;
     let home_id = state.home_root_authority.home_id();
-    if let Ok(db_members) = michi_db::list_home_members(&state.db, &home_id).await {
-        for m in db_members {
-            if roster
-                .iter()
-                .any(|existing| existing.device_michi_id == m.device_michi_id)
-            {
-                continue;
-            }
-            if let Ok(membership) =
-                serde_json::from_str::<michi_identity::DeviceMembershipDto>(&m.membership_json)
-            {
-                let roles: Vec<String> =
-                    serde_json::from_str::<Vec<michi_identity::Role>>(&m.roles_json)
-                        .unwrap_or_else(|_| membership.roles.clone())
-                        .into_iter()
-                        .map(|r| r.as_str().to_string())
-                        .collect();
-                let revoked = m.revoked
-                    || crate::routes::v1::aircat::is_member_revoked(
+    let db_revs = michi_db::list_home_revocations_db(&state.db, &home_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("home_roster_handler failed to read home_revocations: {e}");
+            v1_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "REVOCATION_STORE_UNAVAILABLE",
+                "unable to read Home revocation state; refusing roster response fail-closed",
+            )
+        })?;
+    let db_members = michi_db::list_home_members(&state.db, &home_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("home_roster_handler failed to read home_members: {e}");
+            v1_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "REVOCATION_STORE_UNAVAILABLE",
+                "unable to read Home member roster",
+            )
+        })?;
+
+    // Ensure receiver roster entries also reflect durable revocations
+    for entry in &mut roster {
+        if db_revs
+            .iter()
+            .any(|r| r.revoked_device_michi_id == entry.device_michi_id)
+        {
+            entry.revoked = true;
+            entry.authenticated = false;
+            entry.online = false;
+        }
+    }
+
+    for m in db_members {
+        if roster
+            .iter()
+            .any(|existing| existing.device_michi_id == m.device_michi_id)
+        {
+            continue;
+        }
+        if let Ok(membership) =
+            serde_json::from_str::<michi_identity::DeviceMembershipDto>(&m.membership_json)
+        {
+            let roles: Vec<String> =
+                serde_json::from_str::<Vec<michi_identity::Role>>(&m.roles_json)
+                    .unwrap_or_else(|_| membership.roles.clone())
+                    .into_iter()
+                    .map(|r| r.as_str().to_string())
+                    .collect();
+            let revoked = m.revoked
+                || db_revs
+                    .iter()
+                    .any(|r| r.revoked_device_michi_id == m.device_michi_id)
+                || !matches!(
+                    crate::routes::v1::aircat::check_home_member_authorization(
                         &state,
                         &home_id,
                         &m.device_michi_id,
                     )
-                    .await;
-                let last_seen = chrono::DateTime::parse_from_rfc3339(&m.last_seen_at)
-                    .ok()
-                    .map(|dt| dt.with_timezone(&chrono::Utc));
-                roster.push(michi_receivers::models::HomeRosterDevice {
-                    device_michi_id: m.device_michi_id,
-                    name: m.device_name,
-                    device_type: m.device_type,
-                    base_url: None,
-                    roles,
-                    authenticated: !revoked,
-                    revoked,
-                    online: !revoked,
-                    last_seen,
-                    outbox_status: None,
-                    last_revocation_ack: None,
-                    last_revocation_error: None,
-                });
-            }
+                    .await,
+                    crate::routes::v1::aircat::HomeMemberAuthorizationState::Active
+                );
+            let last_seen = chrono::DateTime::parse_from_rfc3339(&m.last_seen_at)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+            roster.push(michi_receivers::models::HomeRosterDevice {
+                device_michi_id: m.device_michi_id,
+                name: m.device_name,
+                device_type: m.device_type,
+                base_url: None,
+                roles,
+                authenticated: !revoked,
+                revoked,
+                online: !revoked,
+                last_seen,
+                outbox_status: None,
+                last_revocation_ack: None,
+                last_revocation_error: None,
+            });
         }
     }
     Ok(Json(serde_json::json!({
@@ -2412,8 +2449,16 @@ pub async fn home_revoke_handler(
     {
         Ok(revocation) => {
             let home_id = state.home_root_authority.home_id();
+            let now_rfc = chrono::Utc::now().to_rfc3339();
             let _ = michi_db::mark_home_member_revoked(&state.db, &home_id, &body.device_michi_id)
                 .await;
+            let _ = michi_db::reject_enrollments_for_device_db(
+                &state.db,
+                &home_id,
+                &body.device_michi_id,
+                &now_rfc,
+            )
+            .await;
             state.aircat_security.revoke_member(&body.device_michi_id);
             let synthetic_uuid =
                 Uuid::new_v5(&Uuid::NAMESPACE_OID, body.device_michi_id.as_bytes());

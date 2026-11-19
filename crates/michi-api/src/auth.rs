@@ -383,21 +383,52 @@ fn is_admin_route(path: &str) -> bool {
     .any(|prefix| path.starts_with(prefix))
 }
 
+fn is_home_tls_required_protected_route(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/v1/aircat/manifest"
+            | "/api/v1/aircat/authorize"
+            | "/api/v1/aircat/enrollment-qr"
+            | "/api/v1/home/enrollment/pending"
+            | "/api/v1/home/members/enroll"
+    ) || path.starts_with("/api/v1/aircat/download/")
+        || (path.starts_with("/api/v1/home/enrollment/")
+            && (path.ends_with("/approve") || path.ends_with("/reject")))
+}
+
 /// V1 authorization policy:
+/// - Home enrollment admin and AirCat routes fail closed on cleartext HTTP via
+///   `HomeTlsTransportPolicy` before processing credentials;
+/// - `michi_home_*` bearer sessions NEVER travel over cleartext HTTP on ANY route,
+///   are validated exclusively against the dedicated Home session store (never legacy
+///   TokenStore), and fail closed on revocation or DB error (`Indeterminate` -> 503);
 /// - admin paths require an active administrator session;
-/// - other protected paths accept an active user session or paired device token;
-/// - this never fails open when username/password authentication is disabled.
+/// - other protected paths accept an active user session, paired device token, or
+///   verified HTTPS Home session.
 pub async fn v1_auth_middleware(
     State(state): State<AppState>,
     request: Request,
     next: Next,
 ) -> Response {
+    let path = request.uri().path();
+    if is_home_tls_required_protected_route(path) {
+        if let Err(err) = crate::home_tls_policy::HomeTlsTransportPolicy::enforce(
+            &state,
+            request.headers(),
+            request.extensions(),
+        )
+        .await
+        {
+            return err.into_response();
+        }
+    }
+
     let token = match extract_token(&request) {
         Some(token) => token,
         None => return auth_error(StatusCode::UNAUTHORIZED, "missing authorization header"),
     };
 
-    if is_admin_route(request.uri().path()) {
+    if is_admin_route(path) {
         let Some(user_id) = state.auth_sessions.extract_user_id(&token).await else {
             return auth_error(StatusCode::UNAUTHORIZED, "administrator session required");
         };
@@ -415,17 +446,71 @@ pub async fn v1_auth_middleware(
     }
 
     if token.starts_with("michi_home_") {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        if let Some(member_id) = state.aircat_security.lookup_home_session(&token, now_ms) {
-            if state
-                .aircat_security
-                .is_member_revoked_in_memory(&member_id)
-            {
-                return auth_error(StatusCode::FORBIDDEN, "home member is revoked");
-            }
-            return next.run(request).await;
+        // P0-A: A HOME_MEMBERSHIP bearer token MUST NEVER be accepted over cleartext HTTP,
+        // even on general library, playback, queue, or sync routes.
+        if let Err(err) = crate::home_tls_policy::HomeTlsTransportPolicy::enforce(
+            &state,
+            request.headers(),
+            request.extensions(),
+        )
+        .await
+        {
+            return err.into_response();
         }
-        return auth_error(StatusCode::UNAUTHORIZED, "invalid or expired home session");
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let Some(member_id) = state.aircat_security.lookup_home_session(&token, now_ms) else {
+            return crate::routes::v1::aircat::aircat_error(
+                StatusCode::UNAUTHORIZED,
+                "INVALID_TOKEN",
+                "invalid or expired Home session",
+            )
+            .into_response();
+        };
+
+        // Header identity coherence on Home sessions: if X-Michi-Device-Id is sent,
+        // it MUST match the verified cryptographic client_michi_id.
+        if let Some(hdr_dev) = request
+            .headers()
+            .get("X-Michi-Device-Id")
+            .and_then(|h| h.to_str().ok())
+        {
+            if !hdr_dev.is_empty() && hdr_dev != member_id {
+                return crate::routes::v1::aircat::aircat_error(
+                    StatusCode::FORBIDDEN,
+                    "IDENTITY_MISMATCH",
+                    "X-Michi-Device-Id header does not match verified Home member michi_id",
+                )
+                .into_response();
+            }
+        }
+
+        let home_id = state.home_root_authority.home_id();
+        match crate::routes::v1::aircat::check_home_member_authorization(
+            &state, &home_id, &member_id,
+        )
+        .await
+        {
+            crate::routes::v1::aircat::HomeMemberAuthorizationState::Active => {
+                return next.run(request).await;
+            }
+            crate::routes::v1::aircat::HomeMemberAuthorizationState::Revoked => {
+                return crate::routes::v1::aircat::aircat_error(
+                    StatusCode::FORBIDDEN,
+                    "MEMBER_REVOKED",
+                    "authenticated member is revoked in this Home",
+                )
+                .into_response();
+            }
+            crate::routes::v1::aircat::HomeMemberAuthorizationState::Indeterminate => {
+                return crate::routes::v1::aircat::aircat_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "REVOCATION_STORE_UNAVAILABLE",
+                    "unable to verify Home revocation state; access temporarily denied",
+                )
+                .into_response();
+            }
+        }
     }
 
     if state.auth_sessions.validate(&token).await
