@@ -19,6 +19,7 @@ const MAX_ACTIVE: usize = 1024;
 const MAX_REPLAY_NONCES: usize = 4096;
 const MAX_LIFETIME_MS: i64 = 600_000;
 const MAX_DIGEST_CACHE: usize = 10_000;
+const MAX_ENROLLMENT_REQUESTS: usize = 128;
 
 #[derive(Clone, Debug)]
 pub struct OriginalAssetRevision {
@@ -49,6 +50,32 @@ struct HomeAuthChallengeEntry {
     expires_at_ms: i64,
 }
 
+#[derive(Clone, Debug)]
+struct HomeEnrollmentChallengeEntry {
+    home_id: String,
+    client_michi_id: String,
+    client_public_key: String,
+    nonce: String,
+    expires_at_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct HomeEnrollmentRecord {
+    pub request_id: uuid::Uuid,
+    pub home_id: String,
+    pub client_michi_id: String,
+    pub client_public_key: String,
+    pub device_name: String,
+    pub device_type: String,
+    pub requested_roles: Vec<michi_identity::Role>,
+    pub created_at: String,
+    pub expires_at: String,
+    pub expires_at_ms: i64,
+    pub claim_token_hash: String,
+    pub status: michi_identity::HomeEnrollmentStatus,
+    pub membership: Option<michi_identity::DeviceMembershipDto>,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct AirCatStatsSnapshot {
     pub active_snapshots: usize,
@@ -70,6 +97,10 @@ struct Inner {
     snapshots: HashMap<(String, String), ProducerSnapshot>,
     /// key: challenge UUID for HOME_MEMBERSHIP mutual auth
     home_challenges: HashMap<uuid::Uuid, HomeAuthChallengeEntry>,
+    /// key: challenge UUID for authorized Home membership enrollment PoP
+    enrollment_challenges: HashMap<uuid::Uuid, HomeEnrollmentChallengeEntry>,
+    /// key: request UUID for admin-approved Home membership enrollment
+    enrollment_requests: HashMap<uuid::Uuid, HomeEnrollmentRecord>,
     /// key: opaque bearer token -> (verified client_michi_id, expires_at_ms)
     home_sessions: HashMap<String, (String, i64)>,
     /// key: remote_track_id -> verified original file revision matched by (size, dev_ino, mtime_ns)
@@ -429,7 +460,177 @@ impl AirCatProducerSecurityState {
                 .snapshots
                 .retain(|_, s| s.authenticated_destination_michi_id != member);
             inner.home_sessions.retain(|_, (id, _)| id != member);
+            inner
+                .enrollment_challenges
+                .retain(|_, c| c.client_michi_id != member);
+            inner
+                .enrollment_requests
+                .retain(|_, r| r.client_michi_id != member);
         }
+    }
+
+    pub fn issue_enrollment_challenge(
+        &self,
+        home_id: &str,
+        client_michi_id: &str,
+        client_public_key: &str,
+        nonce: String,
+        now_ms: i64,
+        ttl_ms: i64,
+    ) -> Result<uuid::Uuid, Refusal> {
+        let mut inner = self.inner.lock().map_err(|_| Refusal::InvalidFields)?;
+        Self::prune(&mut inner, now_ms);
+        if inner.enrollment_challenges.len() >= MAX_ACTIVE {
+            return Err(Refusal::InvalidFields);
+        }
+        let id = uuid::Uuid::new_v4();
+        inner.enrollment_challenges.insert(
+            id,
+            HomeEnrollmentChallengeEntry {
+                home_id: home_id.to_string(),
+                client_michi_id: client_michi_id.to_string(),
+                client_public_key: client_public_key.to_string(),
+                nonce,
+                expires_at_ms: now_ms.saturating_add(ttl_ms),
+            },
+        );
+        Ok(id)
+    }
+
+    pub fn consume_enrollment_challenge(
+        &self,
+        challenge_id: &uuid::Uuid,
+        home_id: &str,
+        client_michi_id: &str,
+        client_public_key: &str,
+        now_ms: i64,
+    ) -> Result<String, Refusal> {
+        let mut inner = self.inner.lock().map_err(|_| Refusal::InvalidFields)?;
+        Self::prune(&mut inner, now_ms);
+        let entry = inner
+            .enrollment_challenges
+            .remove(challenge_id)
+            .ok_or(Refusal::Expired)?;
+        if entry.expires_at_ms <= now_ms
+            || entry.home_id != home_id
+            || entry.client_michi_id != client_michi_id
+            || entry.client_public_key != client_public_key
+        {
+            return Err(Refusal::WrongAudience);
+        }
+        Ok(entry.nonce)
+    }
+
+    pub fn create_enrollment_request(
+        &self,
+        record: HomeEnrollmentRecord,
+        now_ms: i64,
+    ) -> Result<(), Refusal> {
+        let mut inner = self.inner.lock().map_err(|_| Refusal::InvalidFields)?;
+        Self::prune(&mut inner, now_ms);
+        if inner.enrollment_requests.len() >= MAX_ENROLLMENT_REQUESTS {
+            return Err(Refusal::InvalidFields);
+        }
+        inner.enrollment_requests.insert(record.request_id, record);
+        Ok(())
+    }
+
+    pub fn list_pending_enrollments(
+        &self,
+        now_ms: i64,
+    ) -> Vec<michi_identity::HomeEnrollmentPendingEntry> {
+        let Ok(mut inner) = self.inner.lock() else {
+            return Vec::new();
+        };
+        Self::prune(&mut inner, now_ms);
+        inner
+            .enrollment_requests
+            .values()
+            .filter(|r| r.status == michi_identity::HomeEnrollmentStatus::Pending)
+            .map(|r| michi_identity::HomeEnrollmentPendingEntry {
+                request_id: r.request_id,
+                home_id: r.home_id.clone(),
+                client_michi_id: r.client_michi_id.clone(),
+                client_public_key: r.client_public_key.clone(),
+                device_name: r.device_name.clone(),
+                device_type: r.device_type.clone(),
+                requested_roles: r.requested_roles.clone(),
+                created_at: r.created_at.clone(),
+                expires_at: r.expires_at.clone(),
+            })
+            .collect()
+    }
+
+    pub fn get_pending_enrollment(
+        &self,
+        request_id: &uuid::Uuid,
+        now_ms: i64,
+    ) -> Option<HomeEnrollmentRecord> {
+        let mut inner = self.inner.lock().ok()?;
+        Self::prune(&mut inner, now_ms);
+        inner
+            .enrollment_requests
+            .get(request_id)
+            .filter(|r| r.status == michi_identity::HomeEnrollmentStatus::Pending)
+            .cloned()
+    }
+
+    pub fn complete_enrollment_approval(
+        &self,
+        request_id: &uuid::Uuid,
+        membership: michi_identity::DeviceMembershipDto,
+        now_ms: i64,
+    ) -> Result<HomeEnrollmentRecord, Refusal> {
+        let mut inner = self.inner.lock().map_err(|_| Refusal::InvalidFields)?;
+        Self::prune(&mut inner, now_ms);
+        let rec = inner
+            .enrollment_requests
+            .get_mut(request_id)
+            .ok_or(Refusal::Expired)?;
+        if rec.status != michi_identity::HomeEnrollmentStatus::Pending {
+            return Err(Refusal::InvalidFields);
+        }
+        rec.status = michi_identity::HomeEnrollmentStatus::Approved;
+        rec.membership = Some(membership);
+        // Give the client a short bounded window to claim the approved certificate
+        rec.expires_at_ms = now_ms.saturating_add(MAX_LIFETIME_MS);
+        Ok(rec.clone())
+    }
+
+    pub fn reject_enrollment_request(
+        &self,
+        request_id: &uuid::Uuid,
+        now_ms: i64,
+    ) -> Result<(), Refusal> {
+        let mut inner = self.inner.lock().map_err(|_| Refusal::InvalidFields)?;
+        Self::prune(&mut inner, now_ms);
+        let rec = inner
+            .enrollment_requests
+            .get_mut(request_id)
+            .ok_or(Refusal::Expired)?;
+        if rec.status != michi_identity::HomeEnrollmentStatus::Pending {
+            return Err(Refusal::InvalidFields);
+        }
+        rec.status = michi_identity::HomeEnrollmentStatus::Rejected;
+        rec.membership = None;
+        Ok(())
+    }
+
+    pub fn lookup_enrollment_status(
+        &self,
+        request_id: &uuid::Uuid,
+        claim_token_hash: &str,
+        now_ms: i64,
+    ) -> Result<Option<HomeEnrollmentRecord>, Refusal> {
+        let mut inner = self.inner.lock().map_err(|_| Refusal::InvalidFields)?;
+        Self::prune(&mut inner, now_ms);
+        let Some(rec) = inner.enrollment_requests.get(request_id) else {
+            return Ok(None);
+        };
+        if !subtle_eq_str(&rec.claim_token_hash, claim_token_hash) {
+            return Err(Refusal::WrongAudience);
+        }
+        Ok(Some(rec.clone()))
     }
 
     fn prune(inner: &mut Inner, now_ms: i64) {
@@ -438,8 +639,27 @@ impl AirCatProducerSecurityState {
         inner
             .home_challenges
             .retain(|_, c| c.expires_at_ms > now_ms);
+        inner
+            .enrollment_challenges
+            .retain(|_, c| c.expires_at_ms > now_ms);
+        inner
+            .enrollment_requests
+            .retain(|_, r| r.expires_at_ms > now_ms);
         inner.home_sessions.retain(|_, (_, exp)| *exp > now_ms);
     }
+}
+
+fn subtle_eq_str(a: &str, b: &str) -> bool {
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    if ab.len() != bb.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in ab.iter().zip(bb.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 #[cfg(test)]

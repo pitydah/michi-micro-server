@@ -926,6 +926,134 @@ pub async fn queue_delete_handler(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct QueueRepeatBody {
+    pub mode: String,
+}
+
+pub async fn queue_repeat_handler(
+    State(state): State<AppState>,
+    Json(body): Json<QueueRepeatBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
+    let mode = match body.mode.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" => michi_playback::RepeatMode::Off,
+        "one" | "track" => michi_playback::RepeatMode::One,
+        "all" | "queue" => michi_playback::RepeatMode::All,
+        other => {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_REQUEST",
+                &format!("invalid repeat mode '{other}'; expected off, one, or all"),
+            ));
+        }
+    };
+    state.playback_engine.set_repeat(mode).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            e.error_code(),
+            &e.to_string(),
+        )
+    })?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "mode": mode.as_str(),
+        "repeat": mode.as_str(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueueShuffleBody {
+    pub enabled: bool,
+}
+
+pub async fn queue_shuffle_handler(
+    State(state): State<AppState>,
+    Json(body): Json<QueueShuffleBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
+    state
+        .playback_engine
+        .set_shuffle(body.enabled)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                e.error_code(),
+                &e.to_string(),
+            )
+        })?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "enabled": body.enabled,
+        "shuffle": body.enabled,
+    })))
+}
+
+pub async fn queue_item_delete_handler(
+    State(state): State<AppState>,
+    Path(item_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
+    let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+    let res =
+        sqlx::query("DELETE FROM queue_items WHERE queue_id = ? AND (id = ? OR track_id = ?)")
+            .bind(active_queue_id.to_string())
+            .bind(item_id.to_string())
+            .bind(item_id.to_string())
+            .execute(&state.db)
+            .await
+            .map_err(|e| {
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                )
+            })?;
+    if res.rows_affected() == 0 {
+        return Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "queue item not found",
+        ));
+    }
+    let cur_track_id = state
+        .playback_engine
+        .snapshot()
+        .await
+        .ok()
+        .and_then(|s| s.track_id);
+    sync_active_queue_to_engine(&state, &active_queue_id, cur_track_id).await?;
+    Ok(Json(serde_json::json!({
+        "status": "deleted",
+        "item_id": item_id,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct QueueSaveBody {
     pub track_ids: Vec<Uuid>,
     pub current_index: u32,

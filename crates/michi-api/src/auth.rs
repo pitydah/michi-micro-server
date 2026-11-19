@@ -414,6 +414,20 @@ pub async fn v1_auth_middleware(
         };
     }
 
+    if token.starts_with("michi_home_") {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        if let Some(member_id) = state.aircat_security.lookup_home_session(&token, now_ms) {
+            if state
+                .aircat_security
+                .is_member_revoked_in_memory(&member_id)
+            {
+                return auth_error(StatusCode::FORBIDDEN, "home member is revoked");
+            }
+            return next.run(request).await;
+        }
+        return auth_error(StatusCode::UNAUTHORIZED, "invalid or expired home session");
+    }
+
     if state.auth_sessions.validate(&token).await
         || state
             .token_store

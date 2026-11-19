@@ -95,6 +95,118 @@ async fn make_app() -> (
     (app, pool, state, token, music_dir)
 }
 
+async fn enable_test_tls(state: &michi_api::AppState) {
+    let cert_der = sample_x509_der_cert();
+    let spki = michi_api::extract_spki_sha256_from_pem(&cert_der).unwrap();
+    *state.aircat_tls.write().await = Some(michi_api::AirCatTlsInfo {
+        pinned_base_url: "https://127.0.0.1:9443".to_string(),
+        tls_spki_sha256: spki,
+        cert_path: std::path::PathBuf::from("/tmp/test-tls.crt"),
+        key_path: std::path::PathBuf::from("/tmp/test-tls.key"),
+        tls_port: 9443,
+    });
+    state.set_aircat_tls_listener_ready(true);
+}
+
+fn with_tls(mut req: Request<Body>) -> Request<Body> {
+    req.extensions_mut()
+        .insert(michi_api::AirCatTlsVerifiedConnection);
+    req
+}
+
+async fn establish_home_session(
+    app: &axum::Router,
+    state: &michi_api::AppState,
+) -> (String, String) {
+    let client_sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let client_vk = client_sk.verifying_key();
+    let client_pk = michi_identity::encode_base64url(&client_vk.to_bytes());
+    let client_michi_id = michi_identity::MichiId::from_public_key(&client_vk).to_base64url();
+    let home_id = state.home_root_authority.home_id();
+    let membership = state.home_root_authority.issue_membership(
+        &home_id,
+        &client_michi_id,
+        &client_pk,
+        "mobile",
+        vec![michi_identity::Role::MobilePlayer],
+        &chrono::Utc::now().to_rfc3339(),
+        99,
+    );
+
+    let chal_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/challenge")
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&michi_identity::DeviceAuthChallengeRequest {
+                        client_michi_id: client_michi_id.clone(),
+                        client_public_key: client_pk.clone(),
+                        home_id: home_id.clone(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(chal_resp.status(), StatusCode::OK);
+    let chal: michi_identity::DeviceAuthChallengeResponse = serde_json::from_slice(
+        &axum::body::to_bytes(chal_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let sig = michi_identity::home::sign_device_auth_challenge(
+        &client_sk,
+        &home_id,
+        &chal.server_michi_id,
+        &client_michi_id,
+        &chal.challenge_id.to_string(),
+        &chal.challenge_nonce,
+    );
+    let sess_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/session")
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&michi_identity::DeviceAuthSessionRequest {
+                        challenge_id: chal.challenge_id,
+                        client_michi_id: client_michi_id.clone(),
+                        membership,
+                        client_signature: sig,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sess_resp.status(), StatusCode::OK);
+    let sess: michi_identity::DeviceAuthSessionResponse = serde_json::from_slice(
+        &axum::body::to_bytes(sess_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    michi_identity::home::verify_server_auth_session(
+        &sess,
+        &state.home_root_authority.public_key_base64url(),
+        &home_id,
+        &client_michi_id,
+        &chal.challenge_id.to_string(),
+        &[],
+    )
+    .expect("server mutual auth confirmation over session_token must verify");
+    (sess.session_token, client_michi_id)
+}
+
 fn create_test_file(
     dir: &std::path::Path,
     filename: &str,
@@ -109,16 +221,20 @@ fn create_test_file(
 
 #[tokio::test]
 async fn test_aircat_manifest_empty_and_populated() {
-    let (app, pool, _state, token, music_dir) = make_app().await;
-    let auth = format!("Bearer {token}");
+    let (app, pool, state, _admin_token, music_dir) = make_app().await;
+    enable_test_tls(&state).await;
+    let (home_token, _member_id) = establish_home_session(&app, &state).await;
+    let auth = format!("Bearer {home_token}");
 
     // 1. Empty catalog manifest -> 0/0
-    let req = Request::builder()
-        .uri("/api/v1/aircat/manifest")
-        .method("GET")
-        .header(header::AUTHORIZATION, &auth)
-        .body(Body::empty())
-        .unwrap();
+    let req = with_tls(
+        Request::builder()
+            .uri("/api/v1/aircat/manifest")
+            .method("GET")
+            .header(header::AUTHORIZATION, &auth)
+            .body(Body::empty())
+            .unwrap(),
+    );
 
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -185,12 +301,14 @@ async fn test_aircat_manifest_empty_and_populated() {
     michi_db::upsert_track(&pool, &track).await.unwrap();
 
     // 3. Request manifest again -> 1 track with exact totals and SHA-256
-    let req = Request::builder()
-        .uri("/api/v1/aircat/manifest")
-        .method("GET")
-        .header(header::AUTHORIZATION, &auth)
-        .body(Body::empty())
-        .unwrap();
+    let req = with_tls(
+        Request::builder()
+            .uri("/api/v1/aircat/manifest")
+            .method("GET")
+            .header(header::AUTHORIZATION, &auth)
+            .body(Body::empty())
+            .unwrap(),
+    );
 
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -229,8 +347,10 @@ async fn test_aircat_manifest_empty_and_populated() {
 
 #[tokio::test]
 async fn test_aircat_authorize_and_download_full_flow() {
-    let (app, pool, state, token, music_dir) = make_app().await;
-    let auth = format!("Bearer {token}");
+    let (app, pool, state, _admin_token, music_dir) = make_app().await;
+    enable_test_tls(&state).await;
+    let (home_token, dest_member_id) = establish_home_session(&app, &state).await;
+    let auth = format!("Bearer {home_token}");
 
     // Insert track
     let filename = format!("stream-{}.flac", Uuid::new_v4());
@@ -269,7 +389,6 @@ async fn test_aircat_authorize_and_download_full_flow() {
     michi_db::upsert_track(&pool, &track).await.unwrap();
 
     let producer_id = state.identity.michi_id().to_base64url();
-    let dest_member_id = "lhlxbEOUgOykbYw6mg4McXy75xBWBX5HOn8pVbixqbY";
     let transfer_id = format!("tx-{}", Uuid::new_v4());
     let nonce_bytes = [0x5au8; 24];
     let client_nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
@@ -317,13 +436,15 @@ async fn test_aircat_authorize_and_download_full_flow() {
     };
 
     // 1. POST /api/v1/aircat/authorize
-    let req = Request::builder()
-        .uri("/api/v1/aircat/authorize")
-        .method("POST")
-        .header(header::AUTHORIZATION, &auth)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_vec(&auth_request).unwrap()))
-        .unwrap();
+    let req = with_tls(
+        Request::builder()
+            .uri("/api/v1/aircat/authorize")
+            .method("POST")
+            .header(header::AUTHORIZATION, &auth)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&auth_request).unwrap()))
+            .unwrap(),
+    );
 
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -356,13 +477,15 @@ async fn test_aircat_authorize_and_download_full_flow() {
     assert_eq!(grant.signature_base64_url.len(), 86);
 
     // 2. Replay check: A second POST with the exact same nonce fails with 409 Conflict
-    let req_replay = Request::builder()
-        .uri("/api/v1/aircat/authorize")
-        .method("POST")
-        .header(header::AUTHORIZATION, &auth)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_vec(&auth_request).unwrap()))
-        .unwrap();
+    let req_replay = with_tls(
+        Request::builder()
+            .uri("/api/v1/aircat/authorize")
+            .method("POST")
+            .header(header::AUTHORIZATION, &auth)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&auth_request).unwrap()))
+            .unwrap(),
+    );
     let resp_replay = app.clone().oneshot(req_replay).await.unwrap();
     assert_eq!(resp_replay.status(), StatusCode::CONFLICT);
 
@@ -370,13 +493,15 @@ async fn test_aircat_authorize_and_download_full_flow() {
     let grant_header = URL_SAFE_NO_PAD.encode(&grant_bytes);
     let expected_receipt = hex::encode(Sha256::digest(grant_header.as_bytes()));
 
-    let req_dl = Request::builder()
-        .uri(format!("/api/v1/aircat/download/{track_id}"))
-        .method("GET")
-        .header(header::AUTHORIZATION, &auth)
-        .header("X-Michi-AirCat-Grant", &grant_header)
-        .body(Body::empty())
-        .unwrap();
+    let req_dl = with_tls(
+        Request::builder()
+            .uri(format!("/api/v1/aircat/download/{track_id}"))
+            .method("GET")
+            .header(header::AUTHORIZATION, &auth)
+            .header("X-Michi-AirCat-Grant", &grant_header)
+            .body(Body::empty())
+            .unwrap(),
+    );
 
     let resp_dl = app.clone().oneshot(req_dl).await.unwrap();
     assert_eq!(resp_dl.status(), StatusCode::OK);
@@ -433,15 +558,17 @@ async fn test_aircat_authorize_and_download_full_flow() {
     assert_eq!(downloaded_bytes.as_ref(), content);
 
     // 4. GET /api/v1/aircat/download/:remote_id with Range (206 Partial Content)
-    let req_range = Request::builder()
-        .uri(format!("/api/v1/aircat/download/{track_id}"))
-        .method("GET")
-        .header(header::AUTHORIZATION, &auth)
-        .header("X-Michi-AirCat-Grant", &grant_header)
-        .header(header::RANGE, "bytes=0-9")
-        .header(header::IF_RANGE, &expected_etag)
-        .body(Body::empty())
-        .unwrap();
+    let req_range = with_tls(
+        Request::builder()
+            .uri(format!("/api/v1/aircat/download/{track_id}"))
+            .method("GET")
+            .header(header::AUTHORIZATION, &auth)
+            .header("X-Michi-AirCat-Grant", &grant_header)
+            .header(header::RANGE, "bytes=0-9")
+            .header(header::IF_RANGE, &expected_etag)
+            .body(Body::empty())
+            .unwrap(),
+    );
 
     let resp_range = app.clone().oneshot(req_range).await.unwrap();
     assert_eq!(resp_range.status(), StatusCode::PARTIAL_CONTENT);
@@ -496,14 +623,16 @@ async fn test_aircat_authorize_and_download_full_flow() {
     assert_eq!(range_bytes.as_ref(), &content[0..10]);
 
     // 5. GET /api/v1/aircat/download/:remote_id with Invalid Range -> 416
-    let req_invalid_range = Request::builder()
-        .uri(format!("/api/v1/aircat/download/{track_id}"))
-        .method("GET")
-        .header(header::AUTHORIZATION, &auth)
-        .header("X-Michi-AirCat-Grant", &grant_header)
-        .header(header::RANGE, "bytes=999999-")
-        .body(Body::empty())
-        .unwrap();
+    let req_invalid_range = with_tls(
+        Request::builder()
+            .uri(format!("/api/v1/aircat/download/{track_id}"))
+            .method("GET")
+            .header(header::AUTHORIZATION, &auth)
+            .header("X-Michi-AirCat-Grant", &grant_header)
+            .header(header::RANGE, "bytes=999999-")
+            .body(Body::empty())
+            .unwrap(),
+    );
 
     let resp_inv_range = app.clone().oneshot(req_invalid_range).await.unwrap();
     assert_eq!(resp_inv_range.status(), StatusCode::RANGE_NOT_SATISFIABLE);
@@ -519,13 +648,15 @@ async fn test_aircat_authorize_and_download_full_flow() {
 
     // 6. Adversarial: Download an unselected track ID -> 403 / 404
     let unselected_uuid = Uuid::new_v4();
-    let req_unselected = Request::builder()
-        .uri(format!("/api/v1/aircat/download/{unselected_uuid}"))
-        .method("GET")
-        .header(header::AUTHORIZATION, &auth)
-        .header("X-Michi-AirCat-Grant", &grant_header)
-        .body(Body::empty())
-        .unwrap();
+    let req_unselected = with_tls(
+        Request::builder()
+            .uri(format!("/api/v1/aircat/download/{unselected_uuid}"))
+            .method("GET")
+            .header(header::AUTHORIZATION, &auth)
+            .header("X-Michi-AirCat-Grant", &grant_header)
+            .body(Body::empty())
+            .unwrap(),
+    );
 
     let resp_unselected = app.clone().oneshot(req_unselected).await.unwrap();
     assert_eq!(resp_unselected.status(), StatusCode::NOT_FOUND);
@@ -533,17 +664,19 @@ async fn test_aircat_authorize_and_download_full_flow() {
     // 7. Revoke member: revoke_device and verify subsequent downloads are rejected with 403
     state
         .receiver_manager
-        .revoke_device(dest_member_id, "Test member revocation")
+        .revoke_device(&dest_member_id, "Test member revocation")
         .await
         .unwrap();
 
-    let req_revoked = Request::builder()
-        .uri(format!("/api/v1/aircat/download/{track_id}"))
-        .method("GET")
-        .header(header::AUTHORIZATION, &auth)
-        .header("X-Michi-AirCat-Grant", &grant_header)
-        .body(Body::empty())
-        .unwrap();
+    let req_revoked = with_tls(
+        Request::builder()
+            .uri(format!("/api/v1/aircat/download/{track_id}"))
+            .method("GET")
+            .header(header::AUTHORIZATION, &auth)
+            .header("X-Michi-AirCat-Grant", &grant_header)
+            .body(Body::empty())
+            .unwrap(),
+    );
 
     let resp_revoked = app.clone().oneshot(req_revoked).await.unwrap();
     assert_eq!(resp_revoked.status(), StatusCode::FORBIDDEN);
@@ -634,6 +767,7 @@ async fn test_aircat_enrollment_qr_handler() {
         key_path: std::path::PathBuf::from("/tmp/test-tls.key"),
         tls_port: 9443,
     });
+    state.set_aircat_tls_listener_ready(true);
 
     let info_resp_2 = app
         .clone()
@@ -705,8 +839,10 @@ async fn test_aircat_enrollment_qr_handler() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_aircat_rejects_symlinks_and_detects_same_size_file_swap() {
-    let (app, pool, state, token, music_dir) = make_app().await;
-    let auth = format!("Bearer {token}");
+    let (app, pool, state, _admin_token, music_dir) = make_app().await;
+    enable_test_tls(&state).await;
+    let (home_token, dest_member_id) = establish_home_session(&app, &state).await;
+    let auth = format!("Bearer {home_token}");
 
     // 1. Create a real target file and a symlink pointing to it inside music_dir
     let real_name = format!("real-{}.flac", Uuid::new_v4());
@@ -749,14 +885,14 @@ async fn test_aircat_rejects_symlinks_and_detects_same_size_file_swap() {
     // Manifest must NOT expose the symlinked track
     let manifest_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/manifest")
                 .method("GET")
                 .header(header::AUTHORIZATION, &auth)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     let manifest: Value = serde_json::from_slice(
@@ -823,12 +959,11 @@ async fn test_aircat_rejects_symlinks_and_detects_same_size_file_swap() {
     };
     let manifest_sha = michi_api::aircat_grants::manifest_sha256(&sel_manifest).unwrap();
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let dest_member_id = "lhlxbEOUgOykbYw6mg4McXy75xBWBX5HOn8pVbixqbY";
     let auth_req = michi_api::aircat_grants::Request {
         intent: michi_api::aircat_grants::Intent {
             transfer_id,
             source_michi_id: source_id,
-            destination_michi_id: dest_member_id.into(),
+            destination_michi_id: dest_member_id,
             source_library_id: "lib-src".into(),
             destination_library_id: "lib-dst".into(),
             selection_scope: "ALBUMS".into(),
@@ -845,7 +980,7 @@ async fn test_aircat_rejects_symlinks_and_detects_same_size_file_swap() {
 
     let auth_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/authorize")
                 .method("POST")
@@ -853,7 +988,7 @@ async fn test_aircat_rejects_symlinks_and_detects_same_size_file_swap() {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::to_vec(&auth_req).unwrap()))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(auth_resp.status(), StatusCode::OK);
@@ -870,7 +1005,7 @@ async fn test_aircat_rejects_symlinks_and_detects_same_size_file_swap() {
     // 3. Rejects gzip-only Accept-Encoding (406)
     let resp_gzip = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri(format!("/api/v1/aircat/download/{reg_track_id}"))
                 .method("GET")
@@ -879,7 +1014,7 @@ async fn test_aircat_rejects_symlinks_and_detects_same_size_file_swap() {
                 .header(header::ACCEPT_ENCODING, "gzip")
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(resp_gzip.status(), StatusCode::NOT_ACCEPTABLE);
@@ -887,7 +1022,7 @@ async fn test_aircat_rejects_symlinks_and_detects_same_size_file_swap() {
     // 4. Download must detect the inode/mtime swap and fail with 409 Conflict
     let resp_swap = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri(format!("/api/v1/aircat/download/{reg_track_id}"))
                 .method("GET")
@@ -895,7 +1030,7 @@ async fn test_aircat_rejects_symlinks_and_detects_same_size_file_swap() {
                 .header("X-Michi-AirCat-Grant", &grant_header)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(resp_swap.status(), StatusCode::CONFLICT);
@@ -904,6 +1039,7 @@ async fn test_aircat_rejects_symlinks_and_detects_same_size_file_swap() {
 #[tokio::test]
 async fn test_aircat_home_membership_mutual_auth_and_audience_binding() {
     let (app, pool, state, _admin_token, music_dir) = make_app().await;
+    enable_test_tls(&state).await;
 
     // Provision a real Mobile member identity + Home membership certificate
     let client_sk = ed25519_dalek::SigningKey::from_bytes(&[0x77u8; 32]);
@@ -987,30 +1123,28 @@ async fn test_aircat_home_membership_mutual_auth_and_audience_binding() {
     )
     .unwrap();
 
-    let server_ok = michi_identity::home::verify_server_auth_confirm(
-        &chal_json.server_public_key,
-        &sess_json.server_signature,
+    michi_identity::home::verify_server_auth_session(
+        &sess_json,
+        &state.home_root_authority.public_key_base64url(),
         &home_id,
-        &chal_json.server_michi_id,
         &client_michi_id,
         &chal_json.challenge_id.to_string(),
-        &chal_json.challenge_nonce,
+        &[],
     )
-    .unwrap();
-    assert!(server_ok);
+    .expect("server mutual auth session signature must verify over session_token");
 
-    // 3. Access AirCat manifest with the HOME_MEMBERSHIP bearer token
+    // 3. Access AirCat manifest with the HOME_MEMBERSHIP bearer token over verified TLS
     let member_auth = format!("Bearer {}", sess_json.session_token);
     let manifest_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/manifest")
                 .method("GET")
                 .header(header::AUTHORIZATION, &member_auth)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(manifest_resp.status(), StatusCode::OK);
@@ -1093,7 +1227,7 @@ async fn test_aircat_home_membership_mutual_auth_and_audience_binding() {
 
     let spoof_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/authorize")
                 .method("POST")
@@ -1101,7 +1235,7 @@ async fn test_aircat_home_membership_mutual_auth_and_audience_binding() {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::to_vec(&spoofed_req).unwrap()))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(spoof_resp.status(), StatusCode::FORBIDDEN);
@@ -1195,7 +1329,16 @@ RNNxv6f+JRUS/DdOdg1MtwyavMahRANCAAT1vqfUWW4hG38vizHqZjALbQVnpXQ1\n\
         .unwrap();
     let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_tls_cfg));
 
-    let (app, _pool, _state, token, _music_dir) = make_app().await;
+    let (app, _pool, state, _admin_token, _music_dir) = make_app().await;
+    let (token, _member_id) = establish_home_session(&app, &state).await;
+    *state.aircat_tls.write().await = Some(michi_api::AirCatTlsInfo {
+        pinned_base_url: "https://localhost:9443".to_string(),
+        tls_spki_sha256: expected_spki.clone(),
+        cert_path: std::path::PathBuf::from("/tmp/test-tls.crt"),
+        key_path: std::path::PathBuf::from("/tmp/test-tls.key"),
+        tls_port: 9443,
+    });
+    state.set_aircat_tls_listener_ready(true);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -1274,6 +1417,7 @@ RNNxv6f+JRUS/DdOdg1MtwyavMahRANCAAT1vqfUWW4hG38vizHqZjALbQVnpXQ1\n\
 async fn test_aircat_midstream_revocation_aborts_large_stream_and_tracks_cache() {
     use futures_util::StreamExt;
     let (app, pool, state, admin_token, music_dir) = make_app().await;
+    enable_test_tls(&state).await;
     let admin_auth = format!("Bearer {admin_token}");
 
     // 1. Provision Home member and create 256 KiB (4 x 64 KiB chunks) track
@@ -1396,14 +1540,14 @@ async fn test_aircat_midstream_revocation_aborts_large_stream_and_tracks_cache()
     for _ in 0..2 {
         let m_resp = app
             .clone()
-            .oneshot(
+            .oneshot(with_tls(
                 Request::builder()
                     .uri("/api/v1/aircat/manifest")
                     .method("GET")
                     .header(header::AUTHORIZATION, &member_auth)
                     .body(Body::empty())
                     .unwrap(),
-            )
+            ))
             .await
             .unwrap();
         assert_eq!(m_resp.status(), StatusCode::OK);
@@ -1450,7 +1594,7 @@ async fn test_aircat_midstream_revocation_aborts_large_stream_and_tracks_cache()
     };
     let auth_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/authorize")
                 .method("POST")
@@ -1458,7 +1602,7 @@ async fn test_aircat_midstream_revocation_aborts_large_stream_and_tracks_cache()
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::to_vec(&auth_req).unwrap()))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(auth_resp.status(), StatusCode::OK);
@@ -1473,7 +1617,7 @@ async fn test_aircat_midstream_revocation_aborts_large_stream_and_tracks_cache()
     let etag = format!("\"sha256-{sha}-{size}\"");
     let resp_304 = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri(format!("/api/v1/aircat/download/{track_id}"))
                 .method("GET")
@@ -1482,7 +1626,7 @@ async fn test_aircat_midstream_revocation_aborts_large_stream_and_tracks_cache()
                 .header(header::IF_NONE_MATCH, &etag)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(resp_304.status(), StatusCode::NOT_MODIFIED);
@@ -1490,7 +1634,7 @@ async fn test_aircat_midstream_revocation_aborts_large_stream_and_tracks_cache()
     // 5. Start full download, read 1 chunk (64 KiB), then revoke via HTTP /api/v1/home/revoke
     let dl_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri(format!("/api/v1/aircat/download/{track_id}"))
                 .method("GET")
@@ -1498,7 +1642,7 @@ async fn test_aircat_midstream_revocation_aborts_large_stream_and_tracks_cache()
                 .header("X-Michi-AirCat-Grant", &grant_header)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(dl_resp.status(), StatusCode::OK);
@@ -1567,6 +1711,7 @@ async fn test_aircat_cleartext_http_rejected_when_tls_active() {
         key_path: std::path::PathBuf::from("/tmp/c.key"),
         tls_port: 9443,
     });
+    state.set_aircat_tls_listener_ready(true);
 
     // Bind a real plain HTTP TCP listener to verify ConnectInfo without AirCatTlsVerifiedConnection returns 403 TLS_REQUIRED
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1606,6 +1751,7 @@ async fn test_aircat_webui_cookie_auth_and_admin_enrollment_rbac() {
         key_path: std::path::PathBuf::from("/tmp/c.key"),
         tls_port: 9443,
     });
+    state.set_aircat_tls_listener_ready(true);
 
     // 1. Admin WebUI michi_web_session cookie succeeds on /status and /enrollment-qr
     let admin_cookie = format!("michi_web_session={admin_token}");
@@ -1640,14 +1786,14 @@ async fn test_aircat_webui_cookie_auth_and_admin_enrollment_rbac() {
     // 2. Wire protocol endpoints (/manifest) MUST still reject browser cookies without Bearer
     let manifest_cookie_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/manifest")
                 .method("GET")
                 .header(header::COOKIE, &admin_cookie)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(manifest_cookie_resp.status(), StatusCode::UNAUTHORIZED);
@@ -1774,6 +1920,7 @@ async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_m
     use std::io::{Seek, SeekFrom};
 
     let (app, pool, state, admin_token, music_dir) = make_app().await;
+    enable_test_tls(&state).await;
     let admin_auth = format!("Bearer {admin_token}");
 
     let client_sk = ed25519_dalek::SigningKey::from_bytes(&[0x62u8; 32]);
@@ -1930,7 +2077,7 @@ async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_m
     };
     let auth_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/authorize")
                 .method("POST")
@@ -1938,7 +2085,7 @@ async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_m
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::to_vec(&auth_req).unwrap()))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(auth_resp.status(), StatusCode::OK);
@@ -1949,7 +2096,7 @@ async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_m
 
     let dl_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri(format!("/api/v1/aircat/download/{track_id}"))
                 .method("GET")
@@ -1957,7 +2104,7 @@ async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_m
                 .header("X-Michi-AirCat-Grant", &grant_header)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(dl_resp.status(), StatusCode::OK);
@@ -2027,8 +2174,10 @@ async fn test_aircat_home_revoke_invalidates_token_store_and_detects_midstream_m
 
 #[tokio::test]
 async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninterference() {
-    let (app, pool, state, admin_token, music_dir) = make_app().await;
-    let auth = format!("Bearer {admin_token}");
+    let (app, pool, state, _admin_token, music_dir) = make_app().await;
+    enable_test_tls(&state).await;
+    let (home_token, dest_id) = establish_home_session(&app, &state).await;
+    let auth = format!("Bearer {home_token}");
 
     // 1. A zero-byte original audio file must never appear in /manifest
     let empty_name = format!("empty-{}.flac", Uuid::new_v4());
@@ -2119,7 +2268,7 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
         .unwrap();
     let spoof_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/manifest")
                 .method("GET")
@@ -2127,7 +2276,7 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
                 .header("X-Michi-Device-Id", "victim-spoofed-device-id")
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(spoof_resp.status(), StatusCode::FORBIDDEN);
@@ -2135,14 +2284,14 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
     // 3. Manifest excludes the 0-byte track and includes only the valid track
     let manifest_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/manifest")
                 .method("GET")
                 .header(header::AUTHORIZATION, &auth)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(manifest_resp.status(), StatusCode::OK);
@@ -2163,7 +2312,7 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
     let oversized_body = vec![b' '; 64 * 1024 + 128];
     let oversized_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/authorize")
                 .method("POST")
@@ -2171,7 +2320,7 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(oversized_body))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(oversized_resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -2184,7 +2333,6 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
 
     // 5. Authorize the valid track
     let source_id = state.identity.michi_id().to_base64url();
-    let dest_id = "lhlxbEOUgOykbYw6mg4McXy75xBWBX5HOn8pVbixqbY";
     let sel_manifest = michi_api::aircat_grants::Manifest {
         manifest_version: 1,
         transfer_id: "tx-noninterference".into(),
@@ -2207,7 +2355,7 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
         intent: michi_api::aircat_grants::Intent {
             transfer_id: "tx-noninterference".into(),
             source_michi_id: source_id,
-            destination_michi_id: dest_id.into(),
+            destination_michi_id: dest_id,
             source_library_id: "lib-src".into(),
             destination_library_id: "lib-dst".into(),
             selection_scope: "ALBUMS".into(),
@@ -2223,7 +2371,7 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
     };
     let auth_resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri("/api/v1/aircat/authorize")
                 .method("POST")
@@ -2231,7 +2379,7 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::to_vec(&auth_req).unwrap()))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(auth_resp.status(), StatusCode::OK);
@@ -2244,7 +2392,7 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
     // 6. If-Range mismatch MUST ignore Range and serve full 200 OK; Accept-Encoding: gzip, identity MUST remain uncompressed
     let if_range_mismatch = app
         .clone()
-        .oneshot(
+        .oneshot(with_tls(
             Request::builder()
                 .uri(format!("/api/v1/aircat/download/{track_id}"))
                 .method("GET")
@@ -2258,7 +2406,7 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
                 .header(header::ACCEPT_ENCODING, "gzip, identity")
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(if_range_mismatch.status(), StatusCode::OK);
@@ -2281,7 +2429,7 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
         handles.push(tokio::spawn(async move {
             let dl = app_i
                 .clone()
-                .oneshot(
+                .oneshot(with_tls(
                     Request::builder()
                         .uri(format!("/api/v1/aircat/download/{tid_i}"))
                         .method("GET")
@@ -2289,7 +2437,7 @@ async fn test_aircat_if_range_bounds_empty_file_and_concurrent_playback_noninter
                         .header("X-Michi-AirCat-Grant", &grant_i)
                         .body(Body::empty())
                         .unwrap(),
-                )
+                ))
                 .await
                 .unwrap();
             assert_eq!(dl.status(), StatusCode::OK);

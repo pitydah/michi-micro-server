@@ -344,30 +344,51 @@ impl ServerCapabilities {
             },
         ));
 
-        let tls_ready = state.aircat_tls.read().await.is_some();
+        let tls_ready = state.is_aircat_tls_ready().await;
+        let aircat_evidence = if tls_ready {
+            EvidenceLevel::EffectVerified
+        } else {
+            EvidenceLevel::Implemented
+        };
         features.push(ServerFeature {
-            name: "aircat_original_v1",
+            name: michi_identity::CAP_AIRCAT_ORIGINAL_V1,
             version: "1.0",
             description: "AirCat v1 original file transfer (requires active TLS/SPKI)",
             enabled: tls_ready,
             maturity: FeatureMaturity::Beta,
-            evidence: if tls_ready {
-                EvidenceLevel::EffectVerified
-            } else {
-                EvidenceLevel::Implemented
-            },
+            evidence: aircat_evidence,
         });
         features.push(ServerFeature {
-            name: "home_tls_spki_pinned",
+            name: michi_identity::CAP_HOME_TLS_SPKI_PINNED,
             version: "1.0",
             description: "RFC 7469 TLS SPKI pin active on HTTPS listener",
             enabled: tls_ready,
             maturity: FeatureMaturity::Beta,
-            evidence: if tls_ready {
-                EvidenceLevel::EffectVerified
-            } else {
-                EvidenceLevel::Implemented
-            },
+            evidence: aircat_evidence,
+        });
+        features.push(ServerFeature {
+            name: michi_identity::CAP_AIRCAT_MANIFEST_V1,
+            version: "1.0",
+            description: "AirCat v1 original catalog manifest over pinned HTTPS",
+            enabled: tls_ready,
+            maturity: FeatureMaturity::Beta,
+            evidence: aircat_evidence,
+        });
+        features.push(ServerFeature {
+            name: michi_identity::CAP_AIRCAT_AUTHORIZE_V1,
+            version: "1.0",
+            description: "AirCat v1 Ed25519 grant authorization over pinned HTTPS",
+            enabled: tls_ready,
+            maturity: FeatureMaturity::Beta,
+            evidence: aircat_evidence,
+        });
+        features.push(ServerFeature {
+            name: michi_identity::CAP_AIRCAT_ORIGINAL_DOWNLOAD_V1,
+            version: "1.0",
+            description: "AirCat v1 original-bytes download with Range/ETag over pinned HTTPS",
+            enabled: tls_ready,
+            maturity: FeatureMaturity::Beta,
+            evidence: aircat_evidence,
         });
 
         ServerCapabilities {
@@ -411,23 +432,6 @@ impl ServerCapabilities {
         for feat in &self.features {
             map.insert(feat.name.to_string(), serde_json::Value::Bool(feat.enabled));
         }
-        let tls_ready = self.feature_enabled("home_tls_spki_pinned");
-        map.insert(
-            "aircat_manifest_v1".to_string(),
-            serde_json::Value::Bool(tls_ready),
-        );
-        map.insert(
-            "aircat_authorize_v1".to_string(),
-            serde_json::Value::Bool(tls_ready),
-        );
-        map.insert(
-            "aircat_original_download_v1".to_string(),
-            serde_json::Value::Bool(tls_ready),
-        );
-        map.insert(
-            "home_tls_spki_pinned".to_string(),
-            serde_json::Value::Bool(tls_ready),
-        );
         serde_json::Value::Object(map)
     }
 
@@ -450,10 +454,39 @@ impl ServerCapabilities {
 
     pub fn discovery_features(&self) -> std::collections::BTreeMap<String, bool> {
         let mut map = std::collections::BTreeMap::new();
-        map.insert("library".to_string(), self.feature_enabled("library"));
+        map.insert(
+            michi_identity::CAP_LIBRARY.to_string(),
+            self.feature_enabled("library"),
+        );
         map.insert("stream".to_string(), self.feature_enabled("stream"));
-        map.insert("playback".to_string(), self.feature_enabled("playback"));
-        map.insert("sync".to_string(), self.feature_enabled("sync"));
+        map.insert(
+            michi_identity::CAP_STREAMING.to_string(),
+            self.feature_enabled("stream"),
+        );
+        map.insert(
+            michi_identity::CAP_DOWNLOAD.to_string(),
+            self.feature_enabled("download"),
+        );
+        map.insert(
+            michi_identity::CAP_PLAYBACK.to_string(),
+            self.feature_enabled("playback"),
+        );
+        map.insert(
+            michi_identity::CAP_QUEUE.to_string(),
+            self.feature_enabled("queue"),
+        );
+        map.insert(
+            michi_identity::CAP_SYNC.to_string(),
+            self.feature_enabled("sync"),
+        );
+        map.insert(
+            michi_identity::CAP_AIRCAT_ORIGINAL_V1.to_string(),
+            self.feature_enabled(michi_identity::CAP_AIRCAT_ORIGINAL_V1),
+        );
+        map.insert(
+            michi_identity::CAP_HOME_TLS_SPKI_PINNED.to_string(),
+            self.feature_enabled(michi_identity::CAP_HOME_TLS_SPKI_PINNED),
+        );
         map
     }
 }

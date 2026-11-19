@@ -350,8 +350,16 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
             migration_053
         );
     }
+    if current < 54 {
+        run_migration_step!(
+            conn,
+            54,
+            "home_members durable roster for enrolled Home devices",
+            migration_054
+        );
+    }
 
-    info!("database schema at version 53");
+    info!("database schema at version 54");
     Ok(())
 }
 
@@ -1539,6 +1547,196 @@ async fn migration_053(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
     .execute(&mut **tx)
     .await?;
 
+    Ok(())
+}
+
+async fn migration_054(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS home_members (
+            device_michi_id TEXT PRIMARY KEY,
+            home_id TEXT NOT NULL,
+            device_public_key TEXT NOT NULL,
+            device_name TEXT NOT NULL,
+            device_type TEXT NOT NULL,
+            roles_json TEXT NOT NULL,
+            membership_json TEXT NOT NULL,
+            serial INTEGER NOT NULL,
+            issued_at TEXT NOT NULL,
+            revoked INTEGER NOT NULL DEFAULT 0,
+            last_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_home_members_home_id
+         ON home_members(home_id)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedHomeMember {
+    pub device_michi_id: String,
+    pub home_id: String,
+    pub device_public_key: String,
+    pub device_name: String,
+    pub device_type: String,
+    pub roles_json: String,
+    pub membership_json: String,
+    pub serial: i64,
+    pub issued_at: String,
+    pub revoked: bool,
+    pub last_seen_at: String,
+    pub created_at: String,
+}
+
+pub async fn next_home_member_serial(pool: &SqlitePool, home_id: &str) -> Result<u64, DbError> {
+    let max_serial: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(serial) FROM home_members WHERE home_id = ?")
+            .bind(home_id)
+            .fetch_one(pool)
+            .await?;
+    let next = max_serial.unwrap_or(1).max(1) + 1;
+    Ok(next as u64)
+}
+
+pub async fn upsert_home_member(
+    pool: &SqlitePool,
+    member: &PersistedHomeMember,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO home_members (
+            device_michi_id, home_id, device_public_key, device_name, device_type,
+            roles_json, membership_json, serial, issued_at, revoked, last_seen_at, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(device_michi_id) DO UPDATE SET
+            home_id = excluded.home_id,
+            device_public_key = excluded.device_public_key,
+            device_name = excluded.device_name,
+            device_type = excluded.device_type,
+            roles_json = excluded.roles_json,
+            membership_json = excluded.membership_json,
+            serial = excluded.serial,
+            issued_at = excluded.issued_at,
+            revoked = excluded.revoked,
+            last_seen_at = excluded.last_seen_at",
+    )
+    .bind(&member.device_michi_id)
+    .bind(&member.home_id)
+    .bind(&member.device_public_key)
+    .bind(&member.device_name)
+    .bind(&member.device_type)
+    .bind(&member.roles_json)
+    .bind(&member.membership_json)
+    .bind(member.serial)
+    .bind(&member.issued_at)
+    .bind(if member.revoked { 1i64 } else { 0i64 })
+    .bind(&member.last_seen_at)
+    .bind(&member.created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_home_members(
+    pool: &SqlitePool,
+    home_id: &str,
+) -> Result<Vec<PersistedHomeMember>, DbError> {
+    #[allow(clippy::type_complexity)]
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            i64,
+            String,
+            String,
+        ),
+    >(
+        "SELECT device_michi_id, home_id, device_public_key, device_name, device_type,
+                roles_json, membership_json, serial, issued_at, revoked, last_seen_at, created_at
+         FROM home_members
+         WHERE home_id = ?
+         ORDER BY created_at ASC",
+    )
+    .bind(home_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                device_michi_id,
+                home_id,
+                device_public_key,
+                device_name,
+                device_type,
+                roles_json,
+                membership_json,
+                serial,
+                issued_at,
+                revoked,
+                last_seen_at,
+                created_at,
+            )| PersistedHomeMember {
+                device_michi_id,
+                home_id,
+                device_public_key,
+                device_name,
+                device_type,
+                roles_json,
+                membership_json,
+                serial,
+                issued_at,
+                revoked: revoked != 0,
+                last_seen_at,
+                created_at,
+            },
+        )
+        .collect())
+}
+
+pub async fn mark_home_member_revoked(
+    pool: &SqlitePool,
+    home_id: &str,
+    device_michi_id: &str,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE home_members SET revoked = 1 WHERE home_id = ? AND device_michi_id = ?")
+        .bind(home_id)
+        .bind(device_michi_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn touch_home_member_last_seen(
+    pool: &SqlitePool,
+    home_id: &str,
+    device_michi_id: &str,
+    last_seen_at: &str,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE home_members SET last_seen_at = ? WHERE home_id = ? AND device_michi_id = ?",
+    )
+    .bind(last_seen_at)
+    .bind(home_id)
+    .bind(device_michi_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

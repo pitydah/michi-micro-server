@@ -24,6 +24,7 @@ pub struct MichiConnect {
     service_name: Arc<RwLock<String>>,
     mdns_daemon: Arc<RwLock<Option<mdns_sd::ServiceDaemon>>>,
     scent_store: Arc<ScentStore>,
+    michi_home_id: Arc<RwLock<Option<String>>>,
 }
 
 impl MichiConnect {
@@ -45,7 +46,18 @@ impl MichiConnect {
             service_name: Arc::new(RwLock::new(String::new())),
             mdns_daemon: Arc::new(RwLock::new(None)),
             scent_store,
+            michi_home_id: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub fn set_home_id(&self, home_id: String) {
+        if let Ok(mut guard) = self.michi_home_id.write() {
+            *guard = Some(home_id);
+        }
+    }
+
+    pub fn home_id(&self) -> Option<String> {
+        self.michi_home_id.read().ok().and_then(|g| g.clone())
     }
 
     pub fn scent_store(&self) -> Arc<ScentStore> {
@@ -110,12 +122,19 @@ impl MichiConnect {
         let safe_host_label = hostname.replace('.', "-");
         let service_hostname = format!("{safe_host_label}.local.");
 
-        let properties = [
+        let public_key = self.identity.public_key_base64url();
+        let home_id = self.home_id();
+        let mut properties: Vec<(&str, &str)> = vec![
+            ("identity_scheme", michi_identity::IDENTITY_SCHEME_V1),
             ("michi_id", michi_id.as_str()),
+            ("public_key", public_key.as_str()),
             ("api_version", "v1"),
             ("service", "michi-micro-server"),
             ("version", env!("CARGO_PKG_VERSION")),
         ];
+        if let Some(ref hid) = home_id {
+            properties.push(("michi_home_id", hid.as_str()));
+        }
 
         let service_info = mdns_sd::ServiceInfo::new(
             service_type,
@@ -205,7 +224,7 @@ impl MichiConnect {
             host: host.to_string(),
             port,
             features,
-            michi_home_id: None,
+            michi_home_id: self.home_id(),
             membership_fingerprint: None,
         };
         engine.build_signed_announce(&profile)
@@ -254,7 +273,7 @@ impl MichiConnect {
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         let connect = self.clone();
-        let host = advertised_host.unwrap_or_else(Self::resolve_lan_ip);
+        let pinned_host = advertised_host.filter(|h| !h.trim().is_empty());
 
         tokio::spawn(async move {
             let bind_addr: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
@@ -276,9 +295,10 @@ impl MichiConnect {
             );
 
             let mut interval = tokio::time::interval(michi_identity::discovery::ANNOUNCE_INTERVAL);
+            let initial_host = pinned_host.clone().unwrap_or_else(Self::resolve_lan_ip);
             info!(
                 "connect: discovery announcer started for host {} targeting {}",
-                host, target_addr
+                initial_host, target_addr
             );
 
             loop {
@@ -288,7 +308,10 @@ impl MichiConnect {
                         break;
                     }
                     _ = interval.tick() => {
-                        match connect.build_signed_announce_with_features(port, &host, features.clone()) {
+                        let current_host = pinned_host
+                            .clone()
+                            .unwrap_or_else(Self::resolve_lan_ip);
+                        match connect.build_signed_announce_with_features(port, &current_host, features.clone()) {
                             Ok(announce) => {
                                 if let Ok(json_bytes) = serde_json::to_vec(&announce) {
                                     if let Err(e) = socket.send_to(&json_bytes, &target_addr).await {

@@ -201,6 +201,7 @@ pub enum PlaybackControlValue {
     Integer(u64),
     Boolean(bool),
     Repeat(PlaybackRepeatMode),
+    Text(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -535,6 +536,19 @@ pub async fn playback_control_handler(
         "shuffle" => {
             let shuf = match body.value {
                 Some(PlaybackControlValue::Boolean(b)) => b,
+                Some(PlaybackControlValue::Text(ref s)) => {
+                    match s.trim().to_ascii_lowercase().as_str() {
+                        "" | "true" | "1" | "on" => true,
+                        "false" | "0" | "off" => false,
+                        other => {
+                            return Err(v1_error(
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                "INVALID_REQUEST",
+                                &format!("invalid shuffle value '{other}'"),
+                            ));
+                        }
+                    }
+                }
                 _ => true,
             };
 
@@ -555,7 +569,30 @@ pub async fn playback_control_handler(
             let rep_mode = match body.value {
                 Some(PlaybackControlValue::Repeat(PlaybackRepeatMode::One)) => RepeatMode::One,
                 Some(PlaybackControlValue::Repeat(PlaybackRepeatMode::All)) => RepeatMode::All,
-                _ => RepeatMode::Off,
+                Some(PlaybackControlValue::Repeat(PlaybackRepeatMode::Off)) | None => {
+                    RepeatMode::Off
+                }
+                Some(PlaybackControlValue::Text(ref s)) => {
+                    match s.trim().to_ascii_lowercase().as_str() {
+                        "" | "off" | "none" => RepeatMode::Off,
+                        "one" | "track" => RepeatMode::One,
+                        "all" | "queue" => RepeatMode::All,
+                        other => {
+                            return Err(v1_error(
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                "INVALID_REQUEST",
+                                &format!("invalid repeat mode '{other}'"),
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(v1_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "INVALID_REQUEST",
+                        "invalid repeat mode value",
+                    ));
+                }
             };
 
             state

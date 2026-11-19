@@ -138,6 +138,8 @@ pub struct AppState {
     pub aircat_security: Arc<aircat_producer_security::AirCatProducerSecurityState>,
     /// Real HTTPS/TLS configuration and RFC 7469 SPKI SHA-256 pin when TLS is active.
     pub aircat_tls: Arc<RwLock<Option<AirCatTlsInfo>>>,
+    /// True ONLY once the real tokio-rustls HTTPS listener is bound and serving.
+    pub aircat_tls_listener_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Marker inserted into request extensions exclusively by the HTTPS/TLS accept loop.
@@ -169,6 +171,20 @@ impl AirCatTlsInfo {
         if !cert_path.is_file() || !key_path.is_file() {
             return None;
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&key_path) {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode & 0o077 != 0 {
+                    tracing::warn!(
+                        path = %key_path.display(),
+                        mode = format!("{mode:04o}"),
+                        "TLS private key has overly permissive permissions; tightening to 0600 is recommended"
+                    );
+                }
+            }
+        }
         let cert_pem = std::fs::read(&cert_path).ok()?;
         let tls_spki_sha256 = extract_spki_sha256_from_pem(&cert_pem)?;
         let tls_port = std::env::var("MICHI_TLS_PORT")
@@ -183,6 +199,15 @@ impl AirCatTlsInfo {
                 format!("https://{host}:{tls_port}")
             });
 
+        if !validate_x509_san_for_url(&cert_pem, &pinned_base_url) {
+            tracing::error!(
+                cert = %cert_path.display(),
+                pinned_base_url = %pinned_base_url,
+                "Refusing AirCat TLS activation: X.509 certificate SubjectAltName does not match pinned_base_url host/IP (required by Android TLS hostname verification)"
+            );
+            return None;
+        }
+
         Some(Self {
             pinned_base_url,
             tls_spki_sha256,
@@ -193,13 +218,10 @@ impl AirCatTlsInfo {
     }
 }
 
-/// Parses the first X.509 PEM certificate (or raw DER) and computes its RFC 7469
-/// SubjectPublicKeyInfo SHA-256 pin (`sha256/<BASE64_STANDARD>`).
-pub fn extract_spki_sha256_from_pem(pem_or_der: &[u8]) -> Option<String> {
+/// Parses the first X.509 PEM certificate (or raw DER) into DER bytes.
+fn pem_or_der_to_cert_der(pem_or_der: &[u8]) -> Option<Vec<u8>> {
     use base64::Engine;
-    use sha2::{Digest, Sha256};
-
-    let der = if let Ok(text) = std::str::from_utf8(pem_or_der) {
+    if let Ok(text) = std::str::from_utf8(pem_or_der) {
         if let Some(start) = text.find("-----BEGIN CERTIFICATE-----") {
             let after_header = &text[start + "-----BEGIN CERTIFICATE-----".len()..];
             let end = after_header.find("-----END CERTIFICATE-----")?;
@@ -207,14 +229,146 @@ pub fn extract_spki_sha256_from_pem(pem_or_der: &[u8]) -> Option<String> {
                 .chars()
                 .filter(|c| !c.is_ascii_whitespace())
                 .collect();
-            base64::engine::general_purpose::STANDARD.decode(b64).ok()?
-        } else {
-            pem_or_der.to_vec()
+            return base64::engine::general_purpose::STANDARD.decode(b64).ok();
         }
-    } else {
-        pem_or_der.to_vec()
+    }
+    Some(pem_or_der.to_vec())
+}
+
+/// Validates that the X.509 v3 certificate includes a SubjectAltName (OID 2.5.29.17)
+/// matching the hostname or IP address of `https_url`, as required by Android
+/// `X509TrustManager` + hostname verification alongside RFC 7469 SPKI pinning.
+pub fn validate_x509_san_for_url(pem_or_der: &[u8], https_url: &str) -> bool {
+    let Ok(parsed_url) = reqwest::Url::parse(https_url) else {
+        return false;
+    };
+    if parsed_url.scheme() != "https" {
+        return false;
+    }
+    let Some(host_str) = parsed_url.host_str() else {
+        return false;
+    };
+    let Some(der) = pem_or_der_to_cert_der(pem_or_der) else {
+        return false;
+    };
+    let Some((dns_names, ip_addrs)) = extract_x509_san_entries(&der) else {
+        return false;
     };
 
+    let trimmed = host_str.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
+        ip_addrs.contains(&ip)
+    } else {
+        let target = trimmed.to_ascii_lowercase();
+        dns_names.iter().any(|san| {
+            let san_l = san.to_ascii_lowercase();
+            if san_l == target {
+                true
+            } else if let Some(suffix) = san_l.strip_prefix("*.") {
+                if let Some((_, rest)) = target.split_once('.') {
+                    rest == suffix && !rest.is_empty()
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        })
+    }
+}
+
+/// Extracts DNS (dNSName, tag 0x82) and IP (iPAddress, tag 0x87) SubjectAltName
+/// entries from an X.509 v3 DER certificate.
+pub fn extract_x509_san_entries(cert_der: &[u8]) -> Option<(Vec<String>, Vec<std::net::IpAddr>)> {
+    let (cert_tag, cert_body, _) = read_der_tlv(cert_der)?;
+    if cert_tag != 0x30 {
+        return None;
+    }
+    let (tbs_tag, mut tbs_rest, _) = read_der_tlv(cert_body)?;
+    if tbs_tag != 0x30 {
+        return None;
+    }
+    // Optional explicit [0] version
+    if tbs_rest.first().copied() == Some(0xA0) {
+        let (_, _, after_ver) = read_der_tlv(tbs_rest)?;
+        tbs_rest = after_ver;
+    }
+    // Skip: serialNumber, signature, issuer, validity, subject, subjectPublicKeyInfo (6 elements)
+    for _ in 0..6 {
+        let (_, _, next) = read_der_tlv(tbs_rest)?;
+        tbs_rest = next;
+    }
+    // Scan optional trailing fields for explicit [3] extensions (tag 0xA3)
+    while !tbs_rest.is_empty() {
+        let (tag, body, next) = read_der_tlv(tbs_rest)?;
+        tbs_rest = next;
+        if tag != 0xA3 {
+            continue;
+        }
+        let (ext_seq_tag, mut ext_rest, _) = read_der_tlv(body)?;
+        if ext_seq_tag != 0x30 {
+            return None;
+        }
+        while !ext_rest.is_empty() {
+            let (ext_tag, ext_body, next_ext) = read_der_tlv(ext_rest)?;
+            ext_rest = next_ext;
+            if ext_tag != 0x30 {
+                continue;
+            }
+            let (oid_tag, oid_bytes, mut after_oid) = read_der_tlv(ext_body)?;
+            // OID 2.5.29.17 (subjectAltName) DER encoding: 55 1D 11
+            if oid_tag != 0x06 || oid_bytes != [0x55, 0x1D, 0x11] {
+                continue;
+            }
+            // Optional critical BOOLEAN (tag 0x01)
+            if after_oid.first().copied() == Some(0x01) {
+                let (_, _, next_f) = read_der_tlv(after_oid)?;
+                after_oid = next_f;
+            }
+            let (oct_tag, oct_body, _) = read_der_tlv(after_oid)?;
+            if oct_tag != 0x04 {
+                return None;
+            }
+            let (gn_seq_tag, mut gn_rest, _) = read_der_tlv(oct_body)?;
+            if gn_seq_tag != 0x30 {
+                return None;
+            }
+            let mut dns_names = Vec::new();
+            let mut ip_addrs = Vec::new();
+            while !gn_rest.is_empty() {
+                let (gn_tag, gn_val, next_gn) = read_der_tlv(gn_rest)?;
+                gn_rest = next_gn;
+                match gn_tag {
+                    0x82 => {
+                        if let Ok(s) = std::str::from_utf8(gn_val) {
+                            dns_names.push(s.to_string());
+                        }
+                    }
+                    0x87 => {
+                        if gn_val.len() == 4 {
+                            let octets: [u8; 4] = gn_val.try_into().ok()?;
+                            ip_addrs.push(std::net::IpAddr::V4(std::net::Ipv4Addr::from(octets)));
+                        } else if gn_val.len() == 16 {
+                            let octets: [u8; 16] = gn_val.try_into().ok()?;
+                            ip_addrs.push(std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return Some((dns_names, ip_addrs));
+        }
+    }
+    None
+}
+
+/// Parses the first X.509 PEM certificate (or raw DER) and computes its RFC 7469
+/// SubjectPublicKeyInfo SHA-256 pin (`sha256/<BASE64_STANDARD>`).
+pub fn extract_spki_sha256_from_pem(pem_or_der: &[u8]) -> Option<String> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    let der = pem_or_der_to_cert_der(pem_or_der)?;
     let spki = extract_x509_spki_der(&der)?;
     let digest = Sha256::digest(spki);
     Some(format!(
@@ -283,6 +437,18 @@ pub struct ModuleRuntimeInfo {
 }
 
 impl AppState {
+    pub fn set_aircat_tls_listener_ready(&self, ready: bool) {
+        self.aircat_tls_listener_ready
+            .store(ready, std::sync::atomic::Ordering::Release);
+    }
+
+    pub async fn is_aircat_tls_ready(&self) -> bool {
+        self.aircat_tls.read().await.is_some()
+            && self
+                .aircat_tls_listener_ready
+                .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub async fn get_module_transition_lock(
         &self,
         module_name: &str,
@@ -895,6 +1061,7 @@ impl AppState {
             server_membership,
             aircat_security: Arc::new(aircat_producer_security::AirCatProducerSecurityState::new()),
             aircat_tls,
+            aircat_tls_listener_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         state.spawn_background_tasks();
@@ -2188,6 +2355,18 @@ fn v1_link_routes() -> Router<AppState> {
             post(routes::v1::queue::queue_items_handler),
         )
         .route(
+            "/api/v1/queue/items/:item_id",
+            delete(routes::v1::queue::queue_item_delete_handler),
+        )
+        .route(
+            "/api/v1/queue/repeat",
+            post(routes::v1::queue::queue_repeat_handler),
+        )
+        .route(
+            "/api/v1/queue/shuffle",
+            post(routes::v1::queue::queue_shuffle_handler),
+        )
+        .route(
             "/api/v1/queue/jump",
             post(routes::v1::queue::queue_jump_handler),
         )
@@ -2242,6 +2421,22 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/home/outbox/retry",
             post(routes::v1::receivers::home_retry_outbox_handler),
+        )
+        .route(
+            "/api/v1/home/enrollment/pending",
+            get(routes::v1::aircat::home_enrollment_pending_handler),
+        )
+        .route(
+            "/api/v1/home/enrollment/:request_id/approve",
+            post(routes::v1::aircat::home_enrollment_approve_handler),
+        )
+        .route(
+            "/api/v1/home/enrollment/:request_id/reject",
+            post(routes::v1::aircat::home_enrollment_reject_handler),
+        )
+        .route(
+            "/api/v1/home/members/enroll",
+            post(routes::v1::aircat::home_members_direct_enroll_handler),
         )
         .route(
             "/api/v1/receivers/:id/auth",
@@ -2360,6 +2555,18 @@ fn v1_home_auth_routes(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/auth/session",
             post(routes::v1::aircat::home_auth_session_handler),
+        )
+        .route(
+            "/api/v1/home/enrollment/challenge",
+            post(routes::v1::aircat::home_enrollment_challenge_handler),
+        )
+        .route(
+            "/api/v1/home/enrollment/request",
+            post(routes::v1::aircat::home_enrollment_request_handler),
+        )
+        .route(
+            "/api/v1/home/enrollment/:request_id/status",
+            get(routes::v1::aircat::home_enrollment_status_handler),
         )
         .layer(middleware::from_fn_with_state(
             state.security_state,
