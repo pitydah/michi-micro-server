@@ -4239,9 +4239,19 @@ async function refreshHomeRoster() {
     devices.forEach(function(d) {
       var mid = d.device_michi_id || d.michi_id || d.receiver_id || '';
       var isRev = d.revoked || (mid && revokedIds.has(mid));
-      var statusBadge = isRev
-        ? '<span class="device-badge device-badge--danger">Revoked</span>'
-        : (d.authenticated ? '<span class="device-badge device-badge--verified">Authenticated</span>' : '<span class="device-badge device-badge--warning">Pending</span>');
+      var presenceState = d.presence_state || (isRev ? 'revoked' : (d.online ? 'online' : 'offline'));
+      var statusBadge = '';
+      if (isRev) {
+        statusBadge = '<span class="device-badge device-badge--danger">Revoked</span>';
+      } else {
+        var presenceBadge = presenceState === 'online'
+          ? '<span class="device-badge device-badge--verified">Online</span>'
+          : '<span class="device-badge device-badge--muted">Offline</span>';
+        var authBadge = d.authenticated
+          ? '<span class="device-badge device-badge--verified">Authenticated</span>'
+          : '<span class="device-badge device-badge--warning">Enrolled</span>';
+        statusBadge = presenceBadge + ' ' + authBadge;
+      }
 
       var outboxBadge = '<span style="color:var(--text-3)">--</span>';
       if (d.outbox_status) {

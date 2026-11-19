@@ -90,9 +90,16 @@ pub async fn queue_handler(
         .collect::<Vec<_>>();
 
     let current_index = if let Some(ref cur_tid) = snap.track_id {
-        items
-            .iter()
-            .position(|it| it["track_id"] == cur_tid.to_string())
+        let cur_tid_str = cur_tid.to_string();
+        snap.queue_index
+            .filter(|&idx| {
+                items
+                    .get(idx)
+                    .and_then(|it| it["track_id"].as_str())
+                    .map(|tid| tid == cur_tid_str)
+                    .unwrap_or(false)
+            })
+            .or_else(|| items.iter().position(|it| it["track_id"] == cur_tid_str))
             .map(|pos| pos as u32)
     } else {
         None
@@ -1012,6 +1019,11 @@ pub async fn queue_item_delete_handler(
             "playback module is disabled",
         ));
     }
+
+    // Serialize queue mutations across concurrent callers without holding a SQLite
+    // transaction open while PlaybackEngine performs audio transitions.
+    let _mutation_guard = state.queue_mutation_lock.lock().await;
+
     let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1019,12 +1031,134 @@ pub async fn queue_item_delete_handler(
             &e.to_string(),
         )
     })?;
-    let res =
-        sqlx::query("DELETE FROM queue_items WHERE queue_id = ? AND (id = ? OR track_id = ?)")
+
+    // 1. Read ordered queue snapshot and current engine state before mutating anything.
+    let existing_rows = sqlx::query_as::<_, (String, String, i64, String)>(
+        "SELECT id, track_id, position, added_at FROM queue_items WHERE queue_id = ? ORDER BY position ASC",
+    )
+    .bind(active_queue_id.to_string())
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    let engine_snap = state.playback_engine.snapshot().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ENGINE_UNAVAILABLE",
+            &e.to_string(),
+        )
+    })?;
+
+    // 2. Canonical lookup by queue_item_id (`id`). Legacy fallback by `track_id` deletes
+    // AT MOST ONE matching row (preferring the active slot if its track_id matches) so
+    // duplicate track entries in a queue are NEVER accidentally bulk-deleted.
+    let item_id_str = item_id.to_string();
+    let (removed_idx, matched_by) = if let Some(pos) = existing_rows
+        .iter()
+        .position(|(id, _, _, _)| id == &item_id_str)
+    {
+        (pos, "queue_item_id")
+    } else {
+        let active_matching_pos = engine_snap.queue_index.filter(|&idx| {
+            existing_rows
+                .get(idx)
+                .map(|(_, tid, _, _)| tid == &item_id_str)
+                .unwrap_or(false)
+        });
+        let pos = active_matching_pos.or_else(|| {
+            existing_rows
+                .iter()
+                .position(|(_, tid, _, _)| tid == &item_id_str)
+        });
+        match pos {
+            Some(p) => (p, "legacy_track_id"),
+            None => {
+                return Err(v1_error(
+                    StatusCode::NOT_FOUND,
+                    "NOT_FOUND",
+                    "queue item not found",
+                ));
+            }
+        }
+    };
+
+    let (removed_row_id, removed_track_id_str, removed_orig_pos, removed_added_at) =
+        existing_rows[removed_idx].clone();
+    let removed_track_id = Uuid::parse_str(&removed_track_id_str).map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_INVARIANT_VIOLATION",
+            &format!("invalid track UUID '{removed_track_id_str}' in queue: {e}"),
+        )
+    })?;
+
+    // 3. Pre-validate remaining tracks BEFORE mutating SQLite or PlaybackEngine.
+    let mut remaining_rows = Vec::with_capacity(existing_rows.len().saturating_sub(1));
+    let mut remaining_track_ids = Vec::with_capacity(existing_rows.len().saturating_sub(1));
+    for (idx, row) in existing_rows.iter().enumerate() {
+        if idx == removed_idx {
+            continue;
+        }
+        let tid = Uuid::parse_str(&row.1).map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_INVARIANT_VIOLATION",
+                &format!("invalid track UUID '{}' in queue: {e}", row.1),
+            )
+        })?;
+        remaining_rows.push(row.clone());
+        remaining_track_ids.push(tid);
+    }
+
+    let remaining_tracks = if remaining_track_ids.is_empty() {
+        Vec::new()
+    } else {
+        validate_and_load_tracks(&state.db, &remaining_track_ids, &state.config.music_paths).await?
+    };
+
+    // 4. Atomic SQLite mutation: delete ONLY the single targeted queue_item_id and compact
+    // positions to contiguous 0..N-1. Commit BEFORE calling PlaybackEngine.
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut tx = state.db.begin().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    let del_res = sqlx::query("DELETE FROM queue_items WHERE queue_id = ? AND id = ?")
+        .bind(active_queue_id.to_string())
+        .bind(&removed_row_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+    if del_res.rows_affected() == 0 {
+        return Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "queue item not found",
+        ));
+    }
+
+    for (new_pos, (row_id, _, _, _)) in remaining_rows.iter().enumerate() {
+        sqlx::query("UPDATE queue_items SET position = ? WHERE queue_id = ? AND id = ?")
+            .bind(new_pos as i64)
             .bind(active_queue_id.to_string())
-            .bind(item_id.to_string())
-            .bind(item_id.to_string())
-            .execute(&state.db)
+            .bind(row_id)
+            .execute(&mut *tx)
             .await
             .map_err(|e| {
                 v1_error(
@@ -1033,23 +1167,84 @@ pub async fn queue_item_delete_handler(
                     &e.to_string(),
                 )
             })?;
-    if res.rows_affected() == 0 {
+    }
+
+    sqlx::query("UPDATE queues SET updated_at = ? WHERE id = ?")
+        .bind(&now)
+        .bind(active_queue_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+
+    tx.commit().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+
+    // 5. Coordinate PlaybackEngine transition. If the engine rejects/fails, execute a
+    // compensating SQLite rollback so durable state and runtime engine do not diverge.
+    let remaining_count = remaining_tracks.len();
+    if let Err(engine_err) = state
+        .playback_engine
+        .remove_queue_item(removed_idx, removed_track_id, remaining_tracks)
+        .await
+    {
+        if let Ok(mut rollback_tx) = state.db.begin().await {
+            let _ = sqlx::query(
+                "INSERT OR IGNORE INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&removed_row_id)
+            .bind(active_queue_id.to_string())
+            .bind(&removed_track_id_str)
+            .bind(removed_orig_pos)
+            .bind(&removed_added_at)
+            .execute(&mut *rollback_tx)
+            .await;
+            for (row_id, _, orig_pos, _) in &existing_rows {
+                let _ = sqlx::query(
+                    "UPDATE queue_items SET position = ? WHERE queue_id = ? AND id = ?",
+                )
+                .bind(*orig_pos)
+                .bind(active_queue_id.to_string())
+                .bind(row_id)
+                .execute(&mut *rollback_tx)
+                .await;
+            }
+            let _ = rollback_tx.commit().await;
+        }
         return Err(v1_error(
-            StatusCode::NOT_FOUND,
-            "NOT_FOUND",
-            "queue item not found",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RUNTIME_SYNC_FAILED",
+            &engine_err.to_string(),
         ));
     }
-    let cur_track_id = state
-        .playback_engine
-        .snapshot()
-        .await
-        .ok()
-        .and_then(|s| s.track_id);
-    sync_active_queue_to_engine(&state, &active_queue_id, cur_track_id).await?;
+
+    let _ = state.tx.send(
+        serde_json::json!({
+            "type": "queue_updated",
+            "queue_id": active_queue_id,
+            "removed_item_id": removed_row_id,
+            "remaining_count": remaining_count,
+        })
+        .to_string(),
+    );
+
     Ok(Json(serde_json::json!({
         "status": "deleted",
         "item_id": item_id,
+        "removed_queue_item_id": removed_row_id,
+        "removed_track_id": removed_track_id,
+        "matched_by": matched_by,
+        "remaining_count": remaining_count,
     })))
 }
 

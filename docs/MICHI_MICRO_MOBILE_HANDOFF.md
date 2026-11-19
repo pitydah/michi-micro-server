@@ -1,7 +1,7 @@
-# MICHI MICRO SERVER ↔ MICHI MUSIC MOBILE — INTEROP HANDOFF SPEC (R1.2)
+# MICHI MICRO SERVER ↔ MICHI MUSIC MOBILE — INTEROP HANDOFF SPEC (R1.3)
 
-Target consumer repository (read-only audit baseline): `pitydah/michi-music-mobile` (`master` @ `07a646e`, inspected working branch `feat/ui8-integration-2026-11-18` @ `c840fc5`).
-Normative contract source: `pitydah/michi-link` (`docs/MICHI_INTEROP_CONTRACT.md`, `schemas/aircat-tls-status.schema.json`, & `tests/vectors/interop/micro-mobile-interop-vectors.json`).
+Target consumer repository (read-only audit baseline): `pitydah/michi-music-mobile` (`master` @ `07a646e`, inspected working branch `feat/aircat-a71-experience` @ `eeb3b94`).
+Normative contract source: `pitydah/michi-link` (`docs/MICHI_INTEROP_CONTRACT.md`, `schemas/aircat-tls-status.schema.json`, `schemas/playback-control.schema.json`, `schemas/home-device-roster.schema.json`, & `tests/vectors/interop/micro-mobile-interop-vectors.json`).
 
 > **Scope & Certification Notice**: This document is the authoritative implementation specification for OpenCode / Android engineers updating `michi-music-mobile`. Physical Android device certification (`ANDROID_COMPATIBILITY_VERIFIED` and `PHYSICAL_LAN_E2E`) is **`NOT_RUN` / `NOT_VERIFIED`** until executed on a real Android device against a live Micro Server deployment. Do **not** invent alternate field names, bypass TLS/X.509/SPKI verification, install trust-all `X509TrustManager` or permissive `HostnameVerifier`, or send Home auth / enrollment / `michi_home_*` tokens over cleartext HTTP.
 
@@ -269,13 +269,24 @@ Canonical error codes Mobile MUST handle explicitly:
 
 ---
 
-## 8. Michi Control (Playback & Queue) Compatibility
+## 8. Michi Control (Playback, Queue), Home Presence & QR Security (R1.3)
 
 Micro Server supports all Mobile `LinkClient.kt` playback & queue endpoints:
 - `GET /api/v1/playback/state`
-- `POST /api/v1/playback/control` (accepts Mobile `{"command": "...", "value": ""}`, `position_ms`, `volume`, `track_id`; rejects invalid repeat/shuffle values with `422`)
+- `POST /api/v1/playback/control`:
+  - **`set_volume` (R1.3 strict contract)**:
+    - Canonical field: `"volume": <integer 0..100>` (`0` = real mute, `100` = max).
+    - Legacy compatibility field: `"value"` accepts integer `0..100` or strict unsigned ASCII decimal string (`"0"`..=`"100"`).
+    - **Zero silent fallback to 80**: missing, `null`, negative, `> 100`, integer overflow, float, boolean, ambiguous text (`"75%"`, `"75.5"`, `"-1"`, `"eighty"`, `""`), or conflicting `volume`+`value` are rejected with HTTP `400` (`error.code = "INVALID_REQUEST"`) and NEVER mutate engine volume.
+  - Accepts Mobile `{"command": "...", "value": ""}`, `position_ms`, `volume`, `track_id`; rejects invalid repeat/shuffle values with `422`.
 - `GET /api/v1/playback/output` & `PUT/POST /api/v1/playback/output`
-- `GET /api/v1/queue`, `POST /api/v1/queue/items`, `DELETE /api/v1/queue/items/{item_id}`, `POST /api/v1/queue/jump`, `PUT /api/v1/queue/reorder`, `POST /api/v1/queue/repeat`, `POST /api/v1/queue/shuffle`, `POST /api/v1/queue/transfer`, `POST /api/v1/queue/save`, `GET /api/v1/queue/saved`
+- `GET /api/v1/queue`, `POST /api/v1/queue/items`, `DELETE /api/v1/queue/items/{item_id}`, `POST /api/v1/queue/jump`, `PUT /api/v1/queue/reorder`, `POST /api/v1/queue/repeat`, `POST /api/v1/queue/shuffle`, `POST /api/v1/queue/transfer`, `POST /api/v1/queue/save`, `GET /api/v1/queue/saved`:
+  - **Active queue deletion (R1.3)**: individual deletion targets `queue_item_id` (legacy `track_id` fallback deletes at most one entry, never bulk-deleting duplicates). Removing the active track advances to the next valid track in logical play order (respecting `shuffle` & `repeat`, never repeating a deleted track under `repeat: "one"`, never jumping backward to index `0`, and never auto-playing when `paused`/`stopped`/`idle`). Removing a non-active track preserves current track, position, state, and upcoming order.
+- **Home Roster Presence (R1.3 — `GET /api/v1/home/roster`)**:
+  - Strictly separates `membership_status` (`"enrolled"` | `"revoked"`), `authenticated` (active non-expired Home session or live verified receiver), `online` / `presence_state` (`"online"` | `"offline"` | `"revoked"` — backed only by bounded live evidence within `presence_ttl_seconds = 180` or live Whisker/receiver session, never inferred from SQLite membership alone or across restarts), and `revoked`. Fails closed with `503 REVOCATION_STORE_UNAVAILABLE` if revocation state is unreadable.
+- **QR Pairing Origin Policy & Separation (R1.3 — `POST /api/v1/pair/qr`)**:
+  - Returns `qr_protocol: "legacy_server_code_v1"` (strictly separate from `michi.aircat.home.enrollment.v1`; never carries Home Root PK or SPKI pin).
+  - Enforces 3-tier origin validation (`MICHI_PUBLIC_URL` / `MICHI_PUBLIC_HTTPS_URL` / `MICHI_ALLOWED_QR_HOSTS`, trusted proxy coherent headers, and local/LAN/mDNS/Tailscale destinations), rejecting `javascript:`, `file:`, userinfo, path/query, CRLF, contradictory proxy headers, and unauthorized external hosts with `400 INVALID_REQUEST`.
 - `POST /api/v1/playback-transfer/{prepare,commit,abort}`
 - `GET /api/v1/sessions/active`
 

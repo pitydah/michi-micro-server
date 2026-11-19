@@ -69,6 +69,10 @@ pub struct HomeRosterDevice {
     pub online: bool,
     pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub membership_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub outbox_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_revocation_ack: Option<String>,

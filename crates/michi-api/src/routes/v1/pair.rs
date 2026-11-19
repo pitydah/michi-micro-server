@@ -383,12 +383,12 @@ pub async fn list_devices_handler(
     let items: Vec<serde_json::Value> = devices
         .into_iter()
         .map(|d| {
-            let online = d
-                .last_seen
-                .as_ref()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds() < 180)
-                .unwrap_or(false);
+            let online = !d.revoked
+                && d.last_seen
+                    .as_ref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds() < 180)
+                    .unwrap_or(false);
             serde_json::json!({
                 "device_id": d.device_id,
                 "alias": d.alias,
@@ -404,7 +404,7 @@ pub async fn list_devices_handler(
     Ok(Json(serde_json::json!({ "devices": items })))
 }
 
-// ── QR Pairing ───────────────────────────────────────────────────
+// ── QR Pairing (Legacy SERVER_CODE v1 — strictly distinct from Home Enrollment QR) ──
 
 #[derive(Serialize, Debug, Deserialize, Default)]
 pub struct QrGenerateBody {
@@ -416,6 +416,320 @@ pub struct QrGenerateResponse {
     pub expires_at: String,
     pub svg_url: String,
     pub server_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct QrUrlPolicy {
+    /// Operator-configured canonical public URL (`MICHI_PUBLIC_URL` / `MICHI_PUBLIC_HTTPS_URL`).
+    pub configured_public_url: Option<String>,
+    /// Explicitly authorized hosts (lowercased hostnames or IP literals).
+    pub allowed_hosts: Vec<String>,
+    /// Server HTTP listener port for local fallback.
+    pub server_port: u16,
+}
+
+impl QrUrlPolicy {
+    pub async fn from_env_and_state(state: &AppState) -> Self {
+        let configured_public_url = std::env::var("MICHI_PUBLIC_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| {
+                std::env::var("MICHI_PUBLIC_HTTPS_URL")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+            });
+
+        let mut allowed_hosts = Vec::new();
+        if let Ok(raw_hosts) = std::env::var("MICHI_ALLOWED_QR_HOSTS") {
+            for h in raw_hosts.split(',') {
+                let normalized = normalize_host_for_allowlist(h);
+                if !normalized.is_empty() && !allowed_hosts.contains(&normalized) {
+                    allowed_hosts.push(normalized);
+                }
+            }
+        }
+        if let Some(ref pub_url) = configured_public_url {
+            if let Ok(parsed) = reqwest::Url::parse(pub_url.trim()) {
+                if let Some(h) = parsed.host_str() {
+                    let normalized = normalize_host_for_allowlist(h);
+                    if !normalized.is_empty() && !allowed_hosts.contains(&normalized) {
+                        allowed_hosts.push(normalized);
+                    }
+                }
+            }
+        }
+        if let Some(ref cors) = state.config.cors_origin {
+            if let Ok(parsed) = reqwest::Url::parse(cors.trim()) {
+                if let Some(h) = parsed.host_str() {
+                    let normalized = normalize_host_for_allowlist(h);
+                    if !normalized.is_empty() && !allowed_hosts.contains(&normalized) {
+                        allowed_hosts.push(normalized);
+                    }
+                }
+            }
+        }
+        if let Some(ref tls) = *state.aircat_tls.read().await {
+            if let Ok(parsed) = reqwest::Url::parse(tls.pinned_base_url.trim()) {
+                if let Some(h) = parsed.host_str() {
+                    let normalized = normalize_host_for_allowlist(h);
+                    if !normalized.is_empty() && !allowed_hosts.contains(&normalized) {
+                        allowed_hosts.push(normalized);
+                    }
+                }
+            }
+        }
+
+        Self {
+            configured_public_url,
+            allowed_hosts,
+            server_port: state.config.port(),
+        }
+    }
+}
+
+fn normalize_host_for_allowlist(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn has_forbidden_url_chars(s: &str) -> bool {
+    s.bytes()
+        .any(|b| b < 0x20 || b == 0x7f || b == b' ' || b == b'\t')
+}
+
+fn is_local_or_lan_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    if ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() {
+        return false;
+    }
+    let octets = ip.octets();
+    let is_cgnat_tailscale = octets[0] == 100 && (octets[1] & 0b1100_0000) == 64; // 100.64.0.0/10
+    ip.is_loopback() || ip.is_private() || ip.is_link_local() || is_cgnat_tailscale
+}
+
+fn is_local_or_lan_ipv6(ip: std::net::Ipv6Addr) -> bool {
+    if ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+    let seg0 = ip.segments()[0];
+    let is_ula = (seg0 & 0xfe00) == 0xfc00; // fc00::/7
+    let is_link_local = (seg0 & 0xffc0) == 0xfe80; // fe80::/10
+    ip.is_loopback() || is_ula || is_link_local
+}
+
+fn is_valid_dns_hostname(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    let trimmed = host.trim_end_matches('.');
+    if trimmed.is_empty() {
+        return false;
+    }
+    for label in trimmed.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+        if !label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Checks whether a parsed URL host string is authorized as a Michi QR destination:
+/// - Explicitly listed in `policy.allowed_hosts` (configured public URL, `MICHI_ALLOWED_QR_HOSTS`,
+///   `MICHI_CORS_ORIGIN`, or active TLS pinned host), OR
+/// - Legitimate local/LAN/mDNS/Tailscale address (`localhost`, `*.local`, `*.ts.net`,
+///   loopback, RFC 1918 private, link-local, Tailscale CGNAT `100.64.0.0/10`, IPv6 ULA/link-local).
+///
+/// Arbitrary external public hosts/IPs are REJECTED fail-closed.
+pub fn is_authorized_qr_host(raw_host: &str, policy: &QrUrlPolicy) -> bool {
+    let trimmed = raw_host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                if is_local_or_lan_ipv4(v4) {
+                    return true;
+                }
+                let norm = v4.to_string();
+                return policy.allowed_hosts.iter().any(|h| h == &norm);
+            }
+            std::net::IpAddr::V6(v6) => {
+                if is_local_or_lan_ipv6(v6) {
+                    return true;
+                }
+                let norm = v6.to_string().to_ascii_lowercase();
+                return policy.allowed_hosts.iter().any(|h| h == &norm);
+            }
+        }
+    }
+
+    if !is_valid_dns_hostname(trimmed) {
+        return false;
+    }
+    let norm = normalize_host_for_allowlist(trimmed);
+    if policy.allowed_hosts.iter().any(|h| h == &norm) {
+        return true;
+    }
+    if norm == "localhost" {
+        return true;
+    }
+    if let Some(prefix) = norm.strip_suffix(".local") {
+        return !prefix.is_empty();
+    }
+    if let Some(prefix) = norm.strip_suffix(".ts.net") {
+        return !prefix.is_empty();
+    }
+    false
+}
+
+/// Strictly validates a full QR server URL (scheme, no userinfo, no control chars,
+/// origin-only without path/query/fragment, and authorized destination host).
+pub fn validate_and_canonicalize_qr_url(
+    raw: &str,
+    policy: &QrUrlPolicy,
+) -> Result<String, &'static str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || has_forbidden_url_chars(trimmed) {
+        return Err("server_url contains forbidden characters or is empty");
+    }
+    let parsed = reqwest::Url::parse(trimmed).map_err(|_| "invalid server_url syntax")?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err("server_url scheme must be http or https");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("server_url must not contain userinfo");
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("server_url must be an origin without query or fragment");
+    }
+    if parsed.path() != "/" && !parsed.path().is_empty() {
+        return Err("server_url must be an origin without a path");
+    }
+    let host_str = parsed.host_str().ok_or("server_url missing host")?;
+    if !is_authorized_qr_host(host_str, policy) {
+        return Err("server_url host is not authorized for QR pairing");
+    }
+    match parsed.port() {
+        Some(port) => Ok(format!("{scheme}://{host_str}:{port}")),
+        None => Ok(format!("{scheme}://{host_str}")),
+    }
+}
+
+fn extract_single_host_header<'a>(
+    headers: &'a axum::http::HeaderMap,
+    name: &'static str,
+) -> Result<Option<&'a str>, &'static str> {
+    let mut values = headers.get_all(name).iter();
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err("multiple host forwarding headers are not permitted");
+    }
+    let raw = first
+        .to_str()
+        .map_err(|_| "host header contains non-UTF-8 bytes")?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || has_forbidden_url_chars(trimmed)
+        || trimmed.contains(',')
+        || trimmed.contains('/')
+        || trimmed.contains('@')
+        || trimmed.contains('?')
+        || trimmed.contains('#')
+        || trimmed.contains('\\')
+    {
+        return Err("invalid host header value");
+    }
+    Ok(Some(trimmed))
+}
+
+/// Resolves the canonical `server_url` for legacy SERVER_CODE QR generation using strict
+/// 3-tier precedence and fail-closed header/origin validation:
+/// 1. Explicit authorized `server_url` (rejected if invalid, unauthorized, or contradicting a configured public URL).
+/// 2. Operator-configured public URL (`MICHI_PUBLIC_URL` / `MICHI_PUBLIC_HTTPS_URL`).
+/// 3. Verified trusted-proxy host/proto (rejecting contradictory proxy headers or spoofed hosts)
+///    or direct listener host/scheme (ignoring any forwarded headers from untrusted peers).
+pub fn resolve_canonical_qr_server_url(
+    config: &michi_config::Config,
+    policy: &QrUrlPolicy,
+    peer_ip: Option<std::net::IpAddr>,
+    direct_tls: bool,
+    headers: &axum::http::HeaderMap,
+    explicit_url: Option<&str>,
+) -> Result<String, &'static str> {
+    let from_trusted_proxy = config.trust_proxy
+        && peer_ip
+            .map(|ip| config.is_trusted_proxy(&ip))
+            .unwrap_or(false);
+
+    let proxy_proto = if from_trusted_proxy {
+        let evidence = crate::home_tls_policy::classify_proxy_proto_headers(headers);
+        if evidence == crate::home_tls_policy::ProxyProtoEvidence::ContradictoryOrMalformed {
+            return Err("contradictory or malformed reverse proxy forwarding headers");
+        }
+        evidence
+    } else {
+        crate::home_tls_policy::ProxyProtoEvidence::Absent
+    };
+
+    if let Some(raw_explicit) = explicit_url.map(str::trim).filter(|u| !u.is_empty()) {
+        let canonical = validate_and_canonicalize_qr_url(raw_explicit, policy)?;
+        if let Some(ref configured_pub) = policy.configured_public_url {
+            let configured_canonical = validate_and_canonicalize_qr_url(configured_pub, policy)?;
+            let exp_parsed = reqwest::Url::parse(&canonical).map_err(|_| "invalid explicit url")?;
+            let exp_host = exp_parsed
+                .host_str()
+                .map(normalize_host_for_allowlist)
+                .unwrap_or_default();
+            if canonical != configured_canonical
+                && !policy.allowed_hosts.iter().any(|h| h == &exp_host)
+            {
+                return Err(
+                    "explicit server_url does not match configured public URL or allowed QR hosts",
+                );
+            }
+        }
+        return Ok(canonical);
+    }
+
+    if let Some(ref configured_pub) = policy.configured_public_url {
+        return validate_and_canonicalize_qr_url(configured_pub, policy);
+    }
+
+    let scheme =
+        if direct_tls || proxy_proto == crate::home_tls_policy::ProxyProtoEvidence::CoherentHttps {
+            "https"
+        } else {
+            "http"
+        };
+
+    if from_trusted_proxy {
+        let candidate_host = match extract_single_host_header(headers, "x-forwarded-host")? {
+            Some(xfh) => Some(xfh),
+            None => extract_single_host_header(headers, "host")?,
+        };
+        if let Some(host_val) = candidate_host {
+            return validate_and_canonicalize_qr_url(&format!("{scheme}://{host_val}"), policy);
+        }
+    } else if let Some(host_val) = extract_single_host_header(headers, "host")? {
+        return validate_and_canonicalize_qr_url(&format!("{scheme}://{host_val}"), policy);
+    }
+
+    Ok(format!("{scheme}://localhost:{}", policy.server_port))
 }
 
 pub async fn qr_generate_handler(
@@ -431,35 +745,22 @@ pub async fn qr_generate_handler(
         .filter(|u| !u.trim().is_empty());
 
     let peer_ip = connect_info.map(|axum::extract::ConnectInfo(addr)| addr.ip());
-    let from_trusted_proxy = state.config.trust_proxy
-        && peer_ip
-            .map(|ip| state.config.is_trusted_proxy(&ip))
-            .unwrap_or(false);
-
-    let host_hdr = if from_trusted_proxy {
-        headers
-            .get("x-forwarded-host")
-            .or_else(|| headers.get("host"))
-    } else {
-        headers.get("host")
-    }
-    .and_then(|h| h.to_str().ok())
-    .filter(|h| !h.is_empty());
-
-    let server_url = if let Some(url) = explicit_url {
-        url.trim().trim_end_matches('/').to_string()
-    } else if let Some(host) = host_hdr {
-        let is_https = direct_tls.is_some()
-            || crate::home_tls_policy::HomeTlsTransportPolicy::is_trusted_proxy_https_with_config(
-                &state.config,
-                peer_ip,
-                &headers,
-            );
-        let scheme = if is_https { "https" } else { "http" };
-        format!("{scheme}://{host}")
-    } else {
-        format!("http://localhost:{}", state.config.port())
-    };
+    let policy = QrUrlPolicy::from_env_and_state(&state).await;
+    let server_url = resolve_canonical_qr_server_url(
+        &state.config,
+        &policy,
+        peer_ip,
+        direct_tls.is_some(),
+        &headers,
+        explicit_url.as_deref(),
+    )
+    .map_err(|reason| {
+        v1_error_code(
+            StatusCode::BAD_REQUEST,
+            michi_link::MichiLinkErrorCode::InvalidRequest,
+            reason,
+        )
+    })?;
 
     let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
     sqlx::query(
@@ -483,6 +784,7 @@ pub async fn qr_generate_handler(
 
     Ok(Json(serde_json::json!({
         "qr_code": qr_code,
+        "qr_protocol": "legacy_server_code_v1",
         "expires_at": expires_at.to_rfc3339(),
         "server_url": server_url,
         "svg_url": format!("/api/v1/pair/qr/{}/svg", qr_code),

@@ -146,10 +146,19 @@ pub async fn sync_active_queue_to_engine(
     }
 
     let cur_idx = if let Some(ref cur_tid) = current_track_id {
-        runtime_tracks
-            .iter()
-            .position(|t| t.id == *cur_tid)
-            .unwrap_or(0)
+        let preferred_idx = state
+            .playback_engine
+            .snapshot()
+            .await
+            .ok()
+            .and_then(|s| s.queue_index)
+            .filter(|&idx| runtime_tracks.get(idx).map(|t| t.id) == Some(*cur_tid));
+        preferred_idx.unwrap_or_else(|| {
+            runtime_tracks
+                .iter()
+                .position(|t| t.id == *cur_tid)
+                .unwrap_or(0)
+        })
     } else {
         0
     };

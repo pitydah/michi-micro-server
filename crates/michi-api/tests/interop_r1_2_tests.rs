@@ -1086,6 +1086,7 @@ async fn test_r1_2_p0_b_comprehensive_x509_adversarial_matrix() {
     let leaf3_key = std::fs::read(dir.join("leaf3.key")).unwrap();
     let inter = std::fs::read(dir.join("inter.crt")).unwrap();
     let root = std::fs::read(dir.join("root.crt")).unwrap();
+    let now = chrono::Utc::now() + chrono::Duration::seconds(5);
 
     // 3a. Incomplete chain (leaf only, missing intermediate)
     let inc_meta =

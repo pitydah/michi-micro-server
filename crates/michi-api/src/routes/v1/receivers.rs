@@ -2325,6 +2325,50 @@ pub async fn home_info_handler(
     })))
 }
 
+/// Bounded live presence TTL (seconds) for Home members authenticated in the current
+/// server runtime. Aligned with Michi Link / Whisker presence freshness semantics.
+pub const HOME_MEMBER_PRESENCE_TTL_SECS: i64 = 180;
+pub const HOME_MEMBER_PRESENCE_TTL_MS: i64 = HOME_MEMBER_PRESENCE_TTL_SECS * 1000;
+
+/// Strict separation of Membership, Authentication, Presence, and Revocation for a Home member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HomeMemberPresenceProjection {
+    pub authenticated: bool,
+    pub online: bool,
+    pub membership_status: &'static str,
+    pub presence_state: &'static str,
+}
+
+pub fn evaluate_home_member_presence(
+    revoked: bool,
+    has_active_home_session: bool,
+    last_auth_activity_ms: Option<i64>,
+    whisker_verified_online: bool,
+    now_ms: i64,
+) -> HomeMemberPresenceProjection {
+    if revoked {
+        return HomeMemberPresenceProjection {
+            authenticated: false,
+            online: false,
+            membership_status: "revoked",
+            presence_state: "revoked",
+        };
+    }
+
+    let recent_authenticated_activity = has_active_home_session
+        && last_auth_activity_ms
+            .map(|ts| now_ms >= ts && (now_ms - ts) <= HOME_MEMBER_PRESENCE_TTL_MS)
+            .unwrap_or(false);
+    let online = recent_authenticated_activity || whisker_verified_online;
+
+    HomeMemberPresenceProjection {
+        authenticated: has_active_home_session,
+        online,
+        membership_status: "enrolled",
+        presence_state: if online { "online" } else { "offline" },
+    }
+}
+
 pub async fn home_roster_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -2351,16 +2395,46 @@ pub async fn home_roster_handler(
             )
         })?;
 
-    // Ensure receiver roster entries also reflect durable revocations
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let active_receiver_sessions = {
+        let sessions_arc = state.receiver_manager.active_sessions().await;
+        let guard = sessions_arc.read().await;
+        guard
+            .values()
+            .filter(|s| s.state == michi_receivers::models::ReceiverActiveSessionState::Active)
+            .map(|s| s.receiver_id.clone())
+            .collect::<std::collections::HashSet<_>>()
+    };
+
+    // Reconcile receiver-backed roster entries with durable revocations and live ScentStore TTL.
     for entry in &mut roster {
         if db_revs
             .iter()
             .any(|r| r.revoked_device_michi_id == entry.device_michi_id)
+            || entry.revoked
         {
             entry.revoked = true;
             entry.authenticated = false;
             entry.online = false;
+            entry.membership_status = Some("revoked".to_string());
+            entry.presence_state = Some("revoked".to_string());
+            continue;
         }
+
+        if entry.device_type == "server" {
+            entry.membership_status = Some("enrolled".to_string());
+            entry.presence_state = Some("online".to_string());
+            continue;
+        }
+
+        let has_live_session = active_receiver_sessions.contains(&entry.device_michi_id);
+        if let Some(scent_rec) = state.scent_store.get(&entry.device_michi_id) {
+            let eff = state.scent_store.effective_presence_now(&scent_rec);
+            let scent_online = eff == michi_connect::scent_store::EffectivePresence::VerifiedOnline;
+            entry.online = scent_online || has_live_session;
+        }
+        entry.membership_status = Some("enrolled".to_string());
+        entry.presence_state = Some(if entry.online { "online" } else { "offline" }.to_string());
     }
 
     for m in db_members {
@@ -2379,32 +2453,75 @@ pub async fn home_roster_handler(
                     .into_iter()
                     .map(|r| r.as_str().to_string())
                     .collect();
-            let revoked = m.revoked
-                || db_revs
-                    .iter()
-                    .any(|r| r.revoked_device_michi_id == m.device_michi_id)
-                || !matches!(
-                    crate::routes::v1::aircat::check_home_member_authorization(
-                        &state,
-                        &home_id,
-                        &m.device_michi_id,
-                    )
-                    .await,
-                    crate::routes::v1::aircat::HomeMemberAuthorizationState::Active
-                );
-            let last_seen = chrono::DateTime::parse_from_rfc3339(&m.last_seen_at)
-                .ok()
-                .map(|dt| dt.with_timezone(&chrono::Utc));
+
+            let auth_state = crate::routes::v1::aircat::check_home_member_authorization(
+                &state,
+                &home_id,
+                &m.device_michi_id,
+            )
+            .await;
+            let revoked = match auth_state {
+                crate::routes::v1::aircat::HomeMemberAuthorizationState::Indeterminate => {
+                    return Err(v1_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "REVOCATION_STORE_UNAVAILABLE",
+                        "unable to verify Home revocation state; refusing roster response fail-closed",
+                    ));
+                }
+                crate::routes::v1::aircat::HomeMemberAuthorizationState::Revoked => true,
+                crate::routes::v1::aircat::HomeMemberAuthorizationState::Active => {
+                    m.revoked
+                        || db_revs
+                            .iter()
+                            .any(|r| r.revoked_device_michi_id == m.device_michi_id)
+                }
+            };
+
+            let has_active_session = state
+                .aircat_security
+                .has_active_home_session(&m.device_michi_id, now_ms);
+            let live_activity_ms = state
+                .aircat_security
+                .last_authenticated_activity_ms(&m.device_michi_id, now_ms);
+            let whisker_verified_online = state
+                .scent_store
+                .get(&m.device_michi_id)
+                .map(|rec| {
+                    state.scent_store.effective_presence_now(&rec)
+                        == michi_connect::scent_store::EffectivePresence::VerifiedOnline
+                })
+                .unwrap_or(false);
+
+            let projection = evaluate_home_member_presence(
+                revoked,
+                has_active_session,
+                live_activity_ms,
+                whisker_verified_online,
+                now_ms,
+            );
+
+            // Report live verified activity timestamp when available; otherwise preserve historical
+            // SQLite last_seen_at without inferring online presence from it.
+            let last_seen = live_activity_ms
+                .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+                .or_else(|| {
+                    chrono::DateTime::parse_from_rfc3339(&m.last_seen_at)
+                        .ok()
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                });
+
             roster.push(michi_receivers::models::HomeRosterDevice {
                 device_michi_id: m.device_michi_id,
                 name: m.device_name,
                 device_type: m.device_type,
                 base_url: None,
                 roles,
-                authenticated: !revoked,
+                authenticated: projection.authenticated,
                 revoked,
-                online: !revoked,
+                online: projection.online,
                 last_seen,
+                membership_status: Some(projection.membership_status.to_string()),
+                presence_state: Some(projection.presence_state.to_string()),
                 outbox_status: None,
                 last_revocation_ack: None,
                 last_revocation_error: None,
@@ -2414,6 +2531,7 @@ pub async fn home_roster_handler(
     Ok(Json(serde_json::json!({
         "devices": roster,
         "total": roster.len(),
+        "presence_ttl_seconds": HOME_MEMBER_PRESENCE_TTL_SECS,
     })))
 }
 

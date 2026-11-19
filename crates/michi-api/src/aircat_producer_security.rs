@@ -83,6 +83,10 @@ struct Inner {
     enrollment_challenges: HashMap<uuid::Uuid, HomeEnrollmentChallengeEntry>,
     /// key: opaque bearer token -> (verified client_michi_id, expires_at_ms)
     home_sessions: HashMap<String, (String, i64)>,
+    /// RAM-only map of client_michi_id -> last verified authenticated activity timestamp (epoch ms).
+    /// Cleared on revocation and naturally empty after server restart so stale SQLite rows
+    /// NEVER invent live presence.
+    member_last_activity_ms: HashMap<String, i64>,
     /// key: remote_track_id -> verified original file revision matched by (size, dev_ino, mtime_ns)
     digest_cache: HashMap<String, OriginalAssetRevision>,
     /// in-memory set of revoked member IDs for zero-SQLite chunk-boundary abort
@@ -326,20 +330,91 @@ impl AirCatProducerSecurityState {
                     inner.home_sessions.remove(&evict_key);
                 }
             }
+            inner.home_sessions.insert(
+                token,
+                (client_michi_id.clone(), now_ms.saturating_add(ttl_ms)),
+            );
+            if inner.member_last_activity_ms.len() >= MAX_ACTIVE
+                && !inner.member_last_activity_ms.contains_key(&client_michi_id)
+            {
+                if let Some(oldest_key) = inner
+                    .member_last_activity_ms
+                    .iter()
+                    .min_by_key(|(_, ts)| **ts)
+                    .map(|(k, _)| k.clone())
+                {
+                    inner.member_last_activity_ms.remove(&oldest_key);
+                }
+            }
             inner
-                .home_sessions
-                .insert(token, (client_michi_id, now_ms.saturating_add(ttl_ms)));
+                .member_last_activity_ms
+                .insert(client_michi_id, now_ms);
         }
     }
 
     pub fn lookup_home_session(&self, token: &str, now_ms: i64) -> Option<String> {
         let mut inner = self.inner.lock().ok()?;
         Self::prune(&mut inner, now_ms);
-        inner
+        let member_id = inner
             .home_sessions
             .get(token)
             .filter(|(_, exp)| *exp > now_ms)
-            .map(|(id, _)| id.clone())
+            .map(|(id, _)| id.clone())?;
+        inner
+            .member_last_activity_ms
+            .insert(member_id.clone(), now_ms);
+        Some(member_id)
+    }
+
+    /// Returns true ONLY if `client_michi_id` holds at least one currently active,
+    /// non-expired Home session in RAM and is not revoked in memory.
+    pub fn has_active_home_session(&self, client_michi_id: &str, now_ms: i64) -> bool {
+        let Ok(mut inner) = self.inner.lock() else {
+            return false;
+        };
+        Self::prune(&mut inner, now_ms);
+        if inner.revoked_members.contains(client_michi_id) {
+            return false;
+        }
+        inner
+            .home_sessions
+            .values()
+            .any(|(id, exp)| id == client_michi_id && *exp > now_ms)
+    }
+
+    /// Returns the RAM-only timestamp (epoch ms) of the last verified authenticated activity
+    /// for `client_michi_id` during the current server process lifetime, or `None` if absent/revoked.
+    pub fn last_authenticated_activity_ms(
+        &self,
+        client_michi_id: &str,
+        now_ms: i64,
+    ) -> Option<i64> {
+        let mut inner = self.inner.lock().ok()?;
+        Self::prune(&mut inner, now_ms);
+        if inner.revoked_members.contains(client_michi_id) {
+            return None;
+        }
+        inner.member_last_activity_ms.get(client_michi_id).copied()
+    }
+
+    /// Removes all active Home sessions and live activity markers for `client_michi_id`
+    /// without revoking membership (e.g. clean disconnect / expiration testing).
+    pub fn expire_home_sessions_for_member(&self, client_michi_id: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner
+                .home_sessions
+                .retain(|_, (id, _)| id != client_michi_id);
+            inner.member_last_activity_ms.remove(client_michi_id);
+        }
+    }
+
+    /// Adjusts the recorded last activity timestamp for deterministic TTL expiration testing.
+    pub fn override_member_last_activity_ms(&self, client_michi_id: &str, timestamp_ms: i64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner
+                .member_last_activity_ms
+                .insert(client_michi_id.to_string(), timestamp_ms);
+        }
     }
 
     pub fn cached_original_if_fresh(
@@ -440,6 +515,7 @@ impl AirCatProducerSecurityState {
                 .snapshots
                 .retain(|_, s| s.authenticated_destination_michi_id != member);
             inner.home_sessions.retain(|_, (id, _)| id != member);
+            inner.member_last_activity_ms.remove(member);
             inner
                 .enrollment_challenges
                 .retain(|_, c| c.client_michi_id != member);

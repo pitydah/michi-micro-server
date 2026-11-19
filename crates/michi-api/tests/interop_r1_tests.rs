@@ -851,25 +851,28 @@ async fn test_r1_home_membership_bootstrap_approval_renewal_and_revocation() {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
     ));
 
-    let after_revoke_challenge = app
-        .clone()
-        .oneshot(with_tls(
-            Request::builder()
-                .uri("/api/v1/auth/challenge")
-                .method("POST")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&michi_identity::DeviceAuthChallengeRequest {
-                        client_michi_id: client_michi_id.clone(),
-                        client_public_key: client_pk,
-                        home_id,
-                    })
-                    .unwrap(),
-                ))
+    let mut after_revoke_req = with_tls(
+        Request::builder()
+            .uri("/api/v1/auth/challenge")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&michi_identity::DeviceAuthChallengeRequest {
+                    client_michi_id: client_michi_id.clone(),
+                    client_public_key: client_pk,
+                    home_id,
+                })
                 .unwrap(),
-        ))
-        .await
-        .unwrap();
+            ))
+            .unwrap(),
+    );
+    after_revoke_req
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 2, 1],
+            45000,
+        ))));
+    let after_revoke_challenge = app.clone().oneshot(after_revoke_req).await.unwrap();
     assert_eq!(after_revoke_challenge.status(), StatusCode::FORBIDDEN);
 }
 

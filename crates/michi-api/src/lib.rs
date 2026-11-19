@@ -141,6 +141,9 @@ pub struct AppState {
     pub aircat_tls: Arc<RwLock<Option<AirCatTlsInfo>>>,
     /// True ONLY once the real tokio-rustls HTTPS listener is bound and serving.
     pub aircat_tls_listener_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// Async serializer for active queue mutations so SQLite and PlaybackEngine stay coherent
+    /// without holding SQLite write transactions open during audio operations.
+    pub queue_mutation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Marker inserted into request extensions exclusively by the HTTPS/TLS accept loop.
@@ -1777,6 +1780,7 @@ impl AppState {
             aircat_security: Arc::new(aircat_producer_security::AirCatProducerSecurityState::new()),
             aircat_tls,
             aircat_tls_listener_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            queue_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         state.spawn_background_tasks();

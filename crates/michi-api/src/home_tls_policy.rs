@@ -231,29 +231,71 @@ pub fn parse_rfc7239_forwarded_hops(
     }
 }
 
+/// Classification of reverse proxy protocol forwarding headers (`X-Forwarded-Proto`
+/// and RFC 7239 `Forwarded`) when evaluating transport scheme from a trusted proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyProtoEvidence {
+    /// Neither `X-Forwarded-Proto` nor `Forwarded` was present.
+    Absent,
+    /// Present headers parsed strictly, matched hop counts (if both present), and every hop is `https`.
+    CoherentHttps,
+    /// Present headers parsed strictly, matched hop counts (if both present), and every hop is `http`.
+    CoherentHttp,
+    /// Contradictory (`https` vs `http`), mixed hops, mismatched hop counts, unsupported scheme
+    /// (`ws`, `wss`, etc.), non-UTF-8, or malformed syntax.
+    ContradictoryOrMalformed,
+}
+
+/// Strictly classifies `X-Forwarded-Proto` and RFC 7239 `Forwarded` headers without ever
+/// ignoring one header in favor of the other.
+pub fn classify_proxy_proto_headers(headers: &HeaderMap) -> ProxyProtoEvidence {
+    let Ok(xfp_opt) = parse_x_forwarded_proto_hops(headers) else {
+        return ProxyProtoEvidence::ContradictoryOrMalformed;
+    };
+    let Ok(fwd_opt) = parse_rfc7239_forwarded_hops(headers) else {
+        return ProxyProtoEvidence::ContradictoryOrMalformed;
+    };
+
+    match (xfp_opt, fwd_opt) {
+        (None, None) => ProxyProtoEvidence::Absent,
+        (Some(xfp), None) => {
+            if !xfp.is_empty() && xfp.iter().all(|p| p == "https") {
+                ProxyProtoEvidence::CoherentHttps
+            } else if !xfp.is_empty() && xfp.iter().all(|p| p == "http") {
+                ProxyProtoEvidence::CoherentHttp
+            } else {
+                ProxyProtoEvidence::ContradictoryOrMalformed
+            }
+        }
+        (None, Some(fwd)) => {
+            if !fwd.is_empty() && fwd.iter().all(|p| p == "https") {
+                ProxyProtoEvidence::CoherentHttps
+            } else if !fwd.is_empty() && fwd.iter().all(|p| p == "http") {
+                ProxyProtoEvidence::CoherentHttp
+            } else {
+                ProxyProtoEvidence::ContradictoryOrMalformed
+            }
+        }
+        (Some(xfp), Some(fwd)) => {
+            if xfp.is_empty() || xfp.len() != fwd.len() {
+                ProxyProtoEvidence::ContradictoryOrMalformed
+            } else if xfp.iter().all(|p| p == "https") && fwd.iter().all(|p| p == "https") {
+                ProxyProtoEvidence::CoherentHttps
+            } else if xfp.iter().all(|p| p == "http") && fwd.iter().all(|p| p == "http") {
+                ProxyProtoEvidence::CoherentHttp
+            } else {
+                ProxyProtoEvidence::ContradictoryOrMalformed
+            }
+        }
+    }
+}
+
 /// Evaluates BOTH `X-Forwarded-Proto` and RFC 7239 `Forwarded` unconditionally
 /// (never preferring one header silently over the other). Returns `true` ONLY
 /// when at least one header is present, every present header parses strictly,
 /// every hop equals `https`, and (if both headers exist) their hop counts match.
 pub fn are_proxy_https_headers_consistent(headers: &HeaderMap) -> bool {
-    let Ok(xfp_opt) = parse_x_forwarded_proto_hops(headers) else {
-        return false;
-    };
-    let Ok(fwd_opt) = parse_rfc7239_forwarded_hops(headers) else {
-        return false;
-    };
-
-    match (xfp_opt, fwd_opt) {
-        (None, None) => false,
-        (Some(xfp), None) => !xfp.is_empty() && xfp.iter().all(|p| p == "https"),
-        (None, Some(fwd)) => !fwd.is_empty() && fwd.iter().all(|p| p == "https"),
-        (Some(xfp), Some(fwd)) => {
-            !xfp.is_empty()
-                && xfp.len() == fwd.len()
-                && xfp.iter().all(|p| p == "https")
-                && fwd.iter().all(|p| p == "https")
-        }
-    }
+    classify_proxy_proto_headers(headers) == ProxyProtoEvidence::CoherentHttps
 }
 
 pub struct HomeTlsTransportPolicy;

@@ -1009,6 +1009,8 @@ impl ReceiverSessionManager {
                 revoked: false,
                 online: true,
                 last_seen: Some(chrono::Utc::now()),
+                membership_status: Some("enrolled".to_string()),
+                presence_state: Some("online".to_string()),
                 outbox_status: None,
                 last_revocation_ack: None,
                 last_revocation_error: None,
@@ -1043,16 +1045,28 @@ impl ReceiverSessionManager {
                 last_err = ob.last_error.clone();
             }
 
+            let is_online = !entry.revoked && entry.is_online();
+            let presence_state = if entry.revoked {
+                "revoked"
+            } else if is_online {
+                "online"
+            } else {
+                "offline"
+            };
+            let membership_status = if entry.revoked { "revoked" } else { "enrolled" };
+
             devices.push(HomeRosterDevice {
                 device_michi_id: mid,
                 name: entry.name.clone(),
                 device_type: entry.device_type.clone(),
                 base_url: Some(entry.base_url.clone()),
                 roles,
-                authenticated: entry.authenticated,
+                authenticated: !entry.revoked && entry.authenticated,
                 revoked: entry.revoked,
-                online: entry.is_online(),
+                online: is_online,
                 last_seen: entry.last_seen,
+                membership_status: Some(membership_status.to_string()),
+                presence_state: Some(presence_state.to_string()),
                 outbox_status,
                 last_revocation_ack: last_ack,
                 last_revocation_error: last_err,
