@@ -419,6 +419,8 @@ pub struct QrGenerateResponse {
 }
 
 pub async fn qr_generate_handler(
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    direct_tls: Option<axum::Extension<crate::AirCatTlsVerifiedConnection>>,
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     body: Option<Json<QrGenerateBody>>,
@@ -428,19 +430,32 @@ pub async fn qr_generate_handler(
         .and_then(|b| b.0.server_url)
         .filter(|u| !u.trim().is_empty());
 
-    let host_hdr = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get("host"))
-        .and_then(|h| h.to_str().ok())
-        .filter(|h| !h.is_empty());
+    let peer_ip = connect_info.map(|axum::extract::ConnectInfo(addr)| addr.ip());
+    let from_trusted_proxy = state.config.trust_proxy
+        && peer_ip
+            .map(|ip| state.config.is_trusted_proxy(&ip))
+            .unwrap_or(false);
+
+    let host_hdr = if from_trusted_proxy {
+        headers
+            .get("x-forwarded-host")
+            .or_else(|| headers.get("host"))
+    } else {
+        headers.get("host")
+    }
+    .and_then(|h| h.to_str().ok())
+    .filter(|h| !h.is_empty());
 
     let server_url = if let Some(url) = explicit_url {
         url.trim().trim_end_matches('/').to_string()
     } else if let Some(host) = host_hdr {
-        let scheme = headers
-            .get("x-forwarded-proto")
-            .and_then(|p| p.to_str().ok())
-            .unwrap_or("http");
+        let is_https = direct_tls.is_some()
+            || crate::home_tls_policy::HomeTlsTransportPolicy::is_trusted_proxy_https_with_config(
+                &state.config,
+                peer_ip,
+                &headers,
+            );
+        let scheme = if is_https { "https" } else { "http" };
         format!("{scheme}://{host}")
     } else {
         format!("http://localhost:{}", state.config.port())

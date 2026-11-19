@@ -1,9 +1,9 @@
-# MICHI MICRO SERVER ↔ MICHI MUSIC MOBILE — INTEROP HANDOFF SPEC (R1.1)
+# MICHI MICRO SERVER ↔ MICHI MUSIC MOBILE — INTEROP HANDOFF SPEC (R1.2)
 
-Target consumer repository (read-only audit baseline): `pitydah/michi-music-mobile` (`master` @ `07a646e`, inspected working branch `feat/aircat-a71-experience` @ `41b0e2c`).
-Normative contract source: `pitydah/michi-link` (`docs/MICHI_INTEROP_CONTRACT.md` & `tests/vectors/interop/micro-mobile-interop-vectors.json`).
+Target consumer repository (read-only audit baseline): `pitydah/michi-music-mobile` (`master` @ `07a646e`, inspected working branch `feat/ui8-integration-2026-11-18` @ `c840fc5`).
+Normative contract source: `pitydah/michi-link` (`docs/MICHI_INTEROP_CONTRACT.md`, `schemas/aircat-tls-status.schema.json`, & `tests/vectors/interop/micro-mobile-interop-vectors.json`).
 
-> **Scope note**: This document is the authoritative implementation specification for OpenCode / Android engineers updating `michi-music-mobile`. Do **not** invent alternate field names, bypass TLS/X.509/SPKI verification, install trust-all `X509TrustManager` or permissive `HostnameVerifier`, or send Home auth / enrollment / `michi_home_*` tokens over cleartext HTTP.
+> **Scope & Certification Notice**: This document is the authoritative implementation specification for OpenCode / Android engineers updating `michi-music-mobile`. Physical Android device certification (`ANDROID_COMPATIBILITY_VERIFIED` and `PHYSICAL_LAN_E2E`) is **`NOT_RUN` / `NOT_VERIFIED`** until executed on a real Android device against a live Micro Server deployment. Do **not** invent alternate field names, bypass TLS/X.509/SPKI verification, install trust-all `X509TrustManager` or permissive `HostnameVerifier`, or send Home auth / enrollment / `michi_home_*` tokens over cleartext HTTP.
 
 ---
 
@@ -122,21 +122,39 @@ Cleartext HTTP is rejected fail-closed (`403 TLS_REQUIRED` when TLS is active; `
 
 **AND** ANY `/api/v1/*` request (including `/api/v1/tracks`, `/api/v1/playback/*`, `/api/v1/queue/*`, `/api/v1/sync/*`) carrying `Authorization: Bearer michi_home_*` is ALSO rejected with `403 TLS_REQUIRED` over cleartext HTTP.
 
+### 3.1 Reverse Proxy Threat Model & Edge Sanitization (R1.2-P0-A)
+Micro Server accepts HTTPS transport in strict precedence order:
+1. **Direct verified TLS** (`AirCatTlsVerifiedConnection` set by `tokio-rustls` after a real TLS handshake — authoritative; ignores HTTP forwarding headers).
+2. **Explicitly trusted reverse proxy** (`MICHI_TRUST_PROXY=true` + peer IP in `MICHI_TRUSTED_PROXIES` + strictly consistent `X-Forwarded-Proto` and/or RFC 7239 `Forwarded` headers with zero contradictions, zero malformed/empty/non-UTF-8 values, zero HTTP hops, and matching hop counts if both headers exist).
+3. **Fail-closed refusal** (`403 TLS_REQUIRED` or `503 TLS_NOT_CONFIGURED`).
+
+**Mandatory edge proxy requirements (Nginx / Caddy / Traefik)**:
+- The edge proxy MUST **strip/overwrite** client-supplied `X-Forwarded-Proto` and `Forwarded` headers and emit them strictly from the real inbound TLS connection (e.g., Nginx: `proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header Forwarded "";`; Caddy: `header_up X-Forwarded-Proto {scheme}` and `header_up -Forwarded`; Traefik: configure `entryPoints.websecure.forwardedHeaders.trustedIPs` exclusively to upstream proxies, never `*`).
+- Firewall/bind the backend HTTP port (`9090`) to loopback or a private proxy network so untrusted clients CANNOT bypass the reverse proxy or spoof its source IP.
+- Because application code cannot cryptographically prove proxy header provenance without mTLS to the proxy, direct TLS on Micro Server (`MICHI_TLS_PORT=9443`) remains the strongest deployment topology.
+
 ---
 
-## 4. Android-Compatible TLS / X.509 / SPKI PKI Architecture (`P0-B`)
+## 4. Android-Compatible TLS / X.509 / SPKI PKI Architecture (`P0-B` / `R1.2-P0-B`)
 
-### Why Self-Signed Certificates Fail on Android
-`michi-music-mobile/michi-link-client/src/main/java/org/michimusic/link/LinkClient.kt` uses OkHttp's `CertificatePinner` **on top of** Android's default platform `X509TrustManager`. OkHttp validates in TWO mandatory layers:
-1. **Layer 1 — X.509 Trust Chain + Hostname/SAN + Validity**: The leaf certificate MUST chain to a trusted CA, carry a matching `SubjectAltName` (`DNS` or `IP`) for `pinnedBaseUrl`, and satisfy `notBefore <= now <= notAfter`.
-2. **Layer 2 — RFC 7469 SPKI SHA-256 Pin**: `sha256/<BASE64_STANDARD>` matches the pinned leaf (or intermediate) SPKI hash.
+### Four Strictly Independent Security Properties
+Never conflate these four properties in server diagnostics, WebUI, or Mobile logic:
+1. **TLS server readiness / leaf validity**: PEM parses, private key matches leaf (`rustls`), `notBefore <= now <= notAfter`, `SubjectAltName` covers `pinnedBaseUrl`, leaf ExtendedKeyUsage (if present) permits `serverAuth`, and the TLS listener is bound.
+2. **X.509 certificate profile & chain verification** (`certificate_profile`, `chain_cryptographically_verified` on `GET /api/v1/aircat/status`):
+   - `self_signed_verified` — single self-issued leaf whose cryptographic signature verifies against its own SPKI.
+   - `self_issued_unverified` — `issuer == subject`, but cryptographic self-signature failed.
+   - `ca_issued_chain_present` — CA-issued leaf with ordered, valid (`CA:TRUE`, in-window), cryptographically verified chain (`chain_cryptographically_verified: true`).
+   - `incomplete_chain` — CA-issued leaf missing intermediates, out of order, expired intermediate, non-CA intermediate, or failed chain signature.
+3. **Android client trust verification** (`android_trust_verification_status`):
+   - `not_verified` — server-side inspection CANNOT verify Android's live platform `X509TrustManager` trust store. **A presented X.509 chain (even `ca_issued_chain_present`) NEVER proves Android default trust acceptance** (e.g., it could be signed by an unknown private CA).
+   - `verification_failed` — known incompatible with default Android trust (e.g., self-signed, unverified/broken chain).
+   - Legacy boolean `android_default_trust_compatible` is ALWAYS `false` when status is `not_verified` or `verification_failed` (zero false positives).
+4. **RFC 7469 SPKI SHA-256 Pinning** (`tlsSpkiSha256`):
+   - `michi-music-mobile/michi-link-client/src/main/java/org/michimusic/link/LinkClient.kt` layers OkHttp `CertificatePinner` ON TOP of Android's platform `X509TrustManager`. SPKI pinning never replaces X.509 chain trust.
+   - `home_tls_spki_pinned` in server capabilities reflects canonical TLS/SPKI readiness and is intentionally independent of `android_trust_verification_status`: clients explicitly trusting a private CA may connect, while Android MUST fail closed if its trust store rejects the chain.
 
-Therefore, **a standalone self-signed certificate WILL FAIL with `SSLHandshakeException` on Android even when SAN and SPKI pin match**. Micro Server explicitly detects and surfaces this on `GET /api/v1/aircat/status`:
-- `tls_trust_mode: "ca_chained"` → `android_default_trust_compatible: true`
-- `tls_trust_mode: "self_signed"` → `android_default_trust_compatible: false` (logs startup warning; WebUI shows warning badge).
-
-### Mode A — Public CA Certificate (PRIMARY, Android-Ready Immediately)
-Compatible with Android's default `X509TrustManager` + OkHttp `CertificatePinner` with **zero custom `TrustManager` changes** in Mobile.
+### Mode A — Public CA Certificate (PRIMARY Target Path for Default Android Trust — Physical Certification Pending)
+Designed to satisfy Android's default `X509TrustManager` + OkHttp `CertificatePinner` without custom `TrustManager` code in Mobile (status on real Android hardware: **`NOT_VERIFIED` / `NOT_RUN`** until physical E2E execution).
 
 Recommended provisioning options for ZimaOS / CasaOS / Docker LAN deployments:
 1. **Let's Encrypt via DNS-01 challenge** (e.g., `certbot` / `acme.sh` with a private LAN A/AAAA record pointing `music.home.example.com` to `192.168.1.50` — no inbound internet ports required!). Mount `fullchain.pem` as `/config/tls.crt` and `privkey.pem` as `/config/tls.key`:
@@ -287,7 +305,7 @@ Authoritative fixture file: `pitydah/michi-link/tests/vectors/interop/micro-mobi
    - Expose TCP `9443` alongside HTTP `9090` (or `network_mode: host` on ZimaOS/CasaOS).
 4. **Verify readiness**:
    - Open `https://<your-dns-hostname>:9443` in WebUI → **AirCat Original Transfer & TLS** → click **Inspect AirCat & TLS Pin**.
-   - Confirm `TLS Ready: HTTPS ACTIVE` and `TLS Trust Mode: CA-CHAINED (ANDROID COMPATIBLE)`.
+   - Confirm `TLS Ready: HTTPS ACTIVE`, `X.509 Profile: CA CHAIN PRESENT — ANDROID TRUST NOT VERIFIED`, and `Chain Signature: VERIFIED`. (Android platform trust MUST be verified from a real Android client against Mode A public CA roots.)
    - Confirm `GET /api/v1/server/info` publishes `michi_id`, `public_key`, `identity_scheme: "ed25519-blake3-v1"`, `michi_home_id`, and all 5 AirCat flags `true`.
 
 ---

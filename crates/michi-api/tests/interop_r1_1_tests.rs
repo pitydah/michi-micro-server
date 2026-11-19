@@ -139,6 +139,9 @@ async fn enable_tls_ca_chained(state: &AppState) {
         key_path: PathBuf::from("/tmp/r1-1-tls.key"),
         tls_port: 9443,
         tls_trust_mode: TlsTrustMode::CaChained,
+        certificate_profile: michi_api::TlsCertificateProfile::CaIssuedChainPresent,
+        chain_cryptographically_verified: true,
+        android_trust_verification_status: michi_api::AndroidTrustVerificationStatus::NotVerified,
         cert_chain_len: 2,
         cert_not_before: Some("2026-01-01T00:00:00Z".into()),
         cert_not_after: Some("2027-01-01T00:00:00Z".into()),
@@ -655,6 +658,9 @@ async fn test_r1_1_p0_b_x509_validation_ca_chained_vs_self_signed_expired_mismat
         key_path: fx.dir.join("self.key"),
         tls_port: 9443,
         tls_trust_mode: TlsTrustMode::SelfSigned,
+        certificate_profile: ok_self.certificate_profile,
+        chain_cryptographically_verified: ok_self.chain_cryptographically_verified,
+        android_trust_verification_status: ok_self.android_trust_verification_status,
         cert_chain_len: 1,
         cert_not_before: Some(ok_self.not_before.to_rfc3339()),
         cert_not_after: Some(ok_self.not_after.to_rfc3339()),
@@ -676,6 +682,12 @@ async fn test_r1_1_p0_b_x509_validation_ca_chained_vs_self_signed_expired_mismat
     )
     .await;
     assert_eq!(st_self["tls_trust_mode"], "self_signed");
+    assert_eq!(st_self["certificate_profile"], "self_signed_verified");
+    assert_eq!(st_self["chain_cryptographically_verified"], false);
+    assert_eq!(
+        st_self["android_trust_verification_status"],
+        "verification_failed"
+    );
     assert_eq!(st_self["android_default_trust_compatible"], false);
 
     enable_tls_ca_chained(&state).await;
@@ -694,7 +706,11 @@ async fn test_r1_1_p0_b_x509_validation_ca_chained_vs_self_signed_expired_mismat
     )
     .await;
     assert_eq!(st_ca["tls_trust_mode"], "ca_chained");
-    assert_eq!(st_ca["android_default_trust_compatible"], true);
+    assert_eq!(st_ca["certificate_profile"], "ca_issued_chain_present");
+    assert_eq!(st_ca["chain_cryptographically_verified"], true);
+    // R1.2-P0-B: A CA chain MUST NEVER claim Android default trust compatibility without verification
+    assert_eq!(st_ca["android_trust_verification_status"], "not_verified");
+    assert_eq!(st_ca["android_default_trust_compatible"], false);
 }
 
 #[tokio::test]
@@ -1417,6 +1433,9 @@ async fn test_r1_1_real_tcp_http_vs_real_rustls_https_full_mobile_lifecycle() {
         key_path: fx.dir.join("leaf.key"),
         tls_port: https_addr.port(),
         tls_trust_mode: TlsTrustMode::CaChained,
+        certificate_profile: michi_api::TlsCertificateProfile::CaIssuedChainPresent,
+        chain_cryptographically_verified: true,
+        android_trust_verification_status: michi_api::AndroidTrustVerificationStatus::NotVerified,
         cert_chain_len: 2,
         cert_not_before: Some(verified.not_before.to_rfc3339()),
         cert_not_after: Some(verified.not_after.to_rfc3339()),

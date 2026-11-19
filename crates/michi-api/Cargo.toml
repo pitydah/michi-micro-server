@@ -61,6 +61,8 @@ semver = "1.0"
 libc = "0.2"
 rustls.workspace = true
 rustls-pemfile = "2"
+rustls-webpki = { version = "0.103", features = ["ring", "std"] }
+ring = "0.17"
 
 [features]
 default = []

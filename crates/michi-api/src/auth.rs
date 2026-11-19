@@ -29,25 +29,21 @@ pub fn extract_bearer_token(request: &Request) -> Option<String> {
     extract_token(request)
 }
 
-/// Helper to determine if the request is over HTTPS
+/// Helper to determine if the request arrived over verified HTTPS (direct TLS
+/// or strictly consistent trusted reverse proxy headers).
 fn is_secure_request(
+    direct_tls: bool,
     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: &axum::http::HeaderMap,
     config: &michi_config::Config,
 ) -> bool {
-    let peer_addr = connect_info.map(|axum::extract::ConnectInfo(addr)| addr);
-    let peer_ip = peer_addr.map(|a| a.ip());
-    if let Some(ref ip) = peer_ip {
-        if config.is_trusted_proxy(ip) {
-            if let Some(proto) = headers
-                .get("X-Forwarded-Proto")
-                .and_then(|v| v.to_str().ok())
-            {
-                return proto.eq_ignore_ascii_case("https");
-            }
-        }
+    if direct_tls {
+        return true;
     }
-    false
+    let peer_ip = connect_info.map(|axum::extract::ConnectInfo(addr)| addr.ip());
+    crate::home_tls_policy::HomeTlsTransportPolicy::is_trusted_proxy_https_with_config(
+        config, peer_ip, headers,
+    )
 }
 
 /// Helper to build Set-Cookie header for michi_web_session
@@ -618,6 +614,7 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::passw
 )]
 pub(crate) async fn login_handler(
     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    direct_tls: Option<axum::Extension<crate::AirCatTlsVerifiedConnection>>,
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
@@ -697,7 +694,7 @@ pub(crate) async fn login_handler(
             Json(json!({"status": "error", "message": "failed to initialize session"})),
         )
     })?;
-    let secure = is_secure_request(connect_info, &headers, &state.config);
+    let secure = is_secure_request(direct_tls.is_some(), connect_info, &headers, &state.config);
     let cookie_val = make_session_cookie(&token, 86400, secure);
 
     let mut resp_headers = axum::http::HeaderMap::new();
@@ -734,6 +731,7 @@ pub(crate) async fn login_handler(
 )]
 pub(crate) async fn register_handler(
     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    direct_tls: Option<axum::Extension<crate::AirCatTlsVerifiedConnection>>,
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
@@ -832,7 +830,7 @@ pub(crate) async fn register_handler(
                 Json(json!({"status": "error", "message": "failed to initialize session"})),
             )
         })?;
-    let secure = is_secure_request(connect_info, &headers, &state.config);
+    let secure = is_secure_request(direct_tls.is_some(), connect_info, &headers, &state.config);
     let cookie_val = make_session_cookie(&token, 86400, secure);
 
     let mut resp_headers = axum::http::HeaderMap::new();
@@ -865,6 +863,7 @@ pub(crate) async fn register_handler(
 )]
 pub(crate) async fn logout_handler(
     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    direct_tls: Option<axum::Extension<crate::AirCatTlsVerifiedConnection>>,
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     request: Request,
@@ -876,7 +875,7 @@ pub(crate) async fn logout_handler(
             revocation_failed = true;
         }
     }
-    let secure = is_secure_request(connect_info, &headers, &state.config);
+    let secure = is_secure_request(direct_tls.is_some(), connect_info, &headers, &state.config);
     let cookie_val = make_session_cookie("", 0, secure);
     let mut resp_headers = axum::http::HeaderMap::new();
     if let Ok(v) = axum::http::HeaderValue::from_str(&cookie_val) {

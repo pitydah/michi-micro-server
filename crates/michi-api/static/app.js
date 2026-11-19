@@ -2433,17 +2433,32 @@ async function loadAirCatStatus() {
     }
     if (out && st) {
       var stats = st.stats || {};
+      var profile = st.certificate_profile || 'unknown';
+      var androidStatus = st.android_trust_verification_status || 'not_verified';
       var trustLabel = 'NOT CONFIGURED';
       var trustBadge = 'disabled';
       if (st.tls_configured) {
-        if (st.android_default_trust_compatible) {
-          trustLabel = 'CA-CHAINED (ANDROID COMPATIBLE)';
-          trustBadge = 'stable';
-        } else {
-          trustLabel = 'SELF-SIGNED (REJECTED BY ANDROID DEFAULT)';
+        if (profile === 'ca_issued_chain_present') {
+          trustLabel = 'CA CHAIN PRESENT — ANDROID TRUST NOT VERIFIED';
           trustBadge = 'warning';
+        } else if (profile === 'incomplete_chain') {
+          trustLabel = 'INCOMPLETE / UNVERIFIED CHAIN';
+          trustBadge = 'warning';
+        } else if (profile === 'self_signed_verified') {
+          trustLabel = 'SELF-SIGNED — REJECTED BY ANDROID DEFAULT';
+          trustBadge = 'warning';
+        } else if (profile === 'self_issued_unverified') {
+          trustLabel = 'SELF-ISSUED (UNVERIFIED SIGNATURE)';
+          trustBadge = 'disabled';
+        } else {
+          trustLabel = 'UNKNOWN CERTIFICATE PROFILE';
+          trustBadge = 'disabled';
         }
       }
+      var androidTrustLabel = androidStatus === 'verified_with_explicit_trust_roots'
+        ? 'VERIFIED WITH EXPLICIT ROOTS (NOT ANDROID DEFAULT)'
+        : (androidStatus === 'verification_failed' ? 'VERIFICATION FAILED' : 'NOT VERIFIED');
+      var androidTrustBadge = androidStatus === 'verification_failed' ? 'disabled' : 'warning';
       var pendingHtml = '';
       if (tlsAdminNote) {
         pendingHtml = '<div class="panel-row"><span class="panel-label">HTTPS Admin</span><span style="color:var(--warning,#f59e0b);font-size:.78rem">' + esc(tlsAdminNote) + '</span></div>';
@@ -2470,10 +2485,12 @@ async function loadAirCatStatus() {
       out.innerHTML =
         '<div class="panel-row"><span class="panel-label">Protocol</span><span class="panel-mono">' + esc(st.protocol || 'michi.aircat.original.v1') + '</span></div>' +
         '<div class="panel-row"><span class="panel-label">TLS Ready</span><span class="badge ' + (st.tls_listener_ready ? 'stable' : 'disabled') + '">' + (st.tls_listener_ready ? 'HTTPS ACTIVE' : 'TLS NOT CONFIGURED') + '</span></div>' +
-        '<div class="panel-row"><span class="panel-label">TLS Trust Mode</span><span class="badge ' + trustBadge + '">' + esc(trustLabel) + '</span></div>' +
+        '<div class="panel-row"><span class="panel-label">X.509 Profile</span><span class="badge ' + trustBadge + '">' + esc(trustLabel) + '</span></div>' +
+        '<div class="panel-row"><span class="panel-label">Android Trust</span><span class="badge ' + androidTrustBadge + '">' + esc(androidTrustLabel) + '</span></div>' +
+        '<div class="panel-row"><span class="panel-label">Chain Signature</span><span class="panel-mono">' + (st.chain_cryptographically_verified ? 'VERIFIED (' + (st.cert_chain_len || 0) + ' certs)' : 'NOT VERIFIED (' + (st.cert_chain_len || 0) + ' certs)') + '</span></div>' +
         '<div class="panel-row"><span class="panel-label">Pinned URL</span><span class="panel-mono">' + esc(st.pinned_base_url || 'N/A (configure tls.crt / tls.key)') + '</span></div>' +
         '<div class="panel-row"><span class="panel-label">SPKI Pin</span><span class="panel-mono">' + esc(st.tls_spki_sha256 || 'N/A') + '</span></div>' +
-        (st.cert_not_after ? '<div class="panel-row"><span class="panel-label">Cert Valid Until</span><span class="panel-mono">' + esc(st.cert_not_after) + ' (chain: ' + (st.cert_chain_len || 0) + ')</span></div>' : '') +
+        (st.cert_not_after ? '<div class="panel-row"><span class="panel-label">Cert Valid Until</span><span class="panel-mono">' + esc(st.cert_not_after) + '</span></div>' : '') +
         '<div class="panel-row"><span class="panel-label">Snapshots / Cache</span><span class="panel-mono">' + (stats.active_snapshots || 0) + ' active · ' + (stats.cached_digests || 0) + ' cached (' + (stats.digest_cache_hits || 0) + ' hits)</span></div>' +
         '<div class="panel-row"><span class="panel-label">Transfers / Revocations</span><span class="panel-mono">' + (stats.downloads_started || 0) + ' downloads · ' + (stats.bytes_served || 0) + ' B · ' + (stats.midstream_revocations || 0) + ' aborts · ' + (st.pending_enrollments || 0) + ' pending</span></div>' +
         (qrPayload ? '<div class="panel-row"><span class="panel-label">Home ID</span><span class="panel-mono">' + esc(qrPayload.homeId || '') + '</span></div>' : '') +

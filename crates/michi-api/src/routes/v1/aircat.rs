@@ -31,7 +31,7 @@ use crate::{
     aircat_original_file,
     aircat_producer_security::{subtle_eq_str, ProducerSnapshot},
     home_tls_policy::{HomeTlsTransportPolicy, TlsTransportVerdict},
-    AppState, TlsTrustMode,
+    AndroidTrustVerificationStatus, AppState, TlsCertificateProfile,
 };
 
 pub const AIRCAT_PROTOCOL_HEADER: &str = "X-Michi-AirCat-Protocol";
@@ -2316,10 +2316,23 @@ pub async fn aircat_status_handler(
             .await
             .map(|v| v.len())
             .unwrap_or(0);
-    let android_default_trust_compatible = tls_info
+    let certificate_profile = tls_info
         .as_ref()
-        .map(|t| tls_listener_ready && t.tls_trust_mode == TlsTrustMode::CaChained)
+        .map(|t| t.certificate_profile)
+        .unwrap_or(TlsCertificateProfile::Unknown);
+    let chain_cryptographically_verified = tls_info
+        .as_ref()
+        .map(|t| t.chain_cryptographically_verified)
         .unwrap_or(false);
+    let android_trust_verification_status = tls_info
+        .as_ref()
+        .map(|t| t.android_trust_verification_status)
+        .unwrap_or(AndroidTrustVerificationStatus::NotVerified);
+    // R1.2-P0-B: Never infer Android default X509TrustManager acceptance from
+    // structural chain presence. Server-side inspection cannot verify Android's
+    // live platform trust store, so this legacy boolean MUST remain false when
+    // status is `not_verified` or `verification_failed` (zero false positives).
+    let android_default_trust_compatible = false;
     Ok((
         aircat_json_headers(),
         Json(serde_json::json!({
@@ -2330,6 +2343,9 @@ pub async fn aircat_status_handler(
             "pinned_base_url": tls_info.as_ref().map(|t| t.pinned_base_url.clone()),
             "tls_spki_sha256": tls_info.as_ref().map(|t| t.tls_spki_sha256.clone()),
             "tls_trust_mode": tls_info.as_ref().map(|t| t.tls_trust_mode),
+            "certificate_profile": certificate_profile,
+            "chain_cryptographically_verified": chain_cryptographically_verified,
+            "android_trust_verification_status": android_trust_verification_status,
             "android_default_trust_compatible": android_default_trust_compatible,
             "cert_chain_len": tls_info.as_ref().map(|t| t.cert_chain_len).unwrap_or(0),
             "cert_not_before": tls_info.as_ref().and_then(|t| t.cert_not_before.clone()),

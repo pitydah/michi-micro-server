@@ -150,13 +150,46 @@ pub struct AirCatTlsVerifiedConnection;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsTrustMode {
-    /// Leaf signed by an issuer distinct from subject (Public CA such as Let's Encrypt
-    /// DNS-01 / Tailscale HTTPS, or a Home Private CA chain).
+    /// Legacy coarse structural indicator: CA-issued certificate with a verified
+    /// X.509 chain present. NEVER implies Android default X509TrustManager acceptance.
     CaChained,
-    /// Single self-signed leaf certificate (issuer == subject). Android's default
+    /// Single self-signed or self-issued leaf certificate. Android's default
     /// X509TrustManager rejects self-signed certificates even with matching SAN + SPKI pin.
     #[default]
     SelfSigned,
+    /// CA-issued leaf without a complete/valid verified chain (missing intermediate,
+    /// out-of-order chain, expired intermediate, or signature verification failure).
+    IncompleteChain,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsCertificateProfile {
+    /// Single self-issued leaf whose cryptographic signature verifies against its own SPKI.
+    SelfSignedVerified,
+    /// Leaf has issuer == subject (self-issued), but cryptographic self-signature did not verify.
+    SelfIssuedUnverified,
+    /// CA-issued leaf accompanied by an ordered, valid, cryptographically verified chain.
+    CaIssuedChainPresent,
+    /// CA-issued leaf missing issuer/intermediate certs, out of order, expired intermediate,
+    /// non-CA intermediate, or failed cryptographic chain verification.
+    IncompleteChain,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AndroidTrustVerificationStatus {
+    /// Server has NOT verified trust against Android's platform X509TrustManager.
+    /// Presenting a CA chain never proves Android default trust acceptance.
+    #[default]
+    NotVerified,
+    /// Verified cryptographically against an explicit trust root bundle.
+    VerifiedWithExplicitTrustRoots,
+    /// Known incompatible with default Android trust (e.g., self-signed, broken chain,
+    /// or failed explicit trust root verification).
+    VerificationFailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,6 +202,12 @@ pub struct AirCatTlsInfo {
     #[serde(default)]
     pub tls_trust_mode: TlsTrustMode,
     #[serde(default)]
+    pub certificate_profile: TlsCertificateProfile,
+    #[serde(default)]
+    pub chain_cryptographically_verified: bool,
+    #[serde(default)]
+    pub android_trust_verification_status: AndroidTrustVerificationStatus,
+    #[serde(default)]
     pub cert_chain_len: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cert_not_before: Option<String>,
@@ -177,10 +216,15 @@ pub struct AirCatTlsInfo {
 }
 
 /// Verified X.509 metadata extracted from a PEM certificate chain and private key.
+/// Strictly separates TLS readiness, X.509 structure/chain verification, SPKI pin,
+/// and Android client trust verification (never inferring Android trust from chain presence).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedX509Metadata {
     pub tls_spki_sha256: String,
     pub tls_trust_mode: TlsTrustMode,
+    pub certificate_profile: TlsCertificateProfile,
+    pub chain_cryptographically_verified: bool,
+    pub android_trust_verification_status: AndroidTrustVerificationStatus,
     pub cert_chain_len: usize,
     pub not_before: chrono::DateTime<chrono::Utc>,
     pub not_after: chrono::DateTime<chrono::Utc>,
@@ -188,9 +232,11 @@ pub struct VerifiedX509Metadata {
 
 /// Validates a PEM certificate chain + private key for AirCat/Home HTTPS:
 /// 1. Parses PEM certs (>= 1) and private key, verifying cryptographic cert/key match via rustls.
-/// 2. Verifies X.509 validity window (`notBefore <= now <= notAfter`).
-/// 3. Verifies X.509 v3 SubjectAltName covers `pinned_base_url` host/IP.
-/// 4. Computes RFC 7469 SPKI SHA-256 pin and classifies `CaChained` vs `SelfSigned`.
+/// 2. Verifies leaf X.509 validity window (`notBefore <= now <= notAfter`).
+/// 3. Verifies leaf X.509 v3 SubjectAltName covers `pinned_base_url` host/IP.
+/// 4. Verifies leaf ExtendedKeyUsage permits `serverAuth` when the EKU extension is present.
+/// 5. Computes RFC 7469 SPKI SHA-256 pin and cryptographically classifies `TlsCertificateProfile`
+///    and `AndroidTrustVerificationStatus` without inferring Android default trust from chain presence.
 pub fn validate_x509_for_home_tls(
     cert_pem: &[u8],
     key_pem: &[u8],
@@ -214,7 +260,7 @@ pub fn validate_x509_for_home_tls(
     let leaf_der = certs[0].as_ref().to_vec();
     rustls::ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(certs, key)
+        .with_single_cert(certs.clone(), key)
         .map_err(|e| format!("TLS certificate and private key mismatch or invalid: {e}"))?;
 
     let tls_spki_sha256 = extract_spki_sha256_from_pem(&leaf_der)
@@ -241,20 +287,251 @@ pub fn validate_x509_for_home_tls(
         ));
     }
 
-    let is_self_signed = cert_chain_len == 1 && is_x509_self_issued(&leaf_der).unwrap_or(true);
-    let tls_trust_mode = if is_self_signed {
-        TlsTrustMode::SelfSigned
+    if !x509_eku_permits_server_auth(&leaf_der) {
+        return Err(
+            "X.509 ExtendedKeyUsage on leaf certificate does not permit TLS serverAuth".into(),
+        );
+    }
+
+    let self_issued = is_x509_self_issued(&leaf_der);
+    let (
+        certificate_profile,
+        chain_cryptographically_verified,
+        tls_trust_mode,
+        android_trust_verification_status,
+    ) = if cert_chain_len == 1 {
+        match self_issued {
+            Some(true) => {
+                if verify_x509_signature_by_issuer(&leaf_der, &leaf_der) {
+                    (
+                        TlsCertificateProfile::SelfSignedVerified,
+                        false,
+                        TlsTrustMode::SelfSigned,
+                        AndroidTrustVerificationStatus::VerificationFailed,
+                    )
+                } else {
+                    (
+                        TlsCertificateProfile::SelfIssuedUnverified,
+                        false,
+                        TlsTrustMode::SelfSigned,
+                        AndroidTrustVerificationStatus::VerificationFailed,
+                    )
+                }
+            }
+            Some(false) => {
+                // CA-issued leaf presented without any intermediate/issuer certificate.
+                // Chain is incomplete locally; Android trust is not verified.
+                (
+                    TlsCertificateProfile::IncompleteChain,
+                    false,
+                    TlsTrustMode::IncompleteChain,
+                    AndroidTrustVerificationStatus::NotVerified,
+                )
+            }
+            None => (
+                TlsCertificateProfile::Unknown,
+                false,
+                TlsTrustMode::SelfSigned,
+                AndroidTrustVerificationStatus::VerificationFailed,
+            ),
+        }
+    } else if self_issued == Some(true) {
+        // Multi-cert PEM starting with a self-issued leaf is structurally invalid as a CA chain
+        let profile = if verify_x509_signature_by_issuer(&leaf_der, &leaf_der) {
+            TlsCertificateProfile::SelfSignedVerified
+        } else {
+            TlsCertificateProfile::SelfIssuedUnverified
+        };
+        (
+            profile,
+            false,
+            TlsTrustMode::SelfSigned,
+            AndroidTrustVerificationStatus::VerificationFailed,
+        )
     } else {
-        TlsTrustMode::CaChained
+        match verify_presented_ca_chain(&certs, pinned_base_url, now_utc) {
+            Ok(()) => (
+                TlsCertificateProfile::CaIssuedChainPresent,
+                true,
+                TlsTrustMode::CaChained,
+                // CRITICAL (R1.2-P0-B): A valid presented chain NEVER proves acceptance
+                // by Android's platform X509TrustManager (e.g. could be an unknown private CA).
+                AndroidTrustVerificationStatus::NotVerified,
+            ),
+            Err(reason) => {
+                tracing::warn!(
+                    pinned_base_url = %pinned_base_url,
+                    reason = %reason,
+                    "Presented X.509 chain failed structural/cryptographic verification"
+                );
+                (
+                    TlsCertificateProfile::IncompleteChain,
+                    false,
+                    TlsTrustMode::IncompleteChain,
+                    AndroidTrustVerificationStatus::VerificationFailed,
+                )
+            }
+        }
     };
 
     Ok(VerifiedX509Metadata {
         tls_spki_sha256,
         tls_trust_mode,
+        certificate_profile,
+        chain_cryptographically_verified,
+        android_trust_verification_status,
         cert_chain_len,
         not_before,
         not_after,
     })
+}
+
+/// Cryptographically verifies a presented PEM certificate chain against an explicit
+/// trust root PEM bundle (using `rustls-webpki`), validating chain signatures,
+/// BasicConstraints, KeyUsage/EKU `serverAuth`, validity windows, and SAN/hostname.
+/// Note: Passing against a custom test/private CA bundle NEVER proves acceptance by
+/// Android's default platform `X509TrustManager`.
+pub fn verify_x509_against_explicit_roots(
+    cert_pem: &[u8],
+    trust_roots_pem: &[u8],
+    pinned_base_url: &str,
+    now_utc: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut std::io::Cursor::new(cert_pem))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("invalid certificate PEM: {e}"))?;
+    if certs.is_empty() {
+        return Err("no certificates in presented PEM".into());
+    }
+    let root_certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut std::io::Cursor::new(trust_roots_pem))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("invalid trust root PEM: {e}"))?;
+    if root_certs.is_empty() {
+        return Err("no certificates in trust roots PEM".into());
+    }
+
+    let anchors: Vec<rustls::pki_types::TrustAnchor<'static>> = root_certs
+        .iter()
+        .map(|c| {
+            webpki::anchor_from_trusted_cert(c)
+                .map(|a| a.to_owned())
+                .map_err(|e| format!("invalid trust anchor: {e:?}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let ee = webpki::EndEntityCert::try_from(&certs[0])
+        .map_err(|e| format!("leaf certificate rejected by webpki: {e:?}"))?;
+    let unix_time = rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(
+        now_utc.timestamp().max(0) as u64,
+    ));
+    let intermediates = if certs.len() > 1 { &certs[1..] } else { &[] };
+    ee.verify_for_usage(
+        webpki::ALL_VERIFICATION_ALGS,
+        &anchors,
+        intermediates,
+        unix_time,
+        webpki::KeyUsage::server_auth(),
+        None,
+        None,
+    )
+    .map_err(|e| format!("X.509 chain verification against explicit roots failed: {e:?}"))?;
+
+    let server_name = extract_server_name_from_https_url(pinned_base_url)?;
+    ee.verify_is_valid_for_subject_name(&server_name)
+        .map_err(|e| format!("X.509 subject name verification failed: {e:?}"))?;
+
+    Ok(())
+}
+
+fn extract_server_name_from_https_url(
+    https_url: &str,
+) -> Result<rustls::pki_types::ServerName<'static>, String> {
+    let parsed = reqwest::Url::parse(https_url)
+        .map_err(|e| format!("invalid pinned_base_url '{https_url}': {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("pinned_base_url must use https scheme".into());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "pinned_base_url missing host".to_string())?;
+    let trimmed = host.trim_start_matches('[').trim_end_matches(']');
+    rustls::pki_types::ServerName::try_from(trimmed.to_string())
+        .map_err(|_| format!("invalid TLS server name '{trimmed}'"))
+}
+
+/// Verifies that a multi-certificate chain (`certs.len() >= 2`) is strictly ordered
+/// (`certs[i].issuer == certs[i+1].subject`), every issuer/intermediate cert is within
+/// its validity window and carries `BasicConstraints (CA:TRUE)`, and the cryptographic
+/// signatures and `serverAuth` usage verify cleanly with `rustls-webpki`.
+fn verify_presented_ca_chain(
+    certs: &[rustls::pki_types::CertificateDer<'static>],
+    pinned_base_url: &str,
+    now_utc: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    if certs.len() < 2 {
+        return Err("chain has fewer than 2 certificates".into());
+    }
+
+    // 1. Strict order check: each certificate's issuer MUST match the next certificate's subject
+    for idx in 0..certs.len() - 1 {
+        let (child_issuer, _) = extract_x509_issuer_and_subject(certs[idx].as_ref())
+            .ok_or_else(|| format!("failed to parse issuer/subject at chain index {idx}"))?;
+        let (_, parent_subject) = extract_x509_issuer_and_subject(certs[idx + 1].as_ref())
+            .ok_or_else(|| format!("failed to parse issuer/subject at chain index {}", idx + 1))?;
+        if child_issuer != parent_subject {
+            return Err(format!(
+                "X.509 chain out of order or disconnected between index {idx} and {}",
+                idx + 1
+            ));
+        }
+    }
+
+    // 2. Every issuer/intermediate certificate in certs[1..] MUST be within its validity window
+    //    and carry BasicConstraints CA:TRUE
+    for (offset, cert) in certs[1..].iter().enumerate() {
+        let idx = offset + 1;
+        let (nb, na) = extract_x509_validity(cert.as_ref())
+            .ok_or_else(|| format!("failed to parse validity for chain cert index {idx}"))?;
+        if now_utc < nb || now_utc > na {
+            return Err(format!(
+                "intermediate/issuer certificate at index {idx} is outside validity window"
+            ));
+        }
+        if !x509_basic_constraints_is_ca(cert.as_ref()) {
+            return Err(format!(
+                "chain certificate at index {idx} lacks BasicConstraints CA:TRUE"
+            ));
+        }
+    }
+
+    // 3. Cryptographic verification of leaf -> intermediates -> presented chain tip using rustls-webpki
+    let ee = webpki::EndEntityCert::try_from(&certs[0])
+        .map_err(|e| format!("leaf cert rejected as EndEntityCert: {e:?}"))?;
+    let tip_anchor = webpki::anchor_from_trusted_cert(certs.last().unwrap())
+        .map_err(|e| format!("chain tip invalid as trust anchor: {e:?}"))?
+        .to_owned();
+    let intermediates = &certs[1..certs.len() - 1];
+    let unix_time = rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(
+        now_utc.timestamp().max(0) as u64,
+    ));
+    ee.verify_for_usage(
+        webpki::ALL_VERIFICATION_ALGS,
+        &[tip_anchor],
+        intermediates,
+        unix_time,
+        webpki::KeyUsage::server_auth(),
+        None,
+        None,
+    )
+    .map_err(|e| format!("cryptographic X.509 chain verification failed: {e:?}"))?;
+
+    let server_name = extract_server_name_from_https_url(pinned_base_url)?;
+    ee.verify_is_valid_for_subject_name(&server_name)
+        .map_err(|e| format!("leaf SAN verification failed: {e:?}"))?;
+
+    Ok(())
 }
 
 impl AirCatTlsInfo {
@@ -319,11 +596,21 @@ impl AirCatTlsInfo {
             }
         };
 
-        if verified.tls_trust_mode == TlsTrustMode::SelfSigned {
+        if matches!(
+            verified.certificate_profile,
+            TlsCertificateProfile::SelfSignedVerified | TlsCertificateProfile::SelfIssuedUnverified
+        ) {
             tracing::warn!(
                 cert = %cert_path.display(),
                 pinned_base_url = %pinned_base_url,
-                "Loaded self-signed TLS certificate: Android's default X509TrustManager rejects self-signed certificates even with matching SAN + SPKI pin. Use a CA-chained certificate (Mode A: Let's Encrypt DNS-01 / Tailscale HTTPS) for production Android interoperability."
+                profile = ?verified.certificate_profile,
+                "Loaded self-signed/self-issued TLS certificate: Android's default X509TrustManager rejects self-signed certificates even with matching SAN + SPKI pin. Use a publicly trusted CA certificate (Mode A: Let's Encrypt DNS-01 / Tailscale HTTPS) for default Android trust compatibility."
+            );
+        } else if verified.certificate_profile == TlsCertificateProfile::IncompleteChain {
+            tracing::warn!(
+                cert = %cert_path.display(),
+                pinned_base_url = %pinned_base_url,
+                "Loaded TLS certificate with incomplete or unverified X.509 chain; clients may reject the handshake unless the full ordered chain is provided"
             );
         }
 
@@ -334,6 +621,9 @@ impl AirCatTlsInfo {
             key_path,
             tls_port,
             tls_trust_mode: verified.tls_trust_mode,
+            certificate_profile: verified.certificate_profile,
+            chain_cryptographically_verified: verified.chain_cryptographically_verified,
+            android_trust_verification_status: verified.android_trust_verification_status,
             cert_chain_len: verified.cert_chain_len,
             cert_not_before: Some(verified.not_before.to_rfc3339()),
             cert_not_after: Some(verified.not_after.to_rfc3339()),
@@ -416,8 +706,8 @@ pub fn extract_x509_validity(
     ))
 }
 
-/// Returns `true` when the X.509 DER certificate's issuer Name equals its subject Name.
-pub fn is_x509_self_issued(cert_der: &[u8]) -> Option<bool> {
+/// Extracts `(issuer_der_body, subject_der_body)` from a DER X.509 certificate.
+pub fn extract_x509_issuer_and_subject(cert_der: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let (cert_tag, cert_body, _) = read_der_tlv(cert_der)?;
     if cert_tag != 0x30 {
         return None;
@@ -438,7 +728,209 @@ pub fn is_x509_self_issued(cert_der: &[u8]) -> Option<bool> {
     let (_, issuer_body, after_issuer) = read_der_tlv(tbs_rest)?;
     let (_, _, after_validity) = read_der_tlv(after_issuer)?;
     let (_, subject_body, _) = read_der_tlv(after_validity)?;
-    Some(issuer_body == subject_body)
+    Some((issuer_body.to_vec(), subject_body.to_vec()))
+}
+
+/// Returns `true` when the X.509 DER certificate's issuer Name equals its subject Name.
+/// Note: equality of issuer and subject indicates *self-issued*, NOT cryptographic self-signature.
+pub fn is_x509_self_issued(cert_der: &[u8]) -> Option<bool> {
+    let (issuer, subject) = extract_x509_issuer_and_subject(cert_der)?;
+    Some(issuer == subject)
+}
+
+/// Finds an X.509 v3 extension's OCTET STRING value by raw DER OID bytes.
+fn find_x509_extension<'a>(cert_der: &'a [u8], target_oid: &[u8]) -> Option<&'a [u8]> {
+    let (cert_tag, cert_body, _) = read_der_tlv(cert_der)?;
+    if cert_tag != 0x30 {
+        return None;
+    }
+    let (tbs_tag, mut tbs_rest, _) = read_der_tlv(cert_body)?;
+    if tbs_tag != 0x30 {
+        return None;
+    }
+    if tbs_rest.first().copied() == Some(0xA0) {
+        let (_, _, after_ver) = read_der_tlv(tbs_rest)?;
+        tbs_rest = after_ver;
+    }
+    // Skip: serialNumber, signature, issuer, validity, subject, subjectPublicKeyInfo
+    for _ in 0..6 {
+        let (_, _, next) = read_der_tlv(tbs_rest)?;
+        tbs_rest = next;
+    }
+    while !tbs_rest.is_empty() {
+        let (tag, body, next) = read_der_tlv(tbs_rest)?;
+        tbs_rest = next;
+        if tag != 0xA3 {
+            continue;
+        }
+        let (ext_seq_tag, mut ext_rest, _) = read_der_tlv(body)?;
+        if ext_seq_tag != 0x30 {
+            return None;
+        }
+        while !ext_rest.is_empty() {
+            let (ext_tag, ext_body, next_ext) = read_der_tlv(ext_rest)?;
+            ext_rest = next_ext;
+            if ext_tag != 0x30 {
+                continue;
+            }
+            let (oid_tag, oid_bytes, mut after_oid) = read_der_tlv(ext_body)?;
+            if oid_tag != 0x06 || oid_bytes != target_oid {
+                continue;
+            }
+            if after_oid.first().copied() == Some(0x01) {
+                let (_, _, next_f) = read_der_tlv(after_oid)?;
+                after_oid = next_f;
+            }
+            let (oct_tag, oct_body, _) = read_der_tlv(after_oid)?;
+            if oct_tag == 0x04 {
+                return Some(oct_body);
+            }
+        }
+    }
+    None
+}
+
+/// Returns `true` if BasicConstraints (OID 2.5.29.19) is present and has `cA = TRUE`.
+pub fn x509_basic_constraints_is_ca(cert_der: &[u8]) -> bool {
+    // OID 2.5.29.19 (basicConstraints) = [0x55, 0x1D, 0x13]
+    let Some(ext_val) = find_x509_extension(cert_der, &[0x55, 0x1D, 0x13]) else {
+        return false;
+    };
+    let Some((seq_tag, seq_body, _)) = read_der_tlv(ext_val) else {
+        return false;
+    };
+    if seq_tag != 0x30 || seq_body.is_empty() {
+        return false;
+    }
+    if let Some((tag, val, _)) = read_der_tlv(seq_body) {
+        tag == 0x01 && val.first().copied().unwrap_or(0) != 0
+    } else {
+        false
+    }
+}
+
+/// Returns `true` if ExtendedKeyUsage (OID 2.5.29.37) is absent OR permits
+/// `id-kp-serverAuth` (1.3.6.1.5.5.7.3.1) / `anyExtendedKeyUsage` (2.5.29.37.0).
+pub fn x509_eku_permits_server_auth(cert_der: &[u8]) -> bool {
+    // OID 2.5.29.37 (extKeyUsage) = [0x55, 0x1D, 0x25]
+    let Some(ext_val) = find_x509_extension(cert_der, &[0x55, 0x1D, 0x25]) else {
+        return true;
+    };
+    let Some((seq_tag, mut seq_rest, _)) = read_der_tlv(ext_val) else {
+        return false;
+    };
+    if seq_tag != 0x30 {
+        return false;
+    }
+    const OID_SERVER_AUTH: &[u8] = &[0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01];
+    const OID_ANY_EKU: &[u8] = &[0x55, 0x1D, 0x25, 0x00];
+    while !seq_rest.is_empty() {
+        let Some((tag, oid_bytes, next)) = read_der_tlv(seq_rest) else {
+            return false;
+        };
+        seq_rest = next;
+        if tag == 0x06 && (oid_bytes == OID_SERVER_AUTH || oid_bytes == OID_ANY_EKU) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Cryptographically verifies `child_der`'s X.509 signature using `issuer_der`'s
+/// SubjectPublicKeyInfo via `ring`. Used to distinguish a genuinely self-signed
+/// certificate (`SelfSignedVerified`) from a self-issued certificate signed by a
+/// different key (`SelfIssuedUnverified`).
+pub fn verify_x509_signature_by_issuer(child_der: &[u8], issuer_der: &[u8]) -> bool {
+    let Some((cert_tag, cert_body, _)) = read_der_tlv(child_der) else {
+        return false;
+    };
+    if cert_tag != 0x30 {
+        return false;
+    }
+    // tbsCertificate exact TLV slice (bytes covered by X.509 signature)
+    let Some((tbs_tag, _, after_tbs)) = read_der_tlv(cert_body) else {
+        return false;
+    };
+    if tbs_tag != 0x30 {
+        return false;
+    }
+    let tbs_len = cert_body.len().saturating_sub(after_tbs.len());
+    let tbs_tlv = &cert_body[..tbs_len];
+
+    // signatureAlgorithm AlgorithmIdentifier SEQUENCE
+    let Some((alg_tag, alg_body, after_alg)) = read_der_tlv(after_tbs) else {
+        return false;
+    };
+    if alg_tag != 0x30 {
+        return false;
+    }
+    let Some((oid_tag, sig_alg_oid, _)) = read_der_tlv(alg_body) else {
+        return false;
+    };
+    if oid_tag != 0x06 {
+        return false;
+    }
+
+    // signatureValue BIT STRING (leading unused-bits octet must be 0)
+    let Some((sig_tag, sig_bits, _)) = read_der_tlv(after_alg) else {
+        return false;
+    };
+    if sig_tag != 0x03 || sig_bits.len() < 2 || sig_bits[0] != 0 {
+        return false;
+    }
+    let sig_bytes = &sig_bits[1..];
+
+    // Extract issuer SPKI public key BIT STRING bytes
+    let Some(spki_tlv) = extract_x509_spki_der(issuer_der) else {
+        return false;
+    };
+    let Some((spki_tag, spki_body, _)) = read_der_tlv(spki_tlv) else {
+        return false;
+    };
+    if spki_tag != 0x30 {
+        return false;
+    }
+    let Some((_, _, after_spki_alg)) = read_der_tlv(spki_body) else {
+        return false;
+    };
+    let Some((pk_tag, pk_bits, _)) = read_der_tlv(after_spki_alg) else {
+        return false;
+    };
+    if pk_tag != 0x03 || pk_bits.len() < 2 || pk_bits[0] != 0 {
+        return false;
+    }
+    let pk_bytes = &pk_bits[1..];
+
+    // Map X.509 signatureAlgorithm OID -> ring::signature::VerificationAlgorithm
+    let alg: &'static dyn ring::signature::VerificationAlgorithm = match sig_alg_oid {
+        // ecdsa-with-SHA256 (1.2.840.10045.4.3.2)
+        [0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02] => {
+            &ring::signature::ECDSA_P256_SHA256_ASN1
+        }
+        // ecdsa-with-SHA384 (1.2.840.10045.4.3.3)
+        [0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03] => {
+            &ring::signature::ECDSA_P384_SHA384_ASN1
+        }
+        // id-Ed25519 (1.3.101.112)
+        [0x2B, 0x65, 0x70] => &ring::signature::ED25519,
+        // sha256WithRSAEncryption (1.2.840.113549.1.1.11)
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B] => {
+            &ring::signature::RSA_PKCS1_2048_8192_SHA256
+        }
+        // sha384WithRSAEncryption (1.2.840.113549.1.1.12)
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0C] => {
+            &ring::signature::RSA_PKCS1_2048_8192_SHA384
+        }
+        // sha512WithRSAEncryption (1.2.840.113549.1.1.13)
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0D] => {
+            &ring::signature::RSA_PKCS1_2048_8192_SHA512
+        }
+        _ => return false,
+    };
+
+    ring::signature::UnparsedPublicKey::new(alg, pk_bytes)
+        .verify(tbs_tlv, sig_bytes)
+        .is_ok()
 }
 
 /// Parses the first X.509 PEM certificate (or raw DER) into DER bytes.
