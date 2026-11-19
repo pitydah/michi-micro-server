@@ -109,7 +109,7 @@ async fn seed_real_wav_track(
 
     let path_str = path.to_string_lossy().to_string();
     let track = michi_core::Track {
-        id: Uuid::new_v5(&Uuid::NAMESPACE_URL, path_str.as_bytes()),
+        id: michi_core::track_id_from_library_path(music_dir, &path),
         title: Some(name.to_string()),
         artist: Some("Michi R1.3".to_string()),
         album: Some("Certification".to_string()),
@@ -536,7 +536,12 @@ async fn test_r13_02_queue_deletion_duplicates_concurrency_rollback_and_control_
         )
         .await
         .unwrap();
-    assert_eq!(add_dup.status(), StatusCode::OK);
+    assert_eq!(
+        add_dup.status(),
+        StatusCode::OK,
+        "add_dup failed: {:?}",
+        response_json(add_dup).await
+    );
 
     let q_dup = response_json(
         app.clone()

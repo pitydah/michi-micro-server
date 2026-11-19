@@ -146,7 +146,7 @@ pub async fn queue_items_handler(
     let _validated =
         validate_and_load_tracks(&state.db, &body.track_ids, &state.config.music_paths).await?;
 
-    let mut tx = state.db.begin().await.map_err(|e| {
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DATABASE_ERROR",
@@ -364,7 +364,7 @@ pub async fn queue_jump_handler(
 
     if queue_id != active_queue_id {
         // V-P0-04: Promote to canonical active-queue in SQLite transaction
-        let mut tx = state.db.begin().await.map_err(|e| {
+        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
             v1_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "DATABASE_ERROR",
@@ -524,7 +524,7 @@ pub async fn queue_transfer_handler(
         )
     })?;
 
-    let mut tx = state.db.begin().await.map_err(|e| {
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DATABASE_ERROR",
@@ -664,7 +664,7 @@ pub async fn queue_reorder_handler(
         })?
     };
 
-    let mut tx = state.db.begin().await.map_err(|e| {
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DATABASE_ERROR",
@@ -847,7 +847,7 @@ pub async fn queue_delete_handler(
             "playback module is disabled",
         ));
     }
-    let mut tx = state.db.begin().await.map_err(|e| {
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DATABASE_ERROR",
@@ -1125,7 +1125,7 @@ pub async fn queue_item_delete_handler(
     // 4. Atomic SQLite mutation: delete ONLY the single targeted queue_item_id and compact
     // positions to contiguous 0..N-1. Commit BEFORE calling PlaybackEngine.
     let now = chrono::Utc::now().to_rfc3339();
-    let mut tx = state.db.begin().await.map_err(|e| {
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DATABASE_ERROR",
@@ -1198,7 +1198,7 @@ pub async fn queue_item_delete_handler(
         .remove_queue_item(removed_idx, removed_track_id, remaining_tracks)
         .await
     {
-        if let Ok(mut rollback_tx) = state.db.begin().await {
+        if let Ok(mut rollback_tx) = state.db.begin_with("BEGIN IMMEDIATE").await {
             let _ = sqlx::query(
                 "INSERT OR IGNORE INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
             )
