@@ -24,6 +24,7 @@ pub struct MichiConnect {
     service_name: Arc<RwLock<String>>,
     mdns_daemon: Arc<RwLock<Option<mdns_sd::ServiceDaemon>>>,
     scent_store: Arc<ScentStore>,
+    michi_home_id: Arc<RwLock<Option<String>>>,
 }
 
 impl MichiConnect {
@@ -45,7 +46,18 @@ impl MichiConnect {
             service_name: Arc::new(RwLock::new(String::new())),
             mdns_daemon: Arc::new(RwLock::new(None)),
             scent_store,
+            michi_home_id: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub fn set_home_id(&self, home_id: String) {
+        if let Ok(mut guard) = self.michi_home_id.write() {
+            *guard = Some(home_id);
+        }
+    }
+
+    pub fn home_id(&self) -> Option<String> {
+        self.michi_home_id.read().ok().and_then(|g| g.clone())
     }
 
     pub fn scent_store(&self) -> Arc<ScentStore> {
@@ -110,12 +122,19 @@ impl MichiConnect {
         let safe_host_label = hostname.replace('.', "-");
         let service_hostname = format!("{safe_host_label}.local.");
 
-        let properties = [
+        let public_key = self.identity.public_key_base64url();
+        let home_id = self.home_id();
+        let mut properties: Vec<(&str, &str)> = vec![
+            ("identity_scheme", michi_identity::IDENTITY_SCHEME_V1),
             ("michi_id", michi_id.as_str()),
+            ("public_key", public_key.as_str()),
             ("api_version", "v1"),
             ("service", "michi-micro-server"),
             ("version", env!("CARGO_PKG_VERSION")),
         ];
+        if let Some(ref hid) = home_id {
+            properties.push(("michi_home_id", hid.as_str()));
+        }
 
         let service_info = mdns_sd::ServiceInfo::new(
             service_type,
@@ -205,10 +224,98 @@ impl MichiConnect {
             host: host.to_string(),
             port,
             features,
-            michi_home_id: None,
+            michi_home_id: self.home_id(),
             membership_fingerprint: None,
         };
         engine.build_signed_announce(&profile)
+    }
+
+    /// Enumerates all unicast IP addresses actually bound to this host's network
+    /// interfaces (including LAN, IPv6, Tailscale NICs, and loopback), plus any
+    /// explicit IP configured via `MICHI_ADVERTISE_HOST`.
+    pub fn local_server_ips() -> Vec<std::net::IpAddr> {
+        let mut ips = Vec::new();
+        let mut push_unique = |ip: std::net::IpAddr| {
+            if ip.is_unspecified() || ip.is_multicast() {
+                return;
+            }
+            if let std::net::IpAddr::V4(v4) = ip {
+                if v4.is_broadcast() {
+                    return;
+                }
+            }
+            if !ips.contains(&ip) {
+                ips.push(ip);
+            }
+        };
+
+        push_unique(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        push_unique(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+
+        if let Ok(ifaces) = if_addrs::get_if_addrs() {
+            for iface in ifaces {
+                push_unique(iface.ip());
+            }
+        }
+
+        if let Ok(adv) = std::env::var("MICHI_ADVERTISE_HOST") {
+            let trimmed = adv.trim().trim_start_matches('[').trim_end_matches(']');
+            if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
+                push_unique(ip);
+            }
+        }
+
+        ips
+    }
+
+    /// Returns the actual `.local` mDNS hostnames advertised by this server instance
+    /// for an optional configured/advertised host (never a blanket wildcard for
+    /// arbitrary LAN `.local` peers).
+    pub fn local_mdns_hostnames_for_host(advertised_host: Option<&str>) -> Vec<String> {
+        let mut hosts = Vec::new();
+        let mut push_mdns = |raw: &str| {
+            let trimmed = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+            if trimmed.is_empty() || trimmed == "0.0.0.0" || trimmed == "::" {
+                return;
+            }
+            let candidate = if trimmed.ends_with(".local") {
+                trimmed
+            } else {
+                format!("{}.local", trimmed.replace('.', "-"))
+            };
+            if candidate != ".local" && !hosts.contains(&candidate) {
+                hosts.push(candidate);
+            }
+        };
+
+        if let Some(h) = advertised_host {
+            push_mdns(h);
+        }
+        if let Ok(explicit) = std::env::var("MICHI_MDNS_HOST") {
+            push_mdns(&explicit);
+        }
+        if let Ok(adv) = std::env::var("MICHI_ADVERTISE_HOST") {
+            push_mdns(&adv);
+        }
+        if let Ok(env_host) = std::env::var("HOSTNAME") {
+            push_mdns(&env_host);
+        }
+        if let Ok(etc_host) = std::fs::read_to_string("/etc/hostname") {
+            push_mdns(&etc_host);
+        }
+
+        hosts
+    }
+
+    /// Returns the actual `.local` mDNS hostnames advertised by this `MichiConnect` instance.
+    pub fn local_mdns_hostnames(&self) -> Vec<String> {
+        let host = self.server_url.read().ok().and_then(|url| {
+            let hostonly = url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://");
+            hostonly.split(':').next().map(|s| s.to_string())
+        });
+        Self::local_mdns_hostnames_for_host(host.as_deref())
     }
 
     /// Resolves the primary non-loopback reachable LAN IP, checking MICHI_ADVERTISE_HOST and local routes offline.
@@ -254,7 +361,7 @@ impl MichiConnect {
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         let connect = self.clone();
-        let host = advertised_host.unwrap_or_else(Self::resolve_lan_ip);
+        let pinned_host = advertised_host.filter(|h| !h.trim().is_empty());
 
         tokio::spawn(async move {
             let bind_addr: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
@@ -276,9 +383,10 @@ impl MichiConnect {
             );
 
             let mut interval = tokio::time::interval(michi_identity::discovery::ANNOUNCE_INTERVAL);
+            let initial_host = pinned_host.clone().unwrap_or_else(Self::resolve_lan_ip);
             info!(
                 "connect: discovery announcer started for host {} targeting {}",
-                host, target_addr
+                initial_host, target_addr
             );
 
             loop {
@@ -288,7 +396,10 @@ impl MichiConnect {
                         break;
                     }
                     _ = interval.tick() => {
-                        match connect.build_signed_announce_with_features(port, &host, features.clone()) {
+                        let current_host = pinned_host
+                            .clone()
+                            .unwrap_or_else(Self::resolve_lan_ip);
+                        match connect.build_signed_announce_with_features(port, &current_host, features.clone()) {
                             Ok(announce) => {
                                 if let Ok(json_bytes) = serde_json::to_vec(&announce) {
                                     if let Err(e) = socket.send_to(&json_bytes, &target_addr).await {

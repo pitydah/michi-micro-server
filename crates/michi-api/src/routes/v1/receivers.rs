@@ -2325,14 +2325,296 @@ pub async fn home_info_handler(
     })))
 }
 
+/// Bounded live presence TTL (seconds) for Home members authenticated in the current
+/// server runtime. Aligned with Michi Link / Whisker presence freshness semantics.
+pub const HOME_MEMBER_PRESENCE_TTL_SECS: i64 = 180;
+pub const HOME_MEMBER_PRESENCE_TTL_MS: i64 = HOME_MEMBER_PRESENCE_TTL_SECS * 1000;
+
+/// Strict separation of Membership, Authentication, Presence, and Revocation for a Home member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HomeMemberPresenceProjection {
+    pub authenticated: bool,
+    pub online: bool,
+    pub membership_status: &'static str,
+    pub presence_state: &'static str,
+}
+
+pub fn evaluate_home_member_presence(
+    revoked: bool,
+    has_active_home_session: bool,
+    last_auth_activity_ms: Option<i64>,
+    whisker_verified_online: bool,
+    now_ms: i64,
+) -> HomeMemberPresenceProjection {
+    if revoked {
+        return HomeMemberPresenceProjection {
+            authenticated: false,
+            online: false,
+            membership_status: "revoked",
+            presence_state: "revoked",
+        };
+    }
+
+    let recent_authenticated_activity = has_active_home_session
+        && last_auth_activity_ms
+            .map(|ts| now_ms >= ts && (now_ms - ts) <= HOME_MEMBER_PRESENCE_TTL_MS)
+            .unwrap_or(false);
+    let online = recent_authenticated_activity || whisker_verified_online;
+
+    HomeMemberPresenceProjection {
+        authenticated: has_active_home_session,
+        online,
+        membership_status: "enrolled",
+        presence_state: if online { "online" } else { "offline" },
+    }
+}
+
+/// Canonical `GET /api/v1/home/roster` response matching
+/// `michi-link/schemas/home-device-roster.schema.json` (version 1).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HomeRosterResponse {
+    pub version: u8,
+    pub home_id: String,
+    pub total: usize,
+    pub presence_ttl_seconds: i64,
+    pub devices: Vec<michi_receivers::models::HomeRosterDevice>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn canonical_roster_device_type(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "player" | "server" | "stream" | "mobile" | "desktop" => raw.trim().to_ascii_lowercase(),
+        "receiver" | "michi_stream" | "michi-stream" | "audio_receiver" => "stream".to_string(),
+        "android" | "ios" | "michi_music_mobile" => "mobile".to_string(),
+        "michi_music_player" => "player".to_string(),
+        _ => "stream".to_string(),
+    }
+}
+
 pub async fn home_roster_handler(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let roster = state.receiver_manager.get_home_roster().await;
-    Ok(Json(serde_json::json!({
-        "devices": roster,
-        "total": roster.len(),
-    })))
+) -> Result<Json<HomeRosterResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let mut roster = state.receiver_manager.get_home_roster().await;
+    let home_id = state.home_root_authority.home_id();
+    let db_revs = michi_db::list_home_revocations_db(&state.db, &home_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("home_roster_handler failed to read home_revocations: {e}");
+            v1_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "REVOCATION_STORE_UNAVAILABLE",
+                "unable to read Home revocation state; refusing roster response fail-closed",
+            )
+        })?;
+    let db_members = michi_db::list_home_members(&state.db, &home_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("home_roster_handler failed to read home_members: {e}");
+            v1_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "REVOCATION_STORE_UNAVAILABLE",
+                "unable to read Home member roster",
+            )
+        })?;
+
+    let now = chrono::Utc::now();
+    let now_ms = now.timestamp_millis();
+
+    // R1.4 §3.3: Resolve active receiver sessions by explicit typed domains
+    // (`receiver_id` and resolved `device_michi_id`), never conflating them.
+    let active_identities = state.receiver_manager.active_session_identities().await;
+    let active_by_receiver_id: std::collections::HashSet<String> = active_identities
+        .iter()
+        .map(|s| s.receiver_id.clone())
+        .collect();
+    let active_by_device_michi_id: std::collections::HashSet<String> = active_identities
+        .iter()
+        .filter_map(|s| s.device_michi_id.clone())
+        .collect();
+
+    // Reconcile receiver-backed roster entries with durable revocations, active sessions, and live ScentStore TTL.
+    for entry in &mut roster {
+        entry.device_type = canonical_roster_device_type(&entry.device_type);
+        if entry.device_name.trim().is_empty() {
+            entry.device_name = if entry.name.trim().is_empty() {
+                "Michi Device".to_string()
+            } else {
+                entry.name.trim().chars().take(128).collect()
+            };
+        }
+        entry.name = entry.device_name.clone();
+        if entry.roles.is_empty() {
+            entry.roles.push("audio_receiver".to_string());
+        }
+
+        if db_revs
+            .iter()
+            .any(|r| r.revoked_device_michi_id == entry.device_michi_id)
+            || entry.revoked
+        {
+            entry.revoked = true;
+            entry.authenticated = false;
+            entry.online = false;
+            entry.membership_status = "revoked".to_string();
+            entry.presence_state = "revoked".to_string();
+            entry.status = "revoked".to_string();
+            entry.last_seen_at = entry.last_seen;
+            continue;
+        }
+
+        if entry.device_type == "server" {
+            entry.membership_status = "enrolled".to_string();
+            entry.presence_state = "online".to_string();
+            entry.status = "online".to_string();
+            entry.last_seen_at = entry.last_seen.or(Some(now));
+            entry.last_seen = entry.last_seen_at;
+            continue;
+        }
+
+        let has_live_session = entry
+            .receiver_id
+            .as_deref()
+            .map(|rid| active_by_receiver_id.contains(rid))
+            .unwrap_or(false)
+            || active_by_device_michi_id.contains(&entry.device_michi_id);
+
+        if has_live_session {
+            entry.online = true;
+            entry.authenticated = true;
+            entry.last_seen = Some(now);
+        } else if let Some(scent_rec) = state.scent_store.get(&entry.device_michi_id) {
+            let eff = state.scent_store.effective_presence_now(&scent_rec);
+            let scent_online = eff == michi_connect::scent_store::EffectivePresence::VerifiedOnline;
+            entry.online = scent_online;
+        }
+        entry.membership_status = "enrolled".to_string();
+        entry.presence_state = if entry.online { "online" } else { "offline" }.to_string();
+        entry.status = entry.presence_state.clone();
+        entry.last_seen_at = entry.last_seen;
+    }
+
+    for m in db_members {
+        if let Some(existing) = roster
+            .iter_mut()
+            .find(|existing| existing.device_michi_id == m.device_michi_id)
+        {
+            if existing.membership.is_none() {
+                if let Ok(membership) =
+                    serde_json::from_str::<michi_identity::DeviceMembershipDto>(&m.membership_json)
+                {
+                    existing.membership = Some(membership);
+                }
+            }
+            continue;
+        }
+        if let Ok(membership) =
+            serde_json::from_str::<michi_identity::DeviceMembershipDto>(&m.membership_json)
+        {
+            let mut roles: Vec<String> =
+                serde_json::from_str::<Vec<michi_identity::Role>>(&m.roles_json)
+                    .unwrap_or_else(|_| membership.roles.clone())
+                    .into_iter()
+                    .map(|r| r.as_str().to_string())
+                    .collect();
+            if roles.is_empty() {
+                roles.push("mobile_player".to_string());
+            }
+
+            let auth_state = crate::routes::v1::aircat::check_home_member_authorization(
+                &state,
+                &home_id,
+                &m.device_michi_id,
+            )
+            .await;
+            let revoked = match auth_state {
+                crate::routes::v1::aircat::HomeMemberAuthorizationState::Indeterminate => {
+                    return Err(v1_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "REVOCATION_STORE_UNAVAILABLE",
+                        "unable to verify Home revocation state; refusing roster response fail-closed",
+                    ));
+                }
+                crate::routes::v1::aircat::HomeMemberAuthorizationState::Revoked => true,
+                crate::routes::v1::aircat::HomeMemberAuthorizationState::Active => {
+                    m.revoked
+                        || db_revs
+                            .iter()
+                            .any(|r| r.revoked_device_michi_id == m.device_michi_id)
+                }
+            };
+
+            let has_active_session = state
+                .aircat_security
+                .has_active_home_session(&m.device_michi_id, now_ms);
+            let live_activity_ms = state
+                .aircat_security
+                .last_authenticated_activity_ms(&m.device_michi_id, now_ms);
+            let whisker_verified_online = state
+                .scent_store
+                .get(&m.device_michi_id)
+                .map(|rec| {
+                    state.scent_store.effective_presence_now(&rec)
+                        == michi_connect::scent_store::EffectivePresence::VerifiedOnline
+                })
+                .unwrap_or(false);
+
+            let projection = evaluate_home_member_presence(
+                revoked,
+                has_active_session,
+                live_activity_ms,
+                whisker_verified_online,
+                now_ms,
+            );
+
+            // Report live verified activity timestamp when available; otherwise preserve historical
+            // SQLite last_seen_at without inferring online presence from it.
+            let last_seen = live_activity_ms
+                .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+                .or_else(|| {
+                    chrono::DateTime::parse_from_rfc3339(&m.last_seen_at)
+                        .ok()
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                });
+
+            let device_name: String = if m.device_name.trim().is_empty() {
+                "Michi Device".to_string()
+            } else {
+                m.device_name.trim().chars().take(128).collect()
+            };
+
+            roster.push(michi_receivers::models::HomeRosterDevice {
+                device_michi_id: m.device_michi_id,
+                receiver_id: None,
+                device_name: device_name.clone(),
+                name: device_name,
+                device_type: canonical_roster_device_type(&m.device_type),
+                base_url: None,
+                roles,
+                membership: Some(membership),
+                membership_status: projection.membership_status.to_string(),
+                authenticated: projection.authenticated,
+                revoked,
+                online: projection.online,
+                presence_state: projection.presence_state.to_string(),
+                status: projection.presence_state.to_string(),
+                last_seen_at: last_seen,
+                last_seen,
+                outbox_status: None,
+                last_revocation_ack: None,
+                last_revocation_error: None,
+            });
+        }
+    }
+
+    let total = roster.len();
+    Ok(Json(HomeRosterResponse {
+        version: 1,
+        home_id,
+        total,
+        presence_ttl_seconds: HOME_MEMBER_PRESENCE_TTL_SECS,
+        devices: roster,
+        updated_at: now,
+    }))
 }
 
 pub async fn home_revocations_handler(
@@ -2366,6 +2648,17 @@ pub async fn home_revoke_handler(
         .await
     {
         Ok(revocation) => {
+            let home_id = state.home_root_authority.home_id();
+            let now_rfc = chrono::Utc::now().to_rfc3339();
+            let _ = michi_db::mark_home_member_revoked(&state.db, &home_id, &body.device_michi_id)
+                .await;
+            let _ = michi_db::reject_enrollments_for_device_db(
+                &state.db,
+                &home_id,
+                &body.device_michi_id,
+                &now_rfc,
+            )
+            .await;
             state.aircat_security.revoke_member(&body.device_michi_id);
             let synthetic_uuid =
                 Uuid::new_v5(&Uuid::NAMESPACE_OID, body.device_michi_id.as_bytes());

@@ -280,36 +280,10 @@ async fn async_main(config: michi_config::Config) -> Result<()> {
     let advertised_host = michi_connect::MichiConnect::resolve_lan_ip();
     info!("advertised LAN host: {}", advertised_host);
 
-    let michi_connect = michi_connect::MichiConnect::new_with_scent(
-        identity.clone(),
-        actual_port,
-        Some(advertised_host.clone()),
-        state.scent_store.clone(),
-    );
-    let _ = michi_connect.announce_mdns().await;
-
-    // Start persistent discovery runtime (Whisker multicast listener, mDNS resolver, Scent sweeper, bridge)
-    state.start_discovery_services();
-
-    // Spawn UDP multicast discovery announcer with cancellation on shutdown
-    let announcer_cancel = tokio_util::sync::CancellationToken::new();
-    let discovery_features = michi_api::server_caps::ServerCapabilities::from_state(&state)
-        .await
-        .discovery_features();
-    let announcer_handle = michi_connect.spawn_announcer(
-        actual_port,
-        Some(advertised_host),
-        discovery_features,
-        announcer_cancel.clone(),
-    );
-
-    // Graceful shutdown: SIGINT + SIGTERM
-    let shutdown_state = state.clone();
-    let shutdown_tx = state.tx.clone();
-    let shutdown_db = state.db.clone();
-
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Bind and activate AirCat HTTPS/TLS listener BEFORE advertising capabilities
+    // over mDNS/Whisker so AirCat capability flags are only published when TLS is active.
     if let Some(tls_info) = state.aircat_tls.read().await.clone() {
         let cert_bytes = std::fs::read(&tls_info.cert_path)?;
         let key_bytes = std::fs::read(&tls_info.key_path)?;
@@ -325,6 +299,7 @@ async fn async_main(config: michi_config::Config) -> Result<()> {
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_cfg));
         let tls_addr = SocketAddr::from(([0, 0, 0, 0], tls_info.tls_port));
         let tls_listener = tokio::net::TcpListener::bind(tls_addr).await?;
+        state.set_aircat_tls_listener_ready(true);
         info!(
             "AirCat HTTPS/TLS listener active on https://0.0.0.0:{} (spki={})",
             tls_info.tls_port, tls_info.tls_spki_sha256
@@ -374,7 +349,44 @@ async fn async_main(config: michi_config::Config) -> Result<()> {
                 }
             }
         });
+    } else {
+        info!(
+            "AirCat HTTPS/TLS listener not active (configure /config/tls.crt + /config/tls.key with matching SAN for AirCat original-file transfers)"
+        );
     }
+
+    let michi_connect = michi_connect::MichiConnect::new_with_scent(
+        identity.clone(),
+        actual_port,
+        Some(advertised_host.clone()),
+        state.scent_store.clone(),
+    );
+    michi_connect.set_home_id(state.home_root_authority.home_id());
+    let _ = michi_connect.announce_mdns().await;
+
+    // Start persistent discovery runtime (Whisker multicast listener, mDNS resolver, Scent sweeper, bridge)
+    state.start_discovery_services();
+
+    // Spawn UDP multicast discovery announcer with cancellation on shutdown.
+    // Pass None when MICHI_ADVERTISE_HOST is unset so dynamic LAN IP changes refresh cleanly.
+    let announcer_cancel = tokio_util::sync::CancellationToken::new();
+    let discovery_features = michi_api::server_caps::ServerCapabilities::from_state(&state)
+        .await
+        .discovery_features();
+    let explicit_advertise_host = std::env::var("MICHI_ADVERTISE_HOST")
+        .ok()
+        .filter(|h| !h.trim().is_empty());
+    let announcer_handle = michi_connect.spawn_announcer(
+        actual_port,
+        explicit_advertise_host,
+        discovery_features,
+        announcer_cancel.clone(),
+    );
+
+    // Graceful shutdown: SIGINT + SIGTERM
+    let shutdown_state = state.clone();
+    let shutdown_tx = state.tx.clone();
+    let shutdown_db = state.db.clone();
 
     axum::serve(
         listener,

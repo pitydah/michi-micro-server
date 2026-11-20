@@ -350,8 +350,24 @@ async fn run_migrations_on_conn(conn: &mut sqlx::SqliteConnection) -> Result<(),
             migration_053
         );
     }
+    if current < 54 {
+        run_migration_step!(
+            conn,
+            54,
+            "home_members durable roster for enrolled Home devices",
+            migration_054
+        );
+    }
+    if current < 55 {
+        run_migration_step!(
+            conn,
+            55,
+            "home_enrollment_requests durable queue and atomic home_serial_counters",
+            migration_055
+        );
+    }
 
-    info!("database schema at version 53");
+    info!("database schema at version 55");
     Ok(())
 }
 
@@ -1539,6 +1555,798 @@ async fn migration_053(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(
     .execute(&mut **tx)
     .await?;
 
+    Ok(())
+}
+
+async fn migration_054(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS home_members (
+            device_michi_id TEXT PRIMARY KEY,
+            home_id TEXT NOT NULL,
+            device_public_key TEXT NOT NULL,
+            device_name TEXT NOT NULL,
+            device_type TEXT NOT NULL,
+            roles_json TEXT NOT NULL,
+            membership_json TEXT NOT NULL,
+            serial INTEGER NOT NULL,
+            issued_at TEXT NOT NULL,
+            revoked INTEGER NOT NULL DEFAULT 0,
+            last_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_home_members_home_id
+         ON home_members(home_id)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedHomeMember {
+    pub device_michi_id: String,
+    pub home_id: String,
+    pub device_public_key: String,
+    pub device_name: String,
+    pub device_type: String,
+    pub roles_json: String,
+    pub membership_json: String,
+    pub serial: i64,
+    pub issued_at: String,
+    pub revoked: bool,
+    pub last_seen_at: String,
+    pub created_at: String,
+}
+
+pub async fn next_home_member_serial(pool: &SqlitePool, home_id: &str) -> Result<u64, DbError> {
+    let max_serial: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(serial) FROM home_members WHERE home_id = ?")
+            .bind(home_id)
+            .fetch_one(pool)
+            .await?;
+    let next = max_serial.unwrap_or(1).max(1) + 1;
+    Ok(next as u64)
+}
+
+pub async fn upsert_home_member(
+    pool: &SqlitePool,
+    member: &PersistedHomeMember,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO home_members (
+            device_michi_id, home_id, device_public_key, device_name, device_type,
+            roles_json, membership_json, serial, issued_at, revoked, last_seen_at, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(device_michi_id) DO UPDATE SET
+            home_id = excluded.home_id,
+            device_public_key = excluded.device_public_key,
+            device_name = excluded.device_name,
+            device_type = excluded.device_type,
+            roles_json = excluded.roles_json,
+            membership_json = excluded.membership_json,
+            serial = excluded.serial,
+            issued_at = excluded.issued_at,
+            revoked = excluded.revoked,
+            last_seen_at = excluded.last_seen_at",
+    )
+    .bind(&member.device_michi_id)
+    .bind(&member.home_id)
+    .bind(&member.device_public_key)
+    .bind(&member.device_name)
+    .bind(&member.device_type)
+    .bind(&member.roles_json)
+    .bind(&member.membership_json)
+    .bind(member.serial)
+    .bind(&member.issued_at)
+    .bind(if member.revoked { 1i64 } else { 0i64 })
+    .bind(&member.last_seen_at)
+    .bind(&member.created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_home_members(
+    pool: &SqlitePool,
+    home_id: &str,
+) -> Result<Vec<PersistedHomeMember>, DbError> {
+    #[allow(clippy::type_complexity)]
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            i64,
+            String,
+            String,
+        ),
+    >(
+        "SELECT device_michi_id, home_id, device_public_key, device_name, device_type,
+                roles_json, membership_json, serial, issued_at, revoked, last_seen_at, created_at
+         FROM home_members
+         WHERE home_id = ?
+         ORDER BY created_at ASC",
+    )
+    .bind(home_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                device_michi_id,
+                home_id,
+                device_public_key,
+                device_name,
+                device_type,
+                roles_json,
+                membership_json,
+                serial,
+                issued_at,
+                revoked,
+                last_seen_at,
+                created_at,
+            )| PersistedHomeMember {
+                device_michi_id,
+                home_id,
+                device_public_key,
+                device_name,
+                device_type,
+                roles_json,
+                membership_json,
+                serial,
+                issued_at,
+                revoked: revoked != 0,
+                last_seen_at,
+                created_at,
+            },
+        )
+        .collect())
+}
+
+pub async fn mark_home_member_revoked(
+    pool: &SqlitePool,
+    home_id: &str,
+    device_michi_id: &str,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE home_members SET revoked = 1 WHERE home_id = ? AND device_michi_id = ?")
+        .bind(home_id)
+        .bind(device_michi_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn touch_home_member_last_seen(
+    pool: &SqlitePool,
+    home_id: &str,
+    device_michi_id: &str,
+    last_seen_at: &str,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE home_members SET last_seen_at = ? WHERE home_id = ? AND device_michi_id = ?",
+    )
+    .bind(last_seen_at)
+    .bind(home_id)
+    .bind(device_michi_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn migration_055(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS home_enrollment_requests (
+            request_id TEXT PRIMARY KEY,
+            home_id TEXT NOT NULL,
+            client_michi_id TEXT NOT NULL,
+            client_public_key TEXT NOT NULL,
+            device_name TEXT NOT NULL,
+            device_type TEXT NOT NULL,
+            requested_roles_json TEXT NOT NULL,
+            claim_token_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            membership_json TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            expires_at_ms INTEGER NOT NULL,
+            resolved_at TEXT
+        )",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_home_enrollment_home_status
+         ON home_enrollment_requests(home_id, status, expires_at_ms)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_home_enrollment_client
+         ON home_enrollment_requests(home_id, client_michi_id)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS home_serial_counters (
+            home_id TEXT PRIMARY KEY,
+            last_serial INTEGER NOT NULL
+        )",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedHomeEnrollment {
+    pub request_id: String,
+    pub home_id: String,
+    pub client_michi_id: String,
+    pub client_public_key: String,
+    pub device_name: String,
+    pub device_type: String,
+    pub requested_roles_json: String,
+    pub claim_token_hash: String,
+    pub status: String,
+    pub membership_json: Option<String>,
+    pub created_at: String,
+    pub expires_at: String,
+    pub expires_at_ms: i64,
+    pub resolved_at: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum HomeEnrollmentDbError {
+    NotFound,
+    AlreadyResolved,
+    Expired,
+    MemberRevoked,
+    QueueFull,
+    InvalidRoles(String),
+    Db(DbError),
+}
+
+impl From<DbError> for HomeEnrollmentDbError {
+    fn from(e: DbError) -> Self {
+        Self::Db(e)
+    }
+}
+
+impl From<sqlx::Error> for HomeEnrollmentDbError {
+    fn from(e: sqlx::Error) -> Self {
+        Self::Db(DbError::Sqlx(e))
+    }
+}
+
+/// Inserts a new pending Home enrollment request atomically, superseding any
+/// prior pending request for the same `(home_id, client_michi_id)` and enforcing
+/// a hard cap on concurrent pending requests.
+pub async fn create_home_enrollment_request_db(
+    pool: &SqlitePool,
+    rec: &PersistedHomeEnrollment,
+    now_ms: i64,
+    max_pending: i64,
+) -> Result<(), HomeEnrollmentDbError> {
+    let mut conn = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    let result: Result<(), HomeEnrollmentDbError> = async {
+        // Expire stale pending requests
+        sqlx::query(
+            "UPDATE home_enrollment_requests
+             SET status = 'expired'
+             WHERE status = 'pending' AND expires_at_ms <= ?",
+        )
+        .bind(now_ms)
+        .execute(&mut *conn)
+        .await?;
+
+        // Refuse if device is already revoked in durable store
+        let revoked_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM home_revocations
+             WHERE home_id = ? AND revoked_device_michi_id = ?",
+        )
+        .bind(&rec.home_id)
+        .bind(&rec.client_michi_id)
+        .fetch_one(&mut *conn)
+        .await?;
+        if revoked_count > 0 {
+            return Err(HomeEnrollmentDbError::MemberRevoked);
+        }
+
+        // Supersede any prior pending request from the same device to avoid duplicate queue entries
+        sqlx::query(
+            "UPDATE home_enrollment_requests
+             SET status = 'expired'
+             WHERE home_id = ? AND client_michi_id = ? AND status = 'pending'",
+        )
+        .bind(&rec.home_id)
+        .bind(&rec.client_michi_id)
+        .execute(&mut *conn)
+        .await?;
+
+        let active_pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM home_enrollment_requests
+             WHERE home_id = ? AND status = 'pending' AND expires_at_ms > ?",
+        )
+        .bind(&rec.home_id)
+        .bind(now_ms)
+        .fetch_one(&mut *conn)
+        .await?;
+        if active_pending >= max_pending {
+            return Err(HomeEnrollmentDbError::QueueFull);
+        }
+
+        sqlx::query(
+            "INSERT INTO home_enrollment_requests (
+                request_id, home_id, client_michi_id, client_public_key, device_name,
+                device_type, requested_roles_json, claim_token_hash, status, membership_json,
+                created_at, expires_at, expires_at_ms, resolved_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&rec.request_id)
+        .bind(&rec.home_id)
+        .bind(&rec.client_michi_id)
+        .bind(&rec.client_public_key)
+        .bind(&rec.device_name)
+        .bind(&rec.device_type)
+        .bind(&rec.requested_roles_json)
+        .bind(&rec.claim_token_hash)
+        .bind(&rec.status)
+        .bind(&rec.membership_json)
+        .bind(&rec.created_at)
+        .bind(&rec.expires_at)
+        .bind(rec.expires_at_ms)
+        .bind(&rec.resolved_at)
+        .execute(&mut *conn)
+        .await?;
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(e)
+        }
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn map_enrollment_row(
+    r: (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        i64,
+        Option<String>,
+    ),
+) -> PersistedHomeEnrollment {
+    PersistedHomeEnrollment {
+        request_id: r.0,
+        home_id: r.1,
+        client_michi_id: r.2,
+        client_public_key: r.3,
+        device_name: r.4,
+        device_type: r.5,
+        requested_roles_json: r.6,
+        claim_token_hash: r.7,
+        status: r.8,
+        membership_json: r.9,
+        created_at: r.10,
+        expires_at: r.11,
+        expires_at_ms: r.12,
+        resolved_at: r.13,
+    }
+}
+
+pub async fn list_pending_home_enrollments_db(
+    pool: &SqlitePool,
+    home_id: &str,
+    now_ms: i64,
+) -> Result<Vec<PersistedHomeEnrollment>, DbError> {
+    #[allow(clippy::type_complexity)]
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            i64,
+            Option<String>,
+        ),
+    >(
+        "SELECT request_id, home_id, client_michi_id, client_public_key, device_name,
+                device_type, requested_roles_json, claim_token_hash, status, membership_json,
+                created_at, expires_at, expires_at_ms, resolved_at
+         FROM home_enrollment_requests
+         WHERE home_id = ? AND status = 'pending' AND expires_at_ms > ?
+         ORDER BY created_at ASC",
+    )
+    .bind(home_id)
+    .bind(now_ms)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(map_enrollment_row).collect())
+}
+
+pub async fn get_home_enrollment_by_id_db(
+    pool: &SqlitePool,
+    request_id: &str,
+) -> Result<Option<PersistedHomeEnrollment>, DbError> {
+    #[allow(clippy::type_complexity)]
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            i64,
+            Option<String>,
+        ),
+    >(
+        "SELECT request_id, home_id, client_michi_id, client_public_key, device_name,
+                device_type, requested_roles_json, claim_token_hash, status, membership_json,
+                created_at, expires_at, expires_at_ms, resolved_at
+         FROM home_enrollment_requests
+         WHERE request_id = ?",
+    )
+    .bind(request_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(map_enrollment_row))
+}
+
+async fn allocate_serial_in_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    home_id: &str,
+) -> Result<u64, sqlx::Error> {
+    let existing_member_max: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(serial) FROM home_members WHERE home_id = ?")
+            .bind(home_id)
+            .fetch_one(&mut **conn)
+            .await?;
+    let counter_val: Option<i64> =
+        sqlx::query_scalar("SELECT last_serial FROM home_serial_counters WHERE home_id = ?")
+            .bind(home_id)
+            .fetch_optional(&mut **conn)
+            .await?;
+    let base = existing_member_max
+        .unwrap_or(1)
+        .max(counter_val.unwrap_or(1))
+        .max(1);
+    let next = base + 1;
+    sqlx::query(
+        "INSERT INTO home_serial_counters (home_id, last_serial) VALUES (?, ?)
+         ON CONFLICT(home_id) DO UPDATE SET last_serial = excluded.last_serial",
+    )
+    .bind(home_id)
+    .bind(next)
+    .execute(&mut **conn)
+    .await?;
+    Ok(next as u64)
+}
+
+/// Atomically approves a pending Home enrollment inside a SQLite `BEGIN IMMEDIATE`
+/// transaction, preventing double-approval races, duplicate serial numbers, and
+/// approving concurrently revoked devices.
+pub async fn approve_home_enrollment_atomic_db<T, F>(
+    pool: &SqlitePool,
+    home_id: &str,
+    request_id: &str,
+    now_ms: i64,
+    issued_at: &str,
+    claim_ttl_ms: i64,
+    sign_membership: F,
+) -> Result<(PersistedHomeEnrollment, T), HomeEnrollmentDbError>
+where
+    F: FnOnce(&PersistedHomeEnrollment, u64) -> Result<(T, String, String), HomeEnrollmentDbError>,
+{
+    let mut conn = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    let result: Result<(PersistedHomeEnrollment, T), HomeEnrollmentDbError> = async {
+        #[allow(clippy::type_complexity)]
+        let row = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+                String,
+                String,
+                i64,
+                Option<String>,
+            ),
+        >(
+            "SELECT request_id, home_id, client_michi_id, client_public_key, device_name,
+                    device_type, requested_roles_json, claim_token_hash, status, membership_json,
+                    created_at, expires_at, expires_at_ms, resolved_at
+             FROM home_enrollment_requests
+             WHERE request_id = ? AND home_id = ?",
+        )
+        .bind(request_id)
+        .bind(home_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .map(map_enrollment_row)
+        .ok_or(HomeEnrollmentDbError::NotFound)?;
+
+        if row.status != "pending" {
+            return Err(HomeEnrollmentDbError::AlreadyResolved);
+        }
+        if row.expires_at_ms <= now_ms {
+            sqlx::query(
+                "UPDATE home_enrollment_requests SET status = 'expired' WHERE request_id = ?",
+            )
+            .bind(request_id)
+            .execute(&mut *conn)
+            .await?;
+            return Err(HomeEnrollmentDbError::Expired);
+        }
+
+        let revoked_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM home_revocations
+             WHERE home_id = ? AND revoked_device_michi_id = ?",
+        )
+        .bind(home_id)
+        .bind(&row.client_michi_id)
+        .fetch_one(&mut *conn)
+        .await?;
+        if revoked_count > 0 {
+            return Err(HomeEnrollmentDbError::MemberRevoked);
+        }
+
+        let serial = allocate_serial_in_conn(&mut conn, home_id).await?;
+        let (membership_val, granted_roles_json, membership_json) = sign_membership(&row, serial)?;
+
+        sqlx::query(
+            "INSERT INTO home_members (
+                device_michi_id, home_id, device_public_key, device_name, device_type,
+                roles_json, membership_json, serial, issued_at, revoked, last_seen_at, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+             ON CONFLICT(device_michi_id) DO UPDATE SET
+                home_id = excluded.home_id,
+                device_public_key = excluded.device_public_key,
+                device_name = excluded.device_name,
+                device_type = excluded.device_type,
+                roles_json = excluded.roles_json,
+                membership_json = excluded.membership_json,
+                serial = excluded.serial,
+                issued_at = excluded.issued_at,
+                revoked = 0,
+                last_seen_at = excluded.last_seen_at",
+        )
+        .bind(&row.client_michi_id)
+        .bind(home_id)
+        .bind(&row.client_public_key)
+        .bind(&row.device_name)
+        .bind(&row.device_type)
+        .bind(&granted_roles_json)
+        .bind(&membership_json)
+        .bind(serial as i64)
+        .bind(issued_at)
+        .bind(issued_at)
+        .bind(issued_at)
+        .execute(&mut *conn)
+        .await?;
+
+        let new_exp_ms = now_ms.saturating_add(claim_ttl_ms);
+        sqlx::query(
+            "UPDATE home_enrollment_requests
+             SET status = 'approved',
+                 membership_json = ?,
+                 expires_at_ms = ?,
+                 resolved_at = ?
+             WHERE request_id = ?",
+        )
+        .bind(&membership_json)
+        .bind(new_exp_ms)
+        .bind(issued_at)
+        .bind(request_id)
+        .execute(&mut *conn)
+        .await?;
+
+        let mut updated = row;
+        updated.status = "approved".to_string();
+        updated.membership_json = Some(membership_json);
+        updated.expires_at_ms = new_exp_ms;
+        updated.resolved_at = Some(issued_at.to_string());
+        Ok((updated, membership_val))
+    }
+    .await;
+
+    match result {
+        Ok(val) => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            Ok(val)
+        }
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(e)
+        }
+    }
+}
+
+/// Atomically allocates a monotonic serial and persists a directly-enrolled Home member.
+#[allow(clippy::too_many_arguments)]
+pub async fn direct_enroll_home_member_atomic_db<T, F>(
+    pool: &SqlitePool,
+    home_id: &str,
+    device_michi_id: &str,
+    device_public_key: &str,
+    device_name: &str,
+    device_type: &str,
+    roles_json: &str,
+    issued_at: &str,
+    sign_membership: F,
+) -> Result<T, HomeEnrollmentDbError>
+where
+    F: FnOnce(u64) -> Result<(T, String), HomeEnrollmentDbError>,
+{
+    let mut conn = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    let result: Result<T, HomeEnrollmentDbError> = async {
+        let revoked_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM home_revocations
+             WHERE home_id = ? AND revoked_device_michi_id = ?",
+        )
+        .bind(home_id)
+        .bind(device_michi_id)
+        .fetch_one(&mut *conn)
+        .await?;
+        if revoked_count > 0 {
+            return Err(HomeEnrollmentDbError::MemberRevoked);
+        }
+
+        let serial = allocate_serial_in_conn(&mut conn, home_id).await?;
+        let (membership_val, membership_json) = sign_membership(serial)?;
+
+        sqlx::query(
+            "INSERT INTO home_members (
+                device_michi_id, home_id, device_public_key, device_name, device_type,
+                roles_json, membership_json, serial, issued_at, revoked, last_seen_at, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+             ON CONFLICT(device_michi_id) DO UPDATE SET
+                home_id = excluded.home_id,
+                device_public_key = excluded.device_public_key,
+                device_name = excluded.device_name,
+                device_type = excluded.device_type,
+                roles_json = excluded.roles_json,
+                membership_json = excluded.membership_json,
+                serial = excluded.serial,
+                issued_at = excluded.issued_at,
+                revoked = 0,
+                last_seen_at = excluded.last_seen_at",
+        )
+        .bind(device_michi_id)
+        .bind(home_id)
+        .bind(device_public_key)
+        .bind(device_name)
+        .bind(device_type)
+        .bind(roles_json)
+        .bind(&membership_json)
+        .bind(serial as i64)
+        .bind(issued_at)
+        .bind(issued_at)
+        .bind(issued_at)
+        .execute(&mut *conn)
+        .await?;
+
+        Ok(membership_val)
+    }
+    .await;
+
+    match result {
+        Ok(val) => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            Ok(val)
+        }
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(e)
+        }
+    }
+}
+
+pub async fn reject_home_enrollment_db(
+    pool: &SqlitePool,
+    home_id: &str,
+    request_id: &str,
+    now_ms: i64,
+    resolved_at: &str,
+) -> Result<(), HomeEnrollmentDbError> {
+    let res = sqlx::query(
+        "UPDATE home_enrollment_requests
+         SET status = 'rejected', membership_json = NULL, resolved_at = ?
+         WHERE request_id = ? AND home_id = ? AND status = 'pending' AND expires_at_ms > ?",
+    )
+    .bind(resolved_at)
+    .bind(request_id)
+    .bind(home_id)
+    .bind(now_ms)
+    .execute(pool)
+    .await?;
+    if res.rows_affected() == 0 {
+        return Err(HomeEnrollmentDbError::NotFound);
+    }
+    Ok(())
+}
+
+pub async fn reject_enrollments_for_device_db(
+    pool: &SqlitePool,
+    home_id: &str,
+    device_michi_id: &str,
+    resolved_at: &str,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE home_enrollment_requests
+         SET status = 'rejected', membership_json = NULL, resolved_at = ?
+         WHERE home_id = ? AND client_michi_id = ? AND status IN ('pending', 'approved')",
+    )
+    .bind(resolved_at)
+    .bind(home_id)
+    .bind(device_michi_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

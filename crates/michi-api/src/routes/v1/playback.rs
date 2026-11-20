@@ -199,8 +199,120 @@ impl PlaybackRepeatMode {
 #[serde(untagged)]
 pub enum PlaybackControlValue {
     Integer(u64),
+    SignedInteger(i64),
+    Float(f64),
     Boolean(bool),
     Repeat(PlaybackRepeatMode),
+    Text(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaybackControlError {
+    pub code: michi_link::MichiLinkErrorCode,
+    pub message: String,
+}
+
+impl PlaybackControlError {
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self {
+            code: michi_link::MichiLinkErrorCode::InvalidRequest,
+            message: message.into(),
+        }
+    }
+}
+
+/// Parses a strict integer JSON value in `[0, 100]` without lossy `as` casts.
+fn parse_strict_volume_json_number(val: &serde_json::Value) -> Result<u8, PlaybackControlError> {
+    let n = val.as_u64().ok_or_else(|| {
+        PlaybackControlError::invalid_request("volume must be an integer between 0 and 100")
+    })?;
+    let v = u8::try_from(n).map_err(|_| {
+        PlaybackControlError::invalid_request("volume must be an integer between 0 and 100")
+    })?;
+    if v > 100 {
+        return Err(PlaybackControlError::invalid_request(
+            "volume must be an integer between 0 and 100",
+        ));
+    }
+    Ok(v)
+}
+
+/// Parses a legacy `value` field for `set_volume`: accepts strict non-negative integer
+/// or strict ASCII decimal string (e.g. `"0"`, `"75"`, `"100"`) in `[0, 100]`.
+fn parse_legacy_volume_value(val: &PlaybackControlValue) -> Result<u8, PlaybackControlError> {
+    match val {
+        PlaybackControlValue::Integer(n) => {
+            let v = u8::try_from(*n).map_err(|_| {
+                PlaybackControlError::invalid_request("volume must be an integer between 0 and 100")
+            })?;
+            if v > 100 {
+                return Err(PlaybackControlError::invalid_request(
+                    "volume must be an integer between 0 and 100",
+                ));
+            }
+            Ok(v)
+        }
+        PlaybackControlValue::Text(raw) => {
+            if raw.is_empty()
+                || !raw.bytes().all(|b| b.is_ascii_digit())
+                || (raw.len() > 1 && raw.starts_with('0'))
+            {
+                return Err(PlaybackControlError::invalid_request(
+                    "volume must be an integer between 0 and 100",
+                ));
+            }
+            let v = raw.parse::<u8>().map_err(|_| {
+                PlaybackControlError::invalid_request("volume must be an integer between 0 and 100")
+            })?;
+            if v > 100 {
+                return Err(PlaybackControlError::invalid_request(
+                    "volume must be an integer between 0 and 100",
+                ));
+            }
+            Ok(v)
+        }
+        PlaybackControlValue::SignedInteger(_)
+        | PlaybackControlValue::Float(_)
+        | PlaybackControlValue::Boolean(_)
+        | PlaybackControlValue::Repeat(_) => Err(PlaybackControlError::invalid_request(
+            "volume must be an integer between 0 and 100",
+        )),
+    }
+}
+
+/// Canonical normalizer for `set_volume`.
+///
+/// - Canonical field: `volume` (JSON integer `0..=100`).
+/// - Legacy compatibility field: `value` (JSON integer `0..=100` or strict ASCII decimal string `"0"`..=`"100"`).
+/// - Never invents a fallback default (e.g., 80) on missing or invalid input.
+/// - If both `volume` and `value` are provided (non-null), both must be valid and equal.
+pub fn parse_requested_volume(
+    volume: Option<&serde_json::Value>,
+    value: Option<&PlaybackControlValue>,
+) -> Result<u8, PlaybackControlError> {
+    let parsed_canonical = match volume {
+        Some(v) if !v.is_null() => Some(parse_strict_volume_json_number(v)?),
+        _ => None,
+    };
+    let parsed_legacy = match value {
+        Some(v) => Some(parse_legacy_volume_value(v)?),
+        None => None,
+    };
+
+    match (parsed_canonical, parsed_legacy) {
+        (Some(a), Some(b)) => {
+            if a != b {
+                return Err(PlaybackControlError::invalid_request(
+                    "conflicting volume and value fields in set_volume request",
+                ));
+            }
+            Ok(a)
+        }
+        (Some(v), None) | (None, Some(v)) => Ok(v),
+        (None, None) => Err(PlaybackControlError::invalid_request(
+            "volume must be an integer between 0 and 100",
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -208,7 +320,7 @@ pub struct PlaybackControlBody {
     pub command: String,
     pub track_id: Option<Uuid>,
     pub position_ms: Option<u64>,
-    pub volume: Option<u32>,
+    pub volume: Option<serde_json::Value>,
     pub value: Option<PlaybackControlValue>,
 }
 
@@ -471,26 +583,9 @@ pub async fn playback_control_handler(
             })))
         }
         "set_volume" => {
-            let vol_val = body.volume.or(match body.value {
-                Some(PlaybackControlValue::Integer(v)) => Some(v as u32),
-                _ => None,
-            });
+            let vol = parse_requested_volume(body.volume.as_ref(), body.value.as_ref())
+                .map_err(|e| v1_error_code(StatusCode::BAD_REQUEST, e.code, &e.message))?;
 
-            let vol_u32 = match vol_val {
-                Some(v) => {
-                    if v > 100 {
-                        return Err(v1_error_code(
-                            StatusCode::BAD_REQUEST,
-                            michi_link::MichiLinkErrorCode::InvalidRequest,
-                            "volume must be between 0 and 100",
-                        ));
-                    }
-                    v
-                }
-                None => 80,
-            };
-
-            let vol = vol_u32 as u8;
             state.playback_engine.set_volume(vol).await.map_err(|e| {
                 v1_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -535,6 +630,19 @@ pub async fn playback_control_handler(
         "shuffle" => {
             let shuf = match body.value {
                 Some(PlaybackControlValue::Boolean(b)) => b,
+                Some(PlaybackControlValue::Text(ref s)) => {
+                    match s.trim().to_ascii_lowercase().as_str() {
+                        "" | "true" | "1" | "on" => true,
+                        "false" | "0" | "off" => false,
+                        other => {
+                            return Err(v1_error(
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                "INVALID_REQUEST",
+                                &format!("invalid shuffle value '{other}'"),
+                            ));
+                        }
+                    }
+                }
                 _ => true,
             };
 
@@ -555,7 +663,30 @@ pub async fn playback_control_handler(
             let rep_mode = match body.value {
                 Some(PlaybackControlValue::Repeat(PlaybackRepeatMode::One)) => RepeatMode::One,
                 Some(PlaybackControlValue::Repeat(PlaybackRepeatMode::All)) => RepeatMode::All,
-                _ => RepeatMode::Off,
+                Some(PlaybackControlValue::Repeat(PlaybackRepeatMode::Off)) | None => {
+                    RepeatMode::Off
+                }
+                Some(PlaybackControlValue::Text(ref s)) => {
+                    match s.trim().to_ascii_lowercase().as_str() {
+                        "" | "off" | "none" => RepeatMode::Off,
+                        "one" | "track" => RepeatMode::One,
+                        "all" | "queue" => RepeatMode::All,
+                        other => {
+                            return Err(v1_error(
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                "INVALID_REQUEST",
+                                &format!("invalid repeat mode '{other}'"),
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(v1_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "INVALID_REQUEST",
+                        "invalid repeat mode value",
+                    ));
+                }
             };
 
             state
@@ -727,7 +858,10 @@ pub async fn playback_session_handler(
         None
     };
 
-    // 6. Only after ALL preconditions pass: begin DB transaction
+    // 6. Only after ALL preconditions pass: acquire coordinator lock & begin DB transaction
+    let _queue_guard = state.queue_coordinator.lock().await;
+    state.queue_coordinator.ensure_coherent()?;
+
     let session_id = Uuid::new_v4();
     let now = chrono::Utc::now().to_rfc3339();
     let queue_json = serde_json::to_string(&body.queue).unwrap_or_default();
@@ -740,7 +874,9 @@ pub async fn playback_session_handler(
         )
     })?;
 
-    let mut tx = state.db.begin().await.map_err(|e| {
+    let previous_items = crate::playback_queue::snapshot_queue_items(&state.db, &queue_id).await?;
+
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DATABASE_ERROR",
@@ -844,18 +980,22 @@ pub async fn playback_session_handler(
             )
         })?;
 
-    // 8. Synchronize PlaybackEngine
-    state
+    // 8. Synchronize PlaybackEngine (with verified compensating rollback on failure)
+    if let Err(engine_err) = state
         .playback_engine
         .set_queue(runtime_tracks.clone(), current_index, current_track_id)
         .await
-        .map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "RUNTIME_SYNC_FAILED",
-                &e.to_string(),
-            )
-        })?;
+    {
+        return Err(crate::playback_queue::restore_queue_items_or_degrade(
+            &state,
+            &queue_id,
+            &previous_items,
+            None,
+            &engine_err.to_string(),
+        )
+        .await);
+    }
+    state.queue_coordinator.bump_version();
 
     state
         .playback_engine
@@ -1054,6 +1194,9 @@ pub async fn restore_playback_state_handler(
             "playback module is disabled",
         ));
     }
+    let _queue_guard = state.queue_coordinator.lock().await;
+    state.queue_coordinator.ensure_coherent()?;
+
     let latest = michi_db::get_latest_playback_session(&state.db)
         .await
         .map_err(|e| {
@@ -1129,6 +1272,7 @@ pub async fn restore_playback_state_handler(
                         &e.to_string(),
                     )
                 })?;
+            state.queue_coordinator.bump_version();
 
             // Restore volume, shuffle, repeat strictly to engine
             let vol_u8 = (session.volume * 100.0).round().clamp(0.0, 100.0) as u8;

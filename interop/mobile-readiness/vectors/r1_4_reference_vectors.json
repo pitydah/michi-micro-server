@@ -1,0 +1,63 @@
+{
+  "schema_version": "r1.4-readiness-index-v1",
+  "normative_michi_link_commit": "8dad0fb51128df98422bd74968e75f0ae8f85ccf",
+  "note": "Signed cryptographic byte vectors are NOT duplicated here; consume directly from the pinned vendor/michi-link submodule paths listed below.",
+  "canonical_golden_vectors": {
+    "identity_home_auth_revocation": "vendor/michi-link/tests/vectors/interop/micro-mobile-interop-vectors.json",
+    "aircat_strict_v1": "vendor/michi-link/tests/vectors/aircat/aircat-golden-v1.json",
+    "aircat_manifest": "vendor/michi-link/tests/vectors/aircat/aircat-golden-v1.manifest.json",
+    "aircat_receipt": "vendor/michi-link/tests/vectors/aircat/aircat-golden-v1.receipt.json",
+    "discovery_announce_micro": "vendor/michi-link/tests/vectors/generated/announce-micro.generated.json"
+  },
+  "authoritative_schemas": {
+    "server_info": "vendor/michi-link/schemas/server-info.schema.json",
+    "home_device_roster": "vendor/michi-link/schemas/home-device-roster.schema.json",
+    "michi_membership": "vendor/michi-link/schemas/michi-membership.schema.json",
+    "playback_control": "vendor/michi-link/schemas/playback-control.schema.json",
+    "aircat_tls_status": "vendor/michi-link/schemas/aircat-tls-status.schema.json",
+    "aircat_enrollment_qr": "vendor/michi-link/schemas/aircat-enrollment-qr.schema.json",
+    "aircat_manifest": "vendor/michi-link/schemas/aircat-manifest.schema.json",
+    "aircat_grant_request": "vendor/michi-link/schemas/aircat-grant-request.schema.json",
+    "aircat_signed_grant": "vendor/michi-link/schemas/aircat-signed-grant.schema.json"
+  },
+  "r1_4_behavioral_conformance_cases": {
+    "playback_set_volume_valid": [
+      { "command": "set_volume", "volume": 0 },
+      { "command": "set_volume", "volume": 72 },
+      { "command": "set_volume", "volume": 100 },
+      { "command": "set_volume", "value": "0" },
+      { "command": "set_volume", "value": "75" },
+      { "command": "set_volume", "value": "100" }
+    ],
+    "playback_set_volume_invalid_must_reject_400": [
+      { "command": "set_volume", "value": "00" },
+      { "command": "set_volume", "value": "01" },
+      { "command": "set_volume", "value": "075" },
+      { "command": "set_volume", "value": "0100" },
+      { "command": "set_volume", "value": "+50" },
+      { "command": "set_volume", "value": "101" },
+      { "command": "set_volume", "value": "50.5" },
+      { "command": "set_volume", "value": "" }
+    ],
+    "queue_degraded_error_envelope": {
+      "http_status": 503,
+      "body": {
+        "error": {
+          "code": "QUEUE_DEGRADED",
+          "message": "active queue is in degraded state until reconciled: <reason>",
+          "details": {}
+        }
+      },
+      "recovery_endpoint": "POST /api/v1/queue/reconcile"
+    },
+    "home_roster_v1_required_invariants": {
+      "version": 1,
+      "forbidden_combinations": [
+        { "revoked": true, "online": true },
+        { "revoked": true, "authenticated": true },
+        { "online": true, "presence_state": "offline" }
+      ],
+      "receiver_id_domain_rule": "receiver_id (registry key) and device_michi_id (43-char cryptographic identity) are distinct fields and MUST NOT be conflated."
+    }
+  }
+}

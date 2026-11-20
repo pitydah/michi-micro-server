@@ -189,6 +189,11 @@ impl PlaybackEngine {
             generation_id: self.generation_id,
             track_id: self.current_track.as_ref().map(|t| t.id),
             current_track: self.current_track.clone(),
+            queue_index: if self.queue.is_empty() || self.current_track.is_none() {
+                None
+            } else {
+                Some(self.queue_index)
+            },
             position_ms: pos,
             duration_ms,
             volume: self.volume,
@@ -672,6 +677,13 @@ impl PlaybackEngine {
                 self.sinks = sinks;
                 self.output_desc = Some(output_desc);
 
+                if let Some(idx) = self.queue.iter().position(|t| t.id == track.id) {
+                    self.queue_index = idx;
+                    if let Some(pos) = self.play_order.iter().position(|&x| x == idx) {
+                        self.play_order_pos = pos;
+                    }
+                }
+
                 let res = self.start_playback_internal(*track, position_ms).await;
                 let _ = respond_to.send(res);
                 true
@@ -1103,17 +1115,56 @@ impl PlaybackEngine {
                 respond_to,
             } => {
                 let resolved_index = if let Some(target_id) = current_track_id {
-                    tracks
-                        .iter()
-                        .position(|t| t.id == target_id)
-                        .unwrap_or(current_index)
+                    if tracks.get(current_index).map(|t| t.id) == Some(target_id) {
+                        current_index
+                    } else {
+                        tracks
+                            .iter()
+                            .position(|t| t.id == target_id)
+                            .unwrap_or(current_index)
+                    }
                 } else {
                     current_index
                 };
 
+                let old_queue = std::mem::take(&mut self.queue);
+                let old_order = std::mem::take(&mut self.play_order);
+                let new_len = tracks.len();
                 self.queue = tracks;
-                self.queue_index = resolved_index.min(self.queue.len().saturating_sub(1));
-                self.recompute_play_order(self.queue_index);
+                self.queue_index = resolved_index.min(new_len.saturating_sub(1));
+
+                if self.shuffle && !old_order.is_empty() && !self.queue.is_empty() {
+                    // Preserve existing shuffled play_order for surviving tracks so append/reorder
+                    // never discards the active shuffle permutation.
+                    let mut claimed = vec![false; new_len];
+                    let mut preserved = Vec::with_capacity(new_len);
+                    for old_idx in old_order {
+                        if let Some(old_track) = old_queue.get(old_idx) {
+                            if let Some(new_idx) = self
+                                .queue
+                                .iter()
+                                .enumerate()
+                                .find(|(i, t)| !claimed[*i] && t.id == old_track.id)
+                                .map(|(i, _)| i)
+                            {
+                                claimed[new_idx] = true;
+                                preserved.push(new_idx);
+                            }
+                        }
+                    }
+                    for (i, used) in claimed.into_iter().enumerate() {
+                        if !used {
+                            preserved.push(i);
+                        }
+                    }
+                    self.play_order_pos = preserved
+                        .iter()
+                        .position(|&x| x == self.queue_index)
+                        .unwrap_or(0);
+                    self.play_order = preserved;
+                } else {
+                    self.recompute_play_order(self.queue_index);
+                }
 
                 if !self.state.is_playing() && self.current_track.is_none() {
                     self.current_track = self.queue.get(self.queue_index).cloned();
@@ -1130,6 +1181,19 @@ impl PlaybackEngine {
                 let _ = respond_to.send(Ok(()));
                 true
             }
+            EngineCommand::RemoveQueueItem {
+                removed_index,
+                removed_track_id,
+                remaining_tracks,
+                origin: _,
+                respond_to,
+            } => {
+                let res = self
+                    .handle_remove_queue_item(removed_index, removed_track_id, remaining_tracks)
+                    .await;
+                let _ = respond_to.send(res);
+                true
+            }
             EngineCommand::GetSnapshot { respond_to } => {
                 let _ = respond_to.send(self.snapshot());
                 true
@@ -1140,6 +1204,221 @@ impl PlaybackEngine {
                 false
             }
         }
+    }
+
+    async fn handle_remove_queue_item(
+        &mut self,
+        removed_index: usize,
+        removed_track_id: Uuid,
+        remaining_tracks: Vec<Track>,
+    ) -> Result<(), PlaybackError> {
+        let had_matching_queue = self.queue.len() == remaining_tracks.len() + 1
+            && self
+                .queue
+                .get(removed_index)
+                .map(|t| t.id == removed_track_id)
+                .unwrap_or(false);
+
+        let was_active = if let Some(ref cur) = self.current_track {
+            if had_matching_queue {
+                self.queue_index == removed_index && cur.id == removed_track_id
+            } else {
+                cur.id == removed_track_id
+            }
+        } else {
+            false
+        };
+
+        let (new_play_order, removed_order_pos) = if had_matching_queue
+            && self.play_order.len() == remaining_tracks.len() + 1
+            && self.play_order.contains(&removed_index)
+        {
+            let pos = self
+                .play_order
+                .iter()
+                .position(|&idx| idx == removed_index)
+                .unwrap_or(0);
+            let updated: Vec<usize> = self
+                .play_order
+                .iter()
+                .filter_map(|&idx| {
+                    if idx == removed_index {
+                        None
+                    } else if idx > removed_index {
+                        Some(idx - 1)
+                    } else {
+                        Some(idx)
+                    }
+                })
+                .collect();
+            (updated, pos)
+        } else {
+            let updated: Vec<usize> = (0..remaining_tracks.len()).collect();
+            let pos = removed_index.min(updated.len());
+            (updated, pos)
+        };
+
+        if !was_active {
+            // Deleting a non-active item must NEVER interrupt, seek, restart, or change playback state.
+            self.queue = remaining_tracks;
+            self.play_order = new_play_order;
+
+            if self.queue.is_empty() {
+                self.play_order_pos = 0;
+                self.queue_index = 0;
+            } else if had_matching_queue {
+                if removed_order_pos < self.play_order_pos {
+                    self.play_order_pos = self.play_order_pos.saturating_sub(1);
+                }
+                self.play_order_pos = self
+                    .play_order_pos
+                    .min(self.play_order.len().saturating_sub(1));
+                self.queue_index = self.play_order[self.play_order_pos];
+            } else if let Some(cur_id) = self.current_track.as_ref().map(|t| t.id) {
+                if let Some(idx) = self.queue.iter().position(|t| t.id == cur_id) {
+                    self.queue_index = idx;
+                    self.play_order_pos =
+                        self.play_order.iter().position(|&x| x == idx).unwrap_or(0);
+                } else {
+                    self.play_order_pos = self
+                        .play_order_pos
+                        .min(self.play_order.len().saturating_sub(1));
+                    self.queue_index = self.play_order[self.play_order_pos];
+                }
+            } else {
+                self.play_order_pos = 0;
+                self.queue_index = self.play_order[0];
+            }
+
+            self.emit_event(crate::model::EngineEvent::QueueChanged {
+                len: self.queue.len(),
+            });
+            return Ok(());
+        }
+
+        // Active track was removed: advance to the next valid track in logical play order
+        // without jumping backwards to index 0, never repeating a deleted track under Repeat::One,
+        // and preserving Paused/Stopped/Idle without auto-starting playback.
+        let prev_state = self.state;
+        let was_actively_playing = prev_state.is_playing()
+            || prev_state == PlaybackLifecycle::Preparing
+            || prev_state == PlaybackLifecycle::Buffering;
+
+        self.queue = remaining_tracks;
+
+        if self.queue.is_empty() {
+            let _ = self.cleanup_playback().await;
+            self.current_track = None;
+            self.queue_index = 0;
+            self.play_order = Vec::new();
+            self.play_order_pos = 0;
+            self.base_position_ms = 0;
+            self.state = if prev_state == PlaybackLifecycle::Idle {
+                PlaybackLifecycle::Idle
+            } else {
+                PlaybackLifecycle::Stopped
+            };
+            self.emit_event(crate::model::EngineEvent::QueueChanged { len: 0 });
+            self.emit_event(crate::model::EngineEvent::TrackChanged {
+                track_id: None,
+                index: 0,
+            });
+            self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                lifecycle: self.state,
+                track_id: None,
+            });
+            return Ok(());
+        }
+
+        let has_next_in_cycle = removed_order_pos < new_play_order.len();
+        if has_next_in_cycle {
+            self.play_order = new_play_order;
+            self.play_order_pos = removed_order_pos;
+            self.queue_index = self.play_order[self.play_order_pos];
+        } else if self.repeat == RepeatMode::All {
+            if self.shuffle {
+                self.recompute_play_order_new_cycle(usize::MAX);
+            } else {
+                self.play_order = new_play_order;
+                self.play_order_pos = 0;
+            }
+            self.queue_index = self.play_order[self.play_order_pos];
+        } else {
+            // Deleted active track was the last valid track and Repeat != All (Off or One).
+            // Never repeat a deleted item or jump back to index 0.
+            let _ = self.cleanup_playback().await;
+            self.play_order = new_play_order;
+            self.play_order_pos = self.play_order.len().saturating_sub(1);
+            self.queue_index = self.play_order[self.play_order_pos];
+            self.current_track = None;
+            self.base_position_ms = 0;
+            self.state = if prev_state == PlaybackLifecycle::Idle {
+                PlaybackLifecycle::Idle
+            } else {
+                PlaybackLifecycle::Stopped
+            };
+            self.emit_event(crate::model::EngineEvent::QueueChanged {
+                len: self.queue.len(),
+            });
+            self.emit_event(crate::model::EngineEvent::TrackChanged {
+                track_id: None,
+                index: self.queue_index,
+            });
+            self.emit_event(crate::model::EngineEvent::LifecycleChanged {
+                lifecycle: self.state,
+                track_id: None,
+            });
+            return Ok(());
+        }
+
+        let next_track = self.queue[self.queue_index].clone();
+        if was_actively_playing {
+            if let Some(mut d) = self.decoder.take() {
+                let _ = d.stop().await;
+            }
+            if !self.sinks.is_empty() {
+                let res = self.start_playback_internal(next_track, 0).await;
+                self.emit_event(crate::model::EngineEvent::QueueChanged {
+                    len: self.queue.len(),
+                });
+                return res;
+            } else {
+                self.generation_id += 1;
+                self.track_bytes_decoded = 0;
+                self.track_pcm_timeline_bytes = 0;
+                self.current_track = Some(next_track);
+                self.base_position_ms = 0;
+                self.playing_started_at = None;
+                self.emit_event(crate::model::EngineEvent::QueueChanged {
+                    len: self.queue.len(),
+                });
+                self.emit_event(crate::model::EngineEvent::TrackChanged {
+                    track_id: self.current_track.as_ref().map(|t| t.id),
+                    index: self.queue_index,
+                });
+                return Ok(());
+            }
+        }
+
+        // Was Paused / Stopped / Idle / Ended / Failed: select the next track without starting playback.
+        if let Some(mut d) = self.decoder.take() {
+            let _ = d.stop().await;
+        }
+        self.playing_started_at = None;
+        self.generation_id += 1;
+        self.track_bytes_decoded = 0;
+        self.track_pcm_timeline_bytes = 0;
+        self.current_track = Some(next_track);
+        self.base_position_ms = 0;
+        self.state = prev_state;
+        self.emit_event(crate::model::EngineEvent::QueueChanged {
+            len: self.queue.len(),
+        });
+        self.emit_event(crate::model::EngineEvent::TrackChanged {
+            track_id: self.current_track.as_ref().map(|t| t.id),
+            index: self.queue_index,
+        });
+        Ok(())
     }
 
     async fn cleanup_playback(&mut self) -> Result<(), PlaybackError> {
@@ -1455,6 +1734,26 @@ impl PlaybackEngineHandle {
         rx.await.map_err(|_| PlaybackError::ChannelClosed)?
     }
 
+    pub async fn remove_queue_item(
+        &self,
+        removed_index: usize,
+        removed_track_id: Uuid,
+        remaining_tracks: Vec<Track>,
+    ) -> Result<(), PlaybackError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(EngineCommand::RemoveQueueItem {
+                removed_index,
+                removed_track_id,
+                remaining_tracks,
+                origin: crate::model::CommandOrigin::Local,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| PlaybackError::ChannelClosed)?;
+        rx.await.map_err(|_| PlaybackError::ChannelClosed)?
+    }
+
     pub async fn snapshot(&self) -> Result<EngineSnapshot, PlaybackError> {
         let (tx, rx) = oneshot::channel();
         self.sender
@@ -1655,5 +1954,244 @@ mod tests {
             .try_recv()
             .expect("should receive autonomous event");
         assert_eq!(te.origin, remote_origin);
+    }
+
+    #[tokio::test]
+    async fn test_r13_02_remove_active_middle_track_advances_to_d_not_b() {
+        let (_tx, rx) = mpsc::channel(16);
+        let mut engine = PlaybackEngine::new(rx, Arc::new(DummyResolver), PcmFormat::default());
+        let a = make_dummy_track("A");
+        let b = make_dummy_track("B");
+        let c = make_dummy_track("C");
+        let d = make_dummy_track("D");
+        let e = make_dummy_track("E");
+
+        engine.queue = vec![a.clone(), b.clone(), c.clone(), d.clone(), e.clone()];
+        engine.queue_index = 2;
+        engine.recompute_play_order(2);
+        engine.current_track = Some(c.clone());
+        engine.state = PlaybackLifecycle::Playing;
+
+        // Remove active track C (index 2)
+        engine
+            .handle_remove_queue_item(2, c.id, vec![a.clone(), b.clone(), d.clone(), e.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.current_track.as_ref().map(|t| t.id),
+            Some(d.id),
+            "removing active C must advance to D, never back to A or B"
+        );
+        assert_eq!(engine.queue_index, 2);
+        assert_eq!(engine.play_order_pos, 2);
+
+        // Subsequent Next must advance from D -> E (never B!)
+        let (resp_tx, resp_rx) = oneshot::channel();
+        engine
+            .handle_command(EngineCommand::Next {
+                origin: crate::model::CommandOrigin::Local,
+                respond_to: resp_tx,
+            })
+            .await;
+        resp_rx.await.unwrap().unwrap();
+        assert_eq!(engine.current_track.as_ref().map(|t| t.id), Some(e.id));
+    }
+
+    #[tokio::test]
+    async fn test_r13_02_remove_active_paused_and_stopped_never_autoplays() {
+        let (_tx, rx) = mpsc::channel(16);
+        let mut engine = PlaybackEngine::new(rx, Arc::new(DummyResolver), PcmFormat::default());
+        let a = make_dummy_track("A");
+        let b = make_dummy_track("B");
+        let c = make_dummy_track("C");
+
+        // Paused on A -> remove A -> selects B and stays Paused
+        engine.queue = vec![a.clone(), b.clone(), c.clone()];
+        engine.queue_index = 0;
+        engine.recompute_play_order(0);
+        engine.current_track = Some(a.clone());
+        engine.state = PlaybackLifecycle::Paused;
+
+        engine
+            .handle_remove_queue_item(0, a.id, vec![b.clone(), c.clone()])
+            .await
+            .unwrap();
+        assert_eq!(engine.state, PlaybackLifecycle::Paused);
+        assert_eq!(engine.current_track.as_ref().map(|t| t.id), Some(b.id));
+
+        // Stopped on B -> remove B -> selects C and stays Stopped
+        engine.state = PlaybackLifecycle::Stopped;
+        engine
+            .handle_remove_queue_item(0, b.id, vec![c.clone()])
+            .await
+            .unwrap();
+        assert_eq!(engine.state, PlaybackLifecycle::Stopped);
+        assert_eq!(engine.current_track.as_ref().map(|t| t.id), Some(c.id));
+    }
+
+    #[tokio::test]
+    async fn test_r13_02_remove_last_and_only_track_respects_repeat_policies() {
+        let (_tx, rx) = mpsc::channel(16);
+        let mut engine = PlaybackEngine::new(rx, Arc::new(DummyResolver), PcmFormat::default());
+        let a = make_dummy_track("A");
+        let b = make_dummy_track("B");
+
+        // Repeat::One on last track B -> MUST NOT repeat deleted B, must stop cleanly
+        engine.queue = vec![a.clone(), b.clone()];
+        engine.queue_index = 1;
+        engine.recompute_play_order(1);
+        engine.current_track = Some(b.clone());
+        engine.repeat = RepeatMode::One;
+        engine.state = PlaybackLifecycle::Playing;
+
+        engine
+            .handle_remove_queue_item(1, b.id, vec![a.clone()])
+            .await
+            .unwrap();
+        assert_eq!(engine.state, PlaybackLifecycle::Stopped);
+        assert_eq!(engine.current_track, None);
+
+        // Repeat::All on last track B -> wraps cleanly to A
+        engine.queue = vec![a.clone(), b.clone()];
+        engine.queue_index = 1;
+        engine.recompute_play_order(1);
+        engine.current_track = Some(b.clone());
+        engine.repeat = RepeatMode::All;
+        engine.state = PlaybackLifecycle::Playing;
+
+        engine
+            .handle_remove_queue_item(1, b.id, vec![a.clone()])
+            .await
+            .unwrap();
+        assert_eq!(engine.current_track.as_ref().map(|t| t.id), Some(a.id));
+        assert_eq!(engine.queue_index, 0);
+
+        // Removing the ONLY track in queue under Repeat::All -> stops cleanly with empty queue
+        engine
+            .handle_remove_queue_item(0, a.id, Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(engine.state, PlaybackLifecycle::Stopped);
+        assert_eq!(engine.current_track, None);
+        assert!(engine.queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_r13_02_remove_active_under_shuffle_follows_logical_play_order() {
+        let (_tx, rx) = mpsc::channel(16);
+        let mut engine = PlaybackEngine::new(rx, Arc::new(DummyResolver), PcmFormat::default());
+        let a = make_dummy_track("A");
+        let b = make_dummy_track("B");
+        let c = make_dummy_track("C");
+        let d = make_dummy_track("D");
+
+        // Explicit shuffled play_order: C(2) -> A(0) -> D(3) -> B(1)
+        engine.queue = vec![a.clone(), b.clone(), c.clone(), d.clone()];
+        engine.shuffle = true;
+        engine.play_order = vec![2, 0, 3, 1];
+        engine.play_order_pos = 0;
+        engine.queue_index = 2;
+        engine.current_track = Some(c.clone());
+        engine.state = PlaybackLifecycle::Playing;
+
+        // Removing active C(2) MUST advance to next in shuffle play_order -> A(0), then D -> B!
+        engine
+            .handle_remove_queue_item(2, c.id, vec![a.clone(), b.clone(), d.clone()])
+            .await
+            .unwrap();
+        assert_eq!(engine.current_track.as_ref().map(|t| t.id), Some(a.id));
+        assert_eq!(engine.play_order, vec![0, 2, 1]);
+        assert_eq!(engine.play_order_pos, 0);
+
+        // Next -> D (now at queue index 2)
+        let (tx1, rx1) = oneshot::channel();
+        engine
+            .handle_command(EngineCommand::Next {
+                origin: crate::model::CommandOrigin::Local,
+                respond_to: tx1,
+            })
+            .await;
+        rx1.await.unwrap().unwrap();
+        assert_eq!(engine.current_track.as_ref().map(|t| t.id), Some(d.id));
+
+        // Next -> B (now at queue index 1)
+        let (tx2, rx2) = oneshot::channel();
+        engine
+            .handle_command(EngineCommand::Next {
+                origin: crate::model::CommandOrigin::Local,
+                respond_to: tx2,
+            })
+            .await;
+        rx2.await.unwrap().unwrap();
+        assert_eq!(engine.current_track.as_ref().map(|t| t.id), Some(b.id));
+    }
+
+    #[tokio::test]
+    async fn test_r13_02_remove_non_active_before_and_after_preserves_position_and_next() {
+        let (_tx, rx) = mpsc::channel(16);
+        let mut engine = PlaybackEngine::new(rx, Arc::new(DummyResolver), PcmFormat::default());
+        let a = make_dummy_track("A");
+        let b = make_dummy_track("B");
+        let c = make_dummy_track("C");
+        let d = make_dummy_track("D");
+
+        engine.queue = vec![a.clone(), b.clone(), c.clone(), d.clone()];
+        engine.queue_index = 2;
+        engine.recompute_play_order(2);
+        engine.current_track = Some(c.clone());
+        engine.base_position_ms = 42_000;
+        engine.state = PlaybackLifecycle::Paused;
+
+        // Delete A (index 0, before C): C stays active at index 1, position 42_000 untouched
+        engine
+            .handle_remove_queue_item(0, a.id, vec![b.clone(), c.clone(), d.clone()])
+            .await
+            .unwrap();
+        assert_eq!(engine.current_track.as_ref().map(|t| t.id), Some(c.id));
+        assert_eq!(engine.queue_index, 1);
+        assert_eq!(engine.base_position_ms, 42_000);
+        assert_eq!(engine.state, PlaybackLifecycle::Paused);
+
+        // Next advances cleanly to D
+        let (tx1, rx1) = oneshot::channel();
+        engine
+            .handle_command(EngineCommand::Next {
+                origin: crate::model::CommandOrigin::Local,
+                respond_to: tx1,
+            })
+            .await;
+        rx1.await.unwrap().unwrap();
+        assert_eq!(engine.current_track.as_ref().map(|t| t.id), Some(d.id));
+    }
+
+    #[tokio::test]
+    async fn test_r13_02_eof_after_removing_active_track_advances_without_backtracking() {
+        let (_tx, rx) = mpsc::channel(16);
+        let mut engine = PlaybackEngine::new(rx, Arc::new(DummyResolver), PcmFormat::default());
+        let a = make_dummy_track("A");
+        let b = make_dummy_track("B");
+        let c = make_dummy_track("C");
+        let d = make_dummy_track("D");
+
+        // [A, B, C*, D] -> delete C -> D selected -> EOF on D with Repeat::Off -> Ended (NEVER B!)
+        engine.queue = vec![a.clone(), b.clone(), c.clone(), d.clone()];
+        engine.queue_index = 2;
+        engine.recompute_play_order(2);
+        engine.current_track = Some(c.clone());
+        engine.state = PlaybackLifecycle::Playing;
+
+        engine
+            .handle_remove_queue_item(2, c.id, vec![a.clone(), b.clone(), d.clone()])
+            .await
+            .unwrap();
+        assert_eq!(engine.current_track.as_ref().map(|t| t.id), Some(d.id));
+
+        // Trigger EOF on D
+        engine.handle_eof().await;
+        assert_eq!(
+            engine.state,
+            PlaybackLifecycle::Ended,
+            "EOF on D after deleting C must reach Ended, never backtrack to B"
+        );
     }
 }

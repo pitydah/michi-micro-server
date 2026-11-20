@@ -54,6 +54,12 @@ pub struct ServerCapabilities {
     pub features: Vec<ServerFeature>,
     pub protocols: Vec<ServerProtocol>,
     pub runtime: ServerRuntime,
+    /// Single authoritative canonical capability projection from `michi-identity`.
+    #[serde(skip)]
+    pub canonical: michi_identity::CanonicalServerCapabilities,
+    /// Derived runtime transcoding availability (ffmpeg + stream/transcode modules active).
+    #[serde(skip)]
+    pub transcoding_ready: bool,
 }
 
 // BEGIN GENERATED PRODUCT MATURITY
@@ -299,25 +305,79 @@ impl ServerCapabilities {
             .filter(|r| r.presence == michi_receivers::ReceiverPresence::VerifiedOnline)
             .count();
         let ffmpeg = michi_streaming::check_ffmpeg();
+        let tls_ready = state.is_aircat_tls_ready().await;
+
+        let library_enabled = !disabled.contains("library");
+        let search_enabled = !disabled.contains("search") && library_enabled;
+        let streaming_enabled = !disabled.contains("stream") && !disabled.contains("streaming");
+        let download_enabled = !disabled.contains("download") && library_enabled;
+        let sync_enabled = !disabled.contains("sync");
+        let sync_manifest_enabled = sync_enabled && library_enabled;
+        let artwork_enabled = !disabled.contains("artwork") && library_enabled;
+        let playlists_enabled = !disabled.contains("playlists") && library_enabled;
+        let playback_enabled = !disabled.contains("playback");
+        let queue_enabled = playback_enabled && !disabled.contains("queue");
+        let events_enabled = !disabled.contains("events");
+        let receivers_enabled = !disabled.contains("receivers");
+        let rooms_enabled = !disabled.contains("rooms");
+        let multiroom_enabled = rooms_enabled && receivers_enabled;
+        let transcoding_ready = ffmpeg
+            && streaming_enabled
+            && !disabled.contains("transcoding")
+            && !disabled.contains("transcode");
+
+        // Single authoritative runtime capability projection governed by michi-link
+        let canonical = michi_identity::CanonicalServerCapabilities::from_runtime_state(
+            &michi_identity::RuntimeCapabilityState {
+                library: library_enabled,
+                search: search_enabled,
+                streaming: streaming_enabled,
+                download: download_enabled,
+                sync: sync_enabled,
+                sync_manifest: sync_manifest_enabled,
+                artwork: artwork_enabled,
+                playlists: playlists_enabled,
+                playback: playback_enabled,
+                queue: queue_enabled,
+                events: events_enabled,
+                receivers: receivers_enabled,
+                multiroom: multiroom_enabled,
+                aircat_tls_listener_ready: tls_ready,
+                aircat_producer_ready: tls_ready && library_enabled,
+            },
+        );
+        let canonical_map = canonical.to_features_map();
 
         let mut features: Vec<ServerFeature> = MODULE_FEATURES
             .iter()
-            .map(
-                |(name, version, description, maturity, evidence)| ServerFeature {
+            .map(|(name, version, description, maturity, evidence)| {
+                let enabled = match *name {
+                    "stream" => canonical.streaming,
+                    "sync" => canonical.sync,
+                    "playback" => canonical.playback,
+                    "receivers" => canonical.receivers,
+                    "rooms" => rooms_enabled,
+                    other => !disabled.contains(other),
+                };
+                ServerFeature {
                     name,
                     version,
                     description,
-                    enabled: !disabled.contains(*name),
+                    enabled,
                     maturity: canonical_maturity(name, *maturity),
                     evidence: *evidence,
-                },
-            )
+                }
+            })
             .collect();
 
         features.extend(ALWAYS_ON_FEATURES.iter().map(
             |(name, version, description, maturity, evidence)| {
-                let enabled = if *name == "autonomous_playback" {
-                    ffmpeg && !disabled.contains("playback")
+                let enabled = if let Some(&canon_val) = canonical_map.get(*name) {
+                    canon_val
+                } else if *name == "autonomous_playback" {
+                    ffmpeg && canonical.playback
+                } else if *name == "import" {
+                    library_enabled && !disabled.contains("import")
                 } else {
                     true
                 };
@@ -344,30 +404,92 @@ impl ServerCapabilities {
             },
         ));
 
-        let tls_ready = state.aircat_tls.read().await.is_some();
+        // Canonical Michi Link capabilities not yet in legacy MODULE/ALWAYS_ON tables
         features.push(ServerFeature {
-            name: "aircat_original_v1",
+            name: michi_identity::CAP_STREAMING,
             version: "1.0",
-            description: "AirCat v1 original file transfer (requires active TLS/SPKI)",
-            enabled: tls_ready,
+            description: "Canonical HTTP audio streaming capability (aliased by legacy 'stream')",
+            enabled: canonical.streaming,
+            maturity: canonical_maturity("stream", FeatureMaturity::Stable),
+            evidence: EvidenceLevel::EffectVerified,
+        });
+        features.push(ServerFeature {
+            name: michi_identity::CAP_SYNC_MANIFEST,
+            version: "1.0",
+            description: "Library delta & manifest synchronization endpoints",
+            enabled: canonical.sync_manifest,
+            maturity: canonical_maturity("sync", FeatureMaturity::Stable),
+            evidence: EvidenceLevel::EffectVerified,
+        });
+        features.push(ServerFeature {
+            name: michi_identity::CAP_MULTIROOM,
+            version: "1.0",
+            description: "Multiroom groups & synchronized receiver playback",
+            enabled: canonical.multiroom,
+            maturity: canonical_maturity("rooms", FeatureMaturity::Beta),
+            evidence: EvidenceLevel::EffectVerified,
+        });
+        features.push(ServerFeature {
+            name: "transcoding",
+            version: "1.0",
+            description: "On-the-fly audio transcoding (requires FFmpeg and active stream module)",
+            enabled: transcoding_ready,
+            maturity: canonical_maturity("transcode", FeatureMaturity::Stable),
+            evidence: if transcoding_ready {
+                EvidenceLevel::EffectVerified
+            } else {
+                EvidenceLevel::Implemented
+            },
+        });
+
+        let aircat_evidence = if canonical.aircat_original_v1 {
+            EvidenceLevel::EffectVerified
+        } else {
+            EvidenceLevel::Implemented
+        };
+        features.push(ServerFeature {
+            name: michi_identity::CAP_AIRCAT_ORIGINAL_V1,
+            version: "1.0",
+            description: "AirCat v1 original file transfer (requires active TLS/SPKI and library)",
+            enabled: canonical.aircat_original_v1,
             maturity: FeatureMaturity::Beta,
-            evidence: if tls_ready {
+            evidence: aircat_evidence,
+        });
+        features.push(ServerFeature {
+            name: michi_identity::CAP_HOME_TLS_SPKI_PINNED,
+            version: "1.0",
+            description: "RFC 7469 TLS SPKI pin active on HTTPS listener",
+            enabled: canonical.home_tls_spki_pinned,
+            maturity: FeatureMaturity::Beta,
+            evidence: if canonical.home_tls_spki_pinned {
                 EvidenceLevel::EffectVerified
             } else {
                 EvidenceLevel::Implemented
             },
         });
         features.push(ServerFeature {
-            name: "home_tls_spki_pinned",
+            name: michi_identity::CAP_AIRCAT_MANIFEST_V1,
             version: "1.0",
-            description: "RFC 7469 TLS SPKI pin active on HTTPS listener",
-            enabled: tls_ready,
+            description: "AirCat v1 original catalog manifest over pinned HTTPS",
+            enabled: canonical.aircat_manifest_v1,
             maturity: FeatureMaturity::Beta,
-            evidence: if tls_ready {
-                EvidenceLevel::EffectVerified
-            } else {
-                EvidenceLevel::Implemented
-            },
+            evidence: aircat_evidence,
+        });
+        features.push(ServerFeature {
+            name: michi_identity::CAP_AIRCAT_AUTHORIZE_V1,
+            version: "1.0",
+            description: "AirCat v1 Ed25519 grant authorization over pinned HTTPS",
+            enabled: canonical.aircat_authorize_v1,
+            maturity: FeatureMaturity::Beta,
+            evidence: aircat_evidence,
+        });
+        features.push(ServerFeature {
+            name: michi_identity::CAP_AIRCAT_ORIGINAL_DOWNLOAD_V1,
+            version: "1.0",
+            description: "AirCat v1 original-bytes download with Range/ETag over pinned HTTPS",
+            enabled: canonical.aircat_original_download_v1,
+            maturity: FeatureMaturity::Beta,
+            evidence: aircat_evidence,
         });
 
         ServerCapabilities {
@@ -395,6 +517,8 @@ impl ServerCapabilities {
                 receivers_connected: receiver_count,
                 ffmpeg_available: ffmpeg,
             },
+            canonical,
+            transcoding_ready,
         }
     }
 
@@ -411,23 +535,10 @@ impl ServerCapabilities {
         for feat in &self.features {
             map.insert(feat.name.to_string(), serde_json::Value::Bool(feat.enabled));
         }
-        let tls_ready = self.feature_enabled("home_tls_spki_pinned");
-        map.insert(
-            "aircat_manifest_v1".to_string(),
-            serde_json::Value::Bool(tls_ready),
-        );
-        map.insert(
-            "aircat_authorize_v1".to_string(),
-            serde_json::Value::Bool(tls_ready),
-        );
-        map.insert(
-            "aircat_original_download_v1".to_string(),
-            serde_json::Value::Bool(tls_ready),
-        );
-        map.insert(
-            "home_tls_spki_pinned".to_string(),
-            serde_json::Value::Bool(tls_ready),
-        );
+        // Guarantee canonical keys are always present with identical values
+        for (k, v) in self.canonical.to_features_map() {
+            map.insert(k, serde_json::Value::Bool(v));
+        }
         serde_json::Value::Object(map)
     }
 
@@ -449,11 +560,9 @@ impl ServerCapabilities {
     }
 
     pub fn discovery_features(&self) -> std::collections::BTreeMap<String, bool> {
-        let mut map = std::collections::BTreeMap::new();
-        map.insert("library".to_string(), self.feature_enabled("library"));
-        map.insert("stream".to_string(), self.feature_enabled("stream"));
-        map.insert("playback".to_string(), self.feature_enabled("playback"));
-        map.insert("sync".to_string(), self.feature_enabled("sync"));
+        let mut map = self.canonical.to_discovery_features();
+        // Legacy discovery alias derived strictly from canonical streaming flag
+        map.insert("stream".to_string(), self.canonical.streaming);
         map
     }
 }

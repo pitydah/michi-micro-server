@@ -13,7 +13,7 @@
 use axum::{
     async_trait,
     body::Body,
-    extract::{ConnectInfo, FromRequestParts, Path, State},
+    extract::{FromRequestParts, Path, State},
     http::{header, request::Parts, HeaderMap, StatusCode},
     response::Response,
     Json,
@@ -22,7 +22,6 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use ed25519_dalek::VerifyingKey;
 use michi_identity::types::decode_base64url_strict;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use uuid::Uuid;
@@ -30,8 +29,9 @@ use uuid::Uuid;
 use crate::{
     aircat_grants::{self, ApprovedAsset, AuthorizedContext, Refusal},
     aircat_original_file,
-    aircat_producer_security::ProducerSnapshot,
-    AirCatTlsVerifiedConnection, AppState,
+    aircat_producer_security::{subtle_eq_str, ProducerSnapshot},
+    home_tls_policy::{HomeTlsTransportPolicy, TlsTransportVerdict},
+    AndroidTrustVerificationStatus, AppState, TlsCertificateProfile,
 };
 
 pub const AIRCAT_PROTOCOL_HEADER: &str = "X-Michi-AirCat-Protocol";
@@ -42,13 +42,13 @@ const AUTHORIZE_MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_ERROR_MESSAGE_BYTES: usize = 512;
 const AIRCAT_CHUNK_BYTES: usize = 64 * 1024;
 const DB_REVOCATION_RECHECK_INTERVAL: Duration = Duration::from_secs(2);
+const MAX_PENDING_HOME_ENROLLMENTS: i64 = 128;
+const ENROLLMENT_CLAIM_TTL_MS: i64 = 600_000;
 static AIRCAT_HASH_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 #[derive(Debug, Clone, Copy)]
 pub struct AirCatTransportInfo {
-    pub has_tls_ext: bool,
-    pub has_peer_socket: bool,
-    pub is_trusted_proxy_https: bool,
+    pub verdict: TlsTransportVerdict,
 }
 
 #[async_trait]
@@ -59,31 +59,9 @@ impl FromRequestParts<AppState> for AirCatTransportInfo {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let has_tls_ext = parts
-            .extensions
-            .get::<AirCatTlsVerifiedConnection>()
-            .is_some();
-        let peer_ip = parts
-            .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|c| c.0.ip());
-        let has_peer_socket = peer_ip.is_some();
-        let is_trusted_proxy_https = state.config.trust_proxy
-            && peer_ip
-                .map(|ip| state.config.is_trusted_proxy(&ip))
-                .unwrap_or(false)
-            && parts
-                .headers
-                .get("x-forwarded-proto")
-                .and_then(|v| v.to_str().ok())
-                .map(|p| p.trim().eq_ignore_ascii_case("https"))
-                .unwrap_or(false);
-
-        Ok(Self {
-            has_tls_ext,
-            has_peer_socket,
-            is_trusted_proxy_https,
-        })
+        let verdict =
+            HomeTlsTransportPolicy::evaluate(state, &parts.headers, &parts.extensions).await;
+        Ok(Self { verdict })
     }
 }
 
@@ -91,19 +69,27 @@ async fn enforce_aircat_tls_transport(
     state: &AppState,
     transport: &AirCatTransportInfo,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    if state.aircat_tls.read().await.is_some()
-        && transport.has_peer_socket
-        && !transport.has_tls_ext
-        && !transport.is_trusted_proxy_https
-    {
-        state.aircat_security.record_tls_rejection();
-        return Err(aircat_error(
-            StatusCode::FORBIDDEN,
-            "TLS_REQUIRED",
-            "AirCat endpoints forbid cleartext HTTP when HTTPS/TLS is active",
-        ));
+    match transport.verdict {
+        TlsTransportVerdict::VerifiedDirectTls | TlsTransportVerdict::VerifiedTrustedProxyHttps => {
+            Ok(())
+        }
+        TlsTransportVerdict::TlsNotConfigured => {
+            state.aircat_security.record_tls_rejection();
+            Err(aircat_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "TLS_NOT_CONFIGURED",
+                "Home authentication and AirCat endpoints require an active HTTPS/TLS listener with verified certificate and SPKI pin",
+            ))
+        }
+        TlsTransportVerdict::CleartextRejected => {
+            state.aircat_security.record_tls_rejection();
+            Err(aircat_error(
+                StatusCode::FORBIDDEN,
+                "TLS_REQUIRED",
+                "This endpoint requires verified HTTPS transport; cleartext HTTP is forbidden",
+            ))
+        }
     }
-    Ok(())
 }
 
 pub fn aircat_json_headers() -> HeaderMap {
@@ -222,13 +208,27 @@ fn refusal_to_status(refusal: Refusal) -> (StatusCode, &'static str, &'static st
     }
 }
 
-/// Checks whether a given device/member is revoked in this Home.
-pub async fn is_member_revoked(state: &AppState, home_id: &str, device_michi_id: &str) -> bool {
+/// Explicit authorization state for Home membership revocation verification (`P1-D`).
+/// Any database failure yields `Indeterminate`, which MUST fail closed (`503 REVOCATION_STORE_UNAVAILABLE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeMemberAuthorizationState {
+    Active,
+    Revoked,
+    Indeterminate,
+}
+
+/// Checks whether a given device/member is active or revoked in this Home, failing
+/// closed (`Indeterminate`) if the durable SQLite revocation store cannot be read.
+pub async fn check_home_member_authorization(
+    state: &AppState,
+    home_id: &str,
+    device_michi_id: &str,
+) -> HomeMemberAuthorizationState {
     if state
         .aircat_security
         .is_member_revoked_in_memory(device_michi_id)
     {
-        return true;
+        return HomeMemberAuthorizationState::Revoked;
     }
 
     // 1. In-memory session manager revocations
@@ -238,21 +238,103 @@ pub async fn is_member_revoked(state: &AppState, home_id: &str, device_michi_id:
         .any(|r| r.revoked_device_michi_id == device_michi_id)
     {
         state.aircat_security.revoke_member(device_michi_id);
-        return true;
+        return HomeMemberAuthorizationState::Revoked;
     }
 
-    // 2. Persisted SQLite home_revocations
-    if let Ok(db_revs) = michi_db::list_home_revocations_db(&state.db, home_id).await {
-        if db_revs
-            .iter()
-            .any(|r| r.revoked_device_michi_id == device_michi_id)
-        {
-            state.aircat_security.revoke_member(device_michi_id);
-            return true;
+    // 2. Persisted SQLite home_revocations (fail-closed on I/O or SQL error)
+    match michi_db::list_home_revocations_db(&state.db, home_id).await {
+        Ok(db_revs) => {
+            if db_revs
+                .iter()
+                .any(|r| r.revoked_device_michi_id == device_michi_id)
+            {
+                state.aircat_security.revoke_member(device_michi_id);
+                HomeMemberAuthorizationState::Revoked
+            } else {
+                HomeMemberAuthorizationState::Active
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                home_id = %home_id,
+                device_michi_id = %device_michi_id,
+                error = %e,
+                "Failed to query durable home_revocations table; denying access fail-closed"
+            );
+            HomeMemberAuthorizationState::Indeterminate
         }
     }
+}
 
-    false
+pub fn ensure_member_authorized(
+    auth_state: HomeMemberAuthorizationState,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    match auth_state {
+        HomeMemberAuthorizationState::Active => Ok(()),
+        HomeMemberAuthorizationState::Revoked => Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "MEMBER_REVOKED",
+            "member identity is revoked in this Home",
+        )),
+        HomeMemberAuthorizationState::Indeterminate => Err(aircat_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "REVOCATION_STORE_UNAVAILABLE",
+            "unable to verify Home revocation state; refusing access fail-closed",
+        )),
+    }
+}
+
+/// Validates and deduplicates Home membership roles against the declared `device_type`
+/// to prevent privilege escalation (e.g. a mobile client requesting `music_server` or `library_host`).
+fn validate_roles_for_device_type(
+    device_type: &str,
+    roles: &[michi_identity::Role],
+) -> Result<Vec<michi_identity::Role>, String> {
+    use michi_identity::Role;
+    if roles.is_empty() {
+        return Err("at least one role is required".to_string());
+    }
+    let mut normalized = Vec::with_capacity(roles.len());
+    for role in roles {
+        let allowed = match device_type {
+            "mobile" => matches!(
+                role,
+                Role::MobilePlayer | Role::RemoteController | Role::SyncClient
+            ),
+            "desktop" => matches!(
+                role,
+                Role::DesktopPlayer
+                    | Role::LibraryMaster
+                    | Role::SyncHost
+                    | Role::RemoteController
+                    | Role::SyncClient
+            ),
+            "stream" => matches!(role, Role::AudioReceiver),
+            "server" => matches!(
+                role,
+                Role::MusicServer | Role::LibraryHost | Role::PlaybackHost | Role::SyncHost
+            ),
+            _ => false,
+        };
+        if !allowed {
+            return Err(format!(
+                "role '{role:?}' is not permitted for device_type '{device_type}'"
+            ));
+        }
+        if !normalized.contains(role) {
+            normalized.push(*role);
+        }
+    }
+    Ok(normalized)
+}
+
+fn parse_enrollment_status(raw: &str) -> michi_identity::HomeEnrollmentStatus {
+    match raw {
+        "approved" => michi_identity::HomeEnrollmentStatus::Approved,
+        "rejected" => michi_identity::HomeEnrollmentStatus::Rejected,
+        "expired" => michi_identity::HomeEnrollmentStatus::Expired,
+        _ => michi_identity::HomeEnrollmentStatus::Pending,
+    }
 }
 
 async fn resolve_caller_with_token(
@@ -293,13 +375,9 @@ async fn resolve_caller_with_token(
             }
         }
         let home_id = state.home_root_authority.home_id();
-        if is_member_revoked(state, &home_id, &verified_home_member).await {
-            return Err(aircat_error(
-                StatusCode::FORBIDDEN,
-                "MEMBER_REVOKED",
-                "authenticated member is revoked in this Home",
-            ));
-        }
+        ensure_member_authorized(
+            check_home_member_authorization(state, &home_id, &verified_home_member).await,
+        )?;
         return Ok(verified_home_member);
     }
 
@@ -440,21 +518,22 @@ async fn resolve_caller_with_token(
         }
     }
 
-    // Check Home revocation status
+    // Check Home revocation status fail-closed
     let home_id = state.home_root_authority.home_id();
-    if is_member_revoked(state, &home_id, &authenticated_member).await {
-        return Err(aircat_error(
-            StatusCode::FORBIDDEN,
-            "MEMBER_REVOKED",
-            "authenticated member is revoked in this Home",
-        ));
-    }
+    ensure_member_authorized(
+        check_home_member_authorization(state, &home_id, &authenticated_member).await,
+    )?;
 
     Ok(authenticated_member)
 }
 
-/// Resolves and cryptographically checks the caller's Home session and identity via
-/// `Authorization: Bearer ...` strictly (no browser cookies on AirCat wire transfer APIs).
+/// Resolves and cryptographically verifies an `AIRCAT_STRICT` caller via
+/// `Authorization: Bearer <michi_home_...>` ONLY.
+///
+/// Legacy `SERVER_CODE` device tokens and WebUI username/password sessions are
+/// explicitly rejected with `403 HOME_SESSION_REQUIRED`. `X-Michi-Device-Id`
+/// NEVER substitutes or grants identity; if supplied it MUST match the
+/// cryptographically verified Home member `michi_id`.
 pub async fn resolve_authenticated_caller(
     state: &AppState,
     headers: &HeaderMap,
@@ -475,7 +554,57 @@ pub async fn resolve_authenticated_caller(
         }
     };
 
-    resolve_caller_with_token(state, headers, token, claimed_destination, false).await
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if let Some(verified_home_member) = state.aircat_security.lookup_home_session(token, now_ms) {
+        if let Some(claimed) = claimed_destination {
+            if claimed != verified_home_member {
+                return Err(aircat_error(
+                    StatusCode::FORBIDDEN,
+                    "WRONG_AUDIENCE",
+                    "destinationMichiId does not match cryptographically verified Home member session",
+                ));
+            }
+        }
+        if let Some(hdr_dev) = headers
+            .get("X-Michi-Device-Id")
+            .and_then(|h| h.to_str().ok())
+        {
+            if !hdr_dev.is_empty() && hdr_dev != verified_home_member {
+                return Err(aircat_error(
+                    StatusCode::FORBIDDEN,
+                    "IDENTITY_MISMATCH",
+                    "X-Michi-Device-Id header does not match verified Home member michi_id",
+                ));
+            }
+        }
+        let home_id = state.home_root_authority.home_id();
+        ensure_member_authorized(
+            check_home_member_authorization(state, &home_id, &verified_home_member).await,
+        )?;
+        return Ok(verified_home_member);
+    }
+
+    // Distinguish valid legacy SERVER_CODE / WebUI credentials from unknown tokens
+    // so callers receive an unambiguous policy refusal (`403 HOME_SESSION_REQUIRED`).
+    let is_legacy_or_webui = state.auth_sessions.extract_user_id(token).await.is_some()
+        || state
+            .token_store
+            .validate(token, michi_link::TokenType::Device)
+            .await
+            .is_ok();
+    if is_legacy_or_webui {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "HOME_SESSION_REQUIRED",
+            "AirCat strict endpoints require a verified HOME_MEMBERSHIP session; legacy SERVER_CODE or WebUI tokens are rejected",
+        ));
+    }
+
+    Err(aircat_error(
+        StatusCode::UNAUTHORIZED,
+        "INVALID_TOKEN",
+        "invalid or expired Home session token",
+    ))
 }
 
 /// Resolves WebUI (`michi_web_session` cookie) or Bearer callers for WebUI/admin AirCat panels.
@@ -813,19 +942,23 @@ fn checked_download_stream(
                 return None;
             }
             let now_ms = chrono::Utc::now().timestamp_millis();
-            let mut revoked = guard
+            let mut blocked = guard
                 .state
                 .aircat_security
                 .is_member_revoked_in_memory(&guard.authenticated_member);
-            if !revoked && last_db_check.elapsed() >= DB_REVOCATION_RECHECK_INTERVAL {
-                revoked =
-                    is_member_revoked(&guard.state, &guard.home_id, &guard.authenticated_member)
-                        .await;
+            if !blocked && last_db_check.elapsed() >= DB_REVOCATION_RECHECK_INTERVAL {
+                blocked = check_home_member_authorization(
+                    &guard.state,
+                    &guard.home_id,
+                    &guard.authenticated_member,
+                )
+                .await
+                    != HomeMemberAuthorizationState::Active;
                 last_db_check = tokio::time::Instant::now();
             }
 
             if now_ms >= guard.expires_at_millis
-                || revoked
+                || blocked
                 || guard
                     .state
                     .aircat_security
@@ -1001,13 +1134,16 @@ pub async fn aircat_download_handler(
         )
     })?;
 
-    let is_revoked = is_member_revoked(&state, &grant.home_id, &grant.destination_michi_id).await;
+    ensure_member_authorized(
+        check_home_member_authorization(&state, &grant.home_id, &grant.destination_michi_id).await,
+    )?;
 
-    aircat_grants::verify_grant(&grant, &root_key, &authenticated_member, now_ms, is_revoked)
-        .map_err(|r| {
+    aircat_grants::verify_grant(&grant, &root_key, &authenticated_member, now_ms, false).map_err(
+        |r| {
             let (status, code, msg) = refusal_to_status(r);
             aircat_error(status, code, msg)
-        })?;
+        },
+    )?;
 
     // Verify remote_id is in retained authorized snapshot
     let revision = state
@@ -1254,12 +1390,22 @@ pub async fn aircat_download_handler(
 /// GET /api/v1/aircat/enrollment-qr
 ///
 /// Generates an administrative AirCat enrollment QR payload (michi.aircat.home.enrollment.v1).
-/// Fails closed with 503 if real HTTPS/TLS + SPKI pinning is not configured.
+/// Fails closed with 503 if real HTTPS/TLS + SPKI pinning is not configured or 403 over cleartext HTTP.
 pub async fn aircat_enrollment_qr_handler(
     State(state): State<AppState>,
+    transport: AirCatTransportInfo,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<AirCatTrustedEnrollmentQr>), (StatusCode, Json<serde_json::Value>)> {
+    enforce_aircat_tls_transport(&state, &transport).await?;
     let _authenticated_admin = resolve_webui_or_bearer_caller(&state, &headers, true).await?;
+
+    if !state.is_aircat_tls_ready().await {
+        return Err(aircat_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TLS_NOT_CONFIGURED",
+            "HTTPS/TLS listener with SPKI pinning is not active for AirCat enrollment",
+        ));
+    }
 
     let tls_info = state.aircat_tls.read().await.clone().ok_or_else(|| {
         aircat_error(
@@ -1344,13 +1490,9 @@ pub async fn home_auth_challenge_handler(
         ));
     }
 
-    if is_member_revoked(&state, &home_id, &body.client_michi_id).await {
-        return Err(aircat_error(
-            StatusCode::FORBIDDEN,
-            "MEMBER_REVOKED",
-            "device identity is revoked in this Home",
-        ));
-    }
+    ensure_member_authorized(
+        check_home_member_authorization(&state, &home_id, &body.client_michi_id).await,
+    )?;
 
     let mut nonce_bytes = [0u8; 32];
     use rand::RngCore;
@@ -1383,7 +1525,7 @@ pub async fn home_auth_challenge_handler(
 /// POST /api/v1/auth/session
 ///
 /// Verifies Home membership certificate + Ed25519 challenge signature and establishes a
-/// bound HOME_MEMBERSHIP bearer session.
+/// bound HOME_MEMBERSHIP bearer session exclusively in the dedicated Home session store.
 pub async fn home_auth_session_handler(
     State(state): State<AppState>,
     Json(body): Json<michi_identity::types::DeviceAuthSessionRequest>,
@@ -1403,13 +1545,9 @@ pub async fn home_auth_session_handler(
         ));
     }
 
-    if is_member_revoked(&state, &home_id, &body.client_michi_id).await {
-        return Err(aircat_error(
-            StatusCode::FORBIDDEN,
-            "MEMBER_REVOKED",
-            "member is revoked",
-        ));
-    }
+    ensure_member_authorized(
+        check_home_member_authorization(&state, &home_id, &body.client_michi_id).await,
+    )?;
 
     let challenge_nonce = state
         .aircat_security
@@ -1419,7 +1557,32 @@ pub async fn home_auth_session_handler(
             aircat_error(status, code, msg)
         })?;
 
-    let revocations = state.receiver_manager.get_revocations().await;
+    let mut revocations = state.receiver_manager.get_revocations().await;
+    let db_revs = michi_db::list_home_revocations_db(&state.db, &home_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("home_auth_session failed to read home_revocations: {e}");
+            aircat_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "REVOCATION_STORE_UNAVAILABLE",
+                "unable to verify Home revocation state; refusing session creation fail-closed",
+            )
+        })?;
+    for r in db_revs {
+        if !revocations
+            .iter()
+            .any(|existing| existing.revoked_device_michi_id == r.revoked_device_michi_id)
+        {
+            revocations.push(michi_identity::HomeDeviceRevocationDto {
+                version: r.version as u32,
+                home_id: r.home_id,
+                revoked_device_michi_id: r.revoked_device_michi_id,
+                revoked_at: r.revoked_at,
+                reason: r.reason,
+                signature: r.signature,
+            });
+        }
+    }
 
     michi_identity::home::verify_membership(&body.membership, &root_pk, &home_id, &revocations)
         .map_err(|e| match e {
@@ -1463,28 +1626,30 @@ pub async fn home_auth_session_handler(
     let session_token = format!("michi_home_{}", URL_SAFE_NO_PAD.encode(token_bytes));
 
     let ttl_secs: u64 = 3600;
-    let synthetic_device_uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, body.client_michi_id.as_bytes());
-    state
-        .token_store
-        .store(
-            &session_token,
-            michi_link::TokenType::Device,
-            synthetic_device_uuid,
-        )
-        .await;
+    // R1.1-M5: Single Home session authority — store ONLY in aircat_security.home_sessions,
+    // never duplicate michi_home_* tokens into the legacy SERVER_CODE TokenStore.
     state.aircat_security.record_home_session(
         session_token.clone(),
         body.client_michi_id.clone(),
         now_ms,
         (ttl_secs as i64) * 1000,
     );
+    let _ = michi_db::touch_home_member_last_seen(
+        &state.db,
+        &home_id,
+        &body.client_michi_id,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .await;
 
+    // Mutual authentication confirmation MUST sign over session_token (matching
+    // michi_identity::home::verify_server_auth_session), never challenge_nonce.
     let confirm_payload = michi_identity::home::server_auth_confirm_payload(
         &home_id,
         &server_michi_id,
         &body.client_michi_id,
         &challenge_id_str,
-        &challenge_nonce,
+        &session_token,
     );
     let (server_signature, _) = state.identity.sign_base64url(&confirm_payload);
 
@@ -1498,9 +1663,644 @@ pub async fn home_auth_session_handler(
     }))
 }
 
+/// POST /api/v1/home/enrollment/challenge
+///
+/// Issues a single-use Ed25519 proof-of-possession challenge for a client device
+/// requesting authorized Home membership bootstrap. Never grants membership.
+pub async fn home_enrollment_challenge_handler(
+    State(state): State<AppState>,
+    Json(body): Json<michi_identity::HomeEnrollmentChallengeRequest>,
+) -> Result<
+    Json<michi_identity::HomeEnrollmentChallengeResponse>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    if body.purpose != "home_enrollment" {
+        return Err(aircat_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_FIELDS",
+            "purpose must be 'home_enrollment'",
+        ));
+    }
+    let home_id = state.home_root_authority.home_id();
+    if body.home_id != home_id {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "HOME_ID_MISMATCH",
+            "home_id does not match this server's Home authority",
+        ));
+    }
+    let derived = michi_identity::IdentityManager::derive_michi_id(&body.client_public_key)
+        .map_err(|_| {
+            aircat_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "INVALID_FIELDS",
+                "invalid client_public_key",
+            )
+        })?;
+    if derived.to_base64url() != body.client_michi_id {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "IDENTITY_MISMATCH",
+            "client_michi_id does not derive from client_public_key",
+        ));
+    }
+    ensure_member_authorized(
+        check_home_member_authorization(&state, &home_id, &body.client_michi_id).await,
+    )?;
+
+    let mut nonce_bytes = [0u8; 32];
+    use rand::RngCore;
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    let challenge_nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let ttl_secs: u64 = 120;
+
+    let challenge_id = state
+        .aircat_security
+        .issue_enrollment_challenge(
+            &home_id,
+            &body.client_michi_id,
+            &body.client_public_key,
+            challenge_nonce.clone(),
+            now_ms,
+            (ttl_secs as i64) * 1000,
+        )
+        .map_err(|r| {
+            let (status, code, msg) = refusal_to_status(r);
+            aircat_error(status, code, msg)
+        })?;
+
+    Ok(Json(michi_identity::HomeEnrollmentChallengeResponse {
+        challenge_id,
+        challenge_nonce,
+        home_id,
+        server_michi_id: state.identity.michi_id().to_base64url(),
+        server_public_key: state.identity.public_key_base64url(),
+        expires_in: ttl_secs,
+    }))
+}
+
+/// POST /api/v1/home/enrollment/request
+///
+/// Verifies client Ed25519 proof-of-possession over the enrollment challenge and
+/// enqueues a durable SQLite PENDING request for explicit administrator approval.
+/// Never self-enrolls.
+pub async fn home_enrollment_request_handler(
+    State(state): State<AppState>,
+    Json(body): Json<michi_identity::HomeEnrollmentRequest>,
+) -> Result<
+    (
+        StatusCode,
+        Json<michi_identity::HomeEnrollmentRequestResponse>,
+    ),
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let home_id = state.home_root_authority.home_id();
+    if body.home_id != home_id {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "HOME_ID_MISMATCH",
+            "home_id does not match this server's Home authority",
+        ));
+    }
+    if body.device_name.trim().is_empty()
+        || body.device_name.len() > 128
+        || body.requested_roles.is_empty()
+    {
+        return Err(aircat_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_FIELDS",
+            "device_name (1..=128 chars) and at least one requested role are required",
+        ));
+    }
+    if !matches!(
+        body.device_type.as_str(),
+        "mobile" | "desktop" | "server" | "stream"
+    ) {
+        return Err(aircat_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_FIELDS",
+            "device_type must be one of mobile, desktop, server, stream",
+        ));
+    }
+    let validated_roles = validate_roles_for_device_type(&body.device_type, &body.requested_roles)
+        .map_err(|msg| aircat_error(StatusCode::UNPROCESSABLE_ENTITY, "INVALID_ROLES", &msg))?;
+
+    ensure_member_authorized(
+        check_home_member_authorization(&state, &home_id, &body.client_michi_id).await,
+    )?;
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let challenge_nonce = state
+        .aircat_security
+        .consume_enrollment_challenge(
+            &body.challenge_id,
+            &home_id,
+            &body.client_michi_id,
+            &body.client_public_key,
+            now_ms,
+        )
+        .map_err(|r| {
+            let (status, code, msg) = refusal_to_status(r);
+            aircat_error(status, code, msg)
+        })?;
+
+    let server_michi_id = state.identity.michi_id().to_base64url();
+    let challenge_id_str = body.challenge_id.to_string();
+    let pop_ok = michi_identity::verify_home_enrollment_pop(
+        &body.client_public_key,
+        &body.client_signature,
+        &home_id,
+        &server_michi_id,
+        &body.client_michi_id,
+        &challenge_id_str,
+        &challenge_nonce,
+    )
+    .map_err(|e| match e {
+        michi_identity::HomeAuthError::IdentityMismatch => aircat_error(
+            StatusCode::FORBIDDEN,
+            "IDENTITY_MISMATCH",
+            "client_michi_id does not derive from client_public_key",
+        ),
+        _ => aircat_error(
+            StatusCode::FORBIDDEN,
+            "BAD_SIGNATURE",
+            "invalid enrollment proof-of-possession signature",
+        ),
+    })?;
+
+    if !pop_ok {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "BAD_SIGNATURE",
+            "invalid enrollment proof-of-possession signature",
+        ));
+    }
+
+    let mut claim_bytes = [0u8; 32];
+    use rand::RngCore;
+    rand::rngs::OsRng.fill_bytes(&mut claim_bytes);
+    let claim_token = format!("michi_claim_{}", URL_SAFE_NO_PAD.encode(claim_bytes));
+    let claim_token_hash = crate::auth::hash_token(&claim_token);
+
+    let request_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let expires_dt = now + chrono::Duration::seconds(600);
+    let requested_roles_json =
+        serde_json::to_string(&validated_roles).unwrap_or_else(|_| "[]".to_string());
+    let persisted = michi_db::PersistedHomeEnrollment {
+        request_id: request_id.to_string(),
+        home_id: home_id.clone(),
+        client_michi_id: body.client_michi_id.clone(),
+        client_public_key: body.client_public_key,
+        device_name: body.device_name.trim().to_string(),
+        device_type: body.device_type,
+        requested_roles_json,
+        claim_token_hash,
+        status: "pending".to_string(),
+        membership_json: None,
+        created_at: now.to_rfc3339(),
+        expires_at: expires_dt.to_rfc3339(),
+        expires_at_ms: expires_dt.timestamp_millis(),
+        resolved_at: None,
+    };
+
+    michi_db::create_home_enrollment_request_db(
+        &state.db,
+        &persisted,
+        now_ms,
+        MAX_PENDING_HOME_ENROLLMENTS,
+    )
+    .await
+    .map_err(|e| match e {
+        michi_db::HomeEnrollmentDbError::MemberRevoked => aircat_error(
+            StatusCode::FORBIDDEN,
+            "MEMBER_REVOKED",
+            "device identity is revoked in this Home",
+        ),
+        michi_db::HomeEnrollmentDbError::QueueFull => aircat_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "ENROLLMENT_QUEUE_FULL",
+            "pending Home enrollment queue is full",
+        ),
+        other => {
+            tracing::error!("durable home enrollment insert failed: {other:?}");
+            aircat_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ENROLLMENT_STORE_UNAVAILABLE",
+                "unable to persist Home enrollment request",
+            )
+        }
+    })?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(michi_identity::HomeEnrollmentRequestResponse {
+            request_id,
+            status: michi_identity::HomeEnrollmentStatus::Pending,
+            home_id,
+            client_michi_id: body.client_michi_id,
+            expires_at: expires_dt.to_rfc3339(),
+            claim_token,
+        }),
+    ))
+}
+
+/// GET /api/v1/home/enrollment/pending (admin only, HTTPS required)
+pub async fn home_enrollment_pending_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let _admin = resolve_webui_or_bearer_caller(&state, &headers, true).await?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let home_id = state.home_root_authority.home_id();
+    let rows = michi_db::list_pending_home_enrollments_db(&state.db, &home_id, now_ms)
+        .await
+        .map_err(|e| {
+            tracing::error!("list_pending_home_enrollments_db failed: {e}");
+            aircat_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ENROLLMENT_STORE_UNAVAILABLE",
+                "unable to list pending Home enrollment requests",
+            )
+        })?;
+    let requests: Vec<michi_identity::HomeEnrollmentPendingEntry> = rows
+        .into_iter()
+        .filter_map(|r| {
+            let request_id = Uuid::parse_str(&r.request_id).ok()?;
+            let requested_roles: Vec<michi_identity::Role> =
+                serde_json::from_str(&r.requested_roles_json).unwrap_or_default();
+            Some(michi_identity::HomeEnrollmentPendingEntry {
+                request_id,
+                home_id: r.home_id,
+                client_michi_id: r.client_michi_id,
+                client_public_key: r.client_public_key,
+                device_name: r.device_name,
+                device_type: r.device_type,
+                requested_roles,
+                created_at: r.created_at,
+                expires_at: r.expires_at,
+            })
+        })
+        .collect();
+    let total = requests.len();
+    Ok(Json(serde_json::json!({
+        "requests": requests,
+        "total": total,
+    })))
+}
+
+/// POST /api/v1/home/enrollment/:request_id/approve (admin only, HTTPS required)
+pub async fn home_enrollment_approve_handler(
+    State(state): State<AppState>,
+    Path(request_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Option<Json<michi_identity::HomeEnrollmentApproveRequest>>,
+) -> Result<
+    Json<michi_identity::HomeEnrollmentApproveResponse>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let _admin = resolve_webui_or_bearer_caller(&state, &headers, true).await?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let home_id = state.home_root_authority.home_id();
+    let issued_at = chrono::Utc::now().to_rfc3339();
+    let override_roles = body.and_then(|Json(b)| b.roles);
+
+    let (_updated, membership) = michi_db::approve_home_enrollment_atomic_db(
+        &state.db,
+        &home_id,
+        &request_id.to_string(),
+        now_ms,
+        &issued_at,
+        ENROLLMENT_CLAIM_TTL_MS,
+        |row, serial| {
+            let requested: Vec<michi_identity::Role> =
+                serde_json::from_str(&row.requested_roles_json).unwrap_or_default();
+            let raw_roles = override_roles
+                .clone()
+                .filter(|r| !r.is_empty())
+                .unwrap_or(requested);
+            let granted_roles = validate_roles_for_device_type(&row.device_type, &raw_roles)
+                .map_err(michi_db::HomeEnrollmentDbError::InvalidRoles)?;
+            let membership = state.home_root_authority.issue_membership(
+                &home_id,
+                &row.client_michi_id,
+                &row.client_public_key,
+                &row.device_type,
+                granted_roles.clone(),
+                &issued_at,
+                serial,
+            );
+            let roles_json =
+                serde_json::to_string(&granted_roles).unwrap_or_else(|_| "[]".to_string());
+            let membership_json =
+                serde_json::to_string(&membership).unwrap_or_else(|_| "{}".to_string());
+            Ok((membership, roles_json, membership_json))
+        },
+    )
+    .await
+    .map_err(|e| match e {
+        michi_db::HomeEnrollmentDbError::NotFound => aircat_error(
+            StatusCode::NOT_FOUND,
+            "ENROLLMENT_NOT_FOUND",
+            "pending enrollment request not found",
+        ),
+        michi_db::HomeEnrollmentDbError::AlreadyResolved => aircat_error(
+            StatusCode::CONFLICT,
+            "ALREADY_RESOLVED",
+            "enrollment request was already approved or rejected",
+        ),
+        michi_db::HomeEnrollmentDbError::Expired => aircat_error(
+            StatusCode::GONE,
+            "ENROLLMENT_EXPIRED",
+            "enrollment request has expired",
+        ),
+        michi_db::HomeEnrollmentDbError::MemberRevoked => aircat_error(
+            StatusCode::FORBIDDEN,
+            "MEMBER_REVOKED",
+            "cannot approve enrollment for a revoked device identity",
+        ),
+        michi_db::HomeEnrollmentDbError::InvalidRoles(msg) => {
+            aircat_error(StatusCode::UNPROCESSABLE_ENTITY, "INVALID_ROLES", &msg)
+        }
+        other => {
+            tracing::error!("atomic home enrollment approval failed: {other:?}");
+            aircat_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ENROLLMENT_STORE_UNAVAILABLE",
+                "database error approving Home enrollment",
+            )
+        }
+    })?;
+
+    Ok(Json(michi_identity::HomeEnrollmentApproveResponse {
+        request_id,
+        status: michi_identity::HomeEnrollmentStatus::Approved,
+        membership,
+    }))
+}
+
+/// POST /api/v1/home/enrollment/:request_id/reject (admin only, HTTPS required)
+pub async fn home_enrollment_reject_handler(
+    State(state): State<AppState>,
+    Path(request_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let _admin = resolve_webui_or_bearer_caller(&state, &headers, true).await?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let home_id = state.home_root_authority.home_id();
+    let resolved_at = chrono::Utc::now().to_rfc3339();
+    michi_db::reject_home_enrollment_db(
+        &state.db,
+        &home_id,
+        &request_id.to_string(),
+        now_ms,
+        &resolved_at,
+    )
+    .await
+    .map_err(|e| match e {
+        michi_db::HomeEnrollmentDbError::NotFound => aircat_error(
+            StatusCode::NOT_FOUND,
+            "ENROLLMENT_NOT_FOUND",
+            "pending enrollment request not found or already resolved",
+        ),
+        other => {
+            tracing::error!("reject_home_enrollment_db failed: {other:?}");
+            aircat_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ENROLLMENT_STORE_UNAVAILABLE",
+                "database error rejecting Home enrollment",
+            )
+        }
+    })?;
+    Ok(Json(serde_json::json!({
+        "request_id": request_id,
+        "status": "rejected",
+    })))
+}
+
+/// GET /api/v1/home/enrollment/:request_id/status (HTTPS required)
+///
+/// Requires `X-Michi-Enrollment-Claim` returned when submitting the enrollment request.
+/// Backed by durable SQLite storage so approvals survive server restarts.
+pub async fn home_enrollment_status_handler(
+    State(state): State<AppState>,
+    Path(request_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<michi_identity::HomeEnrollmentStatusResponse>, (StatusCode, Json<serde_json::Value>)>
+{
+    let claim_token = headers
+        .get("X-Michi-Enrollment-Claim")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            aircat_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "missing X-Michi-Enrollment-Claim header",
+            )
+        })?;
+    let claim_hash = crate::auth::hash_token(claim_token);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    let rec = michi_db::get_home_enrollment_by_id_db(&state.db, &request_id.to_string())
+        .await
+        .map_err(|e| {
+            tracing::error!("get_home_enrollment_by_id_db failed: {e}");
+            aircat_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ENROLLMENT_STORE_UNAVAILABLE",
+                "unable to query Home enrollment status",
+            )
+        })?
+        .ok_or_else(|| {
+            aircat_error(
+                StatusCode::NOT_FOUND,
+                "ENROLLMENT_NOT_FOUND",
+                "enrollment request not found or expired",
+            )
+        })?;
+
+    if !subtle_eq_str(&rec.claim_token_hash, &claim_hash) {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "invalid enrollment claim token",
+        ));
+    }
+
+    ensure_member_authorized(
+        check_home_member_authorization(&state, &rec.home_id, &rec.client_michi_id).await,
+    )?;
+
+    let status =
+        if rec.expires_at_ms <= now_ms && (rec.status == "pending" || rec.status == "approved") {
+            return Err(aircat_error(
+                StatusCode::NOT_FOUND,
+                "ENROLLMENT_NOT_FOUND",
+                "enrollment request expired",
+            ));
+        } else {
+            parse_enrollment_status(&rec.status)
+        };
+
+    let (home_root_public_key, membership) =
+        if status == michi_identity::HomeEnrollmentStatus::Approved {
+            let parsed_membership = rec
+                .membership_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<michi_identity::DeviceMembershipDto>(j).ok());
+            (
+                Some(state.home_root_authority.public_key_base64url()),
+                parsed_membership,
+            )
+        } else {
+            (None, None)
+        };
+
+    Ok(Json(michi_identity::HomeEnrollmentStatusResponse {
+        request_id,
+        status,
+        home_id: rec.home_id,
+        home_root_public_key,
+        membership,
+    }))
+}
+
+/// POST /api/v1/home/members/enroll (admin only, HTTPS required, requires client Ed25519 PoP)
+pub async fn home_members_direct_enroll_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<michi_identity::HomeEnrollmentRequest>,
+) -> Result<Json<michi_identity::HomeEnrollmentStatusResponse>, (StatusCode, Json<serde_json::Value>)>
+{
+    let _admin = resolve_webui_or_bearer_caller(&state, &headers, true).await?;
+    let home_id = state.home_root_authority.home_id();
+    if body.home_id != home_id {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "HOME_ID_MISMATCH",
+            "home_id does not match this server's Home authority",
+        ));
+    }
+    if body.device_name.trim().is_empty()
+        || body.device_name.len() > 128
+        || body.requested_roles.is_empty()
+    {
+        return Err(aircat_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_FIELDS",
+            "device_name and at least one role are required",
+        ));
+    }
+    if !matches!(
+        body.device_type.as_str(),
+        "mobile" | "desktop" | "server" | "stream"
+    ) {
+        return Err(aircat_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_FIELDS",
+            "device_type must be one of mobile, desktop, server, stream",
+        ));
+    }
+    let validated_roles = validate_roles_for_device_type(&body.device_type, &body.requested_roles)
+        .map_err(|msg| aircat_error(StatusCode::UNPROCESSABLE_ENTITY, "INVALID_ROLES", &msg))?;
+
+    ensure_member_authorized(
+        check_home_member_authorization(&state, &home_id, &body.client_michi_id).await,
+    )?;
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let challenge_nonce = state
+        .aircat_security
+        .consume_enrollment_challenge(
+            &body.challenge_id,
+            &home_id,
+            &body.client_michi_id,
+            &body.client_public_key,
+            now_ms,
+        )
+        .map_err(|r| {
+            let (status, code, msg) = refusal_to_status(r);
+            aircat_error(status, code, msg)
+        })?;
+
+    let server_michi_id = state.identity.michi_id().to_base64url();
+    let challenge_id_str = body.challenge_id.to_string();
+    let pop_ok = michi_identity::verify_home_enrollment_pop(
+        &body.client_public_key,
+        &body.client_signature,
+        &home_id,
+        &server_michi_id,
+        &body.client_michi_id,
+        &challenge_id_str,
+        &challenge_nonce,
+    )
+    .unwrap_or(false);
+    if !pop_ok {
+        return Err(aircat_error(
+            StatusCode::FORBIDDEN,
+            "BAD_SIGNATURE",
+            "invalid enrollment proof-of-possession signature",
+        ));
+    }
+
+    let issued_at = chrono::Utc::now().to_rfc3339();
+    let roles_json = serde_json::to_string(&validated_roles).unwrap_or_else(|_| "[]".to_string());
+    let membership = michi_db::direct_enroll_home_member_atomic_db(
+        &state.db,
+        &home_id,
+        &body.client_michi_id,
+        &body.client_public_key,
+        body.device_name.trim(),
+        &body.device_type,
+        &roles_json,
+        &issued_at,
+        |serial| {
+            let m = state.home_root_authority.issue_membership(
+                &home_id,
+                &body.client_michi_id,
+                &body.client_public_key,
+                &body.device_type,
+                validated_roles.clone(),
+                &issued_at,
+                serial,
+            );
+            let m_json = serde_json::to_string(&m).unwrap_or_else(|_| "{}".to_string());
+            Ok((m, m_json))
+        },
+    )
+    .await
+    .map_err(|e| match e {
+        michi_db::HomeEnrollmentDbError::MemberRevoked => aircat_error(
+            StatusCode::FORBIDDEN,
+            "MEMBER_REVOKED",
+            "cannot enroll a revoked device identity",
+        ),
+        other => {
+            tracing::error!("direct_enroll_home_member_atomic_db failed: {other:?}");
+            aircat_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ENROLLMENT_STORE_UNAVAILABLE",
+                "database error persisting enrolled Home member",
+            )
+        }
+    })?;
+
+    Ok(Json(michi_identity::HomeEnrollmentStatusResponse {
+        request_id: Uuid::new_v4(),
+        status: michi_identity::HomeEnrollmentStatus::Approved,
+        home_id,
+        home_root_public_key: Some(state.home_root_authority.public_key_base64url()),
+        membership: Some(membership),
+    }))
+}
+
 /// GET /api/v1/aircat/status
 ///
-/// Returns AirCat TLS/SPKI readiness and runtime transfer/revocation observability metrics.
+/// Returns AirCat TLS/SPKI readiness, X.509 trust mode, pending enrollment count,
+/// and runtime transfer/revocation observability metrics.
 pub async fn aircat_status_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1508,15 +2308,49 @@ pub async fn aircat_status_handler(
     let _authenticated_member = resolve_webui_or_bearer_caller(&state, &headers, false).await?;
     let now_ms = chrono::Utc::now().timestamp_millis();
     let tls_info = state.aircat_tls.read().await.clone();
+    let tls_listener_ready = state.is_aircat_tls_ready().await;
     let stats = state.aircat_security.stats_snapshot(now_ms);
+    let home_id = state.home_root_authority.home_id();
+    let pending_enrollments =
+        michi_db::list_pending_home_enrollments_db(&state.db, &home_id, now_ms)
+            .await
+            .map(|v| v.len())
+            .unwrap_or(0);
+    let certificate_profile = tls_info
+        .as_ref()
+        .map(|t| t.certificate_profile)
+        .unwrap_or(TlsCertificateProfile::Unknown);
+    let chain_cryptographically_verified = tls_info
+        .as_ref()
+        .map(|t| t.chain_cryptographically_verified)
+        .unwrap_or(false);
+    let android_trust_verification_status = tls_info
+        .as_ref()
+        .map(|t| t.android_trust_verification_status)
+        .unwrap_or(AndroidTrustVerificationStatus::NotVerified);
+    // R1.2-P0-B: Never infer Android default X509TrustManager acceptance from
+    // structural chain presence. Server-side inspection cannot verify Android's
+    // live platform trust store, so this legacy boolean MUST remain false when
+    // status is `not_verified` or `verification_failed` (zero false positives).
+    let android_default_trust_compatible = false;
     Ok((
         aircat_json_headers(),
         Json(serde_json::json!({
             "protocol": AIRCAT_PROTOCOL_VALUE,
             "tls_configured": tls_info.is_some(),
+            "tls_listener_ready": tls_listener_ready,
             "tls_port": tls_info.as_ref().map(|t| t.tls_port),
             "pinned_base_url": tls_info.as_ref().map(|t| t.pinned_base_url.clone()),
             "tls_spki_sha256": tls_info.as_ref().map(|t| t.tls_spki_sha256.clone()),
+            "tls_trust_mode": tls_info.as_ref().map(|t| t.tls_trust_mode),
+            "certificate_profile": certificate_profile,
+            "chain_cryptographically_verified": chain_cryptographically_verified,
+            "android_trust_verification_status": android_trust_verification_status,
+            "android_default_trust_compatible": android_default_trust_compatible,
+            "cert_chain_len": tls_info.as_ref().map(|t| t.cert_chain_len).unwrap_or(0),
+            "cert_not_before": tls_info.as_ref().and_then(|t| t.cert_not_before.clone()),
+            "cert_not_after": tls_info.as_ref().and_then(|t| t.cert_not_after.clone()),
+            "pending_enrollments": pending_enrollments,
             "stats": stats,
         })),
     ))

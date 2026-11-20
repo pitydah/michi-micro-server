@@ -29,25 +29,21 @@ pub fn extract_bearer_token(request: &Request) -> Option<String> {
     extract_token(request)
 }
 
-/// Helper to determine if the request is over HTTPS
+/// Helper to determine if the request arrived over verified HTTPS (direct TLS
+/// or strictly consistent trusted reverse proxy headers).
 fn is_secure_request(
+    direct_tls: bool,
     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: &axum::http::HeaderMap,
     config: &michi_config::Config,
 ) -> bool {
-    let peer_addr = connect_info.map(|axum::extract::ConnectInfo(addr)| addr);
-    let peer_ip = peer_addr.map(|a| a.ip());
-    if let Some(ref ip) = peer_ip {
-        if config.is_trusted_proxy(ip) {
-            if let Some(proto) = headers
-                .get("X-Forwarded-Proto")
-                .and_then(|v| v.to_str().ok())
-            {
-                return proto.eq_ignore_ascii_case("https");
-            }
-        }
+    if direct_tls {
+        return true;
     }
-    false
+    let peer_ip = connect_info.map(|axum::extract::ConnectInfo(addr)| addr.ip());
+    crate::home_tls_policy::HomeTlsTransportPolicy::is_trusted_proxy_https_with_config(
+        config, peer_ip, headers,
+    )
 }
 
 /// Helper to build Set-Cookie header for michi_web_session
@@ -383,21 +379,52 @@ fn is_admin_route(path: &str) -> bool {
     .any(|prefix| path.starts_with(prefix))
 }
 
+fn is_home_tls_required_protected_route(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/v1/aircat/manifest"
+            | "/api/v1/aircat/authorize"
+            | "/api/v1/aircat/enrollment-qr"
+            | "/api/v1/home/enrollment/pending"
+            | "/api/v1/home/members/enroll"
+    ) || path.starts_with("/api/v1/aircat/download/")
+        || (path.starts_with("/api/v1/home/enrollment/")
+            && (path.ends_with("/approve") || path.ends_with("/reject")))
+}
+
 /// V1 authorization policy:
+/// - Home enrollment admin and AirCat routes fail closed on cleartext HTTP via
+///   `HomeTlsTransportPolicy` before processing credentials;
+/// - `michi_home_*` bearer sessions NEVER travel over cleartext HTTP on ANY route,
+///   are validated exclusively against the dedicated Home session store (never legacy
+///   TokenStore), and fail closed on revocation or DB error (`Indeterminate` -> 503);
 /// - admin paths require an active administrator session;
-/// - other protected paths accept an active user session or paired device token;
-/// - this never fails open when username/password authentication is disabled.
+/// - other protected paths accept an active user session, paired device token, or
+///   verified HTTPS Home session.
 pub async fn v1_auth_middleware(
     State(state): State<AppState>,
     request: Request,
     next: Next,
 ) -> Response {
+    let path = request.uri().path();
+    if is_home_tls_required_protected_route(path) {
+        if let Err(err) = crate::home_tls_policy::HomeTlsTransportPolicy::enforce(
+            &state,
+            request.headers(),
+            request.extensions(),
+        )
+        .await
+        {
+            return err.into_response();
+        }
+    }
+
     let token = match extract_token(&request) {
         Some(token) => token,
         None => return auth_error(StatusCode::UNAUTHORIZED, "missing authorization header"),
     };
 
-    if is_admin_route(request.uri().path()) {
+    if is_admin_route(path) {
         let Some(user_id) = state.auth_sessions.extract_user_id(&token).await else {
             return auth_error(StatusCode::UNAUTHORIZED, "administrator session required");
         };
@@ -412,6 +439,74 @@ pub async fn v1_auth_middleware(
         } else {
             auth_error(StatusCode::FORBIDDEN, "administrator privileges required")
         };
+    }
+
+    if token.starts_with("michi_home_") {
+        // P0-A: A HOME_MEMBERSHIP bearer token MUST NEVER be accepted over cleartext HTTP,
+        // even on general library, playback, queue, or sync routes.
+        if let Err(err) = crate::home_tls_policy::HomeTlsTransportPolicy::enforce(
+            &state,
+            request.headers(),
+            request.extensions(),
+        )
+        .await
+        {
+            return err.into_response();
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let Some(member_id) = state.aircat_security.lookup_home_session(&token, now_ms) else {
+            return crate::routes::v1::aircat::aircat_error(
+                StatusCode::UNAUTHORIZED,
+                "INVALID_TOKEN",
+                "invalid or expired Home session",
+            )
+            .into_response();
+        };
+
+        // Header identity coherence on Home sessions: if X-Michi-Device-Id is sent,
+        // it MUST match the verified cryptographic client_michi_id.
+        if let Some(hdr_dev) = request
+            .headers()
+            .get("X-Michi-Device-Id")
+            .and_then(|h| h.to_str().ok())
+        {
+            if !hdr_dev.is_empty() && hdr_dev != member_id {
+                return crate::routes::v1::aircat::aircat_error(
+                    StatusCode::FORBIDDEN,
+                    "IDENTITY_MISMATCH",
+                    "X-Michi-Device-Id header does not match verified Home member michi_id",
+                )
+                .into_response();
+            }
+        }
+
+        let home_id = state.home_root_authority.home_id();
+        match crate::routes::v1::aircat::check_home_member_authorization(
+            &state, &home_id, &member_id,
+        )
+        .await
+        {
+            crate::routes::v1::aircat::HomeMemberAuthorizationState::Active => {
+                return next.run(request).await;
+            }
+            crate::routes::v1::aircat::HomeMemberAuthorizationState::Revoked => {
+                return crate::routes::v1::aircat::aircat_error(
+                    StatusCode::FORBIDDEN,
+                    "MEMBER_REVOKED",
+                    "authenticated member is revoked in this Home",
+                )
+                .into_response();
+            }
+            crate::routes::v1::aircat::HomeMemberAuthorizationState::Indeterminate => {
+                return crate::routes::v1::aircat::aircat_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "REVOCATION_STORE_UNAVAILABLE",
+                    "unable to verify Home revocation state; access temporarily denied",
+                )
+                .into_response();
+            }
+        }
     }
 
     if state.auth_sessions.validate(&token).await
@@ -519,6 +614,7 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::passw
 )]
 pub(crate) async fn login_handler(
     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    direct_tls: Option<axum::Extension<crate::AirCatTlsVerifiedConnection>>,
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
@@ -598,7 +694,7 @@ pub(crate) async fn login_handler(
             Json(json!({"status": "error", "message": "failed to initialize session"})),
         )
     })?;
-    let secure = is_secure_request(connect_info, &headers, &state.config);
+    let secure = is_secure_request(direct_tls.is_some(), connect_info, &headers, &state.config);
     let cookie_val = make_session_cookie(&token, 86400, secure);
 
     let mut resp_headers = axum::http::HeaderMap::new();
@@ -635,6 +731,7 @@ pub(crate) async fn login_handler(
 )]
 pub(crate) async fn register_handler(
     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    direct_tls: Option<axum::Extension<crate::AirCatTlsVerifiedConnection>>,
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
@@ -733,7 +830,7 @@ pub(crate) async fn register_handler(
                 Json(json!({"status": "error", "message": "failed to initialize session"})),
             )
         })?;
-    let secure = is_secure_request(connect_info, &headers, &state.config);
+    let secure = is_secure_request(direct_tls.is_some(), connect_info, &headers, &state.config);
     let cookie_val = make_session_cookie(&token, 86400, secure);
 
     let mut resp_headers = axum::http::HeaderMap::new();
@@ -766,6 +863,7 @@ pub(crate) async fn register_handler(
 )]
 pub(crate) async fn logout_handler(
     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    direct_tls: Option<axum::Extension<crate::AirCatTlsVerifiedConnection>>,
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     request: Request,
@@ -777,7 +875,7 @@ pub(crate) async fn logout_handler(
             revocation_failed = true;
         }
     }
-    let secure = is_secure_request(connect_info, &headers, &state.config);
+    let secure = is_secure_request(direct_tls.is_some(), connect_info, &headers, &state.config);
     let cookie_val = make_session_cookie("", 0, secure);
     let mut resp_headers = axum::http::HeaderMap::new();
     if let Ok(v) = axum::http::HeaderValue::from_str(&cookie_val) {

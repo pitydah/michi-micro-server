@@ -154,6 +154,8 @@ pub struct EngineSnapshot {
     pub generation_id: u64,
     pub track_id: Option<Uuid>,
     pub current_track: Option<Track>,
+    #[serde(default)]
+    pub queue_index: Option<usize>,
     pub position_ms: u64,
     pub duration_ms: Option<u64>,
     pub volume: u8,
@@ -181,6 +183,7 @@ impl Default for EngineSnapshot {
             generation_id: 0,
             track_id: None,
             current_track: None,
+            queue_index: None,
             position_ms: 0,
             duration_ms: None,
             volume: 80,
@@ -362,6 +365,13 @@ pub enum EngineCommand {
         origin: CommandOrigin,
         respond_to: oneshot::Sender<Result<(), PlaybackError>>,
     },
+    RemoveQueueItem {
+        removed_index: usize,
+        removed_track_id: Uuid,
+        remaining_tracks: Vec<Track>,
+        origin: CommandOrigin,
+        respond_to: oneshot::Sender<Result<(), PlaybackError>>,
+    },
     GetSnapshot {
         respond_to: oneshot::Sender<EngineSnapshot>,
     },
@@ -385,7 +395,8 @@ impl EngineCommand {
             | EngineCommand::SetVolume { origin, .. }
             | EngineCommand::SetShuffle { origin, .. }
             | EngineCommand::SetRepeat { origin, .. }
-            | EngineCommand::SetQueue { origin, .. } => origin.clone(),
+            | EngineCommand::SetQueue { origin, .. }
+            | EngineCommand::RemoveQueueItem { origin, .. } => origin.clone(),
             EngineCommand::GetSnapshot { .. } | EngineCommand::Shutdown { .. } => {
                 CommandOrigin::Local
             }
