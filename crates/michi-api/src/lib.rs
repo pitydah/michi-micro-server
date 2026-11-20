@@ -141,9 +141,9 @@ pub struct AppState {
     pub aircat_tls: Arc<RwLock<Option<AirCatTlsInfo>>>,
     /// True ONLY once the real tokio-rustls HTTPS listener is bound and serving.
     pub aircat_tls_listener_ready: Arc<std::sync::atomic::AtomicBool>,
-    /// Async serializer for active queue mutations so SQLite and PlaybackEngine stay coherent
-    /// without holding SQLite write transactions open during audio operations.
-    pub queue_mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Single authoritative coordinator for active queue mutations, monotonic versioning,
+    /// and fail-closed degraded state detection when SQLite and PlaybackEngine diverge.
+    pub queue_coordinator: Arc<playback_queue::ActiveQueueCoordinator>,
 }
 
 /// Marker inserted into request extensions exclusively by the HTTPS/TLS accept loop.
@@ -1780,7 +1780,7 @@ impl AppState {
             aircat_security: Arc::new(aircat_producer_security::AirCatProducerSecurityState::new()),
             aircat_tls,
             aircat_tls_listener_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            queue_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            queue_coordinator: Arc::new(playback_queue::ActiveQueueCoordinator::new()),
         };
 
         state.spawn_background_tasks();
@@ -3108,6 +3108,10 @@ fn v1_link_routes() -> Router<AppState> {
         .route(
             "/api/v1/queue/saved",
             get(routes::v1::queue::queue_saved_handler),
+        )
+        .route(
+            "/api/v1/queue/reconcile",
+            post(routes::v1::queue::queue_reconcile_handler),
         )
         .route(
             "/api/v1/discovery/whisker",

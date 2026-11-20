@@ -1,9 +1,23 @@
-# MICHI MICRO SERVER ↔ MICHI MUSIC MOBILE — INTEROP HANDOFF SPEC (R1.3)
+# MICHI MICRO SERVER ↔ MICHI MUSIC MOBILE — INTEROP HANDOFF SPEC (R1.4)
 
-Target consumer repository (read-only audit baseline): `pitydah/michi-music-mobile` (`master` @ `07a646e`, inspected working branch `feat/aircat-a71-experience` @ `eeb3b94`).
-Normative contract source: `pitydah/michi-link` (`docs/MICHI_INTEROP_CONTRACT.md`, `schemas/aircat-tls-status.schema.json`, `schemas/playback-control.schema.json`, `schemas/home-device-roster.schema.json`, & `tests/vectors/interop/micro-mobile-interop-vectors.json`).
+> **Entry Point for OpenCode**: Start at [`MICHI_ANDROID_INTEROP_START_HERE.md`](../MICHI_ANDROID_INTEROP_START_HERE.md) and the modular readiness pack in [`interop/mobile-readiness/`](../interop/mobile-readiness/README.md).
+>
+> **Target consumer repository (read-only audit baseline)**: `pitydah/michi-music-mobile` (`feat/aircat-a71-experience` @ `6e529d6e2a86a400c213a0d2cc847aa591eb4523`).
+> **Normative contract source**: `pitydah/michi-link` (`main` @ `8dad0fb51128df98422bd74968e75f0ae8f85ccf`: `docs/MICHI_INTEROP_CONTRACT.md`, `schemas/aircat-tls-status.schema.json`, `schemas/playback-control.schema.json`, `schemas/home-device-roster.schema.json`, & `tests/vectors/interop/micro-mobile-interop-vectors.json`).
 
-> **Scope & Certification Notice**: This document is the authoritative implementation specification for OpenCode / Android engineers updating `michi-music-mobile`. Physical Android device certification (`ANDROID_COMPATIBILITY_VERIFIED` and `PHYSICAL_LAN_E2E`) is **`NOT_RUN` / `NOT_VERIFIED`** until executed on a real Android device against a live Micro Server deployment. Do **not** invent alternate field names, bypass TLS/X.509/SPKI verification, install trust-all `X509TrustManager` or permissive `HostnameVerifier`, or send Home auth / enrollment / `michi_home_*` tokens over cleartext HTTP.
+> **Scope & Certification Notice**:
+> - `MICHI_MUSIC_MOBILE_INTEROP_IMPLEMENTATION = NOT_IMPLEMENTED / NOT_AUDITED`
+> - `ANDROID_REAL_DEVICE_E2E = NOT_RUN`
+> - `ZIMAOS_ANDROID_PHYSICAL_E2E = NOT_RUN`
+>
+> Do **not** invent alternate field names, bypass TLS/X.509/SPKI verification, install trust-all `X509TrustManager` or permissive `HostnameVerifier`, or send Home auth / enrollment / `michi_home_*` tokens over cleartext HTTP.
+>
+> **R1.4 Additions Frozen on Server**:
+> 1. **Unified `ActiveQueueCoordinator`**: all active queue mutators serialize with monotonic `queue_version`, shuffle permutation preservation, verified rollback, and fail-closed `503 QUEUE_DEGRADED` until `POST /api/v1/queue/reconcile`.
+> 2. **Canonical `GET /api/v1/home/roster` (`version: 1`)**: matches `home-device-roster.schema.json` verbatim with typed separation between `receiver_id` and `device_michi_id`.
+> 3. **Server-Bound QR Origin Policy**: `POST /api/v1/pair/qr` strictly authorizes ONLY this server's real NIC IPs, real advertised `.local` mDNS hostnames, loopback, and operator allowlists (rejecting unrelated LAN/mDNS/Tailscale hosts with `400`).
+> 4. **Strict Volume Grammar Parity**: `set_volume` rejects leading-zero strings (`"00"`, `"01"`, `"075"`) in both Rust and JSON Schema (`^(0|[1-9][0-9]?|100)$`).
+> 5. **Pre-Mobile Reference Client Proof**: 19-phase real TCP HTTP + real `tokio-rustls` HTTPS network E2E (`crates/michi-api/tests/pre_mobile_reference_client_e2e.rs`) emits `target/release-evidence/pre-mobile-reference-client-receipt.json`.
 
 ---
 

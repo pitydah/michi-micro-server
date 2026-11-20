@@ -1175,15 +1175,29 @@ async fn test_r13_05_qr_canonical_url_security_and_protocol_separation() {
     let untrusted_peer = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 77)));
     let base_policy = QrUrlPolicy {
         configured_public_url: None,
-        allowed_hosts: vec!["music.home.example.com".to_string()],
+        allowed_hosts: vec![
+            "music.home.example.com".to_string(),
+            "michi.tail1234.ts.net".to_string(),
+        ],
+        local_interface_ips: vec![
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+            IpAddr::V4(Ipv4Addr::new(100, 88, 12, 34)),
+            "fd00::10".parse::<IpAddr>().unwrap(),
+        ],
+        local_mdns_hosts: vec!["michi-nas.local".to_string()],
         server_port: 9090,
     };
 
-    // 1. Unit policy matrix covering every §7.5 case
+    // 1. Unit policy matrix covering every §7.5 + R1.4 §3.4 case
     // Configured public URL takes precedence over untrusted Host / X-Forwarded-Host
     let pinned_policy = QrUrlPolicy {
         configured_public_url: Some("https://music.home.example.com".to_string()),
         allowed_hosts: vec!["music.home.example.com".to_string()],
+        local_interface_ips: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        local_mdns_hosts: vec![],
         server_port: 9090,
     };
     let mut spoof_hdrs = HeaderMap::new();
@@ -1378,7 +1392,24 @@ async fn test_r13_05_qr_canonical_url_security_and_protocol_separation() {
     let contra_resp = app.clone().oneshot(contra_req).await.unwrap();
     assert_eq!(contra_resp.status(), StatusCode::BAD_REQUEST);
 
-    // Legitimate LAN request succeeds and strictly separates legacy QR from Home cryptographic anchor
+    // R1.4 §3.4: Arbitrary third-party LAN IP NOT owned by this server is rejected (400)
+    let foreign_lan_qr = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/pair/qr")
+                .method("POST")
+                .header(header::AUTHORIZATION, &admin_auth)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::HOST, "192.0.2.99:9090")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(foreign_lan_qr.status(), StatusCode::BAD_REQUEST);
+
+    // Legitimate server-owned host request succeeds and strictly separates legacy QR from Home cryptographic anchor
     let ok_qr = app
         .clone()
         .oneshot(
@@ -1387,7 +1418,7 @@ async fn test_r13_05_qr_canonical_url_security_and_protocol_separation() {
                 .method("POST")
                 .header(header::AUTHORIZATION, &admin_auth)
                 .header(header::CONTENT_TYPE, "application/json")
-                .header(header::HOST, "192.168.1.42:9090")
+                .header(header::HOST, "127.0.0.1:9090")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1395,7 +1426,7 @@ async fn test_r13_05_qr_canonical_url_security_and_protocol_separation() {
         .unwrap();
     assert_eq!(ok_qr.status(), StatusCode::OK);
     let qr_json = response_json(ok_qr).await;
-    assert_eq!(qr_json["server_url"], "http://192.168.1.42:9090");
+    assert_eq!(qr_json["server_url"], "http://127.0.0.1:9090");
     assert_eq!(qr_json["qr_protocol"], "legacy_server_code_v1");
     assert!(qr_json.get("root_authority_public_key").is_none());
     assert!(qr_json.get("tls_spki_sha256").is_none());

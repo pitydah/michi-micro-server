@@ -422,8 +422,13 @@ pub struct QrGenerateResponse {
 pub struct QrUrlPolicy {
     /// Operator-configured canonical public URL (`MICHI_PUBLIC_URL` / `MICHI_PUBLIC_HTTPS_URL`).
     pub configured_public_url: Option<String>,
-    /// Explicitly authorized hosts (lowercased hostnames or IP literals).
+    /// Explicitly authorized hosts (lowercased hostnames or IP literals from operator config,
+    /// `MICHI_ALLOWED_QR_HOSTS`, `MICHI_ADVERTISE_HOST`, `MICHI_TAILSCALE_HOST`, CORS, or TLS SAN).
     pub allowed_hosts: Vec<String>,
+    /// Actual IP addresses owned by this server's network interfaces (plus loopback).
+    pub local_interface_ips: Vec<std::net::IpAddr>,
+    /// Actual `.local` mDNS hostnames advertised by this server instance.
+    pub local_mdns_hosts: Vec<String>,
     /// Server HTTP listener port for local fallback.
     pub server_port: u16,
 }
@@ -440,48 +445,54 @@ impl QrUrlPolicy {
             });
 
         let mut allowed_hosts = Vec::new();
+        let mut push_allowed = |raw: &str| {
+            let normalized = normalize_host_for_allowlist(raw);
+            if !normalized.is_empty() && !allowed_hosts.contains(&normalized) {
+                allowed_hosts.push(normalized);
+            }
+        };
+
         if let Ok(raw_hosts) = std::env::var("MICHI_ALLOWED_QR_HOSTS") {
             for h in raw_hosts.split(',') {
-                let normalized = normalize_host_for_allowlist(h);
-                if !normalized.is_empty() && !allowed_hosts.contains(&normalized) {
-                    allowed_hosts.push(normalized);
-                }
+                push_allowed(h);
             }
+        }
+        if let Ok(adv_host) = std::env::var("MICHI_ADVERTISE_HOST") {
+            push_allowed(&adv_host);
+        }
+        if let Ok(ts_host) = std::env::var("MICHI_TAILSCALE_HOST") {
+            push_allowed(&ts_host);
         }
         if let Some(ref pub_url) = configured_public_url {
             if let Ok(parsed) = reqwest::Url::parse(pub_url.trim()) {
                 if let Some(h) = parsed.host_str() {
-                    let normalized = normalize_host_for_allowlist(h);
-                    if !normalized.is_empty() && !allowed_hosts.contains(&normalized) {
-                        allowed_hosts.push(normalized);
-                    }
+                    push_allowed(h);
                 }
             }
         }
         if let Some(ref cors) = state.config.cors_origin {
             if let Ok(parsed) = reqwest::Url::parse(cors.trim()) {
                 if let Some(h) = parsed.host_str() {
-                    let normalized = normalize_host_for_allowlist(h);
-                    if !normalized.is_empty() && !allowed_hosts.contains(&normalized) {
-                        allowed_hosts.push(normalized);
-                    }
+                    push_allowed(h);
                 }
             }
         }
         if let Some(ref tls) = *state.aircat_tls.read().await {
             if let Ok(parsed) = reqwest::Url::parse(tls.pinned_base_url.trim()) {
                 if let Some(h) = parsed.host_str() {
-                    let normalized = normalize_host_for_allowlist(h);
-                    if !normalized.is_empty() && !allowed_hosts.contains(&normalized) {
-                        allowed_hosts.push(normalized);
-                    }
+                    push_allowed(h);
                 }
             }
         }
 
+        let local_interface_ips = michi_connect::MichiConnect::local_server_ips();
+        let local_mdns_hosts = michi_connect::MichiConnect::local_mdns_hostnames_for_host(None);
+
         Self {
             configured_public_url,
             allowed_hosts,
+            local_interface_ips,
+            local_mdns_hosts,
             server_port: state.config.port(),
         }
     }
@@ -498,25 +509,6 @@ fn normalize_host_for_allowlist(raw: &str) -> String {
 fn has_forbidden_url_chars(s: &str) -> bool {
     s.bytes()
         .any(|b| b < 0x20 || b == 0x7f || b == b' ' || b == b'\t')
-}
-
-fn is_local_or_lan_ipv4(ip: std::net::Ipv4Addr) -> bool {
-    if ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() {
-        return false;
-    }
-    let octets = ip.octets();
-    let is_cgnat_tailscale = octets[0] == 100 && (octets[1] & 0b1100_0000) == 64; // 100.64.0.0/10
-    ip.is_loopback() || ip.is_private() || ip.is_link_local() || is_cgnat_tailscale
-}
-
-fn is_local_or_lan_ipv6(ip: std::net::Ipv6Addr) -> bool {
-    if ip.is_unspecified() || ip.is_multicast() {
-        return false;
-    }
-    let seg0 = ip.segments()[0];
-    let is_ula = (seg0 & 0xfe00) == 0xfc00; // fc00::/7
-    let is_link_local = (seg0 & 0xffc0) == 0xfe80; // fe80::/10
-    ip.is_loopback() || is_ula || is_link_local
 }
 
 fn is_valid_dns_hostname(host: &str) -> bool {
@@ -544,52 +536,52 @@ fn is_valid_dns_hostname(host: &str) -> bool {
     true
 }
 
-/// Checks whether a parsed URL host string is authorized as a Michi QR destination:
-/// - Explicitly listed in `policy.allowed_hosts` (configured public URL, `MICHI_ALLOWED_QR_HOSTS`,
-///   `MICHI_CORS_ORIGIN`, or active TLS pinned host), OR
-/// - Legitimate local/LAN/mDNS/Tailscale address (`localhost`, `*.local`, `*.ts.net`,
-///   loopback, RFC 1918 private, link-local, Tailscale CGNAT `100.64.0.0/10`, IPv6 ULA/link-local).
+/// Checks whether a parsed URL host string is authorized as a Michi QR destination
+/// bound strictly to THIS server (R1.4 §3.4):
+/// - Loopback (`localhost`, `127.0.0.1`, `::1`), OR
+/// - An IP address actually owned by one of this server's local network interfaces
+///   (`policy.local_interface_ips`), OR
+/// - An mDNS `.local` hostname actually advertised by this server instance
+///   (`policy.local_mdns_hosts`), OR
+/// - Explicitly authorized in `policy.allowed_hosts` (`MICHI_PUBLIC_URL`,
+///   `MICHI_PUBLIC_HTTPS_URL`, `MICHI_ALLOWED_QR_HOSTS`, `MICHI_ADVERTISE_HOST`,
+///   `MICHI_TAILSCALE_HOST`, `MICHI_CORS_ORIGIN`, or active TLS pinned host).
 ///
-/// Arbitrary external public hosts/IPs are REJECTED fail-closed.
+/// Arbitrary third-party hosts — including OTHER RFC 1918 LAN IPs, other `*.local`
+/// hosts, other `*.ts.net` peers, and public internet hosts — are REJECTED fail-closed.
 pub fn is_authorized_qr_host(raw_host: &str, policy: &QrUrlPolicy) -> bool {
     let trimmed = raw_host
         .trim()
         .trim_start_matches('[')
         .trim_end_matches(']');
     if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
-        match ip {
-            std::net::IpAddr::V4(v4) => {
-                if is_local_or_lan_ipv4(v4) {
-                    return true;
-                }
-                let norm = v4.to_string();
-                return policy.allowed_hosts.iter().any(|h| h == &norm);
-            }
-            std::net::IpAddr::V6(v6) => {
-                if is_local_or_lan_ipv6(v6) {
-                    return true;
-                }
-                let norm = v6.to_string().to_ascii_lowercase();
-                return policy.allowed_hosts.iter().any(|h| h == &norm);
+        if ip.is_unspecified() || ip.is_multicast() {
+            return false;
+        }
+        if let std::net::IpAddr::V4(v4) = ip {
+            if v4.is_broadcast() {
+                return false;
             }
         }
+        if ip.is_loopback() || policy.local_interface_ips.contains(&ip) {
+            return true;
+        }
+        let norm = ip.to_string().to_ascii_lowercase();
+        return policy.allowed_hosts.iter().any(|h| h == &norm);
     }
 
     if !is_valid_dns_hostname(trimmed) {
         return false;
     }
     let norm = normalize_host_for_allowlist(trimmed);
-    if policy.allowed_hosts.iter().any(|h| h == &norm) {
-        return true;
-    }
     if norm == "localhost" {
         return true;
     }
-    if let Some(prefix) = norm.strip_suffix(".local") {
-        return !prefix.is_empty();
+    if policy.allowed_hosts.iter().any(|h| h == &norm) {
+        return true;
     }
-    if let Some(prefix) = norm.strip_suffix(".ts.net") {
-        return !prefix.is_empty();
+    if policy.local_mdns_hosts.iter().any(|h| h == &norm) {
+        return true;
     }
     false
 }

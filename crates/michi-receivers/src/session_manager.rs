@@ -997,20 +997,26 @@ impl ReceiverSessionManager {
 
     pub async fn get_home_roster(&self) -> Vec<HomeRosterDevice> {
         let mut devices = Vec::new();
+        let now = chrono::Utc::now();
 
         if let Some(ref mem) = *self.server_membership.read().await {
             devices.push(HomeRosterDevice {
                 device_michi_id: mem.device_michi_id.clone(),
+                receiver_id: None,
+                device_name: "Michi Micro Server".to_string(),
                 name: "Michi Micro Server".to_string(),
                 device_type: "server".to_string(),
                 base_url: None,
                 roles: mem.roles.iter().map(|r| r.as_str().to_string()).collect(),
+                membership: Some(mem.clone()),
+                membership_status: "enrolled".to_string(),
                 authenticated: true,
                 revoked: false,
                 online: true,
-                last_seen: Some(chrono::Utc::now()),
-                membership_status: Some("enrolled".to_string()),
-                presence_state: Some("online".to_string()),
+                presence_state: "online".to_string(),
+                status: "online".to_string(),
+                last_seen_at: Some(now),
+                last_seen: Some(now),
                 outbox_status: None,
                 last_revocation_ack: None,
                 last_revocation_error: None,
@@ -1025,6 +1031,7 @@ impl ReceiverSessionManager {
                 .server_membership
                 .as_ref()
                 .map(|m| m.roles.iter().map(|r| r.as_str().to_string()).collect())
+                .filter(|r: &Vec<String>| !r.is_empty())
                 .unwrap_or_else(|| vec!["audio_receiver".to_string()]);
 
             let mid = entry
@@ -1054,19 +1061,29 @@ impl ReceiverSessionManager {
                 "offline"
             };
             let membership_status = if entry.revoked { "revoked" } else { "enrolled" };
+            let canonical_name = if entry.name.trim().is_empty() {
+                "Michi Receiver".to_string()
+            } else {
+                entry.name.trim().chars().take(128).collect()
+            };
 
             devices.push(HomeRosterDevice {
                 device_michi_id: mid,
-                name: entry.name.clone(),
+                receiver_id: Some(entry.receiver_id.clone()),
+                device_name: canonical_name.clone(),
+                name: canonical_name,
                 device_type: entry.device_type.clone(),
                 base_url: Some(entry.base_url.clone()),
                 roles,
+                membership: entry.server_membership.clone(),
+                membership_status: membership_status.to_string(),
                 authenticated: !entry.revoked && entry.authenticated,
                 revoked: entry.revoked,
                 online: is_online,
+                presence_state: presence_state.to_string(),
+                status: presence_state.to_string(),
+                last_seen_at: entry.last_seen,
                 last_seen: entry.last_seen,
-                membership_status: Some(membership_status.to_string()),
-                presence_state: Some(presence_state.to_string()),
                 outbox_status,
                 last_revocation_ack: last_ack,
                 last_revocation_error: last_err,
@@ -1074,6 +1091,29 @@ impl ReceiverSessionManager {
         }
 
         devices
+    }
+
+    /// Resolves active receiver sessions with explicit domain separation between
+    /// `receiver_id` (registry key) and `device_michi_id` (cryptographic identity).
+    pub async fn active_session_identities(&self) -> Vec<ActiveReceiverSessionIdentity> {
+        let sessions = self.active_sessions.read().await;
+        let reg = self.registry.read().await;
+        sessions
+            .values()
+            .filter(|s| s.state == ReceiverActiveSessionState::Active)
+            .map(|s| {
+                let device_michi_id = reg
+                    .receivers
+                    .get(&s.receiver_id)
+                    .and_then(|entry| entry.michi_id.clone());
+                ActiveReceiverSessionIdentity {
+                    receiver_id: s.receiver_id.clone(),
+                    device_michi_id,
+                    playback_session_id: s.playback_session_id.clone(),
+                    receiver_session_id: s.receiver_session_id.clone(),
+                }
+            })
+            .collect()
     }
 
     pub async fn registry(&self) -> Arc<RwLock<ReceiverRegistry>> {

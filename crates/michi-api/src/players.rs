@@ -197,15 +197,25 @@ pub async fn create_queue_handler(
     State(state): State<AppState>,
     Json(body): Json<CreateQueueRequest>,
 ) -> Result<Json<QueueInfo>, (StatusCode, Json<serde_json::Value>)> {
+    let _guard = state.queue_coordinator.lock().await;
+    state.queue_coordinator.ensure_coherent()?;
+
     let queue_id = Uuid::new_v4();
     let now = chrono::Utc::now().to_rfc3339();
+
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
     sqlx::query("INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
         .bind(queue_id.to_string())
         .bind(&body.name)
         .bind(&now)
         .bind(&now)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             (
@@ -225,7 +235,7 @@ pub async fn create_queue_handler(
         .bind(track_id)
         .bind(i as i32)
         .bind(&now)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             (
@@ -238,6 +248,25 @@ pub async fn create_queue_handler(
             track_id: track_id.clone(),
             position: i as i32,
         });
+    }
+
+    tx.commit().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    if body.name == "active-queue" {
+        let cur_track_id = state
+            .playback_engine
+            .snapshot()
+            .await
+            .ok()
+            .and_then(|s| s.track_id);
+        let _ = crate::playback_queue::sync_active_queue_to_engine(&state, &queue_id, cur_track_id)
+            .await;
+        state.queue_coordinator.bump_version();
     }
 
     Ok(Json(QueueInfo {

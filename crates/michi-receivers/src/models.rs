@@ -56,28 +56,44 @@ pub struct DiscreteAudioCapabilities {
     pub transports: Vec<String>,
 }
 
-/// A device in the Michi Home roster.
+/// A device in the Michi Home roster (`home-device-roster.schema.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HomeRosterDevice {
     pub device_michi_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receiver_id: Option<String>,
+    pub device_name: String,
     pub name: String,
     pub device_type: String,
     pub base_url: Option<String>,
     pub roles: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub membership: Option<michi_identity::types::DeviceMembershipDto>,
+    pub membership_status: String,
     pub authenticated: bool,
     pub revoked: bool,
     pub online: bool,
+    pub presence_state: String,
+    pub status: String,
+    pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
     pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub membership_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub presence_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outbox_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_revocation_ack: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_revocation_error: Option<String>,
+}
+
+/// Typed identity resolution for an active receiver session, keeping
+/// `receiver_id` (registry domain) and `device_michi_id` (cryptographic identity
+/// domain) strictly separate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveReceiverSessionIdentity {
+    pub receiver_id: String,
+    pub device_michi_id: Option<String>,
+    pub playback_session_id: String,
+    pub receiver_session_id: String,
 }
 
 /// Pending pairing state held in memory between `/pair/start` and `/pair/confirm`.

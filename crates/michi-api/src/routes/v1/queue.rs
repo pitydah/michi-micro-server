@@ -7,7 +7,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::playback_queue::{
-    get_or_create_active_queue, sync_active_queue_to_engine, validate_and_load_tracks,
+    get_or_create_active_queue, reconcile_active_queue, restore_queue_items_or_degrade,
+    snapshot_queue_items, sync_active_queue_to_engine, validate_and_load_tracks, QueueItemBackup,
 };
 use crate::AppState;
 
@@ -107,6 +108,9 @@ pub async fn queue_handler(
 
     Ok(Json(serde_json::json!({
         "queue_id": active_queue_id,
+        "queue_version": state.queue_coordinator.version(),
+        "queue_degraded": state.queue_coordinator.is_degraded(),
+        "queue_degraded_reason": state.queue_coordinator.degraded_reason(),
         "items_count": items.len(),
         "items": items,
         "current_track_id": snap.track_id,
@@ -142,9 +146,21 @@ pub async fn queue_items_handler(
         ));
     }
 
+    let _mutation_guard = state.queue_coordinator.lock().await;
+    state.queue_coordinator.ensure_coherent()?;
+
     // P0-04 Functional Truth: All-or-nothing validation against DB, disk, and configured library roots
     let _validated =
         validate_and_load_tracks(&state.db, &body.track_ids, &state.config.music_paths).await?;
+
+    let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+    let previous_items = snapshot_queue_items(&state.db, &active_queue_id).await?;
 
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
         v1_error(
@@ -153,36 +169,6 @@ pub async fn queue_items_handler(
             &e.to_string(),
         )
     })?;
-
-    let active_queue_id = {
-        let row = sqlx::query_as::<_, (String,)>(
-            "SELECT id FROM queues WHERE name = 'active-queue' ORDER BY datetime(created_at) DESC LIMIT 1"
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
-
-        if let Some((id_str,)) = row {
-            Uuid::parse_str(&id_str).map_err(|e| {
-                v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "DATABASE_INVARIANT_VIOLATION",
-                    &format!("corrupt queue UUID '{id_str}': {e}"),
-                )
-            })?
-        } else {
-            let new_id = Uuid::new_v4();
-            let now = chrono::Utc::now().to_rfc3339();
-            sqlx::query("INSERT INTO queues (id, name, created_at, updated_at) VALUES (?, 'active-queue', ?, ?)")
-                .bind(new_id.to_string())
-                .bind(&now)
-                .bind(&now)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| v1_error(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", &e.to_string()))?;
-            new_id
-        }
-    };
 
     let max_pos: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(position), -1) FROM queue_items WHERE queue_id = ?",
@@ -244,25 +230,44 @@ pub async fn queue_items_handler(
         )
     })?;
 
-    let cur_track_id = state
-        .playback_engine
-        .snapshot()
-        .await
-        .map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "ENGINE_UNAVAILABLE",
+    let cur_track_id = match state.playback_engine.snapshot().await {
+        Ok(snap) => snap.track_id,
+        Err(e) => {
+            return Err(restore_queue_items_or_degrade(
+                &state,
+                &active_queue_id,
+                &previous_items,
+                None,
                 &e.to_string(),
             )
-        })?
-        .track_id;
+            .await);
+        }
+    };
 
-    sync_active_queue_to_engine(&state, &active_queue_id, cur_track_id).await?;
+    if let Err((_, err_json)) =
+        sync_active_queue_to_engine(&state, &active_queue_id, cur_track_id).await
+    {
+        let err_msg = err_json.0["error"]["message"]
+            .as_str()
+            .unwrap_or("runtime queue sync failed")
+            .to_string();
+        return Err(restore_queue_items_or_degrade(
+            &state,
+            &active_queue_id,
+            &previous_items,
+            None,
+            &err_msg,
+        )
+        .await);
+    }
+
+    let queue_version = state.queue_coordinator.bump_version();
 
     let _ = state.tx.send(
         serde_json::json!({
             "type": "queue_updated",
             "queue_id": active_queue_id,
+            "queue_version": queue_version,
             "added_count": body.track_ids.len(),
         })
         .to_string(),
@@ -271,6 +276,7 @@ pub async fn queue_items_handler(
     Ok(Json(serde_json::json!({
         "status": "ok",
         "queue_id": active_queue_id,
+        "queue_version": queue_version,
         "added": body.track_ids.len(),
     })))
 }
@@ -292,6 +298,9 @@ pub async fn queue_jump_handler(
             "playback module is disabled",
         ));
     }
+    let _mutation_guard = state.queue_coordinator.lock().await;
+    state.queue_coordinator.ensure_coherent()?;
+
     let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -362,6 +371,12 @@ pub async fn queue_jump_handler(
     let validated_tracks =
         validate_and_load_tracks(&state.db, &track_ids, &state.config.music_paths).await?;
 
+    let previous_active_items = if queue_id != active_queue_id {
+        Some(snapshot_queue_items(&state.db, &active_queue_id).await?)
+    } else {
+        None
+    };
+
     if queue_id != active_queue_id {
         // V-P0-04: Promote to canonical active-queue in SQLite transaction
         let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
@@ -424,17 +439,27 @@ pub async fn queue_jump_handler(
         })?;
     }
 
-    state
+    if let Err(engine_err) = state
         .playback_engine
         .set_queue(validated_tracks, body.index as usize, Some(target_track_id))
         .await
-        .map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "RUNTIME_SYNC_FAILED",
-                &e.to_string(),
+    {
+        if let Some(prev) = previous_active_items.as_deref() {
+            return Err(restore_queue_items_or_degrade(
+                &state,
+                &active_queue_id,
+                prev,
+                None,
+                &engine_err.to_string(),
             )
-        })?;
+            .await);
+        }
+        return Err(v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RUNTIME_SYNC_FAILED",
+            &engine_err.to_string(),
+        ));
+    }
 
     // Now jump to the requested index in the guaranteed synchronized queue
     state
@@ -449,11 +474,14 @@ pub async fn queue_jump_handler(
             )
         })?;
 
+    let queue_version = state.queue_coordinator.bump_version();
+
     let _ = state.tx.send(
         serde_json::json!({
             "type": "playback_state_changed",
             "track_id": target_track_id,
             "index": body.index,
+            "queue_version": queue_version,
         })
         .to_string(),
     );
@@ -462,6 +490,7 @@ pub async fn queue_jump_handler(
         "status": "ok",
         "index": body.index,
         "track_id": target_track_id,
+        "queue_version": queue_version,
     })))
 }
 
@@ -501,6 +530,9 @@ pub async fn queue_transfer_handler(
         ));
     }
 
+    let _mutation_guard = state.queue_coordinator.lock().await;
+    state.queue_coordinator.ensure_coherent()?;
+
     // P0-04 Functional Truth: All-or-nothing validation of every track in transferred queue
     let validated_tracks =
         match validate_and_load_tracks(&state.db, &body.track_ids, &state.config.music_paths).await
@@ -523,6 +555,7 @@ pub async fn queue_transfer_handler(
             &e.to_string(),
         )
     })?;
+    let previous_items = snapshot_queue_items(&state.db, &queue_id).await?;
 
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
         v1_error(
@@ -591,19 +624,22 @@ pub async fn queue_transfer_handler(
         )
     })?;
 
-    // Sync full transferred queue to PlaybackEngine
+    // Sync full transferred queue to PlaybackEngine with verified compensating rollback
     let current_tid = body.track_ids.get(body.current_index as usize).copied();
-    state
+    if let Err(engine_err) = state
         .playback_engine
         .set_queue(validated_tracks, body.current_index as usize, current_tid)
         .await
-        .map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "RUNTIME_SYNC_FAILED",
-                &e.to_string(),
-            )
-        })?;
+    {
+        return Err(restore_queue_items_or_degrade(
+            &state,
+            &queue_id,
+            &previous_items,
+            None,
+            &engine_err.to_string(),
+        )
+        .await);
+    }
 
     if body.position_ms > 0 {
         state
@@ -619,15 +655,20 @@ pub async fn queue_transfer_handler(
             })?;
     }
 
+    let queue_version = state.queue_coordinator.bump_version();
+
     let _ = state.tx.send(
         serde_json::json!({
-            "type": "queue_transferred", "session_id": session_id,
+            "type": "queue_transferred",
+            "session_id": session_id,
+            "queue_version": queue_version,
         })
         .to_string(),
     );
 
     Ok(Json(serde_json::json!({
         "queue_id": queue_id,
+        "queue_version": queue_version,
         "session_id": session_id,
         "accepted": true,
         "current_index": body.current_index,
@@ -652,17 +693,18 @@ pub async fn queue_reorder_handler(
             "playback module is disabled",
         ));
     }
-    let queue_id = if let Some(qid) = body.queue_id {
-        qid
-    } else {
-        get_or_create_active_queue(&state.db).await.map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "DATABASE_ERROR",
-                &e.to_string(),
-            )
-        })?
-    };
+    let _mutation_guard = state.queue_coordinator.lock().await;
+    state.queue_coordinator.ensure_coherent()?;
+
+    let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
+    let queue_id = body.queue_id.unwrap_or(active_queue_id);
+    let previous_items = snapshot_queue_items(&state.db, &queue_id).await?;
 
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
         v1_error(
@@ -700,12 +742,21 @@ pub async fn queue_reorder_handler(
 
     let existing_id_set: std::collections::HashSet<String> =
         existing_items.iter().map(|(id, _)| id.clone()).collect();
+    let mut seen_ids = std::collections::HashSet::with_capacity(body.item_ids.len());
     for i_id in &body.item_ids {
-        if !existing_id_set.contains(&i_id.to_string()) {
+        let i_id_str = i_id.to_string();
+        if !existing_id_set.contains(&i_id_str) {
             return Err(v1_error(
                 StatusCode::BAD_REQUEST,
                 "UNKNOWN_ITEM_ID",
                 &format!("item {i_id} does not belong to queue {queue_id}"),
+            ));
+        }
+        if !seen_ids.insert(i_id_str) {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "DUPLICATE_ITEM_ID",
+                &format!("duplicate item_id {i_id} in reorder payload"),
             ));
         }
     }
@@ -757,32 +808,55 @@ pub async fn queue_reorder_handler(
         )
     })?;
 
-    // P1-03: Sync reordered queue to engine preserving current_track_id
-    let cur_track_id = state
-        .playback_engine
-        .snapshot()
-        .await
-        .map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "ENGINE_UNAVAILABLE",
-                &e.to_string(),
+    // P1-03: Sync reordered active queue to engine preserving current_track_id, with verified rollback
+    if queue_id == active_queue_id {
+        let cur_track_id = match state.playback_engine.snapshot().await {
+            Ok(snap) => snap.track_id,
+            Err(e) => {
+                return Err(restore_queue_items_or_degrade(
+                    &state,
+                    &queue_id,
+                    &previous_items,
+                    None,
+                    &e.to_string(),
+                )
+                .await);
+            }
+        };
+        if let Err((_, err_json)) =
+            sync_active_queue_to_engine(&state, &queue_id, cur_track_id).await
+        {
+            let err_msg = err_json.0["error"]["message"]
+                .as_str()
+                .unwrap_or("runtime queue sync failed")
+                .to_string();
+            return Err(restore_queue_items_or_degrade(
+                &state,
+                &queue_id,
+                &previous_items,
+                None,
+                &err_msg,
             )
-        })?
-        .track_id;
-    sync_active_queue_to_engine(&state, &queue_id, cur_track_id).await?;
+            .await);
+        }
+    }
+
+    let queue_version = state.queue_coordinator.bump_version();
 
     let _ = state.tx.send(
         serde_json::json!({
             "type": "queue_reordered",
             "queue_id": queue_id,
+            "queue_version": queue_version,
         })
         .to_string(),
     );
 
-    Ok(Json(
-        serde_json::json!({ "status": "ok", "reordered": body.item_ids.len() }),
-    ))
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "reordered": body.item_ids.len(),
+        "queue_version": queue_version,
+    })))
 }
 
 pub async fn clear_queue_handler(
@@ -796,6 +870,9 @@ pub async fn clear_queue_handler(
             "playback module is disabled",
         ));
     }
+    let _mutation_guard = state.queue_coordinator.lock().await;
+    state.queue_coordinator.ensure_coherent()?;
+
     let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -803,10 +880,18 @@ pub async fn clear_queue_handler(
             &e.to_string(),
         )
     })?;
+    let previous_items = snapshot_queue_items(&state.db, &queue_id).await?;
 
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
     sqlx::query("DELETE FROM queue_items WHERE queue_id = ?")
         .bind(queue_id.to_string())
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             v1_error(
@@ -815,25 +900,48 @@ pub async fn clear_queue_handler(
                 &e.to_string(),
             )
         })?;
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("UPDATE queues SET updated_at = ? WHERE id = ?")
+        .bind(&now)
+        .bind(queue_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+            )
+        })?;
+    tx.commit().await.map_err(|e| {
+        v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+        )
+    })?;
 
     // V-P0-04: Only clear engine queue if clearing the canonical active queue
     if queue_id == active_queue_id {
-        state
-            .playback_engine
-            .set_queue(Vec::new(), 0, None)
-            .await
-            .map_err(|e| {
-                v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "RUNTIME_SYNC_FAILED",
-                    &e.to_string(),
-                )
-            })?;
+        if let Err(engine_err) = state.playback_engine.set_queue(Vec::new(), 0, None).await {
+            return Err(restore_queue_items_or_degrade(
+                &state,
+                &queue_id,
+                &previous_items,
+                None,
+                &engine_err.to_string(),
+            )
+            .await);
+        }
     }
 
-    Ok(Json(
-        serde_json::json!({ "status": "cleared", "queue_id": queue_id }),
-    ))
+    let queue_version = state.queue_coordinator.bump_version();
+
+    Ok(Json(serde_json::json!({
+        "status": "cleared",
+        "queue_id": queue_id,
+        "queue_version": queue_version,
+    })))
 }
 
 pub async fn queue_delete_handler(
@@ -847,6 +955,11 @@ pub async fn queue_delete_handler(
             "playback module is disabled",
         ));
     }
+    let _mutation_guard = state.queue_coordinator.lock().await;
+    state.queue_coordinator.ensure_coherent()?;
+
+    let previous_items = snapshot_queue_items(&state.db, &queue_id).await?;
+
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -912,24 +1025,27 @@ pub async fn queue_delete_handler(
         )
     })?;
 
-    // V-P0-04: Only clear engine queue if clearing the canonical active queue
+    // V-P0-04: Only clear engine queue if deleting the canonical active queue
     if is_active {
-        state
-            .playback_engine
-            .set_queue(Vec::new(), 0, None)
-            .await
-            .map_err(|e| {
-                v1_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "RUNTIME_SYNC_FAILED",
-                    &e.to_string(),
-                )
-            })?;
+        if let Err(engine_err) = state.playback_engine.set_queue(Vec::new(), 0, None).await {
+            return Err(restore_queue_items_or_degrade(
+                &state,
+                &queue_id,
+                &previous_items,
+                Some(&q_name),
+                &engine_err.to_string(),
+            )
+            .await);
+        }
     }
 
-    Ok(Json(
-        serde_json::json!({ "status": "deleted", "queue_id": queue_id }),
-    ))
+    let queue_version = state.queue_coordinator.bump_version();
+
+    Ok(Json(serde_json::json!({
+        "status": "deleted",
+        "queue_id": queue_id,
+        "queue_version": queue_version,
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1022,7 +1138,8 @@ pub async fn queue_item_delete_handler(
 
     // Serialize queue mutations across concurrent callers without holding a SQLite
     // transaction open while PlaybackEngine performs audio transitions.
-    let _mutation_guard = state.queue_mutation_lock.lock().await;
+    let _mutation_guard = state.queue_coordinator.lock().await;
+    state.queue_coordinator.ensure_coherent()?;
 
     let active_queue_id = get_or_create_active_queue(&state.db).await.map_err(|e| {
         v1_error(
@@ -1088,7 +1205,7 @@ pub async fn queue_item_delete_handler(
         }
     };
 
-    let (removed_row_id, removed_track_id_str, removed_orig_pos, removed_added_at) =
+    let (removed_row_id, removed_track_id_str, _removed_orig_pos, _removed_added_at) =
         existing_rows[removed_idx].clone();
     let removed_track_id = Uuid::parse_str(&removed_track_id_str).map_err(|e| {
         v1_error(
@@ -1191,47 +1308,40 @@ pub async fn queue_item_delete_handler(
     })?;
 
     // 5. Coordinate PlaybackEngine transition. If the engine rejects/fails, execute a
-    // compensating SQLite rollback so durable state and runtime engine do not diverge.
+    // verified compensating SQLite rollback; if rollback also fails, enter fail-closed
+    // degraded state (503 QUEUE_DEGRADED) until explicitly reconciled.
     let remaining_count = remaining_tracks.len();
     if let Err(engine_err) = state
         .playback_engine
         .remove_queue_item(removed_idx, removed_track_id, remaining_tracks)
         .await
     {
-        if let Ok(mut rollback_tx) = state.db.begin_with("BEGIN IMMEDIATE").await {
-            let _ = sqlx::query(
-                "INSERT OR IGNORE INTO queue_items (id, queue_id, track_id, position, added_at) VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(&removed_row_id)
-            .bind(active_queue_id.to_string())
-            .bind(&removed_track_id_str)
-            .bind(removed_orig_pos)
-            .bind(&removed_added_at)
-            .execute(&mut *rollback_tx)
-            .await;
-            for (row_id, _, orig_pos, _) in &existing_rows {
-                let _ = sqlx::query(
-                    "UPDATE queue_items SET position = ? WHERE queue_id = ? AND id = ?",
-                )
-                .bind(*orig_pos)
-                .bind(active_queue_id.to_string())
-                .bind(row_id)
-                .execute(&mut *rollback_tx)
-                .await;
-            }
-            let _ = rollback_tx.commit().await;
-        }
-        return Err(v1_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "RUNTIME_SYNC_FAILED",
+        let previous_items: Vec<QueueItemBackup> = existing_rows
+            .iter()
+            .map(|(id, track_id, position, added_at)| QueueItemBackup {
+                id: id.clone(),
+                track_id: track_id.clone(),
+                position: *position,
+                added_at: added_at.clone(),
+            })
+            .collect();
+        return Err(restore_queue_items_or_degrade(
+            &state,
+            &active_queue_id,
+            &previous_items,
+            None,
             &engine_err.to_string(),
-        ));
+        )
+        .await);
     }
+
+    let queue_version = state.queue_coordinator.bump_version();
 
     let _ = state.tx.send(
         serde_json::json!({
             "type": "queue_updated",
             "queue_id": active_queue_id,
+            "queue_version": queue_version,
             "removed_item_id": removed_row_id,
             "remaining_count": remaining_count,
         })
@@ -1245,6 +1355,7 @@ pub async fn queue_item_delete_handler(
         "removed_track_id": removed_track_id,
         "matched_by": matched_by,
         "remaining_count": remaining_count,
+        "queue_version": queue_version,
     })))
 }
 
@@ -1266,6 +1377,9 @@ pub async fn queue_save_handler(
             "playback module is disabled",
         ));
     }
+    let _mutation_guard = state.queue_coordinator.lock().await;
+    state.queue_coordinator.ensure_coherent()?;
+
     let session_id = michi_db::save_queue_state(
         &state.db,
         "saved-queue",
@@ -1286,6 +1400,27 @@ pub async fn queue_save_handler(
         "status": "saved",
         "session_id": session_id,
         "queue_size": body.track_ids.len(),
+        "queue_version": state.queue_coordinator.version(),
+    })))
+}
+
+/// Explicitly reconciles SQLite active queue state into PlaybackEngine and clears
+/// any fail-closed `QUEUE_DEGRADED` status once synchronization succeeds.
+pub async fn queue_reconcile_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.disabled_modules.read().await.contains("playback") {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MODULE_DISABLED",
+            "playback module is disabled",
+        ));
+    }
+    let queue_version = reconcile_active_queue(&state).await?;
+    Ok(Json(serde_json::json!({
+        "status": "reconciled",
+        "queue_degraded": false,
+        "queue_version": queue_version,
     })))
 }
 

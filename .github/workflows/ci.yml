@@ -46,6 +46,7 @@ jobs:
         env:
           MICHI_SIMULATOR_PYTHON: ${{ github.workspace }}/.venv-sim/bin/python3
           MICHI_CERT_RECEIPT_PATH: ${{ github.workspace }}/target/release-evidence/true-cross-repo-certification.json
+          MICHI_PRE_MOBILE_RECEIPT_PATH: ${{ github.workspace }}/target/release-evidence/pre-mobile-reference-client-receipt.json
         run: cargo test --workspace
       - name: Verify true cross-repo certification receipt
         run: |
@@ -79,6 +80,47 @@ jobs:
               sys.exit(f"FAIL: rtp_packets_rejected={data.get('rtp_packets_rejected')!r} != 0")
           print("TRUE CROSS-REPO CERTIFICATION RECEIPT VERIFIED.")
           PY
+      - name: Verify R1.4 Pre-Mobile Reference Client E2E receipt
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+          p = pathlib.Path("target/release-evidence/pre-mobile-reference-client-receipt.json")
+          if not p.exists():
+              sys.exit(f"FAIL: missing pre-mobile reference client receipt at {p}")
+          data = json.loads(p.read_text())
+          print(json.dumps(data, indent=2))
+          required_phases = [
+              "DISCOVERY",
+              "SERVER_IDENTITY",
+              "TLS",
+              "SPKI",
+              "ENROLLMENT_REQUEST",
+              "ADMIN_APPROVAL",
+              "MEMBERSHIP_VERIFICATION",
+              "HOME_AUTHENTICATION",
+              "SESSION_AUTHORIZATION",
+              "CAPABILITIES",
+              "HOME_ROSTER",
+              "MICHI_CONTROL",
+              "QUEUE",
+              "AIRCAT_MANIFEST",
+              "AIRCAT_AUTHORIZATION",
+              "AIRCAT_TRANSFER",
+              "AIRCAT_RANGE_RESUME",
+              "REVOCATION",
+              "RECONNECT",
+          ]
+          phases = data.get("phases", {})
+          for ph in required_phases:
+              if phases.get(ph) != "PASS":
+                  sys.exit(f"FAIL: phase {ph}={phases.get(ph)!r} != 'PASS'")
+          if int(data.get("phases_passed", 0)) != len(required_phases):
+              sys.exit("FAIL: phases_passed mismatch")
+          tr = data.get("transport", {})
+          if tr.get("danger_accept_invalid_certs") is not False or tr.get("internal_appstate_auth_shortcuts") is not False:
+              sys.exit("FAIL: reference client must not bypass TLS or use AppState auth shortcuts")
+          print("R1.4 PRE-MOBILE REFERENCE CLIENT RECEIPT VERIFIED (19/19 PASS).")
+          PY
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Record release evidence
@@ -103,6 +145,14 @@ jobs:
         with:
           name: release-evidence-true-cross-repo-certification
           path: target/release-evidence/true-cross-repo-certification.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload R1.4 Pre-Mobile Reference Client receipt
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-pre-mobile-reference-client
+          path: target/release-evidence/pre-mobile-reference-client-receipt.json
           if-no-files-found: error
           retention-days: 30
 

@@ -1127,9 +1127,44 @@ impl PlaybackEngine {
                     current_index
                 };
 
+                let old_queue = std::mem::take(&mut self.queue);
+                let old_order = std::mem::take(&mut self.play_order);
+                let new_len = tracks.len();
                 self.queue = tracks;
-                self.queue_index = resolved_index.min(self.queue.len().saturating_sub(1));
-                self.recompute_play_order(self.queue_index);
+                self.queue_index = resolved_index.min(new_len.saturating_sub(1));
+
+                if self.shuffle && !old_order.is_empty() && !self.queue.is_empty() {
+                    // Preserve existing shuffled play_order for surviving tracks so append/reorder
+                    // never discards the active shuffle permutation.
+                    let mut claimed = vec![false; new_len];
+                    let mut preserved = Vec::with_capacity(new_len);
+                    for old_idx in old_order {
+                        if let Some(old_track) = old_queue.get(old_idx) {
+                            if let Some(new_idx) = self
+                                .queue
+                                .iter()
+                                .enumerate()
+                                .find(|(i, t)| !claimed[*i] && t.id == old_track.id)
+                                .map(|(i, _)| i)
+                            {
+                                claimed[new_idx] = true;
+                                preserved.push(new_idx);
+                            }
+                        }
+                    }
+                    for (i, used) in claimed.into_iter().enumerate() {
+                        if !used {
+                            preserved.push(i);
+                        }
+                    }
+                    self.play_order_pos = preserved
+                        .iter()
+                        .position(|&x| x == self.queue_index)
+                        .unwrap_or(0);
+                    self.play_order = preserved;
+                } else {
+                    self.recompute_play_order(self.queue_index);
+                }
 
                 if !self.state.is_playing() && self.current_track.is_none() {
                     self.current_track = self.queue.get(self.queue_index).cloned();

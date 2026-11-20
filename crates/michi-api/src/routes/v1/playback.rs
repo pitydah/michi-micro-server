@@ -253,7 +253,10 @@ fn parse_legacy_volume_value(val: &PlaybackControlValue) -> Result<u8, PlaybackC
             Ok(v)
         }
         PlaybackControlValue::Text(raw) => {
-            if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+            if raw.is_empty()
+                || !raw.bytes().all(|b| b.is_ascii_digit())
+                || (raw.len() > 1 && raw.starts_with('0'))
+            {
                 return Err(PlaybackControlError::invalid_request(
                     "volume must be an integer between 0 and 100",
                 ));
@@ -855,7 +858,10 @@ pub async fn playback_session_handler(
         None
     };
 
-    // 6. Only after ALL preconditions pass: begin DB transaction
+    // 6. Only after ALL preconditions pass: acquire coordinator lock & begin DB transaction
+    let _queue_guard = state.queue_coordinator.lock().await;
+    state.queue_coordinator.ensure_coherent()?;
+
     let session_id = Uuid::new_v4();
     let now = chrono::Utc::now().to_rfc3339();
     let queue_json = serde_json::to_string(&body.queue).unwrap_or_default();
@@ -868,7 +874,9 @@ pub async fn playback_session_handler(
         )
     })?;
 
-    let mut tx = state.db.begin().await.map_err(|e| {
+    let previous_items = crate::playback_queue::snapshot_queue_items(&state.db, &queue_id).await?;
+
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
         v1_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DATABASE_ERROR",
@@ -972,18 +980,22 @@ pub async fn playback_session_handler(
             )
         })?;
 
-    // 8. Synchronize PlaybackEngine
-    state
+    // 8. Synchronize PlaybackEngine (with verified compensating rollback on failure)
+    if let Err(engine_err) = state
         .playback_engine
         .set_queue(runtime_tracks.clone(), current_index, current_track_id)
         .await
-        .map_err(|e| {
-            v1_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "RUNTIME_SYNC_FAILED",
-                &e.to_string(),
-            )
-        })?;
+    {
+        return Err(crate::playback_queue::restore_queue_items_or_degrade(
+            &state,
+            &queue_id,
+            &previous_items,
+            None,
+            &engine_err.to_string(),
+        )
+        .await);
+    }
+    state.queue_coordinator.bump_version();
 
     state
         .playback_engine
@@ -1182,6 +1194,9 @@ pub async fn restore_playback_state_handler(
             "playback module is disabled",
         ));
     }
+    let _queue_guard = state.queue_coordinator.lock().await;
+    state.queue_coordinator.ensure_coherent()?;
+
     let latest = michi_db::get_latest_playback_session(&state.db)
         .await
         .map_err(|e| {
@@ -1257,6 +1272,7 @@ pub async fn restore_playback_state_handler(
                         &e.to_string(),
                     )
                 })?;
+            state.queue_coordinator.bump_version();
 
             // Restore volume, shuffle, repeat strictly to engine
             let vol_u8 = (session.volume * 100.0).round().clamp(0.0, 100.0) as u8;
